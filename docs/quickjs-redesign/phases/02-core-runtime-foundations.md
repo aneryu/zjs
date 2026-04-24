@@ -1,6 +1,6 @@
 # Phase 2: Core Runtime Foundations
 
-Status: not_started
+Status: in_progress
 
 ## Goal
 
@@ -40,12 +40,12 @@ area moves from `not_started` to `in_progress` or `validated`.
 
 ## Work Breakdown
 
-- [ ] Define Zig value representation with QuickJS-aligned tag semantics and typed accessors.
-- [ ] Implement duplication/free hooks for primitive and reference values.
-- [ ] Implement runtime allocator accounting and ownership rules.
-- [ ] Implement context lifecycle and exception slot transfer helpers.
-- [ ] Port intrusive list behavior in Zig style.
-- [ ] Implement atom table with predefined atoms, dynamic atoms, integer atoms, symbols, and private names.
+- [x] Define Zig value representation with QuickJS-aligned tag semantics and typed accessors.
+- [x] Implement duplication/free hooks for primitive and reference values.
+- [x] Implement runtime allocator accounting and ownership rules.
+- [x] Implement context lifecycle and exception slot transfer helpers.
+- [x] Port intrusive list behavior in Zig style.
+- [x] Implement atom table with predefined atoms, dynamic atoms, integer atoms, symbols, and private names.
 - [ ] Implement string storage for 8-bit and 16-bit strings, comparison, hashing, and atom backing.
 - [ ] Implement class table, class definitions, finalizer hooks, exotic method records, and prototype slots.
 - [ ] Implement shape records, property shape entries, shape hashing, and transition scaffolding.
@@ -81,4 +81,6 @@ Focused tests should cover:
 
 ## Handoff Notes
 
-Record incomplete GC cycle-removal details here if they are intentionally deferred.
+- GC cycle removal, class/shape tables, function records, module records, atom
+  hash-table optimization, and full 16-bit string behavior remain incomplete
+  and are tracked in `../matrices/core-runtime-invariants.md`.

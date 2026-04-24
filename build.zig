@@ -28,6 +28,23 @@ pub fn build(b: *std.Build) void {
     const test_quickjs_port_step = b.step("test-quickjs-port", "Run direct QuickJS port tests");
     test_quickjs_port_step.dependOn(&run_quickjs_port_tests.step);
 
+    const core_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/core/all.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "quickjs_zig_engine", .module = engine_mod },
+            },
+        }),
+    });
+
+    const run_core_tests = b.addRunArtifact(core_tests);
+    const test_core_step = b.step("test-core", "Run core runtime foundation tests");
+    test_core_step.dependOn(&run_core_tests.step);
+
     const test_step = b.step("test", "Run available Zig tests");
     test_step.dependOn(&run_quickjs_port_tests.step);
+    test_step.dependOn(&run_core_tests.step);
 }

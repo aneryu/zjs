@@ -39,7 +39,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .source_baseline,
         .phase = 1,
-        .state = .in_progress,
+        .state = .validated,
         .zig_paths = &.{ "src/engine/source.zig", "src/engine/status.zig" },
         .quickjs_sources = &.{
             "quickjs/quickjs.c",
@@ -51,7 +51,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .core_runtime,
         .phase = 2,
-        .state = .not_started,
+        .state = .in_progress,
         .zig_paths = &.{"src/engine/core"},
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h", "quickjs/list.h" },
     },

@@ -9,12 +9,12 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Active phase | Phase 1: Bootstrap And Source Baseline |
+| Active phase | Phase 2: Core Runtime Foundations |
 | Overall status | in_progress |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 1 bootstrap tree exists with source/status metadata and empty subsystem roots |
-| Current build state | `build.zig` references only current Phase 1 roots and `test-quickjs-port` |
-| Current validation state | `zig build test-quickjs-port --summary all` passed with 4/4 tests |
+| Current engine state | Phase 2 core foundations in progress: value tags, atoms, refcount strings, runtime/context lifecycle, exception slot, memory accounting, and intrusive list |
+| Current build state | `build.zig` includes `test-quickjs-port`, `test-core`, and aggregate `test` |
+| Current validation state | `zig build test --summary all` passed with 14/14 tests |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -22,7 +22,7 @@ updated alongside implementation, tests, and phase documents.
 | Phase | Status | Phase doc | Matrix | Required next evidence |
 |---|---|---|---|---|
 | 1 Bootstrap And Source Baseline | completed | `phases/01-bootstrap-source-baseline.md` | none | Phase 2 runtime/context init-deinit gate |
-| 2 Core Runtime Foundations | not_started | `phases/02-core-runtime-foundations.md` | `matrices/core-runtime-invariants.md` | Leak-free runtime/context init-deinit and constants tests |
+| 2 Core Runtime Foundations | in_progress | `phases/02-core-runtime-foundations.md` | `matrices/core-runtime-invariants.md` | String/class/shape/function/module/GC rows |
 | 3 Object And Property Semantics | not_started | `phases/03-object-property-semantics.md` | `matrices/object-property-matrix.md` | Descriptor/prototype/array property tests |
 | 4 Opcode And Bytecode Metadata | not_started | `phases/04-opcode-bytecode-metadata.md` | `matrices/opcode-execution-matrix.md` | Opcode and bytecode ownership tests |
 | 5 Frontend And Bytecode Emitter | not_started | `phases/05-frontend-bytecode-emitter.md` | `matrices/frontend-coverage-matrix.md` | Parser/emitter fixtures |
@@ -36,14 +36,14 @@ updated alongside implementation, tests, and phase documents.
 |---|---|---|---|---|---|
 | WQ-001 | completed | 1 | Bootstrap source tree and build wiring | Created planned bootstrap tree and compiled bootstrap roots | none |
 | WQ-002 | completed | 1 | Source/status metadata | Added source mapping and status tests | none |
-| WQ-003 | ready | 2 | Core runtime foundations | Start value/runtime/context invariants matrix | none |
+| WQ-003 | in_progress | 2 | Core runtime foundations | Continue string/class/shape/function/module/GC rows | none |
 
 ## Subsystem Coverage Matrix
 
 | Subsystem | Phase | Matrix | Status | Latest validation |
 |---|---|---|---|---|
 | Source baseline and status table | 1 | none | completed | `zig build test-quickjs-port --summary all` passed, 4/4 tests |
-| Core runtime invariants | 2 | `matrices/core-runtime-invariants.md` | not_started | none |
+| Core runtime invariants | 2 | `matrices/core-runtime-invariants.md` | in_progress | `zig build test-core --summary all` passed, 10/10 tests |
 | Object and property semantics | 3 | `matrices/object-property-matrix.md` | not_started | none |
 | Opcode metadata | 4 | `matrices/opcode-execution-matrix.md` | not_started | none |
 | Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | not_started | none |
@@ -57,6 +57,11 @@ updated alongside implementation, tests, and phase documents.
 |---|---|---|---|---|---|
 | 2026-04-24 | 1 | `zig build test-quickjs-port --summary all` | 1 | Baseline failed before implementation because `src/tests/quickjs_port.zig` did not exist | reproduction |
 | 2026-04-24 | 1 | `zig build test-quickjs-port --summary all` | 0 | Bootstrap source/status tests passed, 4/4 tests | regression |
+| 2026-04-24 | 2 | `zig build test-core --summary all` | 1 | First Phase 2 compile failed on duplicate QuickJS tag enum value and primitive-shadowing names | reproduction |
+| 2026-04-24 | 2 | `zig build test-core --summary all` | 0 | Core foundation slice passed, 7/7 tests | regression |
+| 2026-04-24 | 2 | `zig build test --summary all` | 0 | Aggregate bootstrap and core tests passed, 11/11 tests | regression |
+| 2026-04-24 | 2 | `zig build test-core --summary all` | 0 | Atom table slice passed, 10/10 tests | regression |
+| 2026-04-24 | 2 | `zig build test --summary all` | 0 | Aggregate bootstrap and core tests passed, 14/14 tests | regression |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Root plan and redesign docs whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Matrix expansion and phase links whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Error and learning workflow whitespace check passed | hygiene |
@@ -95,7 +100,7 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Start Phase 2 WQ-003 with value/runtime/context invariants and update `matrices/core-runtime-invariants.md`. |
+| Next recommended action | Continue Phase 2 with fuller string/class/shape scaffolding. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |
@@ -103,6 +108,8 @@ updated alongside implementation, tests, and phase documents.
 ## Handoff Notes
 
 - Phase 1 bootstrap is complete.
+- Phase 2 first slice validates value tags, primitive predicates, runtime/context teardown, exception transfer, string refcounting, memory accounting, and intrusive list operations.
+- Atom table slice validates QuickJS predefined atom ordering, tagged integer atoms, dynamic string interning, symbol uniqueness, and runtime teardown.
 - Do not use old `src/engine/vm/` paths as repair targets.
 - Use local QuickJS source and `quickjs/build/qjs` as semantic oracle once executable validation exists.
 - Use `ERRORS_AND_LEARNINGS.md` for failures that need root-cause analysis or reusable lessons.
