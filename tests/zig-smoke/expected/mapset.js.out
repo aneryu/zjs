@@ -1,0 +1,28 @@
+value
+true
+1
+true
+1
+object
+function set() {
+    [native code]
+}
+function get() {
+    [native code]
+}
+function has() {
+    [native code]
+}
+function delete() {
+    [native code]
+}
+object
+function add() {
+    [native code]
+}
+function has() {
+    [native code]
+}
+function delete() {
+    [native code]
+}

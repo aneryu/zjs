@@ -1,0 +1,6 @@
+[submodule "test262"]
+	path = test262
+	url = https://github.com/tc39/test262
+[submodule "quickjs"]
+	path = quickjs
+	url = https://github.com/quickjs-ng/quickjs.git

@@ -1,0 +1,16 @@
+.{
+    .name = .quickjs_zig,
+    .version = "0.0.0",
+    .fingerprint = 0xd9a29aff87e5b3a8,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "AGENTS.md",
+        "build.zig",
+        "build.zig.zon",
+        "quickjs-zig-plan.md",
+        "src",
+        "tests",
+        "tools",
+    },
+}

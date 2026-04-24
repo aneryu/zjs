@@ -1,0 +1,8 @@
+ruleDirs:
+  - ./rules
+
+customLanguages:
+  zig:
+    libraryPath: ./parsers/zig.dylib
+    extensions: [zig]
+    languageSymbol: tree_sitter_zig

@@ -1,0 +1,4 @@
+{
+  "manifest": "tests/zig-smoke/manifest.txt",
+  "known_fail": []
+}
