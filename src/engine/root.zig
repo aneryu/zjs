@@ -15,6 +15,47 @@ pub const PortState = status.PortState;
 pub const Subsystem = status.Subsystem;
 pub const SubsystemStatus = status.SubsystemStatus;
 
+pub const Engine = struct {
+    runtime: *core.Runtime,
+    context: *core.Context,
+    job_queue: exec.jobs.Queue,
+
+    pub fn init(allocator: std.mem.Allocator) !Engine {
+        const rt = try core.Runtime.create(allocator);
+        errdefer rt.destroy();
+        const ctx = try core.Context.create(rt);
+        errdefer ctx.destroy();
+        return .{
+            .runtime = rt,
+            .context = ctx,
+            .job_queue = exec.jobs.Queue.init(&rt.memory),
+        };
+    }
+
+    pub fn deinit(self: *Engine) void {
+        self.job_queue.deinit();
+        self.context.destroy();
+        self.runtime.destroy();
+    }
+
+    pub fn eval(self: *Engine, source_text: []const u8) !core.Value {
+        var compiled = try frontend.parser.parse(self.runtime, source_text, .{ .mode = .script, .filename = "<eval>" });
+        defer compiled.deinit();
+        if (compiled.syntax_error != null) return self.context.throwValue(core.Value.undefinedValue());
+        var vm_instance = exec.Vm.init(self.context);
+        defer vm_instance.deinit();
+        return vm_instance.run(&compiled.function);
+    }
+
+    pub fn runJobs(self: *Engine) void {
+        self.job_queue.runAll();
+    }
+
+    pub fn takeException(self: *Engine) core.Value {
+        return self.context.takeException();
+    }
+};
+
 test {
     _ = source;
     _ = status;
@@ -25,3 +66,5 @@ test {
     _ = builtins;
     _ = libs;
 }
+
+const std = @import("std");

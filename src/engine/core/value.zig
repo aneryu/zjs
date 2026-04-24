@@ -124,6 +124,13 @@ pub const Value = struct {
         };
     }
 
+    pub fn asBool(self: Value) ?bool {
+        return switch (self.payload) {
+            .bool => |v| v,
+            else => null,
+        };
+    }
+
     pub fn dup(self: Value) Value {
         if (self.refHeader()) |header| gc.retain(header);
         return self;

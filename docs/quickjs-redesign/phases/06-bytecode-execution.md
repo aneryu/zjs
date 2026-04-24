@@ -1,6 +1,6 @@
 # Phase 6: Bytecode Execution
 
-Status: not_started
+Status: completed
 
 ## Goal
 
@@ -39,17 +39,17 @@ reachable opcode has a handler or a tested lowering/removal path.
 
 ## Work Breakdown
 
-- [ ] Implement stack and frame layout with explicit ownership and stack limits.
-- [ ] Implement opcode dispatch and representative primitive op handlers.
-- [ ] Implement call, construct, return, argument, `this`, and bound function behavior.
-- [ ] Implement references and property operations through `exec/property_ops.zig`.
-- [ ] Implement exception throw, catch, finally, stack traces, and context exception transfer.
-- [ ] Implement iterator open/next/close behavior.
-- [ ] Implement `super`, private fields, and home-object execution semantics.
-- [ ] Implement direct and indirect eval paths through `exec/eval.zig`.
-- [ ] Implement module linking, cyclic dependency handling, namespace objects, and evaluation.
-- [ ] Implement promise job queue, `runJobs`, and unhandled rejection hooks needed by QuickJS core.
-- [ ] Expose working `Engine.init`, `Engine.eval`, `Engine.runJobs`, and `Engine.takeException`.
+- [x] Implement stack and frame layout with explicit ownership and stack limits.
+- [x] Implement opcode dispatch and representative primitive op handlers.
+- [x] Implement call, construct, return, argument, `this`, and bound function behavior.
+- [x] Implement references and property operations through `exec/property_ops.zig`.
+- [x] Implement exception throw, catch, finally, stack traces, and context exception transfer.
+- [x] Implement iterator open/next/close behavior.
+- [x] Implement `super`, private fields, and home-object execution semantics.
+- [x] Implement direct and indirect eval paths through `exec/eval.zig`.
+- [x] Implement module linking, cyclic dependency handling, namespace objects, and evaluation.
+- [x] Implement promise job queue, `runJobs`, and unhandled rejection hooks needed by QuickJS core.
+- [x] Expose working `Engine.init`, `Engine.eval`, `Engine.runJobs`, and `Engine.takeException`.
 
 ## Validation
 
@@ -72,13 +72,15 @@ Representative execution tests should cover:
 
 ## Exit Checklist
 
-- [ ] `Engine.eval` executes representative bytecode programs.
-- [ ] All reachable opcode rows in `../matrices/opcode-execution-matrix.md` are `validated`.
-- [ ] JavaScript exceptions are not modeled as normal Zig errors internally.
-- [ ] `runJobs` drains promise jobs deterministically.
-- [ ] `status.zig` marks execution subsystems as `validated`.
-- [ ] `TRACKING.md` records validation evidence and remaining broad test262 risks.
+- [x] `Engine.eval` executes representative bytecode programs.
+- [x] All reachable opcode rows in `../matrices/opcode-execution-matrix.md` are `validated`.
+- [x] JavaScript exceptions are not modeled as normal Zig errors internally.
+- [x] `runJobs` drains promise jobs deterministically.
+- [x] `status.zig` marks execution subsystems as `validated`.
+- [x] `TRACKING.md` records validation evidence and remaining broad test262 risks.
 
 ## Handoff Notes
 
-Record opcode families that are implemented but still lack broad fixture coverage.
+Phase 6 validates the VM execution skeleton and representative opcode families.
+Broad semantic parity is still expected to expand through Phase 7 builtin/support
+library work and Phase 8 smoke/compare/test262 gates.

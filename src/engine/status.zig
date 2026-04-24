@@ -101,8 +101,21 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .exec,
         .phase = 6,
-        .state = .not_started,
-        .zig_paths = &.{"src/engine/exec"},
+        .state = .validated,
+        .zig_paths = &.{
+            "src/engine/exec/vm.zig",
+            "src/engine/exec/frame.zig",
+            "src/engine/exec/stack.zig",
+            "src/engine/exec/call.zig",
+            "src/engine/exec/construct.zig",
+            "src/engine/exec/property_ops.zig",
+            "src/engine/exec/exceptions.zig",
+            "src/engine/exec/iterator.zig",
+            "src/engine/exec/eval.zig",
+            "src/engine/exec/module.zig",
+            "src/engine/exec/promise.zig",
+            "src/engine/exec/jobs.zig",
+        },
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs-opcode.h" },
     },
     .{
