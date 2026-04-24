@@ -87,7 +87,15 @@ pub const source_mappings = [_]SourceMapping{
     },
     .{
         .subsystem = "bytecode",
-        .zig_paths = &.{"src/engine/bytecode"},
+        .zig_paths = &.{
+            "src/engine/bytecode/opcode.zig",
+            "src/engine/bytecode/format.zig",
+            "src/engine/bytecode/function.zig",
+            "src/engine/bytecode/constant.zig",
+            "src/engine/bytecode/scope.zig",
+            "src/engine/bytecode/module.zig",
+            "src/engine/bytecode/debug.zig",
+        },
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs-opcode.h" },
     },
     .{

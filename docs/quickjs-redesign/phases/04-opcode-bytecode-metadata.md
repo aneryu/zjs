@@ -1,6 +1,6 @@
 # Phase 4: Opcode And Bytecode Metadata
 
-Status: not_started
+Status: completed
 
 ## Goal
 
@@ -32,15 +32,15 @@ Phase 6 owns execution-handler columns.
 
 ## Work Breakdown
 
-- [ ] Generate or manually port opcode enum in QuickJS order.
-- [ ] Port opcode names, formats, immediate operands, and stack effects.
-- [ ] Add tests for representative numeric opcode values and every opcode count.
-- [ ] Define bytecode buffer ownership and release APIs.
-- [ ] Define constant pool storage and value lifetime rules.
-- [ ] Define local variable, closure variable, and lexical scope metadata.
-- [ ] Define compiled module request/import/export metadata.
-- [ ] Define source position and debug table ownership.
-- [ ] Add serialization helpers only if required by later phases; do not implement `qjsc`.
+- [x] Generate or manually port opcode enum in QuickJS order.
+- [x] Port opcode names, formats, immediate operands, and stack effects.
+- [x] Add tests for representative numeric opcode values and every opcode count.
+- [x] Define bytecode buffer ownership and release APIs.
+- [x] Define constant pool storage and value lifetime rules.
+- [x] Define local variable, closure variable, and lexical scope metadata.
+- [x] Define compiled module request/import/export metadata.
+- [x] Define source position and debug table ownership.
+- [x] Add serialization helpers only if required by later phases; do not implement `qjsc`.
 
 ## Validation
 
@@ -59,12 +59,14 @@ Focused tests should cover:
 
 ## Exit Checklist
 
-- [ ] Opcode table matches QuickJS.
-- [ ] Opcode metadata rows in `../matrices/opcode-execution-matrix.md` are ready for Phase 6 handler tracking.
-- [ ] Bytecode structures are owned and freed deterministically.
-- [ ] `status.zig` marks opcode and bytecode metadata as `validated`.
-- [ ] `TRACKING.md` records validation evidence and any generation strategy.
+- [x] Opcode table matches QuickJS.
+- [x] Opcode metadata rows in `../matrices/opcode-execution-matrix.md` are ready for Phase 6 handler tracking.
+- [x] Bytecode structures are owned and freed deterministically.
+- [x] `status.zig` marks opcode and bytecode metadata as `validated`.
+- [x] `TRACKING.md` records validation evidence and any generation strategy.
 
 ## Handoff Notes
 
-Record whether opcode metadata is generated or hand-maintained.
+Opcode metadata is generated at test/build time by parsing the local
+`quickjs/quickjs-opcode.h` with `src/engine/bytecode/opcode.zig`; the Zig tree
+does not maintain a duplicated opcode table.

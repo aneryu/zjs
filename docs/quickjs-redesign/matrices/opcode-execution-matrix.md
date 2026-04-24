@@ -3,6 +3,18 @@
 Purpose: make Phase 6 track bytecode execution at opcode level. Phase 4 owns
 opcode metadata; Phase 6 owns handlers and semantic execution tests.
 
+## Phase 4 Metadata Matrix
+
+| Area | QuickJS owner | Zig owner | Required behavior | Required tests | Status |
+|---|---|---|---|---|---|
+| Opcode source parsing | `quickjs/quickjs-opcode.h` | `bytecode/opcode.zig` | Parse `FMT`, `DEF`, and `def` entries in QuickJS order without duplicating the table | Format count, opcode count, normal/temp/short boundaries | validated |
+| Opcode metadata | `quickjs/quickjs-opcode.h` | `bytecode/opcode.zig`, `bytecode/format.zig` | Preserve name, size, pop/push counts, operand format, immediate width, stack delta, and opcode kind | Representative values for `push_i32`, `call`, `source_loc`, and short push opcodes | validated |
+| Bytecode buffer | function bytecode records in `quickjs.c` | `bytecode/function.zig` | Own and replace bytecode bytes with deterministic release | Allocate/copy/free bytecode buffer | validated |
+| Constant pool | function bytecode records in `quickjs.c` | `bytecode/constant.zig` | Retain/free `Value` constants with runtime ownership rules | String constant refcount test | validated |
+| Scope metadata | closure variable and scope records in `quickjs.c` | `bytecode/scope.zig` | Store local bindings, lexical flags, captured flags, and closure variable coordinates | Binding and closure metadata tests | validated |
+| Module bytecode metadata | module bytecode records in `quickjs.c` | `bytecode/module.zig` | Store request/import/export metadata with atom lifetime rules | Request/import/export ownership test | validated |
+| Debug metadata | PC-to-line/debug records in `quickjs.c` | `bytecode/debug.zig` | Store filename atom and PC-to-line entries with lookup | Source line lookup and teardown test | validated |
+
 ## Full Per-Opcode Tracking Rule
 
 Before Phase 6 starts, generate or manually populate a row for every non-format
@@ -52,4 +64,3 @@ row schema is:
   and linked from this file.
 - Any opcode marked lowering-only must have a test proving it is absent from final
   bytecode or handled safely if encountered.
-
