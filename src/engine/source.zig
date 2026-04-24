@@ -70,6 +70,17 @@ pub const source_mappings = [_]SourceMapping{
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h", "quickjs/list.h" },
     },
     .{
+        .subsystem = "object_property",
+        .zig_paths = &.{
+            "src/engine/core/object.zig",
+            "src/engine/core/property.zig",
+            "src/engine/core/descriptor.zig",
+            "src/engine/core/array.zig",
+            "src/engine/core/shape.zig",
+        },
+        .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h" },
+    },
+    .{
         .subsystem = "frontend",
         .zig_paths = &.{"src/engine/frontend"},
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/libregexp.c" },

@@ -1,5 +1,6 @@
 pub const RefKind = enum {
     string,
+    object,
 };
 
 pub const ObjectKind = enum {
@@ -136,6 +137,7 @@ pub fn release(rt: anytype, header: *Header) void {
 
     switch (header.kind) {
         .string => string.String.destroyFromHeader(rt, header),
+        .object => object.Object.destroyFromHeader(rt, header),
     }
 }
 
@@ -149,5 +151,6 @@ fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T
 }
 
 const memory = @import("memory.zig");
+const object = @import("object.zig");
 const string = @import("string.zig");
 const std = @import("std");

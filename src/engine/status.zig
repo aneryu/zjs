@@ -11,6 +11,7 @@ pub const PortState = enum {
 pub const Subsystem = enum {
     source_baseline,
     core_runtime,
+    object_property,
     frontend,
     bytecode,
     exec,
@@ -54,6 +55,19 @@ pub const records = [_]SubsystemStatus{
         .state = .validated,
         .zig_paths = &.{"src/engine/core"},
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h", "quickjs/list.h" },
+    },
+    .{
+        .subsystem = .object_property,
+        .phase = 3,
+        .state = .validated,
+        .zig_paths = &.{
+            "src/engine/core/object.zig",
+            "src/engine/core/property.zig",
+            "src/engine/core/descriptor.zig",
+            "src/engine/core/array.zig",
+            "src/engine/core/shape.zig",
+        },
+        .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h" },
     },
     .{
         .subsystem = .frontend,

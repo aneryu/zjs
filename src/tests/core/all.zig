@@ -423,6 +423,255 @@ test "runtime stack and interrupt state are stored" {
     try std.testing.expectEqual(before +% 1, rt.random_state);
 }
 
+test "ordinary objects define own data properties and descriptors" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+
+    const key = try rt.internAtom("answer");
+    defer rt.atoms.free(key);
+
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(42), true, true, true));
+    const desc = obj.getOwnProperty(key).?;
+    defer desc.destroy(rt);
+    try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
+    try std.testing.expectEqual(@as(?i32, 42), desc.value.asInt32());
+    try std.testing.expectEqual(true, desc.writable.?);
+    try std.testing.expect(obj.hasOwnProperty(key));
+
+    try obj.setProperty(rt, key, core.Value.int32(7));
+    const updated = obj.getProperty(key);
+    try std.testing.expectEqual(@as(?i32, 7), updated.asInt32());
+}
+
+test "define property enforces non-configurable and non-writable invariants" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+
+    const key = try rt.internAtom("locked");
+    defer rt.atoms.free(key);
+
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(1), false, false, false));
+    try std.testing.expectError(
+        error.IncompatibleDescriptor,
+        obj.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(2), false, false, false)),
+    );
+    try std.testing.expectError(
+        error.IncompatibleDescriptor,
+        obj.defineOwnProperty(rt, key, core.Descriptor.generic(true, null)),
+    );
+    try std.testing.expect(!obj.deleteProperty(rt, key));
+}
+
+test "accessor descriptors store getter setter placeholders" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+
+    const key = try rt.internAtom("accessor");
+    defer rt.atoms.free(key);
+
+    const getter = try core.string.String.createAscii(rt, "getter");
+    const setter = try core.string.String.createAscii(rt, "setter");
+    try obj.defineOwnProperty(rt, key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
+    getter.value().free(rt);
+    setter.value().free(rt);
+
+    const desc = obj.getOwnProperty(key).?;
+    defer desc.destroy(rt);
+    try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
+    try std.testing.expect(desc.getter.isString());
+    try std.testing.expect(desc.setter.isString());
+}
+
+test "prototype traversal and cycle checks are enforced" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const proto = try core.Object.create(rt, core.class.ids.object, null);
+    defer proto.value().free(rt);
+    const child = try core.Object.create(rt, core.class.ids.object, proto);
+    defer child.value().free(rt);
+
+    const key = try rt.internAtom("inherited");
+    defer rt.atoms.free(key);
+    try proto.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(11), true, true, true));
+
+    try std.testing.expect(!child.hasOwnProperty(key));
+    try std.testing.expect(child.hasProperty(key));
+    try std.testing.expectEqual(@as(?i32, 11), child.getProperty(key).asInt32());
+    try std.testing.expectError(error.PrototypeCycle, proto.setPrototype(child));
+}
+
+test "own keys follow index string symbol ordering" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+
+    const str_b = try rt.internAtom("b");
+    const index_2 = try rt.internAtom("2");
+    const index_1 = try rt.internAtom("1");
+    const sym = try rt.atoms.newSymbol("sym", .symbol);
+    defer rt.atoms.free(str_b);
+    defer rt.atoms.free(index_2);
+    defer rt.atoms.free(index_1);
+    defer rt.atoms.free(sym);
+
+    try obj.defineOwnProperty(rt, str_b, core.Descriptor.data(core.Value.int32(1), true, true, true));
+    try obj.defineOwnProperty(rt, index_2, core.Descriptor.data(core.Value.int32(2), true, true, true));
+    try obj.defineOwnProperty(rt, sym, core.Descriptor.data(core.Value.int32(3), true, true, true));
+    try obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.Value.int32(4), true, true, true));
+
+    const keys = try obj.ownKeys(rt);
+    defer core.Object.freeKeys(rt, keys);
+
+    try std.testing.expectEqual(@as(usize, 4), keys.len);
+    try std.testing.expectEqual(index_1, keys[0]);
+    try std.testing.expectEqual(index_2, keys[1]);
+    try std.testing.expectEqual(str_b, keys[2]);
+    try std.testing.expectEqual(sym, keys[3]);
+}
+
+test "extensibility seal and freeze update descriptor flags" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const key = try rt.internAtom("x");
+    const other = try rt.internAtom("y");
+    defer rt.atoms.free(key);
+    defer rt.atoms.free(other);
+
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(1), true, true, true));
+    obj.preventExtensions();
+    try std.testing.expect(!obj.isExtensible());
+    try std.testing.expectError(error.NotExtensible, obj.defineOwnProperty(rt, other, core.Descriptor.data(core.Value.int32(2), true, true, true)));
+
+    obj.freeze();
+    const desc = obj.getOwnProperty(key).?;
+    defer desc.destroy(rt);
+    try std.testing.expectEqual(false, desc.configurable.?);
+    try std.testing.expectEqual(false, desc.writable.?);
+}
+
+test "array index detection handles QuickJS boundaries" {
+    try std.testing.expect(core.array.isArrayIndexName("0"));
+    try std.testing.expect(core.array.isArrayIndexName("4294967294"));
+    try std.testing.expect(!core.array.isArrayIndexName("4294967295"));
+    try std.testing.expect(!core.array.isArrayIndexName("01"));
+    try std.testing.expect(!core.array.isArrayIndexName("-1"));
+    try std.testing.expect(core.array.canonicalNumericIndex("-0") != null);
+}
+
+test "array length tracks sparse indices and truncation" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array_obj = try core.Object.createArray(rt, null);
+    defer array_obj.value().free(rt);
+
+    const index_5 = try rt.internAtom("5");
+    const index_1 = try rt.internAtom("1");
+    defer rt.atoms.free(index_5);
+    defer rt.atoms.free(index_1);
+
+    try array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.Value.int32(5), true, true, true));
+    try std.testing.expectEqual(@as(u32, 6), array_obj.length);
+    try array_obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.Value.int32(1), true, true, true));
+    try std.testing.expectEqual(@as(u32, 6), array_obj.length);
+
+    try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.Value.int32(2), false, false, false));
+    try std.testing.expectEqual(@as(u32, 2), array_obj.length);
+    try std.testing.expect(!array_obj.hasOwnProperty(index_5));
+    try std.testing.expect(array_obj.hasOwnProperty(index_1));
+    try std.testing.expectError(error.ReadOnly, array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.Value.int32(5), true, true, true)));
+}
+
+test "array element storage mode moves between dense and sparse" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array_obj = try core.Object.createArray(rt, null);
+    defer array_obj.value().free(rt);
+
+    const index_0 = try rt.internAtom("0");
+    const index_100 = try rt.internAtom("100");
+    defer rt.atoms.free(index_0);
+    defer rt.atoms.free(index_100);
+
+    try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.Value.int32(0), true, true, true));
+    try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array_obj.arrayElementStorageMode());
+    try array_obj.defineOwnProperty(rt, index_100, core.Descriptor.data(core.Value.int32(100), true, true, true));
+    try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array_obj.arrayElementStorageMode());
+    try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.Value.int32(1), true, false, false));
+    try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array_obj.arrayElementStorageMode());
+}
+
+var exotic_define_calls: usize = 0;
+var exotic_delete_calls: usize = 0;
+
+fn exoticGet(_: *core.Object, _: core.Atom) ?core.Descriptor {
+    return core.Descriptor.data(core.Value.int32(99), false, false, true);
+}
+
+fn exoticDefine(_: *core.Object, _: core.Atom, _: core.Descriptor) bool {
+    exotic_define_calls += 1;
+    return true;
+}
+
+fn exoticDelete(_: *core.Object, _: core.Atom) bool {
+    exotic_delete_calls += 1;
+    return true;
+}
+
+fn exoticOwnKeys(_: *core.Object, rt: *core.Runtime) ![]core.Atom {
+    const keys = try rt.memory.alloc(core.Atom, 1);
+    keys[0] = rt.atoms.dup(core.atom.ids.length);
+    return keys;
+}
+
+test "exotic dispatch hooks are called without builtin shortcuts" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    obj.exotic = .{
+        .get_own_property = exoticGet,
+        .define_own_property = exoticDefine,
+        .delete_property = exoticDelete,
+        .own_keys = exoticOwnKeys,
+    };
+
+    exotic_define_calls = 0;
+    exotic_delete_calls = 0;
+    const key = try rt.internAtom("hooked");
+    defer rt.atoms.free(key);
+
+    const desc = obj.getOwnProperty(key).?;
+    defer desc.destroy(rt);
+    try std.testing.expectEqual(@as(?i32, 99), desc.value.asInt32());
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(1), true, true, true));
+    try std.testing.expectEqual(@as(usize, 1), exotic_define_calls);
+    try std.testing.expect(obj.deleteProperty(rt, key));
+    try std.testing.expectEqual(@as(usize, 1), exotic_delete_calls);
+
+    const keys = try obj.ownKeys(rt);
+    defer core.Object.freeKeys(rt, keys);
+    try std.testing.expectEqual(@as(usize, 1), keys.len);
+    try std.testing.expectEqual(core.atom.ids.length, keys[0]);
+}
+
 test "intrusive list supports empty insert and remove" {
     var list = core.list.List{};
     list.init();

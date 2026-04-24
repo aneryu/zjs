@@ -53,6 +53,10 @@ pub const Value = struct {
         return .{ .tag = Tag.string, .payload = .{ .ref = header } };
     }
 
+    pub fn object(header: *gc.Header) Value {
+        return .{ .tag = Tag.object, .payload = .{ .ref = header } };
+    }
+
     pub fn nullValue() Value {
         return .{ .tag = Tag.null_value, .payload = .none };
     }
@@ -127,6 +131,18 @@ pub const Value = struct {
 
     pub fn free(self: Value, rt: anytype) void {
         if (self.refHeader()) |header| gc.release(rt, header);
+    }
+
+    pub fn same(self: Value, other: Value) bool {
+        if (self.tag != other.tag) return false;
+        return switch (self.payload) {
+            .none => other.payload == .none,
+            .int32 => |value| other.payload == .int32 and other.payload.int32 == value,
+            .bool => |value| other.payload == .bool and other.payload.bool == value,
+            .float64 => |value| other.payload == .float64 and other.payload.float64 == value,
+            .short_big_int => |value| other.payload == .short_big_int and other.payload.short_big_int == value,
+            .ref => |header| other.payload == .ref and other.payload.ref == header,
+        };
     }
 
     fn refHeader(self: Value) ?*gc.Header {
