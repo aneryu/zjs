@@ -15,6 +15,7 @@ pub const ReferenceFile = struct {
 
 pub const included_reference_files = [_]ReferenceFile{
     .{ .path = "quickjs/quickjs.c", .role = .core_engine },
+    .{ .path = "quickjs/qjs.c", .role = .validation_tooling },
     .{ .path = "quickjs/quickjs.h", .role = .core_engine },
     .{ .path = "quickjs/quickjs-opcode.h", .role = .core_engine },
     .{ .path = "quickjs/quickjs-atom.h", .role = .core_engine },
@@ -24,8 +25,6 @@ pub const included_reference_files = [_]ReferenceFile{
     .{ .path = "quickjs/libregexp-opcode.h", .role = .support_library },
     .{ .path = "quickjs/libunicode.c", .role = .support_library },
     .{ .path = "quickjs/libunicode-table.h", .role = .support_library },
-    .{ .path = "quickjs/libbf.c", .role = .support_library },
-    .{ .path = "quickjs/libbf.h", .role = .support_library },
     .{ .path = "quickjs/dtoa.c", .role = .support_library },
     .{ .path = "quickjs/run-test262.c", .role = .validation_tooling },
     .{ .path = "quickjs/test262.conf", .role = .validation_tooling },
@@ -58,8 +57,8 @@ pub const source_mappings = [_]SourceMapping{
             "quickjs/cutils.h",
             "quickjs/libregexp.c",
             "quickjs/libunicode.c",
-            "quickjs/libbf.c",
             "quickjs/dtoa.c",
+            "quickjs/qjs.c",
             "quickjs/run-test262.c",
             "quickjs/test262.conf",
         },
@@ -136,9 +135,16 @@ pub const source_mappings = [_]SourceMapping{
     .{
         .subsystem = "cli_tooling",
         .zig_paths = &.{ "src/cli", "src/tools" },
-        .quickjs_sources = &.{ "quickjs/run-test262.c", "quickjs/test262.conf" },
+        .quickjs_sources = &.{ "quickjs/qjs.c", "quickjs/run-test262.c", "quickjs/test262.conf" },
     },
 };
+
+pub fn hasReferenceFile(path: []const u8) bool {
+    for (included_reference_files) |reference| {
+        if (std.mem.eql(u8, reference.path, path)) return true;
+    }
+    return false;
+}
 
 pub fn hasMappingFor(subsystem: []const u8) bool {
     for (source_mappings) |mapping| {

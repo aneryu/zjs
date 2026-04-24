@@ -10,6 +10,62 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const qjs_cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/qjs.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = engine_mod },
+        },
+    });
+    const test262_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/test262_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const smoke_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/smoke_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const qjs_exe = b.addExecutable(.{
+        .name = "zjs",
+        .root_module = qjs_cli_mod,
+    });
+    const install_qjs = b.addInstallArtifact(qjs_exe, .{});
+    const qjs_step = b.step("qjs", "Build and install zjs");
+    qjs_step.dependOn(&install_qjs.step);
+
+    const run_test262_exe = b.addExecutable(.{
+        .name = "run-test262",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/run_test262.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "test262_runner", .module = test262_runner_mod },
+            },
+        }),
+    });
+    const install_run_test262 = b.addInstallArtifact(run_test262_exe, .{});
+    const run_test262_step = b.step("run-test262", "Build and install run-test262");
+    run_test262_step.dependOn(&install_run_test262.step);
+
+    const smoke_runner_exe = b.addExecutable(.{
+        .name = "smoke-runner",
+        .root_module = smoke_runner_mod,
+    });
+    const run_smoke = b.addRunArtifact(smoke_runner_exe);
+    run_smoke.step.dependOn(&install_qjs.step);
+    run_smoke.addArg("zig-out/bin/zjs");
+    run_smoke.addArg("tests/zig-smoke/manifest.txt");
+    const smoke_step = b.step("smoke", "Run JS smoke scripts against zjs");
+    smoke_step.dependOn(&run_smoke.step);
 
     const quickjs_port_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -36,6 +92,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "quickjs_zig_engine", .module = engine_mod },
+                .{ .name = "qjs_cli", .module = qjs_cli_mod },
+                .{ .name = "smoke_runner", .module = smoke_runner_mod },
+                .{ .name = "test262_runner", .module = test262_runner_mod },
             },
         }),
     });
@@ -108,6 +167,25 @@ pub fn build(b: *std.Build) void {
     const test_builtins_step = b.step("test-builtins", "Run builtins and support library tests");
     test_builtins_step.dependOn(&run_builtins_tests.step);
 
+    const tools_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/tools/all.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "quickjs_zig_engine", .module = engine_mod },
+                .{ .name = "qjs_cli", .module = qjs_cli_mod },
+                .{ .name = "smoke_runner", .module = smoke_runner_mod },
+                .{ .name = "test262_runner", .module = test262_runner_mod },
+            },
+        }),
+    });
+
+    const run_tools_tests = b.addRunArtifact(tools_tests);
+    const test_tools_step = b.step("test-tools", "Run CLI and validation tooling tests");
+    test_tools_step.dependOn(&run_tools_tests.step);
+
     const test_step = b.step("test", "Run available Zig tests");
     test_step.dependOn(&run_quickjs_port_tests.step);
     test_step.dependOn(&run_core_tests.step);
@@ -115,4 +193,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_frontend_tests.step);
     test_step.dependOn(&run_exec_tests.step);
     test_step.dependOn(&run_builtins_tests.step);
+    test_step.dependOn(&run_tools_tests.step);
 }

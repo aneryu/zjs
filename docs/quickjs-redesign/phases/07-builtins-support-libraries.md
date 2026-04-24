@@ -14,8 +14,7 @@ same object, property, call, and exception paths as user code.
 - `quickjs/libregexp-opcode.h`
 - `quickjs/libunicode.c`
 - `quickjs/libunicode-table.h`
-- `quickjs/libbf.c`
-- `quickjs/libbf.h`
+- `quickjs/quickjs.c` BigInt and bignum sections in this vendored baseline.
 - `quickjs/dtoa.c`
 
 ## Target Files
@@ -32,8 +31,8 @@ same object, property, call, and exception paths as user code.
 ## Coverage Matrix
 
 Detailed support-library and builtin-domain tracking lives in
-`../matrices/builtins-support-matrix.md`. Support libraries must be validated
-before dependent builtins move beyond `in_progress`.
+`../matrices/builtins-support-matrix.md`. Support libraries are validated before
+dependent builtin domains are marked `validated`.
 
 ## Work Breakdown
 

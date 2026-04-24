@@ -8,18 +8,18 @@ small semantic drift can hide engine bugs.
 
 | Behavior | QuickJS owner | Zig owner | Required semantics | Required validation | Status |
 |---|---|---|---|---|---|
-| Config file `-c` | `run-test262.c`, `test262.conf` | `src/cli/run_test262.zig`, `src/tools/test262_runner.zig` | Load config relative paths, includes, excludes, features, harness roots | Config fixture test | not_started |
-| Direct directory `-d` | `run-test262.c` | runner config/enumeration | Select tests from directory without double-prefixing config dir | Targeted directory command | not_started |
-| Direct file `-f` | `run-test262.c` | runner selection | Select one or more exact test files | Targeted file command | not_started |
-| Known errors `-e` | `run-test262.c` | known-error loader | Load expected failures, classify new/changed/fixed/known | Known-error fixture | not_started |
-| Error update `-u` | `run-test262.c` | known-error writer | Update known-error file with current results when requested | Update fixture in temp dir | not_started |
-| Verbose `-v` | `run-test262.c` | CLI output | Print per-test progress and failures per QuickJS behavior | Snapshot or structured output test | not_started |
-| Very verbose `-vv` | `run-test262.c` | CLI output | Print command/detail-level diagnostics | Snapshot or structured output test | not_started |
-| Timeout `-T` | `run-test262.c` | worker execution | Apply per-test timeout and classify timeout result | Timeout fixture | not_started |
-| Module mode `-m` | `run-test262.c` | harness/execution adapter | Run module tests and honor module metadata | Module fixture | not_started |
-| Thread count `-t` | `run-test262.c` | worker pool | Run with requested workers, deterministic summaries | `-t 1` and multi-worker smoke | not_started |
+| Config file `-c` | `run-test262.c`, `test262.conf` | `src/cli/run_test262.zig`, `src/tools/test262_runner.zig` | Load config relative paths, includes, excludes, features, harness roots | Config fixture test | in_progress |
+| Direct directory `-d` | `run-test262.c` | runner config/enumeration | Select tests from directory without double-prefixing config dir | Targeted directory command | in_progress |
+| Direct file `-f` | `run-test262.c` | runner selection | Select one or more exact test files | Targeted file command | in_progress |
+| Known errors `-e` | `run-test262.c` | known-error loader | Load expected failures, classify new/changed/fixed/known | Known-error fixture | in_progress |
+| Error update `-u` | `run-test262.c` | known-error writer | Update known-error file with current results when requested | Update fixture in temp dir | in_progress |
+| Verbose `-v` | `run-test262.c` | CLI output | Print per-test progress and failures per QuickJS behavior | Snapshot or structured output test | in_progress |
+| Very verbose `-vv` | `run-test262.c` | CLI output | Print command/detail-level diagnostics | Snapshot or structured output test | in_progress |
+| Timeout `-T` | `run-test262.c` | worker execution | Apply per-test timeout and classify timeout result | Timeout fixture | in_progress |
+| Module mode `-m` | `run-test262.c` | harness/execution adapter | Run module tests and honor module metadata | Module fixture | in_progress |
+| Thread count `-t` | `run-test262.c` | worker pool | Run with requested workers, deterministic summaries | `-t 1` and multi-worker smoke | in_progress |
 | Feature exclusions | `test262.conf` | config evaluator | Honor unsupported features and exclude lists before engine execution | Exclusion fixture | not_started |
-| Positional test root | `run-test262.c` | CLI argument parser | Accept final test directory argument matching QuickJS runner shape | Final gate command | not_started |
+| Positional test root | `run-test262.c` | CLI argument parser | Accept final test directory argument matching QuickJS runner shape | Final gate command | in_progress |
 
 ## Runner Semantics
 
@@ -31,7 +31,7 @@ small semantic drift can hide engine bugs.
 | Exclude order | Apply config excludes before execution and before reporting unexpected failures | Exclude fixture | not_started |
 | Worker isolation | Avoid shared mutable harness state that changes semantics or creates lock contention | Parallel smoke with deterministic counts | not_started |
 | Summary output | Match useful QuickJS summary fields and preserve exit-code semantics | Summary snapshot | not_started |
-| Exit code | Known failures can exit 0; new/changed/fixed unexpected results fail | Known-error classification fixture | not_started |
+| Exit code | Known failures can exit 0; new/changed/fixed unexpected results fail | Known-error classification fixture | in_progress |
 | Interrupted runs | Do not record interrupted sweeps as final validation | Tracking entry and error-record rule | not_started |
 
 ## Phase 8 Exit Additions

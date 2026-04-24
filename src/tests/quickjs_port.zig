@@ -6,7 +6,12 @@ test "QuickJS source baseline is recorded" {
         "64e64ebb1dd61505c256285a699c65c42941c5ed",
         engine.source.quickjs_commit,
     );
-    try std.testing.expect(engine.source.included_reference_files.len >= 15);
+    try std.testing.expect(engine.source.hasReferenceFile("quickjs/quickjs.c"));
+    try std.testing.expect(engine.source.hasReferenceFile("quickjs/libregexp.c"));
+    try std.testing.expect(engine.source.hasReferenceFile("quickjs/libunicode.c"));
+    try std.testing.expect(engine.source.hasReferenceFile("quickjs/dtoa.c"));
+    try std.testing.expect(engine.source.hasReferenceFile("quickjs/qjs.c"));
+    try std.testing.expect(engine.source.hasReferenceFile("quickjs/run-test262.c"));
     try std.testing.expect(engine.source.excluded_components.len >= 5);
 }
 

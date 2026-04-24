@@ -10,11 +10,11 @@ updated alongside implementation, tests, and phase documents.
 | Field | Value |
 |---|---|
 | Active phase | Phase 8: CLI Tooling And Validation |
-| Overall status | phase_7_completed |
+| Overall status | phase_8_in_progress |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 7 builtins and support libraries completed at representative domain level: support libraries, intrinsic bootstrap, builtin domain helpers, and shared object/property/job paths are wired |
-| Current build state | `build.zig` includes `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, and aggregate `test` |
-| Current validation state | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` passed with 56/56 tests |
+| Current engine state | Phase 8 tooling first slice is wired: `zjs`, smoke runner, `run-test262` CLI parser skeleton, and tools tests now build on the rebuilt engine |
+| Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
+| Current validation state | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` passed with 60/60 tests; `zig build smoke` is wired but fails 45/45 scripts due missing smoke-visible JS output semantics |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -28,7 +28,7 @@ updated alongside implementation, tests, and phase documents.
 | 5 Frontend And Bytecode Emitter | completed | `phases/05-frontend-bytecode-emitter.md` | `matrices/frontend-coverage-matrix.md` | Phase 6 execution fixtures |
 | 6 Bytecode Execution | completed | `phases/06-bytecode-execution.md` | `matrices/opcode-execution-matrix.md` | Phase 7 builtin/support library fixtures |
 | 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
-| 8 CLI Tooling And Validation | not_started | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | `zjs`, smoke, compare, and test262 runner gates |
+| 8 CLI Tooling And Validation | in_progress | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Fix smoke-visible output semantics and continue test262 runner execution |
 
 ## Work Queue
 
@@ -42,6 +42,7 @@ updated alongside implementation, tests, and phase documents.
 | WQ-006 | completed | 5 | Frontend and bytecode emitter | Validated parser/emitter metadata fixtures without AST execution | none |
 | WQ-007 | completed | 6 | Bytecode execution | Validated representative VM dispatch, Engine API, and job queue | none |
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
+| WQ-009 | in_progress | 8 | CLI and validation tooling | `qjs`, `run-test262`, `smoke`, and `test-tools` build steps are wired; next fix smoke-visible output semantics | smoke currently fails 45/45 scripts |
 
 ## Subsystem Coverage Matrix
 
@@ -54,7 +55,7 @@ updated alongside implementation, tests, and phase documents.
 | Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-frontend --summary all` passed, 6/6 tests |
 | Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-exec --summary all` passed, 6/6 tests |
 | Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` passed, 4/4 tests |
-| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | not_started | none |
+| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | in_progress | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-tools --summary all` passed, 4/4 tests |
 
 ## Validation Log
 
@@ -92,6 +93,15 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-24 | 7 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` | 0 | Builtins and support-library tests passed, 4/4 tests | regression |
 | 2026-04-24 | 7 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-quickjs-port --summary all` | 0 | Source/status tests passed after Phase 7 validation, 4/4 tests | regression |
 | 2026-04-24 | 7 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` | 0 | Aggregate bootstrap, core, bytecode, frontend, exec, and builtins tests passed, 56/56 tests | regression |
+| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-tools --summary all` | 0 | CLI and validation tooling parser/helper tests passed, 4/4 tests | regression |
+| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build qjs --summary all` | 0 | `zjs` executable built and installed | regression |
+| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build run-test262 --summary all` | 0 | `run-test262` executable skeleton built and installed | regression |
+| 2026-04-24 | 8 | `./zig-out/bin/zjs -e "1"` | 0 | `zjs -e` executes through rebuilt engine without output | smoke |
+| 2026-04-24 | 8 | `./zig-out/bin/zjs <temp-file.js>` | 0 | `zjs <file.js>` executes through rebuilt engine without output | smoke |
+| 2026-04-24 | 8 | `./zig-out/bin/zjs` | 2 | Usage path exits non-zero and prints `zjs -e <script>` / `zjs <file.js>` usage | smoke |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -c quickjs/test262.conf -m -t 1 quickjs/test262/test` | 1 | CLI parser accepts QuickJS-shaped final gate args but execution is not implemented yet | reproduction |
+| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` | 0 | Aggregate bootstrap, core, bytecode, frontend, exec, builtins, and tools tests passed, 60/60 tests | regression |
+| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build smoke --summary all` | 1 | Smoke runner is wired and compares manifest/goldens, but current engine fails 45/45 smoke scripts due missing output semantics | reproduction |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Root plan and redesign docs whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Matrix expansion and phase links whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Error and learning workflow whitespace check passed | hygiene |
@@ -104,6 +114,7 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-24 | Avoid `src/engine/quickjs/` nesting. | `src/engine/` is already the QuickJS engine namespace; explicit source mapping is clearer than redundant directory nesting. | Keep mapping table updated when files move or split. |
 | 2026-04-24 | Track incomplete behavior through `status.zig` and phase docs. | A complete rewrite needs temporary gaps, but completed phases must not hide not-implemented behavior. | Phase tests should validate status transitions. |
 | 2026-04-24 | Add a separate error and learning ledger. | Validation logs and known-failure summaries are not enough to preserve root causes and reusable lessons. | Use `ERRORS_AND_LEARNINGS.md` and `templates/error-record.md` for non-trivial failures. |
+| 2026-04-24 | Wire Phase 8 smoke as a real golden comparator even before engine semantics pass. | A passing placeholder smoke step would hide the main remaining execution gap. | Keep `zig build smoke` failing until `zjs` produces expected script output. |
 
 ## Risk Log
 
@@ -113,12 +124,14 @@ updated alongside implementation, tests, and phase documents.
 | Long-running validation gets interrupted but later treated as final proof. | False confidence in parity. | Validation entries must record exit status and mark interrupted sweeps explicitly. | open |
 | Support libraries are postponed until builtin work. | RegExp, Unicode, BigInt, and number formatting semantics diverge. | Phase 7 ports `libs` before dependent builtins. | open |
 | Stale `build.zig` roots hide deleted-code dependencies. | Redesign cannot build from clean state. | Phase 1 replaced build wiring with existing roots only. | mitigated |
+| Phase 8 smoke is wired before the engine can print or execute smoke scripts fully. | `zig build smoke` fails until output-visible semantics are implemented. | Treat the failure as current reproduction evidence and fix engine/print semantics next. | open |
 
 ## Known Failures
 
 | Date | Phase | Command | Exit | Classification | Error record | Notes |
 |---|---|---|---|---|---|---|
 | 2026-04-24 | bootstrap | `zig build test-quickjs-port --summary all` | 1 | expected_bootstrap_gap | none | Failed before implementation because `src/tests/quickjs_port.zig` was missing; fixed by Phase 1 bootstrap. |
+| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build smoke --summary all` | 1 | expected_phase8_gap | pending | Smoke runner is now real; all 45 scripts fail because `zjs` does not yet implement smoke-visible output semantics. |
 
 ## Learning Summary
 
@@ -130,7 +143,7 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Start Phase 8 CLI tooling and validation gates. |
+| Next recommended action | Fix smoke-visible output semantics for `print(...)` and expression execution, then rerun `zig build smoke --summary all`. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |
@@ -148,6 +161,7 @@ updated alongside implementation, tests, and phase documents.
 - Phase 5 validates tokenization, parser modes, source-positioned syntax errors, module/eval/function/class/private/destructuring/spread metadata, and emitter output without running bytecode.
 - Phase 6 validates stack/frame ownership, representative primitive opcode dispatch, source location tracking, shared object property ops, context exception transfer, `Engine.eval`, and deterministic job queue draining.
 - Phase 7 validates Unicode/dtoa/bignum/regexp support helpers, intrinsic bootstrap descriptors, representative builtin domains, Promise job integration, buffers, Reflect/Proxy hooks, iterator helpers, and Atomics lock-free scope.
+- Phase 8 first tooling slice adds `zjs`, `run-test262`, `smoke`, and `test-tools` build steps. Aggregate tests pass 60/60, but `zig build smoke` fails 45/45 because the rebuilt engine currently executes without producing the expected smoke stdout/stderr.
 - Do not use old `src/engine/vm/` paths as repair targets.
 - Use local QuickJS source and `quickjs/build/qjs` as semantic oracle once executable validation exists.
 - Use `ERRORS_AND_LEARNINGS.md` for failures that need root-cause analysis or reusable lessons.

@@ -73,6 +73,7 @@ create a learning record.
 | ID | Status | Severity | Phase | Classification | Symptom | Record | Regression | Matrix rows |
 |---|---|---|---|---|---|---|---|---|
 | EAL-20260424-001 | validated | low | docs | docs_tracking_gap | Redesign plan lacked a durable error and learning workflow. | `#eal-20260424-001-error-and-learning-workflow-missing` | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | README, TRACKING, test262 parity |
+| EAL-20260424-002 | open | high | 8 | quickjs_parity_gap | Real smoke runner fails 45/45 scripts because `zjs` does not yet produce smoke-visible output such as `print(...)`. | `#eal-20260424-002-smoke-runner-wired-before-output-semantics` | pending | Phase 8, smoke runner |
 
 ## Detailed Records
 
@@ -105,6 +106,38 @@ git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign
 
 Learning: Validation evidence, known-failure summaries, and root-cause learning
 serve different purposes and need separate records.
+
+### EAL-20260424-002: Smoke Runner Wired Before Output Semantics
+
+Status: open
+Severity: high
+Phase: 8
+Classification: quickjs_parity_gap
+
+Summary: Phase 8 wired `zig build smoke` to the rebuilt `zjs` executable and the
+existing `tests/zig-smoke/manifest.txt` golden files. The runner works as a real
+comparator, but all 45 manifest scripts currently fail.
+
+Reproduction:
+
+```bash
+ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build smoke --summary all
+```
+
+Observed result: exit 1. The runner reports `smoke: 45/45 scripts failed`.
+Most failures have status 0 but stdout length 0 because the rebuilt engine does
+not yet implement smoke-visible output such as `print(...)`. A few scripts exit
+1 on unsupported frontend/execution paths.
+
+QuickJS owner: `quickjs/qjs.c` for CLI-visible execution behavior and
+`quickjs/quickjs.c` for global builtin registration and execution semantics.
+
+Zig owner: `src/cli/qjs.zig`, `src/engine/root.zig`, builtin global setup, and
+the frontend/exec paths needed by smoke scripts.
+
+Next fix target: implement the smallest source-aligned output path for
+`print(...)` and expression execution, then rerun focused smoke scripts before
+the full manifest.
 
 ## Learning Log
 

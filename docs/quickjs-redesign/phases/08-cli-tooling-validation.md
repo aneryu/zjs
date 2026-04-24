@@ -1,6 +1,6 @@
 # Phase 8: CLI Tooling And Validation
 
-Status: not_started
+Status: in_progress
 
 ## Goal
 
@@ -31,19 +31,19 @@ from full-suite evidence.
 
 ## Work Breakdown
 
-- [ ] Rebuild `zjs -e "<script>"`.
-- [ ] Rebuild `zjs <file.js>`.
-- [ ] Implement CLI usage and non-zero exit behavior for invalid arguments.
-- [ ] Rebuild smoke runner against `tests/zig-smoke/manifest.txt`.
-- [ ] Preserve golden stdout/stderr/exit comparison behavior for smoke tests.
+- [x] Rebuild `zjs -e "<script>"`.
+- [x] Rebuild `zjs <file.js>`.
+- [x] Implement CLI usage and non-zero exit behavior for invalid arguments.
+- [x] Rebuild smoke runner against `tests/zig-smoke/manifest.txt`.
+- [x] Preserve golden stdout/stderr/exit comparison behavior for smoke tests.
 - [ ] Update compare invocation only as needed to point at rebuilt `zjs`.
 - [ ] Rebuild test262 config parsing aligned to `quickjs/run-test262.c`.
 - [ ] Implement exclude handling from `quickjs/test262.conf`.
 - [ ] Implement known-error/errorfile behavior and exit semantics.
-- [ ] Implement direct file and directory selection.
+- [x] Implement direct file and directory selection.
 - [ ] Implement harness loading and metadata parsing.
 - [ ] Implement worker execution without shared-cache contention hazards.
-- [ ] Add build steps for `qjs`, `smoke`, `run-test262`, and aggregate tests.
+- [x] Add build steps for `qjs`, `smoke`, `run-test262`, and aggregate tests.
 
 ## Validation
 
@@ -82,4 +82,11 @@ Final test262 gate:
 
 ## Handoff Notes
 
-Record known local baseline differences and the exact command used to reproduce them.
+- First tooling slice added `zjs`, `run-test262`, `smoke`, and `test-tools`
+  build steps.
+- `zjs -e "1"` and `zjs <file>` currently execute through the rebuilt engine and
+  exit 0 without printing expression results.
+- `zig build smoke --summary all` now runs the manifest and golden comparator,
+  but fails 45/45 scripts because the rebuilt engine does not yet implement
+  smoke-visible output such as `print(...)`; this is expected in the current
+  Phase 8 in-progress state and must not be recorded as final smoke evidence.
