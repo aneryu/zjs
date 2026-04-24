@@ -19,7 +19,8 @@ pub fn main(init: std.process.Init) !void {
     defer summary.deinit(init.gpa);
 
     try printSummary(io, summary);
-    std.process.exit(if (summary.failed == 0) 0 else 1);
+    const has_unexpected = summary.failed != 0 or summary.fixed != 0;
+    std.process.exit(if (has_unexpected) 1 else 0);
 }
 
 fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
@@ -54,6 +55,9 @@ fn printSummary(io: std.Io, summary: runner.ExecutionSummary) !void {
     try stdout.print("\n", .{});
     if (summary.selection.harnessdir) |harnessdir| try stdout.print("harness: {s}\n", .{harnessdir});
     if (summary.selection.errorfile) |errorfile| try stdout.print("known errors: {s}\n", .{errorfile});
-    try stdout.print("Result: {d}/{d} errors, passed {d}\n", .{ summary.failed, summary.selection.selected_tests, summary.passed });
+    try stdout.print("Result: {d}/{d} errors, passed {d}", .{ summary.failed, summary.selection.selected_tests, summary.passed });
+    if (summary.known_failures != 0) try stdout.print(", known {d}", .{summary.known_failures});
+    if (summary.fixed != 0) try stdout.print(", fixed {d}", .{summary.fixed});
+    try stdout.print("\n", .{});
     try stdout.flush();
 }

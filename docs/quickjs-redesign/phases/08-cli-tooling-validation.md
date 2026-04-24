@@ -39,7 +39,7 @@ from full-suite evidence.
 - [ ] Update compare invocation only as needed to point at rebuilt `zjs`.
 - [x] Rebuild test262 config parsing aligned to `quickjs/run-test262.c`.
 - [x] Implement exclude handling from `quickjs/test262.conf`.
-- [ ] Implement known-error/errorfile behavior and exit semantics.
+- [x] Implement known-error/errorfile behavior and exit semantics.
 - [x] Implement direct file and directory selection.
 - [x] Implement baseline harness loading.
 - [ ] Implement metadata parsing.

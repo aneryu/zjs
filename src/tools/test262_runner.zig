@@ -167,6 +167,8 @@ pub const ExecutionSummary = struct {
     selection: SelectionSummary,
     passed: usize = 0,
     failed: usize = 0,
+    known_failures: usize = 0,
+    fixed: usize = 0,
 
     pub fn deinit(self: *ExecutionSummary, allocator: std.mem.Allocator) void {
         self.selection.deinit(allocator);
@@ -291,6 +293,11 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
     var prepared = try prepareSelection(allocator, io, config);
     errdefer prepared.deinit(allocator);
 
+    var known_errors = try loadKnownErrors(allocator, io, prepared.summary.errorfile);
+    defer known_errors.deinit();
+    var current_failures = NameList.init(allocator);
+    defer current_failures.deinit();
+
     var summary = ExecutionSummary{
         .selection = prepared.summary,
     };
@@ -299,11 +306,24 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
 
     for (prepared.tests.items) |test_path| {
         const passed = try runOneTest(allocator, io, zjs_path, summary.selection.harnessdir, test_path, config.verbose);
-        if (passed) {
+        const is_known = known_errors.contains(test_path);
+        if (passed and is_known) {
+            summary.fixed += 1;
+        } else if (passed) {
             summary.passed += 1;
+        } else if (is_known) {
+            summary.known_failures += 1;
+            try current_failures.append(test_path);
         } else {
             summary.failed += 1;
+            try current_failures.append(test_path);
         }
+    }
+
+    if (config.update_errors and summary.selection.errorfile != null) {
+        var merged_failures = try mergeKnownErrorsForUpdate(allocator, known_errors, prepared.tests, current_failures);
+        defer merged_failures.deinit();
+        try writeKnownErrors(allocator, io, summary.selection.errorfile.?, merged_failures);
     }
 
     prepared.tests.deinit();
@@ -520,6 +540,63 @@ fn readHarnessFile(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]cons
     };
 }
 
+fn loadKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const u8) !NameList {
+    const path = errorfile orelse return NameList.init(allocator);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return NameList.init(allocator),
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    return parseKnownErrorsText(allocator, bytes);
+}
+
+fn parseKnownErrorsText(allocator: std.mem.Allocator, text: []const u8) !NameList {
+    var known = NameList.init(allocator);
+    errdefer known.deinit();
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const entry = stripComment(std.mem.trim(u8, line, " \t\r"));
+        if (entry.len == 0) continue;
+        try known.append(entry);
+    }
+    known.sortAndDedupe();
+    return known;
+}
+
+fn writeKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: []const u8, failures: NameList) !void {
+    const rendered = try renderKnownErrorsText(allocator, failures);
+    defer allocator.free(rendered);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = errorfile, .data = rendered });
+}
+
+fn mergeKnownErrorsForUpdate(allocator: std.mem.Allocator, known_failures: NameList, selected_tests: NameList, current_failures: NameList) !NameList {
+    var merged = NameList.init(allocator);
+    errdefer merged.deinit();
+
+    for (current_failures.items) |test_path| try merged.append(test_path);
+    for (known_failures.items) |test_path| {
+        if (!selected_tests.contains(test_path)) try merged.append(test_path);
+    }
+    merged.sortAndDedupe();
+    return merged;
+}
+
+fn renderKnownErrorsText(allocator: std.mem.Allocator, failures: NameList) ![]u8 {
+    var stable = NameList.init(allocator);
+    defer stable.deinit();
+    for (failures.items) |test_path| try stable.append(test_path);
+    stable.sortAndDedupe();
+
+    var buffer = std.ArrayList(u8).empty;
+    errdefer buffer.deinit(allocator);
+    for (stable.items) |test_path| {
+        try buffer.appendSlice(allocator, test_path);
+        try buffer.append(allocator, '\n');
+    }
+    return buffer.toOwnedSlice(allocator);
+}
+
 fn printFailure(io: std.Io, test_path: []const u8, stderr: []const u8) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
@@ -575,4 +652,54 @@ test "test262 config text parses paths features and excludes relative to config"
     try std.testing.expect(loaded.excludes.contains("quickjs/test262/test/intl402/foo.js"));
     try std.testing.expectEqual(@as(usize, 1), loaded.enabled_features.items.len);
     try std.testing.expectEqual(@as(usize, 1), loaded.skipped_features.items.len);
+}
+
+test "known error text parsing ignores comments and dedupes entries" {
+    var known = try parseKnownErrorsText(std.testing.allocator,
+        \\# keep only test paths
+        \\test/a.js
+        \\test/b.js ; trailing comment
+        \\test/a.js
+    );
+    defer known.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), known.items.len);
+    try std.testing.expectEqualStrings("test/a.js", known.items[0]);
+    try std.testing.expectEqualStrings("test/b.js", known.items[1]);
+}
+
+test "known error renderer emits sorted unique newline-separated entries" {
+    var failures = NameList.init(std.testing.allocator);
+    defer failures.deinit();
+    try failures.append("test/z.js");
+    try failures.append("test/a.js");
+    try failures.append("test/z.js");
+
+    const text = try renderKnownErrorsText(std.testing.allocator, failures);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("test/a.js\ntest/z.js\n", text);
+}
+
+test "known error update preserves unselected existing failures" {
+    var known = NameList.init(std.testing.allocator);
+    defer known.deinit();
+    try known.append("test/a.js");
+    try known.append("test/b.js");
+    try known.append("test/c.js");
+
+    var selected = NameList.init(std.testing.allocator);
+    defer selected.deinit();
+    try selected.append("test/a.js");
+    try selected.append("test/b.js");
+
+    var current = NameList.init(std.testing.allocator);
+    defer current.deinit();
+    try current.append("test/b.js");
+
+    var merged = try mergeKnownErrorsForUpdate(std.testing.allocator, known, selected, current);
+    defer merged.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), merged.items.len);
+    try std.testing.expectEqualStrings("test/b.js", merged.items[0]);
+    try std.testing.expectEqualStrings("test/c.js", merged.items[1]);
 }

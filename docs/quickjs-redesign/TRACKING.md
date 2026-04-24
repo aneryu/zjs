@@ -12,7 +12,7 @@ updated alongside implementation, tests, and phase documents.
 | Active phase | Phase 8: CLI Tooling And Validation |
 | Overall status | phase_8_in_progress |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 8 tooling is wired; `run-test262` now parses QuickJS-shaped args, config paths, feature lists, config excludes, direct selectors, and index spans, then runs selected tests through `zig-out/bin/zjs` with baseline harness prepended |
+| Current engine state | Phase 8 tooling is wired; `run-test262` now parses QuickJS-shaped args, config paths, feature lists, config excludes, direct selectors, and index spans, runs selected tests through `zig-out/bin/zjs` with baseline harness prepended, and classifies known/new/fixed failures from `errorfile` with `-u` rewrite support |
 | Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
 | Current validation state | `zig build test --summary all` passed with 63/63 tests; `zig build test-tools --summary all` passed with 6/6 tests; `./zig-out/bin/zjs tests/zig-smoke/arith.js` prints `7`; `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 9` reports `Result: 0/10 errors, passed 10`; `zig build smoke --summary all` still fails 44/45 scripts |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
@@ -42,7 +42,7 @@ updated alongside implementation, tests, and phase documents.
 | WQ-006 | completed | 5 | Frontend and bytecode emitter | Validated parser/emitter metadata fixtures without AST execution | none |
 | WQ-007 | completed | 6 | Bytecode execution | Validated representative VM dispatch, Engine API, and job queue | none |
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
-| WQ-009 | in_progress | 8 | CLI and validation tooling | JSON test262 slice now executes through baseline harness; next fix smoke stdout/object/call semantics | smoke currently fails 44/45 scripts; broader test262 metadata/known-error/worker semantics remain incomplete |
+| WQ-009 | in_progress | 8 | CLI and validation tooling | JSON test262 slice now executes through baseline harness; known-error classification/update is wired; next fix smoke stdout/object/call semantics and metadata/workers | smoke currently fails 44/45 scripts; broader test262 metadata/worker semantics remain incomplete |
 
 ## Subsystem Coverage Matrix
 
@@ -122,6 +122,7 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-24 | 8 | `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 9` | 0 | Expanded JSON slice executes through rebuilt `zjs` and baseline harness, 10/10 passed | regression |
 | 2026-04-24 | 8 | `zig build test-tools --summary all` | 0 | Tool tests passed after executable test262 slice repair, 6/6 tests | regression |
 | 2026-04-24 | 8 | `zig build smoke --summary all` | 1 | Smoke still fails 44/45 scripts; `arith.js` now passes and `template.js` reaches stdout comparison | reproduction |
+| 2026-04-24 | 8 | `mise x -- zig fmt src/tools/test262_runner.zig src/cli/run_test262.zig` | 1 | Unable to run formatter in this environment because `mise` could not download/install Zig (`https://ziglang.org/download/index.json` tunnel/connect failure) | environment |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Root plan and redesign docs whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Matrix expansion and phase links whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Error and learning workflow whitespace check passed | hygiene |
@@ -165,7 +166,7 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Fix the next smoke stdout mismatch and then expand test262 JSON beyond the first 10 files; keep metadata, known-error, and worker parity separate from engine semantic fixes. |
+| Next recommended action | Fix the next smoke stdout mismatch and then expand test262 JSON beyond the first 10 files; keep metadata and worker parity separate from engine semantic fixes. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |
