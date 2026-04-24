@@ -321,7 +321,9 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
     }
 
     if (config.update_errors and summary.selection.errorfile != null) {
-        try writeKnownErrors(allocator, io, summary.selection.errorfile.?, current_failures);
+        var merged_failures = try mergeKnownErrorsForUpdate(allocator, known_errors, prepared.tests, current_failures);
+        defer merged_failures.deinit();
+        try writeKnownErrors(allocator, io, summary.selection.errorfile.?, merged_failures);
     }
 
     prepared.tests.deinit();
@@ -568,6 +570,18 @@ fn writeKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: []const
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = errorfile, .data = rendered });
 }
 
+fn mergeKnownErrorsForUpdate(allocator: std.mem.Allocator, known_failures: NameList, selected_tests: NameList, current_failures: NameList) !NameList {
+    var merged = NameList.init(allocator);
+    errdefer merged.deinit();
+
+    for (current_failures.items) |test_path| try merged.append(test_path);
+    for (known_failures.items) |test_path| {
+        if (!selected_tests.contains(test_path)) try merged.append(test_path);
+    }
+    merged.sortAndDedupe();
+    return merged;
+}
+
 fn renderKnownErrorsText(allocator: std.mem.Allocator, failures: NameList) ![]u8 {
     var stable = NameList.init(allocator);
     defer stable.deinit();
@@ -664,4 +678,28 @@ test "known error renderer emits sorted unique newline-separated entries" {
     const text = try renderKnownErrorsText(std.testing.allocator, failures);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("test/a.js\ntest/z.js\n", text);
+}
+
+test "known error update preserves unselected existing failures" {
+    var known = NameList.init(std.testing.allocator);
+    defer known.deinit();
+    try known.append("test/a.js");
+    try known.append("test/b.js");
+    try known.append("test/c.js");
+
+    var selected = NameList.init(std.testing.allocator);
+    defer selected.deinit();
+    try selected.append("test/a.js");
+    try selected.append("test/b.js");
+
+    var current = NameList.init(std.testing.allocator);
+    defer current.deinit();
+    try current.append("test/b.js");
+
+    var merged = try mergeKnownErrorsForUpdate(std.testing.allocator, known, selected, current);
+    defer merged.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), merged.items.len);
+    try std.testing.expectEqualStrings("test/b.js", merged.items[0]);
+    try std.testing.expectEqualStrings("test/c.js", merged.items[1]);
 }
