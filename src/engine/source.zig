@@ -82,7 +82,14 @@ pub const source_mappings = [_]SourceMapping{
     },
     .{
         .subsystem = "frontend",
-        .zig_paths = &.{"src/engine/frontend"},
+        .zig_paths = &.{
+            "src/engine/frontend/token.zig",
+            "src/engine/frontend/lexer.zig",
+            "src/engine/frontend/parser.zig",
+            "src/engine/frontend/regexp_literal.zig",
+            "src/engine/frontend/source_pos.zig",
+            "src/engine/bytecode/emitter.zig",
+        },
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/libregexp.c" },
     },
     .{

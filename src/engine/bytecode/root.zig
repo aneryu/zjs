@@ -7,5 +7,6 @@ pub const constant = @import("constant.zig");
 pub const scope = @import("scope.zig");
 pub const module = @import("module.zig");
 pub const debug = @import("debug.zig");
+pub const emitter = @import("emitter.zig");
 
 pub const Bytecode = function.Bytecode;

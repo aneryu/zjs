@@ -60,8 +60,25 @@ pub fn build(b: *std.Build) void {
     const test_bytecode_step = b.step("test-bytecode", "Run opcode and bytecode metadata tests");
     test_bytecode_step.dependOn(&run_bytecode_tests.step);
 
+    const frontend_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/frontend/all.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "quickjs_zig_engine", .module = engine_mod },
+            },
+        }),
+    });
+
+    const run_frontend_tests = b.addRunArtifact(frontend_tests);
+    const test_frontend_step = b.step("test-frontend", "Run frontend parser and emitter tests");
+    test_frontend_step.dependOn(&run_frontend_tests.step);
+
     const test_step = b.step("test", "Run available Zig tests");
     test_step.dependOn(&run_quickjs_port_tests.step);
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_bytecode_tests.step);
+    test_step.dependOn(&run_frontend_tests.step);
 }
