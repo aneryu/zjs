@@ -121,16 +121,16 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .builtins,
         .phase = 7,
-        .state = .not_started,
-        .zig_paths = &.{"src/engine/builtins"},
-        .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/libregexp.c", "quickjs/libbf.c", "quickjs/dtoa.c" },
+        .state = .validated,
+        .zig_paths = &.{ "src/engine/builtins", "src/engine/libs" },
+        .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/libregexp.c", "quickjs/dtoa.c" },
     },
     .{
         .subsystem = .libs,
         .phase = 7,
-        .state = .not_started,
+        .state = .validated,
         .zig_paths = &.{"src/engine/libs"},
-        .quickjs_sources = &.{ "quickjs/libregexp.c", "quickjs/libunicode.c", "quickjs/libbf.c", "quickjs/dtoa.c" },
+        .quickjs_sources = &.{ "quickjs/libregexp.c", "quickjs/libunicode.c", "quickjs/quickjs.c", "quickjs/dtoa.c" },
     },
     .{
         .subsystem = .cli_tooling,

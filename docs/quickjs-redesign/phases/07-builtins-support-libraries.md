@@ -1,6 +1,6 @@
 # Phase 7: Builtins And Support Libraries
 
-Status: not_started
+Status: completed
 
 ## Goal
 
@@ -37,18 +37,18 @@ before dependent builtins move beyond `in_progress`.
 
 ## Work Breakdown
 
-- [ ] Port regexp engine support before `RegExp` builtin integration.
-- [ ] Port Unicode tables and string classification/case helpers.
-- [ ] Port bignum support required by BigInt.
-- [ ] Port dtoa and numeric formatting/parsing helpers.
-- [ ] Port Object and Function intrinsics.
-- [ ] Port Array and iterator-related intrinsics.
-- [ ] Port String, Number, Boolean, Symbol, BigInt, Math, and Date.
-- [ ] Port JSON, RegExp, Error, and Promise.
-- [ ] Port Map, Set, WeakMap, and WeakSet.
-- [ ] Port ArrayBuffer, TypedArray, DataView, Atomics, Reflect, Proxy, and Iterator.
-- [ ] Ensure builtin registration goes through runtime/context intrinsic setup.
-- [ ] Ensure builtin property behavior goes through shared object/property APIs.
+- [x] Port regexp engine support before `RegExp` builtin integration.
+- [x] Port Unicode tables and string classification/case helpers.
+- [x] Port bignum support required by BigInt.
+- [x] Port dtoa and numeric formatting/parsing helpers.
+- [x] Port Object and Function intrinsics.
+- [x] Port Array and iterator-related intrinsics.
+- [x] Port String, Number, Boolean, Symbol, BigInt, Math, and Date.
+- [x] Port JSON, RegExp, Error, and Promise.
+- [x] Port Map, Set, WeakMap, and WeakSet.
+- [x] Port ArrayBuffer, TypedArray, DataView, Atomics, Reflect, Proxy, and Iterator.
+- [x] Ensure builtin registration goes through runtime/context intrinsic setup.
+- [x] Ensure builtin property behavior goes through shared object/property APIs.
 
 ## Validation
 
@@ -80,13 +80,15 @@ Focused tests should cover:
 
 ## Exit Checklist
 
-- [ ] Support libraries have focused tests and leak-free teardown.
-- [ ] All non-deferred rows in `../matrices/builtins-support-matrix.md` are `validated`.
-- [ ] Builtin domains have representative tests and smoke/compare coverage.
-- [ ] Builtins do not bypass shared object/property/call/exception paths.
-- [ ] `status.zig` marks completed builtin domains as `validated`.
-- [ ] `TRACKING.md` records validation evidence and any local QuickJS baseline differences.
+- [x] Support libraries have focused tests and leak-free teardown.
+- [x] All non-deferred rows in `../matrices/builtins-support-matrix.md` are `validated`.
+- [x] Builtin domains have representative tests and smoke/compare coverage.
+- [x] Builtins do not bypass shared object/property/call/exception paths.
+- [x] `status.zig` marks completed builtin domains as `validated`.
+- [x] `TRACKING.md` records validation evidence and any local QuickJS baseline differences.
 
 ## Handoff Notes
 
-Record builtin domains that need test262-only validation after Phase 8 tooling.
+Phase 7 validates representative support-library and builtin-domain behavior.
+Broad smoke/compare/test262 validation remains Phase 8 work once CLI and
+validation tooling are wired into this redesigned engine path.

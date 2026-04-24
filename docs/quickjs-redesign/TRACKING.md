@@ -9,12 +9,12 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Active phase | Phase 7: Builtins And Support Libraries |
-| Overall status | phase_6_completed |
+| Active phase | Phase 8: CLI Tooling And Validation |
+| Overall status | phase_7_completed |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 6 bytecode execution completed at representative VM level: stack/frame ownership, primitive opcode dispatch, property ops, exception transfer, Engine API, and job queue are wired |
-| Current build state | `build.zig` includes `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, and aggregate `test` |
-| Current validation state | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` passed with 52/52 tests |
+| Current engine state | Phase 7 builtins and support libraries completed at representative domain level: support libraries, intrinsic bootstrap, builtin domain helpers, and shared object/property/job paths are wired |
+| Current build state | `build.zig` includes `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, and aggregate `test` |
+| Current validation state | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` passed with 56/56 tests |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -27,7 +27,7 @@ updated alongside implementation, tests, and phase documents.
 | 4 Opcode And Bytecode Metadata | completed | `phases/04-opcode-bytecode-metadata.md` | `matrices/opcode-execution-matrix.md` | Phase 5 parser/emitter fixtures |
 | 5 Frontend And Bytecode Emitter | completed | `phases/05-frontend-bytecode-emitter.md` | `matrices/frontend-coverage-matrix.md` | Phase 6 execution fixtures |
 | 6 Bytecode Execution | completed | `phases/06-bytecode-execution.md` | `matrices/opcode-execution-matrix.md` | Phase 7 builtin/support library fixtures |
-| 7 Builtins And Support Libraries | not_started | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Builtin and support library tests |
+| 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
 | 8 CLI Tooling And Validation | not_started | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | `zjs`, smoke, compare, and test262 runner gates |
 
 ## Work Queue
@@ -41,6 +41,7 @@ updated alongside implementation, tests, and phase documents.
 | WQ-005 | completed | 4 | Opcode and bytecode metadata | Validated opcode parser and bytecode ownership records | none |
 | WQ-006 | completed | 5 | Frontend and bytecode emitter | Validated parser/emitter metadata fixtures without AST execution | none |
 | WQ-007 | completed | 6 | Bytecode execution | Validated representative VM dispatch, Engine API, and job queue | none |
+| WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
 
 ## Subsystem Coverage Matrix
 
@@ -52,7 +53,7 @@ updated alongside implementation, tests, and phase documents.
 | Opcode metadata | 4 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-bytecode --summary all` passed, 5/5 tests |
 | Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-frontend --summary all` passed, 6/6 tests |
 | Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-exec --summary all` passed, 6/6 tests |
-| Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | not_started | none |
+| Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` passed, 4/4 tests |
 | CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | not_started | none |
 
 ## Validation Log
@@ -88,6 +89,9 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-24 | 6 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-exec --summary all` | 0 | Bytecode execution tests passed, 6/6 tests | regression |
 | 2026-04-24 | 6 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-quickjs-port --summary all` | 0 | Source/status tests passed after Phase 6 validation, 4/4 tests | regression |
 | 2026-04-24 | 6 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` | 0 | Aggregate bootstrap, core, bytecode, frontend, and exec tests passed, 52/52 tests | regression |
+| 2026-04-24 | 7 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` | 0 | Builtins and support-library tests passed, 4/4 tests | regression |
+| 2026-04-24 | 7 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-quickjs-port --summary all` | 0 | Source/status tests passed after Phase 7 validation, 4/4 tests | regression |
+| 2026-04-24 | 7 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` | 0 | Aggregate bootstrap, core, bytecode, frontend, exec, and builtins tests passed, 56/56 tests | regression |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Root plan and redesign docs whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Matrix expansion and phase links whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Error and learning workflow whitespace check passed | hygiene |
@@ -126,7 +130,7 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Start Phase 7 builtins and support libraries. |
+| Next recommended action | Start Phase 8 CLI tooling and validation gates. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |
@@ -143,6 +147,7 @@ updated alongside implementation, tests, and phase documents.
 - Phase 4 validates opcode metadata by parsing the local QuickJS opcode header instead of duplicating a hand-maintained table, and validates bytecode buffer, constant pool, scope, module, and debug metadata ownership.
 - Phase 5 validates tokenization, parser modes, source-positioned syntax errors, module/eval/function/class/private/destructuring/spread metadata, and emitter output without running bytecode.
 - Phase 6 validates stack/frame ownership, representative primitive opcode dispatch, source location tracking, shared object property ops, context exception transfer, `Engine.eval`, and deterministic job queue draining.
+- Phase 7 validates Unicode/dtoa/bignum/regexp support helpers, intrinsic bootstrap descriptors, representative builtin domains, Promise job integration, buffers, Reflect/Proxy hooks, iterator helpers, and Atomics lock-free scope.
 - Do not use old `src/engine/vm/` paths as repair targets.
 - Use local QuickJS source and `quickjs/build/qjs` as semantic oracle once executable validation exists.
 - Use `ERRORS_AND_LEARNINGS.md` for failures that need root-cause analysis or reusable lessons.

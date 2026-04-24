@@ -9,41 +9,41 @@ all covered.
 
 | Domain | QuickJS owner | Zig owner | Required coverage | Required tests | Status |
 |---|---|---|---|---|---|
-| RegExp bytecode/interpreter | `libregexp.c`, `libregexp-opcode.h` | `libs/regexp.zig`, `libs/regexp_opcode.zig` | Compile, execute, captures, unicode flags, errors | RegExp library fixtures, leak-free teardown | not_started |
-| Unicode tables/helpers | `libunicode.c`, `libunicode-table.h` | `libs/unicode.zig`, `libs/unicode_tables.zig` | Case conversion, categories, identifier helpers, string helpers | Unicode edge fixtures | not_started |
-| Big number arithmetic | `libbf.c`, `libbf.h` | `libs/bignum.zig` | BigInt arithmetic backend, conversion, division/mod edge cases | BigInt backend fixtures | not_started |
-| Number formatting | `dtoa.c` | `libs/dtoa.zig` | Number parse/format, radix paths, special values | dtoa parse/format fixtures | not_started |
+| RegExp bytecode/interpreter | `libregexp.c`, `libregexp-opcode.h` | `libs/regexp.zig`, `libs/regexp_opcode.zig` | Compile, execute, captures, unicode flags, errors | RegExp library fixtures, leak-free teardown | validated |
+| Unicode tables/helpers | `libunicode.c`, `libunicode-table.h` | `libs/unicode.zig`, `libs/unicode_tables.zig` | Case conversion, categories, identifier helpers, string helpers | Unicode edge fixtures | validated |
+| Big number arithmetic | `libbf.c`, `libbf.h` | `libs/bignum.zig` | BigInt arithmetic backend, conversion, division/mod edge cases | BigInt backend fixtures | validated |
+| Number formatting | `dtoa.c` | `libs/dtoa.zig` | Number parse/format, radix paths, special values | dtoa parse/format fixtures | validated |
 
 ## Builtin Domains
 
 | Domain | QuickJS owner | Zig owner | Required coverage | Representative validation | Status |
 |---|---|---|---|---|---|
-| Intrinsic bootstrap | intrinsic registration in `quickjs.c` | `core/context.zig`, `builtins/root.zig` | Constructor/prototype graph, global bindings, descriptor flags | Bootstrap descriptor tests | not_started |
-| Object | Object builtin functions | `builtins/object.zig` | Create, define/get descriptors, keys, seal/freeze, prototype APIs | Object smoke + descriptor tests | not_started |
-| Function | Function builtin functions | `builtins/function.zig`, `exec/call.zig` | Call/apply/bind, constructor behavior, name/length/toString | Function call/bind tests | not_started |
-| Array | Array builtin functions | `builtins/array.zig`, `core/array.zig` | Constructor, length, methods, species where in baseline, iteration | Array smoke + edge tests | not_started |
-| String | String builtin functions | `builtins/string.zig`, `libs/unicode.zig` | Wrapper behavior, indexing, Unicode-sensitive methods | String/Unicode tests | not_started |
-| Number | Number builtin functions | `builtins/number.zig`, `libs/dtoa.zig` | Conversion, formatting, constants, errors | Number formatting tests | not_started |
-| Boolean | Boolean builtin functions | `builtins/boolean.zig` | Wrapper and primitive behavior | Boolean wrapper tests | not_started |
-| Symbol | Symbol builtin functions | `builtins/symbol.zig`, `core/atom.zig` | Well-known symbols, registry, description, property keys | Symbol tests | not_started |
-| BigInt | BigInt builtin functions | `builtins/bigint.zig`, `libs/bignum.zig` | Arithmetic, comparison, conversion errors, formatting | BigInt tests | not_started |
-| Math | Math builtin functions | `builtins/math.zig` | Constants, numeric functions, random state parity where applicable | Math compare tests | not_started |
-| Date | Date builtin functions | `builtins/date.zig` | Parsing, time values, UTC/local behavior, formatting | Date smoke/test262 slices | not_started |
-| JSON | JSON builtin functions | `builtins/json.zig` | Parse/stringify, replacer, reviver, property order, errors | JSON smoke/test262 slices | not_started |
-| RegExp | RegExp builtin functions | `builtins/regexp.zig`, `libs/regexp.zig` | Constructor, exec/test, flags, string integration hooks | RegExp tests | not_started |
-| Error | Error builtin functions | `builtins/error.zig`, `exec/exceptions.zig` | Error constructors, stack/name/message, throw integration | Error/exception tests | not_started |
-| Promise | Promise builtin functions | `builtins/promise.zig`, `exec/promise.zig`, `exec/jobs.zig` | Resolution, reactions, jobs, then/catch/finally, unhandled hooks | Promise job tests | not_started |
-| Map | Map builtin functions | `builtins/map.zig` | SameValueZero keys, iteration order, constructor iterable | Map tests | not_started |
-| Set | Set builtin functions | `builtins/set.zig` | SameValueZero values, iteration order, constructor iterable | Set tests | not_started |
-| WeakMap | WeakMap builtin functions | `builtins/weakmap.zig` | Object-key-only behavior, GC integration hooks | WeakMap tests | not_started |
-| WeakSet | WeakSet builtin functions | `builtins/weakset.zig` | Object-key-only behavior, GC integration hooks | WeakSet tests | not_started |
-| ArrayBuffer | ArrayBuffer builtin functions | `builtins/array_buffer.zig` | Allocation, slicing, detachment state where in scope | ArrayBuffer tests | not_started |
-| TypedArray | TypedArray builtin functions | `builtins/typed_array.zig` | Element access, views, bounds, methods, species where in baseline | TypedArray tests | not_started |
-| DataView | DataView builtin functions | `builtins/data_view.zig` | Endianness, bounds, buffer state | DataView tests | not_started |
-| Reflect | Reflect builtin functions | `builtins/reflect.zig` | get/set/construct/apply/ownKeys through shared paths | Reflect tests | not_started |
-| Proxy | Proxy builtin functions | `builtins/proxy.zig` | Traps, invariants, revocation, object operation integration | Proxy invariant tests | not_started |
-| Iterator | Iterator helpers in baseline | `builtins/iterator.zig`, `exec/iterator.zig` | Iterator prototype and helpers present in local QuickJS baseline | Iterator tests | not_started |
-| Atomics | Atomics builtin functions | `builtins/atomics.zig` | Shared memory behavior in selected scope, out-of-scope notes if host support absent | Atomics tests or scoped exclusion | not_started |
+| Intrinsic bootstrap | intrinsic registration in `quickjs.c` | `core/context.zig`, `builtins/root.zig` | Constructor/prototype graph, global bindings, descriptor flags | Bootstrap descriptor tests | validated |
+| Object | Object builtin functions | `builtins/object.zig` | Create, define/get descriptors, keys, seal/freeze, prototype APIs | Object smoke + descriptor tests | validated |
+| Function | Function builtin functions | `builtins/function.zig`, `exec/call.zig` | Call/apply/bind, constructor behavior, name/length/toString | Function call/bind tests | validated |
+| Array | Array builtin functions | `builtins/array.zig`, `core/array.zig` | Constructor, length, methods, species where in baseline, iteration | Array smoke + edge tests | validated |
+| String | String builtin functions | `builtins/string.zig`, `libs/unicode.zig` | Wrapper behavior, indexing, Unicode-sensitive methods | String/Unicode tests | validated |
+| Number | Number builtin functions | `builtins/number.zig`, `libs/dtoa.zig` | Conversion, formatting, constants, errors | Number formatting tests | validated |
+| Boolean | Boolean builtin functions | `builtins/boolean.zig` | Wrapper and primitive behavior | Boolean wrapper tests | validated |
+| Symbol | Symbol builtin functions | `builtins/symbol.zig`, `core/atom.zig` | Well-known symbols, registry, description, property keys | Symbol tests | validated |
+| BigInt | BigInt builtin functions | `builtins/bigint.zig`, `libs/bignum.zig` | Arithmetic, comparison, conversion errors, formatting | BigInt tests | validated |
+| Math | Math builtin functions | `builtins/math.zig` | Constants, numeric functions, random state parity where applicable | Math compare tests | validated |
+| Date | Date builtin functions | `builtins/date.zig` | Parsing, time values, UTC/local behavior, formatting | Date smoke/test262 slices | validated |
+| JSON | JSON builtin functions | `builtins/json.zig` | Parse/stringify, replacer, reviver, property order, errors | JSON smoke/test262 slices | validated |
+| RegExp | RegExp builtin functions | `builtins/regexp.zig`, `libs/regexp.zig` | Constructor, exec/test, flags, string integration hooks | RegExp tests | validated |
+| Error | Error builtin functions | `builtins/error.zig`, `exec/exceptions.zig` | Error constructors, stack/name/message, throw integration | Error/exception tests | validated |
+| Promise | Promise builtin functions | `builtins/promise.zig`, `exec/promise.zig`, `exec/jobs.zig` | Resolution, reactions, jobs, then/catch/finally, unhandled hooks | Promise job tests | validated |
+| Map | Map builtin functions | `builtins/map.zig` | SameValueZero keys, iteration order, constructor iterable | Map tests | validated |
+| Set | Set builtin functions | `builtins/set.zig` | SameValueZero values, iteration order, constructor iterable | Set tests | validated |
+| WeakMap | WeakMap builtin functions | `builtins/weakmap.zig` | Object-key-only behavior, GC integration hooks | WeakMap tests | validated |
+| WeakSet | WeakSet builtin functions | `builtins/weakset.zig` | Object-key-only behavior, GC integration hooks | WeakSet tests | validated |
+| ArrayBuffer | ArrayBuffer builtin functions | `builtins/array_buffer.zig` | Allocation, slicing, detachment state where in scope | ArrayBuffer tests | validated |
+| TypedArray | TypedArray builtin functions | `builtins/typed_array.zig` | Element access, views, bounds, methods, species where in baseline | TypedArray tests | validated |
+| DataView | DataView builtin functions | `builtins/data_view.zig` | Endianness, bounds, buffer state | DataView tests | validated |
+| Reflect | Reflect builtin functions | `builtins/reflect.zig` | get/set/construct/apply/ownKeys through shared paths | Reflect tests | validated |
+| Proxy | Proxy builtin functions | `builtins/proxy.zig` | Traps, invariants, revocation, object operation integration | Proxy invariant tests | validated |
+| Iterator | Iterator helpers in baseline | `builtins/iterator.zig`, `exec/iterator.zig` | Iterator prototype and helpers present in local QuickJS baseline | Iterator tests | validated |
+| Atomics | Atomics builtin functions | `builtins/atomics.zig` | Shared memory behavior in selected scope, out-of-scope notes if host support absent | Atomics tests or scoped exclusion | validated |
 
 ## Phase 7 Exit Additions
 
