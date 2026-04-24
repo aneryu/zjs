@@ -37,11 +37,12 @@ from full-suite evidence.
 - [x] Rebuild smoke runner against `tests/zig-smoke/manifest.txt`.
 - [x] Preserve golden stdout/stderr/exit comparison behavior for smoke tests.
 - [ ] Update compare invocation only as needed to point at rebuilt `zjs`.
-- [ ] Rebuild test262 config parsing aligned to `quickjs/run-test262.c`.
-- [ ] Implement exclude handling from `quickjs/test262.conf`.
+- [x] Rebuild test262 config parsing aligned to `quickjs/run-test262.c`.
+- [x] Implement exclude handling from `quickjs/test262.conf`.
 - [ ] Implement known-error/errorfile behavior and exit semantics.
 - [x] Implement direct file and directory selection.
-- [ ] Implement harness loading and metadata parsing.
+- [x] Implement baseline harness loading.
+- [ ] Implement metadata parsing.
 - [ ] Implement worker execution without shared-cache contention hazards.
 - [x] Add build steps for `qjs`, `smoke`, `run-test262`, and aggregate tests.
 
@@ -86,7 +87,25 @@ Final test262 gate:
   build steps.
 - `zjs -e "1"` and `zjs <file>` currently execute through the rebuilt engine and
   exit 0 without printing expression results.
+- `zjs` has a transitional host output path for direct `print(...)` and
+  `console.log(...)` calls with currently emitted primitive constants. This is
+  intentionally narrow and should be replaced by normal global function lookup
+  and call execution as Phase 8 advances.
+- Host print now emits integer `+ - * / %` bytecode with precedence for direct
+  primitive print expressions. This is a validation bridge, not the final parser
+  expression implementation.
+- Template literals are currently scanned as one literal through the closing
+  backtick so test262 harness files with `${...}` text can be parsed by the
+  transitional frontend. Full template interpolation semantics remain future
+  parser/compiler work.
+- `run-test262` now parses QuickJS-shaped index spans, config-relative
+  `testdir` / `harnessdir` / `errorfile`, feature lists, `[exclude]` entries,
+  direct `-d` / `-f` selectors, prepares selected test counts, and runs selected
+  tests through `zig-out/bin/zjs` with `sta.js` and `assert.js` prepended.
+  Example:
+  `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 9`
+  now reports `Result: 0/10 errors, passed 10`.
 - `zig build smoke --summary all` now runs the manifest and golden comparator,
-  but fails 45/45 scripts because the rebuilt engine does not yet implement
-  smoke-visible output such as `print(...)`; this is expected in the current
-  Phase 8 in-progress state and must not be recorded as final smoke evidence.
+  but still fails 44/45 scripts. `arith.js` now passes; most remaining failures
+  are stdout mismatches plus object/call semantics and unsupported runtime paths,
+  so this must not be recorded as final smoke evidence.

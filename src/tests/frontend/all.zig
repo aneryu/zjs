@@ -62,6 +62,33 @@ test "script parse mode emits bytecode metadata without AST execution" {
     try std.testing.expect(parsed.function.constants.values.len == 0);
 }
 
+test "print calls emit transitional host print opcode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
+    defer parsed.deinit();
+
+    var host_print_count: usize = 0;
+    var mul_index: ?usize = null;
+    var add_index: ?usize = null;
+    var host_print_index: ?usize = null;
+    for (parsed.function.code, 0..) |op, index| {
+        if (op == engine.bytecode.emitter.known.mul) mul_index = mul_index orelse index;
+        if (op == engine.bytecode.emitter.known.add) add_index = add_index orelse index;
+        if (op == engine.bytecode.emitter.known.host_print) {
+            host_print_count += 1;
+            host_print_index = host_print_index orelse index;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), host_print_count);
+    try std.testing.expect(mul_index != null);
+    try std.testing.expect(add_index != null);
+    try std.testing.expect(host_print_index != null);
+    try std.testing.expect(mul_index.? < add_index.?);
+    try std.testing.expect(add_index.? < host_print_index.?);
+}
+
 test "module parse mode records import export metadata and strict flag" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

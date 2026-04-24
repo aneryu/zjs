@@ -35,3 +35,31 @@ test "test262 args parse QuickJS-shaped config and selectors" {
     try std.testing.expectEqualStrings("language/types/null.js", selected.files.get(0));
     try std.testing.expectEqualStrings("known.txt", selected.known_error_file.?);
 }
+
+test "test262 args parse QuickJS index span" {
+    const config = try test262_runner.parseArgs(&.{ "-c", "quickjs/test262.conf", "0", "20" });
+    try std.testing.expectEqual(@as(?usize, 0), config.start_index);
+    try std.testing.expectEqual(@as(?usize, 20), config.stop_index);
+}
+
+test "test262 config text parses paths features and excludes" {
+    var loaded = try test262_runner.loadConfigText(std.testing.allocator, "quickjs",
+        \\[config]
+        \\testdir=test262/test
+        \\harnessdir=test262/harness
+        \\errorfile=test262_errors.txt
+        \\[features]
+        \\Intl.Locale=skip
+        \\Map
+        \\[exclude]
+        \\test262/test/intl402/
+    );
+    defer loaded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("quickjs/test262/test", loaded.testdir.?);
+    try std.testing.expectEqualStrings("quickjs/test262/harness", loaded.harnessdir.?);
+    try std.testing.expectEqualStrings("quickjs/test262_errors.txt", loaded.errorfile.?);
+    try std.testing.expect(loaded.excludes.contains("quickjs/test262/test/intl402/foo.js"));
+    try std.testing.expectEqual(@as(usize, 1), loaded.enabled_features.items.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.skipped_features.items.len);
+}

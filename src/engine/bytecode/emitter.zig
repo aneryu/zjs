@@ -49,6 +49,10 @@ pub const Emitter = struct {
         try self.emitKnown(known.return_undef);
     }
 
+    pub fn emitHostPrint(self: *Emitter) !void {
+        try self.emitKnown(known.host_print);
+    }
+
     fn append(self: *Emitter, bytes: []const u8) !void {
         const old_len = self.function.code.len;
         const next = try self.function.memory.alloc(u8, old_len + bytes.len);
@@ -74,6 +78,12 @@ pub const known = struct {
     pub const define_class: u8 = 91;
     pub const goto: u8 = 117;
     pub const source_loc: u8 = 196;
+    pub const mul: u8 = 240;
+    pub const div: u8 = 241;
+    pub const mod: u8 = 242;
+    pub const add: u8 = 243;
+    pub const sub: u8 = 244;
+    pub const host_print: u8 = 252;
 };
 
 const std = @import("std");

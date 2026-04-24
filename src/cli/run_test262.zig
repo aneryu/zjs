@@ -12,12 +12,14 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
-    try printError(
-        io,
-        "run-test262: execution is not implemented yet; parsed {d} selected target(s)\n",
-        .{config.selectedCount()},
-    );
-    std.process.exit(1);
+    var summary = runner.runSelectedTests(init.gpa, io, config, "zig-out/bin/zjs") catch |err| {
+        try printError(io, "run-test262: unable to run tests: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer summary.deinit(init.gpa);
+
+    try printSummary(io, summary);
+    std.process.exit(if (summary.failed == 0) 0 else 1);
 }
 
 fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
@@ -37,4 +39,21 @@ fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     const stderr = &stderr_writer.interface;
     try stderr.print(fmt, args);
     try stderr.flush();
+}
+
+fn printSummary(io: std.Io, summary: runner.ExecutionSummary) !void {
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const stdout = &stdout_writer.interface;
+    try stdout.print(
+        "run-test262: prepared {d}/{d} tests",
+        .{ summary.selection.selected_tests, summary.selection.total_tests },
+    );
+    if (summary.selection.excluded_tests != 0) try stdout.print(", {d} excluded", .{summary.selection.excluded_tests});
+    if (summary.selection.skipped_by_index != 0) try stdout.print(", {d} skipped by index", .{summary.selection.skipped_by_index});
+    try stdout.print("\n", .{});
+    if (summary.selection.harnessdir) |harnessdir| try stdout.print("harness: {s}\n", .{harnessdir});
+    if (summary.selection.errorfile) |errorfile| try stdout.print("known errors: {s}\n", .{errorfile});
+    try stdout.print("Result: {d}/{d} errors, passed {d}\n", .{ summary.failed, summary.selection.selected_tests, summary.passed });
+    try stdout.flush();
 }

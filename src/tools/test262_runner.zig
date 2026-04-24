@@ -6,6 +6,10 @@ pub const RunnerArgsError = error{
     TooManyItems,
 };
 
+pub const RunnerError = error{
+    ConfigParse,
+};
+
 pub const Config = struct {
     config_path: ?[]const u8 = null,
     test_root: ?[]const u8 = null,
@@ -15,6 +19,8 @@ pub const Config = struct {
     timeout_seconds: ?u32 = null,
     threads: u32 = 1,
     known_error_file: ?[]const u8 = null,
+    start_index: ?usize = null,
+    stop_index: ?usize = null,
     files: BoundedList = .{},
     dirs: BoundedList = .{},
 
@@ -66,6 +72,15 @@ pub fn parseArgs(args: []const []const u8) RunnerArgsError!Config {
             if (config.threads == 0) return error.Usage;
         } else if (arg.len != 0 and arg[0] == '-') {
             return error.Usage;
+        } else if (isDecimal(arg)) {
+            const index = try parseUsize(arg);
+            if (config.start_index == null) {
+                config.start_index = index;
+            } else if (config.stop_index == null) {
+                config.stop_index = index;
+            } else {
+                return error.Usage;
+            }
         } else if (config.test_root == null) {
             config.test_root = arg;
         } else {
@@ -86,6 +101,439 @@ fn parseU32(bytes: []const u8) RunnerArgsError!u32 {
     return std.fmt.parseInt(u32, bytes, 10) catch error.Usage;
 }
 
+fn parseUsize(bytes: []const u8) RunnerArgsError!usize {
+    return std.fmt.parseInt(usize, bytes, 10) catch error.Usage;
+}
+
+fn isDecimal(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |byte| {
+        if (byte < '0' or byte > '9') return false;
+    }
+    return true;
+}
+
+pub const LoadedConfig = struct {
+    testdir: ?[]const u8 = null,
+    harnessdir: ?[]const u8 = null,
+    errorfile: ?[]const u8 = null,
+    excludes: NameList,
+    enabled_features: NameList,
+    skipped_features: NameList,
+
+    pub fn init(allocator: std.mem.Allocator) LoadedConfig {
+        return .{
+            .excludes = NameList.init(allocator),
+            .enabled_features = NameList.init(allocator),
+            .skipped_features = NameList.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *LoadedConfig, allocator: std.mem.Allocator) void {
+        if (self.testdir) |value| allocator.free(value);
+        if (self.harnessdir) |value| allocator.free(value);
+        if (self.errorfile) |value| allocator.free(value);
+        self.excludes.deinit();
+        self.enabled_features.deinit();
+        self.skipped_features.deinit();
+    }
+};
+
+pub const SelectionSummary = struct {
+    total_tests: usize = 0,
+    selected_tests: usize = 0,
+    excluded_tests: usize = 0,
+    skipped_by_index: usize = 0,
+    harnessdir: ?[]const u8 = null,
+    errorfile: ?[]const u8 = null,
+
+    pub fn deinit(self: *SelectionSummary, allocator: std.mem.Allocator) void {
+        if (self.harnessdir) |value| allocator.free(value);
+        if (self.errorfile) |value| allocator.free(value);
+    }
+};
+
+pub const PreparedSelection = struct {
+    tests: NameList,
+    summary: SelectionSummary,
+
+    pub fn deinit(self: *PreparedSelection, allocator: std.mem.Allocator) void {
+        self.tests.deinit();
+        self.summary.deinit(allocator);
+    }
+};
+
+pub const ExecutionSummary = struct {
+    selection: SelectionSummary,
+    passed: usize = 0,
+    failed: usize = 0,
+
+    pub fn deinit(self: *ExecutionSummary, allocator: std.mem.Allocator) void {
+        self.selection.deinit(allocator);
+    }
+};
+
+pub const NameList = struct {
+    allocator: std.mem.Allocator,
+    items: []const []const u8 = &.{},
+
+    pub fn init(allocator: std.mem.Allocator) NameList {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *NameList) void {
+        for (self.items) |item| self.allocator.free(item);
+        if (self.items.len != 0) self.allocator.free(self.items);
+        self.items = &.{};
+    }
+
+    pub fn appendOwned(self: *NameList, item: []const u8) !void {
+        const next = try self.allocator.alloc([]const u8, self.items.len + 1);
+        @memcpy(next[0..self.items.len], self.items);
+        if (self.items.len != 0) self.allocator.free(self.items);
+        next[self.items.len] = item;
+        self.items = next;
+    }
+
+    pub fn append(self: *NameList, item: []const u8) !void {
+        try self.appendOwned(try self.allocator.dupe(u8, item));
+    }
+
+    pub fn sortAndDedupe(self: *NameList) void {
+        if (self.items.len < 2) return;
+        const mutable: [][]const u8 = @constCast(self.items);
+        std.mem.sort([]const u8, mutable, {}, lessThanName);
+        var write: usize = 1;
+        var read: usize = 1;
+        while (read < mutable.len) : (read += 1) {
+            if (compareNames(mutable[write - 1], mutable[read]) == 0) {
+                self.allocator.free(mutable[read]);
+            } else {
+                mutable[write] = mutable[read];
+                write += 1;
+            }
+        }
+        self.items = mutable[0..write];
+    }
+
+    pub fn contains(self: NameList, needle: []const u8) bool {
+        for (self.items) |item| {
+            if (std.mem.eql(u8, item, needle)) return true;
+            if (std.mem.endsWith(u8, item, "/") and std.mem.startsWith(u8, needle, item)) return true;
+        }
+        return false;
+    }
+};
+
+pub fn loadConfigText(allocator: std.mem.Allocator, base_dir: []const u8, text: []const u8) !LoadedConfig {
+    var loaded = LoadedConfig.init(allocator);
+    errdefer loaded.deinit(allocator);
+
+    var section: enum { none, config, features, exclude, tests } = .none;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const no_cr = std.mem.trim(u8, raw_line, "\r");
+        const line = stripComment(std.mem.trim(u8, no_cr, " \t"));
+        if (line.len == 0) continue;
+
+        if (std.mem.eql(u8, line, "[config]")) {
+            section = .config;
+            continue;
+        }
+        if (std.mem.eql(u8, line, "[features]")) {
+            section = .features;
+            continue;
+        }
+        if (std.mem.eql(u8, line, "[exclude]")) {
+            section = .exclude;
+            continue;
+        }
+        if (std.mem.eql(u8, line, "[tests]")) {
+            section = .tests;
+            continue;
+        }
+
+        switch (section) {
+            .config => try parseConfigEntry(allocator, &loaded, base_dir, line),
+            .features => try parseFeatureEntry(&loaded, line),
+            .exclude => try loaded.excludes.appendOwned(try composePath(allocator, base_dir, line)),
+            .tests, .none => {},
+        }
+    }
+
+    loaded.excludes.sortAndDedupe();
+    loaded.enabled_features.sortAndDedupe();
+    loaded.skipped_features.sortAndDedupe();
+    return loaded;
+}
+
+pub fn loadConfigFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !LoadedConfig {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(bytes);
+    const base_dir = dirname(path);
+    return loadConfigText(allocator, base_dir, bytes);
+}
+
+pub fn collectSelection(allocator: std.mem.Allocator, io: std.Io, config: Config) !SelectionSummary {
+    var prepared = try prepareSelection(allocator, io, config);
+    defer prepared.deinit(allocator);
+    return .{
+        .total_tests = prepared.summary.total_tests,
+        .selected_tests = prepared.summary.selected_tests,
+        .excluded_tests = prepared.summary.excluded_tests,
+        .skipped_by_index = prepared.summary.skipped_by_index,
+        .harnessdir = if (prepared.summary.harnessdir) |value| try allocator.dupe(u8, value) else null,
+        .errorfile = if (prepared.summary.errorfile) |value| try allocator.dupe(u8, value) else null,
+    };
+}
+
+pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config, zjs_path: []const u8) !ExecutionSummary {
+    var prepared = try prepareSelection(allocator, io, config);
+    errdefer prepared.deinit(allocator);
+
+    var summary = ExecutionSummary{
+        .selection = prepared.summary,
+    };
+    prepared.summary = .{};
+    errdefer summary.deinit(allocator);
+
+    for (prepared.tests.items) |test_path| {
+        const passed = try runOneTest(allocator, io, zjs_path, summary.selection.harnessdir, test_path, config.verbose);
+        if (passed) {
+            summary.passed += 1;
+        } else {
+            summary.failed += 1;
+        }
+    }
+
+    prepared.tests.deinit();
+    return summary;
+}
+
+pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config) !PreparedSelection {
+    var loaded = if (config.config_path) |path| try loadConfigFile(allocator, io, path) else LoadedConfig.init(allocator);
+    defer loaded.deinit(allocator);
+
+    var tests = NameList.init(allocator);
+    errdefer tests.deinit();
+    var selected = NameList.init(allocator);
+    errdefer selected.deinit();
+
+    var i: usize = 0;
+    while (i < config.files.len) : (i += 1) {
+        try tests.append(config.files.get(i));
+    }
+
+    i = 0;
+    while (i < config.dirs.len) : (i += 1) {
+        try enumerateTests(allocator, io, &tests, config.dirs.get(i));
+    }
+
+    if (config.files.len == 0 and config.dirs.len == 0) {
+        if (config.test_root) |root| {
+            try enumerateTests(allocator, io, &tests, root);
+        } else if (loaded.testdir) |testdir| {
+            try enumerateTests(allocator, io, &tests, testdir);
+        }
+    }
+
+    tests.sortAndDedupe();
+    var summary = SelectionSummary{
+        .total_tests = tests.items.len,
+        .harnessdir = if (loaded.harnessdir) |value| try allocator.dupe(u8, value) else null,
+        .errorfile = if (config.known_error_file orelse loaded.errorfile) |value| try allocator.dupe(u8, value) else null,
+    };
+    errdefer summary.deinit(allocator);
+
+    for (tests.items, 0..) |test_path, index| {
+        if (loaded.excludes.contains(test_path)) {
+            summary.excluded_tests += 1;
+            continue;
+        }
+        const start_index = config.start_index orelse 0;
+        if (index < start_index or (config.stop_index != null and index > config.stop_index.?)) {
+            summary.skipped_by_index += 1;
+            continue;
+        }
+        summary.selected_tests += 1;
+        try selected.append(test_path);
+    }
+
+    return .{
+        .tests = selected,
+        .summary = summary,
+    };
+}
+
+fn parseConfigEntry(allocator: std.mem.Allocator, loaded: *LoadedConfig, base_dir: []const u8, line: []const u8) !void {
+    const eq_index = std.mem.indexOfScalar(u8, line, '=') orelse return;
+    const key = std.mem.trim(u8, line[0..eq_index], " \t");
+    const value = std.mem.trim(u8, line[eq_index + 1 ..], " \t");
+    if (std.mem.eql(u8, key, "testdir")) {
+        if (loaded.testdir) |old| allocator.free(old);
+        loaded.testdir = try composePath(allocator, base_dir, value);
+    } else if (std.mem.eql(u8, key, "harnessdir")) {
+        if (loaded.harnessdir) |old| allocator.free(old);
+        loaded.harnessdir = try composePath(allocator, base_dir, value);
+    } else if (std.mem.eql(u8, key, "errorfile")) {
+        if (loaded.errorfile) |old| allocator.free(old);
+        loaded.errorfile = try composePath(allocator, base_dir, value);
+    } else if (std.mem.eql(u8, key, "excludefile")) {
+        try loaded.excludes.appendOwned(try composePath(allocator, base_dir, value));
+    }
+}
+
+fn parseFeatureEntry(loaded: *LoadedConfig, line: []const u8) !void {
+    const eq_index = std.mem.indexOfScalar(u8, line, '=');
+    const name = if (eq_index) |index| std.mem.trim(u8, line[0..index], " \t") else line;
+    if (eq_index) |index| {
+        const value = std.mem.trim(u8, line[index + 1 ..], " \t");
+        if (std.mem.eql(u8, value, "skip")) {
+            try loaded.skipped_features.append(name);
+            return;
+        }
+    }
+    try loaded.enabled_features.append(name);
+}
+
+fn enumerateTests(allocator: std.mem.Allocator, io: std.Io, tests: *NameList, root: []const u8) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
+    defer dir.close(io);
+
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".js")) continue;
+        if (std.mem.endsWith(u8, entry.path, "_FIXTURE.js")) continue;
+        try tests.appendOwned(try std.fs.path.join(allocator, &.{ root, entry.path }));
+    }
+}
+
+fn stripComment(line: []const u8) []const u8 {
+    const hash = std.mem.indexOfScalar(u8, line, '#') orelse line.len;
+    const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+    return std.mem.trim(u8, line[0..@min(hash, semi)], " \t");
+}
+
+fn dirname(path: []const u8) []const u8 {
+    return std.fs.path.dirname(path) orelse "";
+}
+
+fn composePath(allocator: std.mem.Allocator, base: []const u8, name: []const u8) ![]const u8 {
+    if (base.len == 0 or std.fs.path.isAbsolute(name)) return allocator.dupe(u8, name);
+    return std.fs.path.join(allocator, &.{ base, name });
+}
+
+fn lessThanName(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return compareNames(lhs, rhs) < 0;
+}
+
+fn compareNames(lhs: []const u8, rhs: []const u8) i32 {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        const lc: u8 = if (i < lhs.len) lhs[i] else 0;
+        const rc: u8 = if (j < rhs.len) rhs[j] else 0;
+        i += @as(usize, if (i < lhs.len) 1 else 0);
+        j += @as(usize, if (j < rhs.len) 1 else 0);
+        if (std.ascii.isDigit(lc) and std.ascii.isDigit(rc)) {
+            var ln: usize = lc - '0';
+            var rn: usize = rc - '0';
+            while (i < lhs.len and std.ascii.isDigit(lhs[i])) : (i += 1) ln = ln * 10 + lhs[i] - '0';
+            while (j < rhs.len and std.ascii.isDigit(rhs[j])) : (j += 1) rn = rn * 10 + rhs[j] - '0';
+            if (ln < rn) return -1;
+            if (ln > rn) return 1;
+        }
+        if (lc < rc) return -1;
+        if (lc > rc) return 1;
+        if (lc == 0) return 0;
+    }
+}
+
+fn runOneTest(allocator: std.mem.Allocator, io: std.Io, zjs_path: []const u8, harnessdir: ?[]const u8, test_path: []const u8, verbose: u8) !bool {
+    const source = try makeTestSource(allocator, io, harnessdir, test_path);
+    defer allocator.free(source);
+
+    const temp_path = ".zig-cache/run-test262-current.js";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = temp_path, .data = source });
+    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+
+    const result = try std.process.run(allocator, io, .{
+        .argv = &.{ zjs_path, temp_path },
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const passed = switch (result.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!passed and verbose != 0) try printFailure(io, test_path, result.stderr);
+    return passed;
+}
+
+fn makeTestSource(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8, test_path: []const u8) ![]u8 {
+    const sta = try readHarnessFile(allocator, io, harnessdir, "sta.js");
+    defer if (sta) |bytes| allocator.free(bytes);
+    const assert = try readHarnessFile(allocator, io, harnessdir, "assert.js");
+    defer if (assert) |bytes| allocator.free(bytes);
+    const test_source = try std.Io.Dir.cwd().readFileAlloc(io, test_path, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(test_source);
+
+    const sta_len = if (sta) |bytes| bytes.len else 0;
+    const assert_len = if (assert) |bytes| bytes.len else 0;
+    const total_len = sta_len + assert_len + test_source.len +
+        @as(usize, if (sta != null) 1 else 0) +
+        @as(usize, if (assert != null) 1 else 0) + 1;
+    const out = try allocator.alloc(u8, total_len);
+    var offset: usize = 0;
+    if (sta) |bytes| {
+        @memcpy(out[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
+        out[offset] = '\n';
+        offset += 1;
+    }
+    if (assert) |bytes| {
+        @memcpy(out[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
+        out[offset] = '\n';
+        offset += 1;
+    }
+    @memcpy(out[offset..][0..test_source.len], test_source);
+    offset += test_source.len;
+    out[offset] = '\n';
+    offset += 1;
+    return out[0..offset];
+}
+
+fn readHarnessFile(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8, basename: []const u8) !?[]u8 {
+    const dir = harnessdir orelse return null;
+    const path = try std.fs.path.join(allocator, &.{ dir, basename });
+    defer allocator.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => |e| return e,
+    };
+}
+
+fn printFailure(io: std.Io, test_path: []const u8, stderr: []const u8) !void {
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    const writer = &stderr_writer.interface;
+    try writer.print("FAIL {s}", .{test_path});
+    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
+    if (trimmed.len != 0) {
+        const limit = @min(trimmed.len, 240);
+        try writer.print(": {s}", .{trimmed[0..limit]});
+    }
+    try writer.print("\n", .{});
+    try writer.flush();
+}
+
 test "test262 args parse QuickJS-shaped config and root" {
     const config = try parseArgs(&.{ "-c", "quickjs/test262.conf", "-m", "-t", "1", "quickjs/test262/test" });
     try std.testing.expectEqualStrings("quickjs/test262.conf", config.config_path.?);
@@ -99,4 +547,32 @@ test "test262 args parse direct file and directory selectors" {
     try std.testing.expectEqualStrings("built-ins/Object", config.dirs.get(0));
     try std.testing.expectEqualStrings("language/types/null.js", config.files.get(0));
     try std.testing.expectEqualStrings("known.txt", config.known_error_file.?);
+}
+
+test "test262 args parse QuickJS index span" {
+    const config = try parseArgs(&.{ "-c", "quickjs/test262.conf", "0", "20" });
+    try std.testing.expectEqual(@as(?usize, 0), config.start_index);
+    try std.testing.expectEqual(@as(?usize, 20), config.stop_index);
+}
+
+test "test262 config text parses paths features and excludes relative to config" {
+    var loaded = try loadConfigText(std.testing.allocator, "quickjs",
+        \\[config]
+        \\testdir=test262/test
+        \\harnessdir=test262/harness
+        \\errorfile=test262_errors.txt
+        \\[features]
+        \\Intl.Locale=skip
+        \\Map
+        \\[exclude]
+        \\test262/test/intl402/
+    );
+    defer loaded.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("quickjs/test262/test", loaded.testdir.?);
+    try std.testing.expectEqualStrings("quickjs/test262/harness", loaded.harnessdir.?);
+    try std.testing.expectEqualStrings("quickjs/test262_errors.txt", loaded.errorfile.?);
+    try std.testing.expect(loaded.excludes.contains("quickjs/test262/test/intl402/foo.js"));
+    try std.testing.expectEqual(@as(usize, 1), loaded.enabled_features.items.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.skipped_features.items.len);
 }

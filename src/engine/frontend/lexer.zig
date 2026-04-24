@@ -113,10 +113,6 @@ pub const Lexer = struct {
                 continue;
             }
             if (c == '`') return self.emit(.template_no_substitution, self.source[start.offset..self.index], start, null);
-            if (c == '$' and self.index < self.source.len and self.peek() == '{') {
-                self.bump();
-                return self.emit(.template_head, self.source[start.offset..self.index], start, null);
-            }
         }
         return error.UnterminatedTemplate;
     }

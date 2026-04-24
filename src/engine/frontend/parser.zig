@@ -80,6 +80,10 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     var previous: ?token.Token = null;
     var brace_balance: i32 = 0;
     var paren_balance: i32 = 0;
+    var pending_host_print = false;
+    var host_print_paren_depth: ?i32 = null;
+    var host_print_ops: [64]u8 = undefined;
+    var host_print_ops_len: usize = 0;
 
     while (true) {
         const tok = lex.next() catch |err| {
@@ -91,6 +95,11 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
             const name = try rt.internAtom(tok.lexeme);
             defer rt.atoms.free(name);
             _ = try global_scope.addBinding(name, .var_, false);
+            if (std.mem.eql(u8, tok.lexeme, "print") or std.mem.eql(u8, tok.lexeme, "log")) pending_host_print = true;
+            if (std.mem.eql(u8, tok.lexeme, "true")) try emit.emitKnown(bytecode.emitter.known.push_true);
+            if (std.mem.eql(u8, tok.lexeme, "false")) try emit.emitKnown(bytecode.emitter.known.push_false);
+            if (std.mem.eql(u8, tok.lexeme, "undefined")) try emit.emitKnown(bytecode.emitter.known.undefined_value);
+            if (std.mem.eql(u8, tok.lexeme, "null")) try emit.emitKnown(bytecode.emitter.known.null_value);
         }
         if (tok.kind == .numeric) {
             result.features.insert(.expression);
@@ -98,7 +107,7 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
         }
         if (tok.kind == .string or tok.kind == .template_no_substitution or tok.kind == .regexp) {
             result.features.insert(.expression);
-            const str = try @import("../core/string.zig").String.createUtf8(rt, tok.lexeme);
+            const str = try @import("../core/string.zig").String.createUtf8(rt, literalBody(tok.lexeme));
             const value = str.value();
             _ = try emit.emitPushConst(value);
             value.free(rt);
@@ -107,8 +116,27 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
         if (tok.kind == .punctuator) {
             if (std.mem.eql(u8, tok.lexeme, "{")) brace_balance += 1;
             if (std.mem.eql(u8, tok.lexeme, "}")) brace_balance -= 1;
-            if (std.mem.eql(u8, tok.lexeme, "(")) paren_balance += 1;
-            if (std.mem.eql(u8, tok.lexeme, ")")) paren_balance -= 1;
+            if (std.mem.eql(u8, tok.lexeme, "(")) {
+                paren_balance += 1;
+                if (pending_host_print and host_print_paren_depth == null) {
+                    host_print_paren_depth = paren_balance;
+                    host_print_ops_len = 0;
+                }
+            }
+            if (std.mem.eql(u8, tok.lexeme, ")")) {
+                if (host_print_paren_depth != null and host_print_paren_depth.? == paren_balance) {
+                    try drainHostPrintOps(&emit, &host_print_ops, &host_print_ops_len);
+                    try emit.emitHostPrint();
+                    pending_host_print = false;
+                    host_print_paren_depth = null;
+                }
+                paren_balance -= 1;
+            }
+            if (host_print_paren_depth != null and paren_balance >= host_print_paren_depth.?) {
+                if (binaryOpcode(tok.lexeme)) |op| {
+                    try pushHostPrintOp(&emit, &host_print_ops, &host_print_ops_len, op);
+                }
+            }
             if (std.mem.eql(u8, tok.lexeme, "...")) result.features.insert(.spread_rest);
             if (std.mem.eql(u8, tok.lexeme, "[") or std.mem.eql(u8, tok.lexeme, "{")) result.features.insert(.destructuring);
         }
@@ -122,6 +150,54 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     }
     try emit.emitReturnUndefined();
     return result;
+}
+
+fn pushHostPrintOp(
+    emit: *bytecode.emitter.Emitter,
+    ops: *[64]u8,
+    ops_len: *usize,
+    op: u8,
+) !void {
+    while (ops_len.* > 0 and binaryPrecedence(ops[ops_len.* - 1]) >= binaryPrecedence(op)) {
+        ops_len.* -= 1;
+        try emit.emitKnown(ops[ops_len.*]);
+    }
+    if (ops_len.* == ops.len) return error.OutOfMemory;
+    ops[ops_len.*] = op;
+    ops_len.* += 1;
+}
+
+fn drainHostPrintOps(
+    emit: *bytecode.emitter.Emitter,
+    ops: *[64]u8,
+    ops_len: *usize,
+) !void {
+    while (ops_len.* > 0) {
+        ops_len.* -= 1;
+        try emit.emitKnown(ops[ops_len.*]);
+    }
+}
+
+fn binaryOpcode(lexeme: []const u8) ?u8 {
+    if (std.mem.eql(u8, lexeme, "*")) return bytecode.emitter.known.mul;
+    if (std.mem.eql(u8, lexeme, "/")) return bytecode.emitter.known.div;
+    if (std.mem.eql(u8, lexeme, "%")) return bytecode.emitter.known.mod;
+    if (std.mem.eql(u8, lexeme, "+")) return bytecode.emitter.known.add;
+    if (std.mem.eql(u8, lexeme, "-")) return bytecode.emitter.known.sub;
+    return null;
+}
+
+fn binaryPrecedence(op: u8) u8 {
+    return switch (op) {
+        bytecode.emitter.known.mul,
+        bytecode.emitter.known.div,
+        bytecode.emitter.known.mod,
+        => 2,
+        bytecode.emitter.known.add,
+        bytecode.emitter.known.sub,
+        => 1,
+        else => 0,
+    };
 }
 
 fn handleKeyword(
@@ -182,6 +258,20 @@ fn parseSmallInt(bytes: []const u8) ?i32 {
     }
     if (len == 0) return null;
     return std.fmt.parseInt(i32, clean[0..len], 10) catch null;
+}
+
+fn literalBody(bytes: []const u8) []const u8 {
+    if (bytes.len >= 2) {
+        const first = bytes[0];
+        const last = bytes[bytes.len - 1];
+        if ((first == '"' and last == '"') or
+            (first == '\'' and last == '\'') or
+            (first == '`' and last == '`'))
+        {
+            return bytes[1 .. bytes.len - 1];
+        }
+    }
+    return bytes;
 }
 
 const std = @import("std");

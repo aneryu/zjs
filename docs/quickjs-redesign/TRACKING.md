@@ -12,9 +12,9 @@ updated alongside implementation, tests, and phase documents.
 | Active phase | Phase 8: CLI Tooling And Validation |
 | Overall status | phase_8_in_progress |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 8 tooling first slice is wired: `zjs`, smoke runner, `run-test262` CLI parser skeleton, and tools tests now build on the rebuilt engine |
+| Current engine state | Phase 8 tooling is wired; `run-test262` now parses QuickJS-shaped args, config paths, feature lists, config excludes, direct selectors, and index spans, then runs selected tests through `zig-out/bin/zjs` with baseline harness prepended |
 | Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
-| Current validation state | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` passed with 60/60 tests; `zig build smoke` is wired but fails 45/45 scripts due missing smoke-visible JS output semantics |
+| Current validation state | `zig build test --summary all` passed with 63/63 tests; `zig build test-tools --summary all` passed with 6/6 tests; `./zig-out/bin/zjs tests/zig-smoke/arith.js` prints `7`; `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 9` reports `Result: 0/10 errors, passed 10`; `zig build smoke --summary all` still fails 44/45 scripts |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -28,7 +28,7 @@ updated alongside implementation, tests, and phase documents.
 | 5 Frontend And Bytecode Emitter | completed | `phases/05-frontend-bytecode-emitter.md` | `matrices/frontend-coverage-matrix.md` | Phase 6 execution fixtures |
 | 6 Bytecode Execution | completed | `phases/06-bytecode-execution.md` | `matrices/opcode-execution-matrix.md` | Phase 7 builtin/support library fixtures |
 | 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
-| 8 CLI Tooling And Validation | in_progress | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Fix smoke-visible output semantics and continue test262 runner execution |
+| 8 CLI Tooling And Validation | in_progress | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Continue expression/object/call semantics after JSON test262 slice is visible and passing |
 
 ## Work Queue
 
@@ -42,7 +42,7 @@ updated alongside implementation, tests, and phase documents.
 | WQ-006 | completed | 5 | Frontend and bytecode emitter | Validated parser/emitter metadata fixtures without AST execution | none |
 | WQ-007 | completed | 6 | Bytecode execution | Validated representative VM dispatch, Engine API, and job queue | none |
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
-| WQ-009 | in_progress | 8 | CLI and validation tooling | `qjs`, `run-test262`, `smoke`, and `test-tools` build steps are wired; next fix smoke-visible output semantics | smoke currently fails 45/45 scripts |
+| WQ-009 | in_progress | 8 | CLI and validation tooling | JSON test262 slice now executes through baseline harness; next fix smoke stdout/object/call semantics | smoke currently fails 44/45 scripts; broader test262 metadata/known-error/worker semantics remain incomplete |
 
 ## Subsystem Coverage Matrix
 
@@ -55,7 +55,7 @@ updated alongside implementation, tests, and phase documents.
 | Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-frontend --summary all` passed, 6/6 tests |
 | Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-exec --summary all` passed, 6/6 tests |
 | Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` passed, 4/4 tests |
-| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | in_progress | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-tools --summary all` passed, 4/4 tests |
+| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | in_progress | `zig build test-tools --summary all` passed, 6/6 tests |
 
 ## Validation Log
 
@@ -102,6 +102,26 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-24 | 8 | `./zig-out/bin/run-test262 -c quickjs/test262.conf -m -t 1 quickjs/test262/test` | 1 | CLI parser accepts QuickJS-shaped final gate args but execution is not implemented yet | reproduction |
 | 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test --summary all` | 0 | Aggregate bootstrap, core, bytecode, frontend, exec, builtins, and tools tests passed, 60/60 tests | regression |
 | 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build smoke --summary all` | 1 | Smoke runner is wired and compares manifest/goldens, but current engine fails 45/45 smoke scripts due missing output semantics | reproduction |
+| 2026-04-24 | 8 | `zig build run-test262 --summary all` | 0 | `run-test262` builds after config/exclude/index selection prep | regression |
+| 2026-04-24 | 8 | `zig build test-tools --summary all` | 0 | Tool tests passed after adding config text parsing and index span coverage, 6/6 tests | regression |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 5` | 1 | Runner prepared 6/165 JSON tests with harness and known-error paths; exits because JavaScript execution is not connected yet | reproduction |
+| 2026-04-24 | 8 | `zig build test --summary all` | 0 | Aggregate tests passed after run-test262 selection prep, 60/60 tests | regression |
+| 2026-04-24 | 8 | `zig build qjs --summary all` | 0 | `zjs` executable still builds after run-test262 selection prep | regression |
+| 2026-04-24 | 8 | `zig build smoke --summary all` | 1 | Smoke remains the Phase 8 execution/output gap, 45/45 scripts failed | reproduction |
+| 2026-04-24 | 8 | `zig build test --summary all` | 0 | Aggregate tests passed after run-test262 execution wiring, 62/62 tests | regression |
+| 2026-04-24 | 8 | `zig build run-test262 --summary all` | 0 | `run-test262` builds after serial `zjs` execution wiring | regression |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 2` | 1 | Runner executed 3 JSON tests through `zjs`; all 3 failed with uncaught exceptions | reproduction |
+| 2026-04-24 | 8 | `zig build smoke --summary all` | 1 | Smoke still fails 45/45 scripts because `zjs` produces no expected stdout and a few syntax/runtime failures | reproduction |
+| 2026-04-24 | 8 | `zig build test --summary all` | 0 | Aggregate tests passed after transitional print output wiring, 63/63 tests | regression |
+| 2026-04-24 | 8 | `zig build qjs --summary all` | 0 | `zjs` builds after output sink and host print opcode wiring | regression |
+| 2026-04-24 | 8 | `./zig-out/bin/zjs -e 'print(1); console.log("ok"); print(true); print(null); print(undefined)'` | 0 | Transitional host print path produced visible stdout for int, string, boolean, null, and undefined | smoke |
+| 2026-04-24 | 8 | `zig build smoke --summary all` | 1 | Smoke still fails 45/45, but most scripts now produce non-empty stdout; remaining gap is expression/object/call semantics and syntax/runtime failures | reproduction |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 2` | 1 | JSON slice still fails 3/3 with uncaught exceptions after print output wiring | reproduction |
+| 2026-04-24 | 8 | `./zig-out/bin/zjs tests/zig-smoke/arith.js` | 0 | Smoke arithmetic script prints expected `7` after host print expression bytecode emission | smoke |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 2` | 0 | JSON slice executes through rebuilt `zjs` and baseline harness, 3/3 passed | regression |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 9` | 0 | Expanded JSON slice executes through rebuilt `zjs` and baseline harness, 10/10 passed | regression |
+| 2026-04-24 | 8 | `zig build test-tools --summary all` | 0 | Tool tests passed after executable test262 slice repair, 6/6 tests | regression |
+| 2026-04-24 | 8 | `zig build smoke --summary all` | 1 | Smoke still fails 44/45 scripts; `arith.js` now passes and `template.js` reaches stdout comparison | reproduction |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Root plan and redesign docs whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Matrix expansion and phase links whitespace check passed | hygiene |
 | 2026-04-24 | docs | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | 0 | Error and learning workflow whitespace check passed | hygiene |
@@ -124,14 +144,16 @@ updated alongside implementation, tests, and phase documents.
 | Long-running validation gets interrupted but later treated as final proof. | False confidence in parity. | Validation entries must record exit status and mark interrupted sweeps explicitly. | open |
 | Support libraries are postponed until builtin work. | RegExp, Unicode, BigInt, and number formatting semantics diverge. | Phase 7 ports `libs` before dependent builtins. | open |
 | Stale `build.zig` roots hide deleted-code dependencies. | Redesign cannot build from clean state. | Phase 1 replaced build wiring with existing roots only. | mitigated |
-| Phase 8 smoke is wired before the engine can print or execute smoke scripts fully. | `zig build smoke` fails until output-visible semantics are implemented. | Treat the failure as current reproduction evidence and fix engine/print semantics next. | open |
+| Phase 8 smoke is wired before the engine can execute smoke scripts fully. | `zig build smoke` fails until expression/object/call semantics catch up. | Transitional `print` output is wired; continue with expression and global-object semantics. | open |
 
 ## Known Failures
 
 | Date | Phase | Command | Exit | Classification | Error record | Notes |
 |---|---|---|---|---|---|---|
 | 2026-04-24 | bootstrap | `zig build test-quickjs-port --summary all` | 1 | expected_bootstrap_gap | none | Failed before implementation because `src/tests/quickjs_port.zig` was missing; fixed by Phase 1 bootstrap. |
-| 2026-04-24 | 8 | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build smoke --summary all` | 1 | expected_phase8_gap | pending | Smoke runner is now real; all 45 scripts fail because `zjs` does not yet implement smoke-visible output semantics. |
+| 2026-04-24 | 8 | `zig build smoke --summary all` | 1 | expected_phase8_gap | pending | Smoke runner is real; current result is 44/45 scripts failed after `arith.js` began passing. |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 5` | 1 | expected_phase8_gap | pending | Earlier selection-only checkpoint; superseded by later `zjs` execution wiring, but still not a passing test262 result. |
+| 2026-04-24 | 8 | `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 2` | 1 | expected_phase8_gap | pending | Superseded by later passing JSON slices after baseline harness and template scanning repair. |
 
 ## Learning Summary
 
@@ -143,7 +165,7 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Fix smoke-visible output semantics for `print(...)` and expression execution, then rerun `zig build smoke --summary all`. |
+| Next recommended action | Fix the next smoke stdout mismatch and then expand test262 JSON beyond the first 10 files; keep metadata, known-error, and worker parity separate from engine semantic fixes. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |
@@ -161,7 +183,7 @@ updated alongside implementation, tests, and phase documents.
 - Phase 5 validates tokenization, parser modes, source-positioned syntax errors, module/eval/function/class/private/destructuring/spread metadata, and emitter output without running bytecode.
 - Phase 6 validates stack/frame ownership, representative primitive opcode dispatch, source location tracking, shared object property ops, context exception transfer, `Engine.eval`, and deterministic job queue draining.
 - Phase 7 validates Unicode/dtoa/bignum/regexp support helpers, intrinsic bootstrap descriptors, representative builtin domains, Promise job integration, buffers, Reflect/Proxy hooks, iterator helpers, and Atomics lock-free scope.
-- Phase 8 first tooling slice adds `zjs`, `run-test262`, `smoke`, and `test-tools` build steps. Aggregate tests pass 60/60, but `zig build smoke` fails 45/45 because the rebuilt engine currently executes without producing the expected smoke stdout/stderr.
+- Phase 8 tooling now has `zjs`, `run-test262`, `smoke`, and `test-tools` build steps. Aggregate tests pass 63/63. `run-test262` can now show real targeted results: the JSON 0..9 slice passes 10/10 through rebuilt `zjs` with baseline harness prepended. `zig build smoke` still fails 44/45; remaining gaps are stdout semantics, object/call behavior, and unsupported runtime paths.
 - Do not use old `src/engine/vm/` paths as repair targets.
 - Use local QuickJS source and `quickjs/build/qjs` as semantic oracle once executable validation exists.
 - Use `ERRORS_AND_LEARNINGS.md` for failures that need root-cause analysis or reusable lessons.

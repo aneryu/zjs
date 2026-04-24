@@ -6,12 +6,21 @@ const stack_mod = @import("stack.zig");
 pub const Vm = struct {
     ctx: *core.Context,
     stack: stack_mod.Stack,
+    output: ?*std.Io.Writer = null,
     last_source_line: u32 = 0,
 
     pub fn init(ctx: *core.Context) Vm {
         return .{
             .ctx = ctx,
             .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
+        };
+    }
+
+    pub fn initWithOutput(ctx: *core.Context, output: *std.Io.Writer) Vm {
+        return .{
+            .ctx = ctx,
+            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
+            .output = output,
         };
     }
 
@@ -38,6 +47,7 @@ pub const Vm = struct {
                 178 => {},
                 197...205 => try self.stack.push(core.Value.int32(@as(i32, op) - 198)),
                 240...251 => try self.binaryInt(op),
+                bytecode.emitter.known.host_print => try self.hostPrint(),
                 253...255 => try self.compareInt(op),
                 224...229 => try self.unaryInt(op),
                 else => return self.throwUnsupported(op),
@@ -122,11 +132,54 @@ pub const Vm = struct {
         try self.stack.push(core.Value.int32(out));
     }
 
+    fn hostPrint(self: *Vm) !void {
+        const value = try self.stack.pop();
+        defer value.free(self.ctx.runtime);
+        if (self.output) |writer| {
+            try printValue(writer, value);
+            try writer.print("\n", .{});
+        }
+        try self.stack.push(core.Value.undefinedValue());
+    }
+
     fn throwUnsupported(self: *Vm, op: u8) error{UnsupportedOpcode} {
         _ = self.ctx.throwValue(core.Value.int32(op));
         return error.UnsupportedOpcode;
     }
 };
+
+fn printValue(writer: *std.Io.Writer, value: core.Value) !void {
+    if (value.asInt32()) |int_value| {
+        try writer.print("{d}", .{int_value});
+    } else if (value.asBool()) |bool_value| {
+        try writer.print("{s}", .{if (bool_value) "true" else "false"});
+    } else if (value.isUndefined()) {
+        try writer.print("undefined", .{});
+    } else if (value.isNull()) {
+        try writer.print("null", .{});
+    } else if (value.isString()) {
+        try printString(writer, value);
+    } else {
+        try writer.print("[object Object]", .{});
+    }
+}
+
+fn printString(writer: *std.Io.Writer, value: core.Value) !void {
+    const header = value.refHeader() orelse return writer.print("[string]", .{});
+    const string_value: *core.string.String = @fieldParentPtr("header", header);
+    switch (string_value.data) {
+        .latin1 => |bytes| try writer.print("{s}", .{bytes}),
+        .utf16 => |units| {
+            for (units) |unit| {
+                if (unit <= 0x7f) {
+                    try writer.writeByte(@intCast(unit));
+                } else {
+                    try writer.print("\\u{x}", .{unit});
+                }
+            }
+        },
+    }
+}
 
 fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);

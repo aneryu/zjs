@@ -47,6 +47,15 @@ pub const Engine = struct {
         return vm_instance.run(&compiled.function);
     }
 
+    pub fn evalWithOutput(self: *Engine, source_text: []const u8, output: *std.Io.Writer) !core.Value {
+        var compiled = try frontend.parser.parse(self.runtime, source_text, .{ .mode = .script, .filename = "<eval>" });
+        defer compiled.deinit();
+        if (compiled.syntax_error != null) return self.context.throwValue(core.Value.undefinedValue());
+        var vm_instance = exec.Vm.initWithOutput(self.context, output);
+        defer vm_instance.deinit();
+        return vm_instance.run(&compiled.function);
+    }
+
     pub fn runJobs(self: *Engine) void {
         self.job_queue.runAll();
     }

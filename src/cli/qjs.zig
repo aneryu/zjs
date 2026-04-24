@@ -49,10 +49,13 @@ pub fn main(init: std.process.Init) !void {
     };
     defer runtime.deinit();
 
-    const value = runtime.eval(source_text) catch |err| {
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    const value = runtime.evalWithOutput(source_text, &stdout_writer.interface) catch |err| {
         try printError(io, "zjs: evaluation failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
+    try stdout_writer.interface.flush();
     defer value.free(runtime.runtime);
 
     if (value.isException()) {

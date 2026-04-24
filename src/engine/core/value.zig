@@ -152,7 +152,7 @@ pub const Value = struct {
         };
     }
 
-    fn refHeader(self: Value) ?*gc.Header {
+    pub fn refHeader(self: Value) ?*gc.Header {
         return switch (self.payload) {
             .ref => |header| header,
             else => null,
