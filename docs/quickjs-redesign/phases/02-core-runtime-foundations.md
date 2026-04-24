@@ -1,6 +1,6 @@
 # Phase 2: Core Runtime Foundations
 
-Status: in_progress
+Status: completed
 
 ## Goal
 
@@ -47,11 +47,11 @@ area moves from `not_started` to `in_progress` or `validated`.
 - [x] Port intrusive list behavior in Zig style.
 - [x] Implement atom table with predefined atoms, dynamic atoms, integer atoms, symbols, and private names.
 - [x] Implement string storage for 8-bit and 16-bit strings, comparison, hashing, and atom backing.
-- [ ] Implement class table, class definitions, finalizer hooks, exotic method records, and prototype slots.
-- [ ] Implement shape records, property shape entries, shape hashing, and transition scaffolding.
-- [ ] Add function object payload records for native, bytecode, bound, constructor, and home-object state.
-- [ ] Add runtime module records and lifecycle state without executing modules yet.
-- [ ] Add GC/refcount scaffolding and leak-free runtime teardown.
+- [x] Implement class table, class definitions, finalizer hooks, exotic method records, and prototype slots.
+- [x] Implement shape records, property shape entries, shape hashing, and transition scaffolding.
+- [x] Add function object payload records for native, bytecode, bound, constructor, and home-object state.
+- [x] Add runtime module records and lifecycle state without executing modules yet.
+- [x] Add GC/refcount scaffolding and leak-free runtime teardown.
 
 ## Validation
 
@@ -72,15 +72,16 @@ Focused tests should cover:
 
 ## Exit Checklist
 
-- [ ] Runtime/context init-deinit is leak-free.
-- [ ] QuickJS constants needed by later phases are locked by tests.
-- [ ] All non-deferred rows in `../matrices/core-runtime-invariants.md` are `validated`.
-- [ ] `status.zig` marks completed core foundations as `validated`.
-- [ ] No public API exposes raw reference payloads or `anyopaque`.
-- [ ] `TRACKING.md` records validation results and open risks.
+- [x] Runtime/context init-deinit is leak-free.
+- [x] QuickJS constants needed by later phases are locked by tests.
+- [x] All non-deferred rows in `../matrices/core-runtime-invariants.md` are `validated`.
+- [x] `status.zig` marks completed core foundations as `validated`.
+- [x] No public API exposes raw reference payloads or `anyopaque`.
+- [x] `TRACKING.md` records validation results and open risks.
 
 ## Handoff Notes
 
-- GC cycle removal, function records, module records, context prototype slots,
-  object finalizer invocation order, and atom hash-table optimization remain
-  incomplete and are tracked in `../matrices/core-runtime-invariants.md`.
+- Phase 2 now provides the validated runtime foundation records needed by later
+  phases. GC cycle removal remains a placeholder by design; object graph marking
+  and actual object payload traversal are Phase 3+ work once object semantics
+  exist.

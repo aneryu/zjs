@@ -155,6 +155,13 @@ pub const Table = struct {
         return rec;
     }
 
+    pub fn runFinalizer(self: *const Table, id: ClassId) bool {
+        const rec = self.record(id) orelse return false;
+        const finalizer = rec.finalizer orelse return false;
+        finalizer();
+        return true;
+    }
+
     fn registerAtom(self: *Table, id: ClassId, name_atom: atom.Atom, def: Definition) !void {
         if (id == invalid_class_id or id >= std.math.maxInt(ClassId)) return error.InvalidClassId;
         try self.ensureCapacity(id + 1);

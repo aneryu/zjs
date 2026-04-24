@@ -192,6 +192,29 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectError(error.DuplicateClass, rt.classes.register(dynamic_id, .{ .class_name = "Again" }));
 }
 
+var finalizer_calls: usize = 0;
+
+fn countFinalizer() void {
+    finalizer_calls += 1;
+}
+
+test "class finalizers and context prototype slots are wired" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const dynamic_id = rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(dynamic_id, .{ .class_name = "FinalizedThing", .finalizer = countFinalizer });
+
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+    try std.testing.expect(ctx.classPrototypeSlotCount() >= dynamic_id + 1);
+
+    finalizer_calls = 0;
+    try std.testing.expect(rt.classes.runFinalizer(dynamic_id));
+    try std.testing.expectEqual(@as(usize, 1), finalizer_calls);
+    try std.testing.expect(!rt.classes.runFinalizer(core.class.ids.object));
+}
+
 test "shapes retain property atoms and compare transitions" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
@@ -214,6 +237,28 @@ test "shapes retain property atoms and compare transitions" {
 
     rt.shapes.release(first);
     try std.testing.expect(rt.atoms.name(second.props[0].atom_id) != null);
+    rt.shapes.release(second);
+    try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
+}
+
+test "shape refcounts and prototype transitions are tracked" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name_atom = try rt.internAtom("shapeProtoProp");
+    defer rt.atoms.free(name_atom);
+
+    const first = try rt.shapes.create(1);
+    const second = try rt.shapes.create(2);
+    try rt.shapes.addProperty(first, name_atom, 0b000001);
+    try rt.shapes.addProperty(second, name_atom, 0b000001);
+    try std.testing.expect(!first.sameTransition(second.*));
+
+    first.retain();
+    try std.testing.expectEqual(@as(usize, 2), first.ref_count);
+    rt.shapes.release(first);
+    try std.testing.expectEqual(@as(usize, 1), first.ref_count);
+    rt.shapes.release(first);
     rt.shapes.release(second);
     try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
 }
@@ -256,6 +301,126 @@ test "memory account tracks same-allocator allocation and free" {
     try std.testing.expect(account.hasOutstandingAllocations());
     account.free(u8, buf);
     try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "gc registry tracks zero-ref objects and mark placeholders" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const header = try rt.memory.create(core.gc.ObjectHeader);
+    defer rt.memory.destroy(core.gc.ObjectHeader, header);
+    header.* = .{ .kind = .object };
+    try rt.gc.add(header);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+
+    rt.gc.mark(header);
+    try std.testing.expect(header.marked);
+    rt.gc.runCycleRemovalPlaceholder();
+    try std.testing.expect(!header.marked);
+
+    try std.testing.expect(try rt.gc.releaseObject(header));
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.zeroRefCount());
+    rt.gc.remove(header);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.zeroRefCount());
+}
+
+test "function records own native bytecode and bound payloads" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("fn");
+    defer rt.atoms.free(name);
+
+    var native = core.FunctionRecord.createNative(&rt.memory, &rt.atoms, name, 2, null, true);
+    try std.testing.expectEqual(core.function.Kind.native, native.kind);
+    try std.testing.expect(native.is_constructor);
+    try std.testing.expectEqual(@as(u16, 2), native.payload.native.length);
+    native.destroy(rt);
+
+    const constant_string = try core.string.String.createAscii(rt, "const");
+    const constant_value = constant_string.value();
+    var bytecode = try core.FunctionRecord.createBytecode(
+        &rt.memory,
+        &rt.atoms,
+        name,
+        &.{ 0xaa, 0xbb },
+        &.{constant_value},
+        .generator,
+        false,
+        core.Value.undefinedValue(),
+    );
+    try std.testing.expectEqual(core.function.Kind.bytecode, bytecode.kind);
+    try std.testing.expectEqual(core.function.FunctionKind.generator, bytecode.function_kind);
+    try std.testing.expectEqual(@as(usize, 2), bytecode.payload.bytecode.bytecode.len);
+    try std.testing.expectEqual(@as(usize, 1), bytecode.payload.bytecode.constants.len);
+    try std.testing.expectEqual(@as(usize, 2), constant_string.header.ref_count);
+    constant_value.free(rt);
+    bytecode.destroy(rt);
+
+    const bound_string = try core.string.String.createAscii(rt, "arg");
+    const bound_arg = bound_string.value();
+    var bound = try core.FunctionRecord.createBound(
+        &rt.memory,
+        &rt.atoms,
+        core.Value.undefinedValue(),
+        core.Value.nullValue(),
+        &.{bound_arg},
+        false,
+    );
+    try std.testing.expectEqual(core.function.Kind.bound, bound.kind);
+    try std.testing.expectEqual(@as(usize, 2), bound_string.header.ref_count);
+    bound_arg.free(rt);
+    bound.destroy(rt);
+}
+
+test "module records retain import export metadata and status" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const module_name = try rt.internAtom("main.mjs");
+    const dep_name = try rt.internAtom("dep.mjs");
+    const import_name = try rt.internAtom("value");
+    const local_name = try rt.internAtom("local");
+    const export_name = try rt.internAtom("default");
+
+    const record = try rt.modules.create(module_name);
+    try record.addRequestedModule(dep_name);
+    try record.addImport(dep_name, import_name, local_name);
+    try record.addExport(export_name, local_name);
+    record.setStatus(.linked);
+
+    rt.atoms.free(module_name);
+    rt.atoms.free(dep_name);
+    rt.atoms.free(import_name);
+    rt.atoms.free(local_name);
+    rt.atoms.free(export_name);
+
+    try std.testing.expectEqual(core.module.Status.linked, record.status);
+    try std.testing.expectEqual(@as(usize, 1), record.requested_modules.len);
+    try std.testing.expectEqual(@as(usize, 1), record.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), record.exports.len);
+    try std.testing.expect(rt.atoms.name(record.module_name) != null);
+    try std.testing.expect(rt.atoms.name(record.imports[0].local_name) != null);
+}
+
+fn interruptOnce(rt: *core.Runtime) bool {
+    rt.random_state +%= 1;
+    return true;
+}
+
+test "runtime stack and interrupt state are stored" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    rt.setStackSize(4096);
+    try std.testing.expectEqual(@as(usize, 4096), rt.stackSize());
+    try std.testing.expect(!rt.hasInterruptHandler());
+    rt.setInterruptHandler(interruptOnce);
+    try std.testing.expect(rt.hasInterruptHandler());
+    const before = rt.random_state;
+    try std.testing.expect(rt.runInterruptHandler());
+    try std.testing.expectEqual(before +% 1, rt.random_state);
 }
 
 test "intrusive list supports empty insert and remove" {

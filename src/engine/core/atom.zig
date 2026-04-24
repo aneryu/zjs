@@ -287,6 +287,7 @@ pub const predefined_atoms = [_]PredefinedAtom{
 pub const DynamicAtom = struct {
     id: Atom,
     bytes: []u8,
+    hash: u32,
     kind: AtomKind,
     ref_count: usize,
 
@@ -391,7 +392,7 @@ pub const AtomTable = struct {
 
         const id = self.next_id;
         self.next_id += 1;
-        try self.append(.{ .id = id, .bytes = owned, .kind = atom_kind, .ref_count = 1 });
+        try self.append(.{ .id = id, .bytes = owned, .hash = string.hashBytes(bytes), .kind = atom_kind, .ref_count = 1 });
         return id;
     }
 

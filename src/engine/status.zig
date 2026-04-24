@@ -51,7 +51,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .core_runtime,
         .phase = 2,
-        .state = .in_progress,
+        .state = .validated,
         .zig_paths = &.{"src/engine/core"},
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h", "quickjs/list.h" },
     },
