@@ -100,6 +100,124 @@ test "symbol atoms are unique even with the same description" {
     rt.atoms.free(b);
 }
 
+test "strings choose QuickJS-style 8-bit or 16-bit storage" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ascii = try core.string.String.createUtf8(rt, "abc");
+    defer ascii.value().free(rt);
+    try std.testing.expect(!ascii.isWide());
+    try std.testing.expectEqual(@as(usize, 3), ascii.len());
+    try std.testing.expect(ascii.eqlBytes("abc"));
+    try std.testing.expectEqual(core.string.hashBytes("abc"), ascii.hash);
+
+    const latin1 = try core.string.String.createUtf8(rt, "é");
+    defer latin1.value().free(rt);
+    try std.testing.expect(!latin1.isWide());
+    try std.testing.expectEqual(@as(usize, 1), latin1.len());
+    try std.testing.expectEqual(@as(u16, 0x00e9), latin1.codeUnitAt(0));
+
+    const wide = try core.string.String.createUtf8(rt, "Ā");
+    defer wide.value().free(rt);
+    try std.testing.expect(wide.isWide());
+    try std.testing.expectEqual(@as(usize, 1), wide.len());
+    try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
+
+    const face = try core.string.String.createUtf8(rt, "😀");
+    defer face.value().free(rt);
+    try std.testing.expect(face.isWide());
+    try std.testing.expectEqual(@as(usize, 2), face.len());
+    try std.testing.expectEqual(@as(u16, 0xd83d), face.codeUnitAt(0));
+    try std.testing.expectEqual(@as(u16, 0xde00), face.codeUnitAt(1));
+}
+
+test "strings compare by code unit across storage widths" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const latin1 = try core.string.String.createUtf8(rt, "é");
+    defer latin1.value().free(rt);
+    const utf16_same = try core.string.String.createUtf16(rt, &.{0x00e9});
+    defer utf16_same.value().free(rt);
+    try std.testing.expect(latin1.eqlString(utf16_same.*));
+
+    const a = try core.string.String.createUtf8(rt, "abc");
+    defer a.value().free(rt);
+    const b = try core.string.String.createUtf8(rt, "abd");
+    defer b.value().free(rt);
+    try std.testing.expect(a.compare(b.*) < 0);
+    try std.testing.expect(b.compare(a.*) > 0);
+}
+
+test "atom-backed strings retain atom until string free" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const atom_id = try rt.internAtom("ownedAtomName");
+    const atom_string = try core.string.String.createAtomBacked(rt, atom_id);
+    rt.atoms.free(atom_id);
+    try std.testing.expect(rt.atoms.name(atom_id) != null);
+    try std.testing.expect(atom_string.eqlBytes("ownedAtomName"));
+    atom_string.value().free(rt);
+    try std.testing.expect(rt.atoms.name(atom_id) == null);
+}
+
+test "class table registers QuickJS standard classes and dynamic classes" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expectEqual(@as(core.ClassId, 0), core.class.invalid_class_id);
+    try std.testing.expectEqual(@as(core.ClassId, 1), core.class.ids.object);
+    try std.testing.expectEqual(@as(core.ClassId, 22), core.class.ids.uint8c_array);
+    try std.testing.expectEqual(@as(core.ClassId, 37), core.class.ids.set);
+    try std.testing.expectEqual(@as(core.ClassId, 65), core.class.ids.init_count);
+    try std.testing.expect(rt.classes.isRegistered(core.class.ids.object));
+    try std.testing.expect(rt.classes.isRegistered(core.class.ids.generator));
+    try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
+
+    const object_name = rt.classes.className(core.class.ids.object).?;
+    defer rt.atoms.free(object_name);
+    try std.testing.expectEqual(core.atom.ids.Object, object_name);
+
+    const dynamic_id = rt.newClassId(core.class.invalid_class_id);
+    try std.testing.expectEqual(core.class.ids.init_count, dynamic_id);
+    try rt.classes.register(dynamic_id, .{ .class_name = "HostThing", .has_exotic = true });
+    try std.testing.expect(rt.classes.isRegistered(dynamic_id));
+    const record = rt.classes.record(dynamic_id).?;
+    try std.testing.expect(record.has_exotic);
+    const dynamic_name = rt.classes.className(dynamic_id).?;
+    defer rt.atoms.free(dynamic_name);
+    try std.testing.expectEqualStrings("HostThing", rt.atoms.name(dynamic_name).?);
+
+    try std.testing.expectError(error.DuplicateClass, rt.classes.register(dynamic_id, .{ .class_name = "Again" }));
+}
+
+test "shapes retain property atoms and compare transitions" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name_atom = try rt.internAtom("shapeProp");
+    const first = try rt.shapes.create(123);
+    const second = try rt.shapes.create(123);
+    try rt.shapes.addProperty(first, name_atom, 0b000011);
+    try rt.shapes.addProperty(second, name_atom, 0b000011);
+    rt.atoms.free(name_atom);
+
+    try std.testing.expect(first.is_hashed);
+    try std.testing.expectEqual(@as(usize, 1), first.prop_count);
+    try std.testing.expect(first.sameTransition(second.*));
+    try std.testing.expect(rt.atoms.name(first.props[0].atom_id) != null);
+    try std.testing.expectEqual(
+        core.shape.hashIndex(first.hash, core.shape.initial_shape_hash_bits),
+        core.shape.hashIndex(first.hash, rt.shapes.shape_hash_bits),
+    );
+
+    rt.shapes.release(first);
+    try std.testing.expect(rt.atoms.name(second.props[0].atom_id) != null);
+    rt.shapes.release(second);
+    try std.testing.expectEqual(@as(usize, 0), rt.shapes.shape_hash_count);
+}
+
 test "exception slot transfers owned value and clears context slot" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

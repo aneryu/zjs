@@ -46,7 +46,7 @@ area moves from `not_started` to `in_progress` or `validated`.
 - [x] Implement context lifecycle and exception slot transfer helpers.
 - [x] Port intrusive list behavior in Zig style.
 - [x] Implement atom table with predefined atoms, dynamic atoms, integer atoms, symbols, and private names.
-- [ ] Implement string storage for 8-bit and 16-bit strings, comparison, hashing, and atom backing.
+- [x] Implement string storage for 8-bit and 16-bit strings, comparison, hashing, and atom backing.
 - [ ] Implement class table, class definitions, finalizer hooks, exotic method records, and prototype slots.
 - [ ] Implement shape records, property shape entries, shape hashing, and transition scaffolding.
 - [ ] Add function object payload records for native, bytecode, bound, constructor, and home-object state.
@@ -81,6 +81,6 @@ Focused tests should cover:
 
 ## Handoff Notes
 
-- GC cycle removal, class/shape tables, function records, module records, atom
-  hash-table optimization, and full 16-bit string behavior remain incomplete
-  and are tracked in `../matrices/core-runtime-invariants.md`.
+- GC cycle removal, function records, module records, context prototype slots,
+  object finalizer invocation order, and atom hash-table optimization remain
+  incomplete and are tracked in `../matrices/core-runtime-invariants.md`.

@@ -371,7 +371,7 @@ pub const AtomTable = struct {
             return s.value();
         }
         const text = self.name(atom_id) orelse return Value.undefinedValue();
-        const s = try string.String.createAscii(rt, text);
+        const s = try string.String.createUtf8(rt, text);
         return s.value();
     }
 
@@ -443,6 +443,7 @@ pub fn predefinedById(id: Atom) ?PredefinedAtom {
 }
 
 pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
+    @setEvalBranchQuota(30000);
     for (predefined_atoms) |entry| {
         if (entry.kind == kind and std.mem.eql(u8, entry.name, bytes)) return entry.id;
     }
