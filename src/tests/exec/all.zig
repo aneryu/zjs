@@ -141,6 +141,28 @@ test "Engine eval executes console.log with many arguments" {
     try std.testing.expectEqualStrings("1 2 3 4 5 6 7 8 9 10\n", output);
 }
 
+test "Engine eval routes host output through global function calls" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(1);
+        \\console.log("x");
+        \\const out = print;
+        \\out(2 + 3, typeof out);
+        \\const logger = console.log;
+        \\logger("ok");
+        \\const c = console;
+        \\c.log("alias");
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\nx\n5 function\nok\nalias\n", stream.buffered());
+}
+
 test "Engine eval executes simple template interpolation" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();

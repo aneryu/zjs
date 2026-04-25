@@ -102,42 +102,31 @@ test "script parse mode emits bytecode metadata without AST execution" {
     try std.testing.expect(parsed.function.constants.values.len == 0);
 }
 
-test "print calls emit transitional host print opcode" {
+test "print calls emit global lookup property lookup and generic call bytecode" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
     defer parsed.deinit();
 
-    var host_print_count: usize = 0;
-    var host_print_n_count: usize = 0;
+    var get_var_count: usize = 0;
+    var get_prop_count: usize = 0;
+    var call_count: usize = 0;
     var mul_index: ?usize = null;
     var add_index: ?usize = null;
-    var modes = [_]u8{0} ** 2;
-    var host_print_n_seen: usize = 0;
     var i: usize = 0;
     while (i < parsed.function.code.len) {
         const op = parsed.function.code[i];
         if (op == engine.bytecode.emitter.known.mul) mul_index = mul_index orelse i;
         if (op == engine.bytecode.emitter.known.add) add_index = add_index orelse i;
-        if (op == engine.bytecode.emitter.known.host_print) {
-            host_print_count += 1;
-        }
-        if (op == engine.bytecode.emitter.known.host_print_n) {
-            host_print_n_count += 1;
-            try std.testing.expect(i + 5 < parsed.function.code.len);
-            const mode = parsed.function.code[i + 5];
-            if (host_print_n_seen < modes.len) modes[host_print_n_seen] = mode;
-            host_print_n_seen += 1;
-            i += 5;
-        }
+        if (op == engine.bytecode.emitter.known.get_var) get_var_count += 1;
+        if (op == engine.bytecode.emitter.known.get_prop) get_prop_count += 1;
+        if (op == engine.bytecode.emitter.known.call) call_count += 1;
         i += 1;
     }
-    try std.testing.expectEqual(@as(usize, 0), host_print_count);
-    try std.testing.expectEqual(@as(usize, 2), host_print_n_count);
-    try std.testing.expectEqual(@as(usize, 2), host_print_n_seen);
-    try std.testing.expectEqual(@as(u8, 0), modes[0]);
-    try std.testing.expectEqual(@as(u8, 1), modes[1]);
+    try std.testing.expectEqual(@as(usize, 2), get_var_count);
+    try std.testing.expectEqual(@as(usize, 1), get_prop_count);
+    try std.testing.expectEqual(@as(usize, 2), call_count);
     try std.testing.expect(mul_index != null);
     try std.testing.expect(add_index != null);
     try std.testing.expect(mul_index.? < add_index.?);
@@ -157,7 +146,7 @@ test "simple variable assignments emit var bytecode" {
         if (op == engine.bytecode.emitter.known.get_var) get_var_count += 1;
         if (op == engine.bytecode.emitter.known.define_var) define_var_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 2), get_var_count);
+    try std.testing.expectEqual(@as(usize, 3), get_var_count);
     try std.testing.expectEqual(@as(usize, 2), define_var_count);
 }
 

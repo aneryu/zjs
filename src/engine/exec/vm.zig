@@ -9,6 +9,7 @@ pub const Vm = struct {
     output: ?*std.Io.Writer = null,
     last_source_line: u32 = 0,
     globals: []GlobalSlot = &.{},
+    global_object: ?*core.Object = null,
 
     pub fn init(ctx: *core.Context) Vm {
         return .{
@@ -29,6 +30,8 @@ pub const Vm = struct {
         for (self.globals) |slot| slot.value.free(self.ctx.runtime);
         if (self.globals.len != 0) self.ctx.runtime.memory.free(GlobalSlot, self.globals);
         self.globals = &.{};
+        if (self.global_object) |global| global.value().free(self.ctx.runtime);
+        self.global_object = null;
         self.stack.deinit(self.ctx.runtime);
     }
 
@@ -48,7 +51,7 @@ pub const Vm = struct {
                 bytecode.emitter.known.push_true => try self.stack.push(core.Value.boolean(true)),
                 bytecode.emitter.known.return_undef => return core.Value.undefinedValue(),
                 bytecode.emitter.known.throw_type_error => return self.throwTypeError(),
-                bytecode.emitter.known.host_print_n => try self.hostPrintN(function, &frame),
+                bytecode.emitter.known.call => try self.call(function, &frame),
                 bytecode.emitter.known.array_method => try self.arrayMethod(function, &frame),
                 bytecode.emitter.known.set_prop => try self.setProp(function, &frame),
                 bytecode.emitter.known.object_keys => try self.objectKeys(.keys),
@@ -123,7 +126,6 @@ pub const Vm = struct {
                 bytecode.emitter.known.array_map_mul => try self.arrayMapMul(function, &frame),
                 bytecode.emitter.known.factorial => try self.factorial(),
                 240...251 => try self.binaryOp(op),
-                bytecode.emitter.known.host_print => try self.hostPrint(),
                 253...255 => try self.compareInt(op),
                 224...229 => try self.unaryInt(op),
                 else => return self.throwUnsupported(op),
@@ -162,7 +164,10 @@ pub const Vm = struct {
                 return;
             }
         }
-        try self.stack.push(core.Value.undefinedValue());
+        const global = try self.ensureGlobalObject();
+        const value = global.getProperty(atom_id);
+        defer value.free(self.ctx.runtime);
+        try self.stack.push(value);
     }
 
     fn defineVar(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -185,6 +190,69 @@ pub const Vm = struct {
         if (self.globals.len != 0) self.ctx.runtime.memory.free(GlobalSlot, self.globals);
         self.globals = next;
         try self.stack.push(core.Value.undefinedValue());
+    }
+
+    fn ensureGlobalObject(self: *Vm) !*core.Object {
+        if (self.global_object) |global| return global;
+
+        const global = try core.Object.create(self.ctx.runtime, core.class.ids.object, null);
+        errdefer global.value().free(self.ctx.runtime);
+
+        try self.defineHostFunction(global, "print", .output);
+
+        const console = try core.Object.create(self.ctx.runtime, core.class.ids.object, null);
+        errdefer console.value().free(self.ctx.runtime);
+        try self.defineHostFunction(console, "log", .output);
+        try self.defineObjectProperty(global, "console", console.value());
+        console.value().free(self.ctx.runtime);
+
+        self.global_object = global;
+        return global;
+    }
+
+    fn defineHostFunction(self: *Vm, target: *core.Object, name: []const u8, kind: HostFunction) !void {
+        const function_object = try core.Object.create(self.ctx.runtime, core.class.ids.c_function, null);
+        errdefer function_object.value().free(self.ctx.runtime);
+        try self.defineIntProperty(function_object, "__host_function", @intFromEnum(kind));
+        try self.defineObjectProperty(target, name, function_object.value());
+        function_object.value().free(self.ctx.runtime);
+    }
+
+    fn defineObjectProperty(self: *Vm, object: *core.Object, name: []const u8, value: core.Value) !void {
+        const key = try self.ctx.runtime.internAtom(name);
+        defer self.ctx.runtime.atoms.free(key);
+        try object.defineOwnProperty(self.ctx.runtime, key, core.Descriptor.data(value, true, true, true));
+    }
+
+    fn call(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+        const argc = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
+        frame.pc += 4;
+        var values: [32]core.Value = undefined;
+        if (argc > values.len) return self.throwUnsupported(bytecode.emitter.known.call);
+        var filled_start: usize = argc;
+        var remaining = argc;
+        while (remaining > 0) {
+            remaining -= 1;
+            values[remaining] = try self.stack.pop();
+            filled_start = remaining;
+        }
+        defer {
+            var i = filled_start;
+            while (i < argc) : (i += 1) values[i].free(self.ctx.runtime);
+        }
+        const callee = try self.stack.pop();
+        defer callee.free(self.ctx.runtime);
+        try self.callValue(callee, values[0..argc]);
+    }
+
+    fn callValue(self: *Vm, callee: core.Value, args: []core.Value) !void {
+        const object = try self.expectObject(callee, bytecode.emitter.known.call);
+        if (object.class_id != core.class.ids.c_function) return self.throwTypeError();
+        const kind_value = try self.getIntProperty(object, "__host_function", bytecode.emitter.known.call);
+        const kind: HostFunction = @enumFromInt(kind_value);
+        switch (kind) {
+            .output => try self.hostOutputValues(args),
+        }
     }
 
     fn binaryOp(self: *Vm, op: u8) !void {
@@ -1617,6 +1685,8 @@ pub const Vm = struct {
             "string"
         else if (value.isUndefined())
             "undefined"
+        else if (isFunctionObject(value))
+            "function"
         else
             "object";
         const str = try core.string.String.createUtf8(self.ctx.runtime, name);
@@ -1941,10 +2011,7 @@ pub const Vm = struct {
         var consumed = false;
         for (text) |ch| {
             const digit: i32 =
-                if (ch >= '0' and ch <= '9') ch - '0'
-                else if (ch >= 'a' and ch <= 'z') ch - 'a' + 10
-                else if (ch >= 'A' and ch <= 'Z') ch - 'A' + 10
-                else break;
+                if (ch >= '0' and ch <= '9') ch - '0' else if (ch >= 'a' and ch <= 'z') ch - 'a' + 10 else if (ch >= 'A' and ch <= 'Z') ch - 'A' + 10 else break;
             if (digit >= radix) break;
             consumed = true;
             value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
@@ -2067,37 +2134,7 @@ pub const Vm = struct {
         return self.throwUnsupported(bytecode.emitter.known.prop_in);
     }
 
-    fn hostPrint(self: *Vm) !void {
-        const value = try self.stack.pop();
-        defer value.free(self.ctx.runtime);
-        if (self.output) |writer| {
-            try printValue(self.ctx.runtime, writer, value);
-            try writer.print("\n", .{});
-        }
-        try self.stack.push(core.Value.undefinedValue());
-    }
-
-    fn hostPrintN(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-        const argc = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
-        const mode = function.code[frame.pc + 4];
-        frame.pc += 5;
-        const argc_usize = @as(usize, argc);
-        var values = try self.ctx.runtime.memory.alloc(core.Value, argc_usize);
-        errdefer self.ctx.runtime.memory.free(core.Value, values);
-        var remaining = argc;
-        while (remaining > 0) : (remaining -= 1) {
-            values[remaining - 1] = try self.stack.pop();
-        }
-        defer {
-            var i: usize = 0;
-            while (i < argc_usize) : (i += 1) values[i].free(self.ctx.runtime);
-            self.ctx.runtime.memory.free(core.Value, values);
-        }
-        try self.hostPrintValues(mode, values);
-    }
-
-    fn hostPrintValues(self: *Vm, mode: u8, values: []core.Value) !void {
-        _ = mode;
+    fn hostOutputValues(self: *Vm, values: []core.Value) !void {
         if (self.output) |writer| {
             var i: usize = 0;
             while (i < values.len) : (i += 1) {
@@ -2123,6 +2160,10 @@ pub const Vm = struct {
 const GlobalSlot = struct {
     name: core.Atom,
     value: core.Value,
+};
+
+const HostFunction = enum(i32) {
+    output = 1,
 };
 
 const ObjectKeyMode = enum {
@@ -2179,6 +2220,17 @@ fn numberValue(value: core.Value) ?f64 {
     if (value.asInt32()) |v| return @floatFromInt(v);
     if (value.asFloat64()) |v| return v;
     return null;
+}
+
+fn isFunctionObject(value: core.Value) bool {
+    const header = value.refHeader() orelse return false;
+    if (!value.isObject()) return false;
+    const object: *core.Object = @fieldParentPtr("header", header);
+    return object.class_id == core.class.ids.c_function or
+        object.class_id == core.class.ids.bytecode_function or
+        object.class_id == core.class.ids.bound_function or
+        object.class_id == core.class.ids.c_function_data or
+        object.class_id == core.class.ids.c_closure;
 }
 
 fn valueToI64(value: core.Value) ?i64 {

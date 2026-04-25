@@ -26,10 +26,10 @@ Completeness means the selected QuickJS core engine scope has no intentional sem
 
 ## Current Repository State
 
-- Phases 1-7 are implemented and validated through the focused Zig test gates recorded in `docs/quickjs-redesign/TRACKING.md`.
-- Phase 8 tooling is wired: `zjs`, smoke, compare, and `run-test262` build and execute through the rebuilt engine path.
-- Current local validation passes `zig build test --summary all` with 109/109 tests, `zig build smoke --summary all` with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
-- Phase 8 remains in progress because the runner parity matrix still has non-validated rows and the engine still contains narrow/transitional semantic paths that must be replaced by fuller QuickJS-aligned implementations.
+- Phases 1-9 are implemented and validated through the focused Zig, smoke, compare, and test262 gates recorded in `docs/quickjs-redesign/TRACKING.md`.
+- Phase 8 tooling is complete: `zjs`, smoke, compare, and `run-test262` build and execute through the rebuilt engine path.
+- Current local validation passes `zig build test --summary all` with 112/112 tests, `zig build smoke --summary all` with 45/45 scripts, functional compare with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
+- Phase 9 runtime semantic hardening replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution. BigInt/DataView/String-wrapper coercion remain tracked follow-up runtime hardening work.
 - `AGENTS.md` still references the historical `quickjs-zig-plan.md`; the active architecture and progress sources are this document plus `docs/quickjs-redesign/TRACKING.md` and the phase/matrix documents.
 
 ## Design Principles
@@ -62,12 +62,14 @@ This root document is the architecture contract. Detailed execution state lives 
 | `docs/quickjs-redesign/phases/06-bytecode-execution.md` | Phase 6 VM execution, frames, calls, exceptions, eval, modules, promises, jobs. |
 | `docs/quickjs-redesign/phases/07-builtins-support-libraries.md` | Phase 7 builtins and regexp/unicode/bignum/dtoa support libraries. |
 | `docs/quickjs-redesign/phases/08-cli-tooling-validation.md` | Phase 8 `zjs`, smoke, compare, and test262 tooling. |
+| `docs/quickjs-redesign/phases/09-runtime-semantic-hardening.md` | Phase 9 runtime semantic hardening and documentation cleanup. |
 | `docs/quickjs-redesign/matrices/core-runtime-invariants.md` | Phase 2 runtime invariant coverage matrix. |
 | `docs/quickjs-redesign/matrices/object-property-matrix.md` | Phase 3 object/property behavior matrix. |
 | `docs/quickjs-redesign/matrices/frontend-coverage-matrix.md` | Phase 5 syntax/frontend/emitter coverage matrix. |
 | `docs/quickjs-redesign/matrices/opcode-execution-matrix.md` | Phase 4/6 opcode metadata and execution coverage matrix. |
 | `docs/quickjs-redesign/matrices/builtins-support-matrix.md` | Phase 7 builtin and support library coverage matrix. |
 | `docs/quickjs-redesign/matrices/test262-runner-parity.md` | Phase 8 test262 runner parity matrix. |
+| `docs/quickjs-redesign/matrices/runtime-semantic-hardening.md` | Phase 9 runtime semantic hardening matrix. |
 | `docs/quickjs-redesign/templates/error-record.md` | Template for detailed failure and learning records. |
 
 Tracking rules:
@@ -417,6 +419,16 @@ Builtins and libraries:
 - Keep top-level `tools/compare/` and update its `zjs` invocation only if needed.
 - Rebuild `run-test262` with behavior aligned to `quickjs/run-test262.c` and `quickjs/test262.conf`, including config parsing, excludes, known-error files, direct file/dir selection, harness loading, metadata parsing, and worker execution.
 
+### Phase 9: Runtime Semantic Hardening
+
+- Replace transitional execution shortcuts with normal QuickJS-style global
+  lookup, property access, callable objects, generic calls, and runtime side
+  effects.
+- Start with host-visible output: `print(...)` and `console.log(...)` must not
+  depend on parser/emitter-recognized output opcodes.
+- Keep BigInt/DataView/String-wrapper coercion gaps tracked as follow-up runtime
+  hardening work unless the active Phase 9 document promotes them to blockers.
+
 ## Phase Exit Criteria
 
 Each phase is complete only when all relevant criteria below are true:
@@ -431,6 +443,7 @@ Each phase is complete only when all relevant criteria below are true:
 | 6 | VM executes representative bytecode programs through public `Engine.eval`, handles JS exceptions through context exception state, and drains jobs through `runJobs`. |
 | 7 | Builtins use shared object/property paths, support libraries have focused tests, and smoke/compare coverage exists for each completed domain. |
 | 8 | `zjs`, `smoke`, compare, and `run-test262` use the rebuilt engine and no command depends on deleted engine paths. |
+| 9 | Host-visible output uses ordinary global lookup/property/call semantics, no dedicated host output opcodes remain, and smoke/test262 gates preserve Phase 8 behavior. |
 
 ## Validation Strategy
 

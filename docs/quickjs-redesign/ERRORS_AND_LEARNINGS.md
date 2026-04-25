@@ -73,7 +73,7 @@ create a learning record.
 | ID | Status | Severity | Phase | Classification | Symptom | Record | Regression | Matrix rows |
 |---|---|---|---|---|---|---|---|---|
 | EAL-20260424-001 | validated | low | docs | docs_tracking_gap | Redesign plan lacked a durable error and learning workflow. | `#eal-20260424-001-error-and-learning-workflow-missing` | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | README, TRACKING, test262 parity |
-| EAL-20260424-002 | open | high | 8 | quickjs_parity_gap | Real smoke runner fails 45/45 scripts because `zjs` does not yet produce smoke-visible output such as `print(...)`. | `#eal-20260424-002-smoke-runner-wired-before-output-semantics` | pending | Phase 8, smoke runner |
+| EAL-20260424-002 | validated | high | 8-9 | quickjs_parity_gap | Real smoke runner initially failed 45/45 scripts because `zjs` did not yet produce smoke-visible output such as `print(...)`. | `#eal-20260424-002-smoke-runner-wired-before-output-semantics` | `zig build smoke --summary all` | Phase 8 smoke runner, Phase 9 runtime hardening |
 
 ## Detailed Records
 
@@ -109,14 +109,15 @@ serve different purposes and need separate records.
 
 ### EAL-20260424-002: Smoke Runner Wired Before Output Semantics
 
-Status: open
+Status: validated
 Severity: high
-Phase: 8
+Phase: 8-9
 Classification: quickjs_parity_gap
 
 Summary: Phase 8 wired `zig build smoke` to the rebuilt `zjs` executable and the
-existing `tests/zig-smoke/manifest.txt` golden files. The runner works as a real
-comparator, but all 45 manifest scripts currently fail.
+existing `tests/zig-smoke/manifest.txt` golden files. The runner worked as a real
+comparator, and initially all 45 manifest scripts failed because runtime-visible
+output was missing.
 
 Reproduction:
 
@@ -124,9 +125,9 @@ Reproduction:
 ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build smoke --summary all
 ```
 
-Observed result: exit 1. The runner reports `smoke: 45/45 scripts failed`.
-Most failures have status 0 but stdout length 0 because the rebuilt engine does
-not yet implement smoke-visible output such as `print(...)`. A few scripts exit
+Initial observed result: exit 1. The runner reported `smoke: 45/45 scripts failed`.
+Most failures had status 0 but stdout length 0 because the rebuilt engine did
+not yet implement smoke-visible output such as `print(...)`. A few scripts exited
 1 on unsupported frontend/execution paths.
 
 QuickJS owner: `quickjs/qjs.c` for CLI-visible execution behavior and
@@ -135,9 +136,21 @@ QuickJS owner: `quickjs/qjs.c` for CLI-visible execution behavior and
 Zig owner: `src/cli/qjs.zig`, `src/engine/root.zig`, builtin global setup, and
 the frontend/exec paths needed by smoke scripts.
 
-Next fix target: implement the smallest source-aligned output path for
-`print(...)` and expression execution, then rerun focused smoke scripts before
-the full manifest.
+Fix summary: Phase 8 completed the smoke runner and broader execution coverage.
+Phase 9 removed the dedicated host output opcode path and routed `print(...)`
+and `console.log(...)` through normal global lookup, property access, callable
+values, generic call execution, and the existing `Engine.evalWithOutput*` writer.
+
+Validation:
+
+```bash
+zig build smoke --summary all
+QJS=/home/aneryu/zjs/quickjs/build/qjs QJS_ZIG=/home/aneryu/zjs/zig-out/bin/zjs bun tools/compare/run_compare.js --functional-only
+./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test 0 100000
+```
+
+Current result: smoke passes 45/45 scripts, functional compare passes 45/45
+scripts, and the full local test262 gate reports `0/48205 errors`.
 
 ## Learning Log
 

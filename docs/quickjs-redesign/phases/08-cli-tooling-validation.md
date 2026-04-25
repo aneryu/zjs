@@ -83,18 +83,17 @@ zig build -Doptimize=ReleaseFast run-test262 --summary all
 - [x] `TRACKING.md` records final command evidence.
 - [x] Targeted parity fixtures were run for `-e`, `-u`, `-v`, `-vv`, `-T`, `-m` and `exclude` behavior.
 - [x] Negative metadata behavior was fixture-validated for both matching and mismatched `type` handling.
-- [x] `Host-visible output` remains deferred to later phase as an explicit `out_of_scope` matrix decision.
+- [x] `Host-visible output` is transferred to the Phase 9 runtime semantic hardening matrix.
 
 ## Handoff Notes
 
 - First tooling slice added `zjs`, `run-test262`, `smoke`, and `test-tools`
   build steps.
-- `zjs -e "1"` and `zjs <file>` currently execute through the rebuilt engine and
-  exit 0 without printing expression results.
-- `zjs` has a transitional host output path for direct `print(...)` and
-  `console.log(...)` calls with currently emitted primitive constants. This is
-  intentionally narrow and should be replaced by normal global function lookup
-  and call execution as Phase 8 advances.
+- `zjs -e "1"` and `zjs <file>` execute through the rebuilt engine and exit 0
+  without printing expression results.
+- Host-visible output is no longer a Phase 8 tooling dependency. Phase 9 owns
+  hardening `print(...)` and `console.log(...)` through normal global lookup,
+  property access, callable values, and generic call execution.
 - The transitional execution path now covers simple globals, templates, string
   operations, simple arrays, narrow array maps, simple functions/arrows, JSON and
   Math smoke subsets, typeof, direct eval of simple expression strings, logical
@@ -107,9 +106,6 @@ zig build -Doptimize=ReleaseFast run-test262 --summary all
   structured parser lowering rather than fixture output bridges.
   Primitive property smoke coverage now includes array prototype function
   `typeof` checks and string `.charAt()` through narrow helpers.
-- Host print now emits integer `+ - * / %` bytecode with precedence for direct
-  primitive print expressions. This is a validation bridge, not the final parser
-  expression implementation.
 - Template literals are currently scanned as one literal through the closing
   backtick so test262 harness files with `${...}` text can be parsed by the
   transitional frontend. Full template interpolation semantics remain future
@@ -143,5 +139,5 @@ zig build -Doptimize=ReleaseFast run-test262 --summary all
   old output bridge.
 - Full local test262 now runs to completion under one minute with ReleaseFast;
   latest result is `0/48205 errors, passed 42200`, elapsed 15.00s.
-- Phase 8 is complete with remaining `host-visible output` semantics explicitly deferred
-  as `out_of_scope` in the matrix for post-Phase-8 hardening.
+- Phase 8 is complete; host-visible output tracking has moved to the Phase 9
+  runtime semantic hardening matrix.

@@ -135,7 +135,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .cli_tooling,
         .phase = 8,
-        .state = .in_progress,
+        .state = .validated,
         .zig_paths = &.{ "src/cli", "src/tools" },
         .quickjs_sources = &.{ "quickjs/qjs.c", "quickjs/run-test262.c", "quickjs/test262.conf" },
     },

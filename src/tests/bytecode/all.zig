@@ -73,6 +73,13 @@ test "format metadata computes immediate operand widths" {
     try std.testing.expectEqual(@as(usize, 8), bytecode.format.describe(.u32x2).immediateSize());
 }
 
+test "emitter known opcode table has no host print opcode names" {
+    inline for (@typeInfo(bytecode.emitter.known).@"struct".decls) |decl| {
+        try std.testing.expect(!std.mem.eql(u8, decl.name, "host_print"));
+        try std.testing.expect(!std.mem.eql(u8, decl.name, "host_print_n"));
+    }
+}
+
 test "constant pool retains and releases values" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

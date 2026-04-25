@@ -38,7 +38,7 @@ small semantic drift can hide engine bugs.
 
 | Dependency | Required behavior | Current evidence | Status |
 |---|---|---|---|
-| Host-visible output | `zjs` must expose normal `print` and `console.log` output through global function lookup and calls | Transitional host print opcode currently covers direct primitive `print(...)` and `console.log(...)` emissions only (`host_print`/`host_print_n`). Full global lookup + function-call path is deferred to later phase work | out_of_scope |
+| Host-visible output | `zjs` must expose normal `print` and `console.log` output through global function lookup and calls | Validated in Phase 9 runtime semantic hardening matrix; runner parity no longer owns this dependency | validated_in_phase_9 |
 
 ## Phase 8 Exit Additions
 

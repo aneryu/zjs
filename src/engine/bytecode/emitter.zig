@@ -50,17 +50,6 @@ pub const Emitter = struct {
         try self.emitKnown(known.return_undef);
     }
 
-    pub fn emitHostPrint(self: *Emitter) !void {
-        try self.emitKnown(known.host_print);
-    }
-
-    pub fn emitHostPrintMode(self: *Emitter, mode: u8) !void {
-        var bytes: [2]u8 = undefined;
-        bytes[0] = known.host_print;
-        bytes[1] = mode;
-        try self.append(&bytes);
-    }
-
     pub fn emitGetVar(self: *Emitter, atom_id: atom.Atom) !void {
         try self.emitKnownAtom(known.get_var, atom_id);
     }
@@ -150,16 +139,11 @@ pub const Emitter = struct {
         try self.emitKnown(if (unsigned) known.bigint_as_uint_n else known.bigint_as_int_n);
     }
 
-    pub fn emitHostPrintN(self: *Emitter, argc: u32) !void {
-        try self.emitHostPrintNWithMode(argc, 0);
-    }
-
-    pub fn emitHostPrintNWithMode(self: *Emitter, argc: u32, mode: u8) !void {
-        var bytes: [6]u8 = undefined;
-        bytes[0] = known.host_print_n;
+    pub fn emitCall(self: *Emitter, argc: u32) !void {
+        var bytes: [5]u8 = undefined;
+        bytes[0] = known.call;
         std.mem.writeInt(u32, bytes[1..5], argc, .little);
-        bytes[5] = mode;
-        try self.append(bytes[0..6]);
+        try self.append(&bytes);
     }
 
     pub fn emitSetProp(self: *Emitter, atom_id: atom.Atom) !void {
@@ -299,7 +283,7 @@ pub const known = struct {
     pub const define_class: u8 = 91;
     pub const goto: u8 = 117;
     pub const array_method: u8 = 169;
-    pub const host_print_n: u8 = 170;
+    pub const call: u8 = 170;
     pub const set_prop: u8 = 171;
     pub const object_keys: u8 = 172;
     pub const object_values: u8 = 173;
@@ -373,7 +357,6 @@ pub const known = struct {
     pub const mod: u8 = 242;
     pub const add: u8 = 243;
     pub const sub: u8 = 244;
-    pub const host_print: u8 = 252;
 };
 
 const std = @import("std");

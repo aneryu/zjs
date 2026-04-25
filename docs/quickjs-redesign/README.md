@@ -19,6 +19,7 @@ progress, phase-level details, validation evidence, and handoff state.
 | `phases/06-bytecode-execution.md` | VM dispatch, stack frames, calls, exceptions, eval, modules, promises, jobs, and iterators. |
 | `phases/07-builtins-support-libraries.md` | Builtins plus regexp, unicode, bignum, and dtoa support libraries. |
 | `phases/08-cli-tooling-validation.md` | `zjs`, smoke runner, compare runner integration, and test262 runner. |
+| `phases/09-runtime-semantic-hardening.md` | Runtime semantic hardening after tooling completion, starting with host-visible output through normal global lookup and calls. |
 
 ## Matrix Map
 
@@ -30,6 +31,7 @@ progress, phase-level details, validation evidence, and handoff state.
 | `matrices/opcode-execution-matrix.md` | 4 and 6 | Opcode metadata, lowering, and execution-handler tracking. |
 | `matrices/builtins-support-matrix.md` | 7 | Support library and builtin domain tracking. |
 | `matrices/test262-runner-parity.md` | 8 | QuickJS `run-test262.c` option and runner-semantics parity tracking. |
+| `matrices/runtime-semantic-hardening.md` | 9 | Runtime semantic hardening matrix for replacing transitional execution shortcuts. |
 
 ## Template Map
 

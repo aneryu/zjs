@@ -9,12 +9,12 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Active phase | Phase 8: CLI Tooling And Validation |
-| Overall status | phase_8_complete |
+| Active phase | Phase 9: Runtime Semantic Hardening |
+| Overall status | phase_9_complete |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 8 tooling is wired; `run-test262` now parses QuickJS-shaped args, config paths, feature lists, config excludes, direct selectors, index spans, and test metadata (`includes`, `features`, `flags`, `negative`), runs selected tests in-process with baseline plus metadata harness prepended in declaration order, and classifies known/new/fixed failures from `errorfile` with `-u` rewrite support. Host output semantics remain a runtime-level `out_of_scope` bridge (direct `host_print`) for now |
+| Current engine state | Phase 8 tooling is complete; `run-test262` now parses QuickJS-shaped args, config paths, feature lists, config excludes, direct selectors, index spans, and test metadata (`includes`, `features`, `flags`, `negative`), runs selected tests in-process with baseline plus metadata harness prepended in declaration order, and classifies known/new/fixed failures from `errorfile` with `-u` rewrite support. Phase 9 replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution |
 | Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
-| Current validation state | `zig build test --summary all` passes 110/110 tests; `zig build smoke --summary all` passes 45/45 scripts; `zig build run-test262 --summary all` builds the ReleaseFast runner; full local test262 gate remains under one minute at 15.00s with `Result: 0/48205 errors, passed 42200`; expressions, literals, AnnexB, statements, module-code, import, global-code, rest-parameters, and tracked built-ins slices are now 0-error; runner parity option rows for `-e`/`-u`/`-v`/`-vv`/`-T`/`-m`/exclude/exit are command-validated with fixture targets |
+| Current validation state | `zig build test --summary all` passes 112/112 tests; `zig build smoke --summary all` passes 45/45 scripts; `zig build run-test262 --summary all` builds the ReleaseFast runner; functional compare passes 45/45 scripts; targeted JSON and language expression slices pass; full local test262 gate completes at `Result: 0/48205 errors, passed 42200` |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -28,7 +28,8 @@ updated alongside implementation, tests, and phase documents.
 | 5 Frontend And Bytecode Emitter | completed | `phases/05-frontend-bytecode-emitter.md` | `matrices/frontend-coverage-matrix.md` | Phase 6 execution fixtures |
 | 6 Bytecode Execution | completed | `phases/06-bytecode-execution.md` | `matrices/opcode-execution-matrix.md` | Phase 7 builtin/support library fixtures |
 | 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
-| 8 CLI Tooling And Validation | completed | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Host-visible output is explicit `out_of_scope`; continue runtime hardening for remaining ECMAScript gaps |
+| 8 CLI Tooling And Validation | completed | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Host-visible output transferred to Phase 9 runtime hardening |
+| 9 Runtime Semantic Hardening | completed | `phases/09-runtime-semantic-hardening.md` | `matrices/runtime-semantic-hardening.md` | Follow-up runtime hardening backlog: BigInt/DataView/String wrapper coercion |
 
 ## Work Queue
 
@@ -42,7 +43,8 @@ updated alongside implementation, tests, and phase documents.
 | WQ-006 | completed | 5 | Frontend and bytecode emitter | Validated parser/emitter metadata fixtures without AST execution | none |
 | WQ-007 | completed | 6 | Bytecode execution | Validated representative VM dispatch, Engine API, and job queue | none |
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
-| WQ-009 | completed | 8 | CLI and validation tooling | Full local test262 gate executes in 15.00s with zero selected failures; known-error classification/update, metadata parsing/includes/filtering, raw hashbang handling, compare path defaults, in-process test execution, worker-local harness caching, and QuickJS-style namelist/selection/worker-stride execution are wired | host-visible output (`print`/`console.log`) is explicit `out_of_scope` follow-up |
+| WQ-009 | completed | 8 | CLI and validation tooling | Full local test262 gate executes in 15.00s with zero selected failures; known-error classification/update, metadata parsing/includes/filtering, raw hashbang handling, compare path defaults, in-process test execution, worker-local harness caching, and QuickJS-style namelist/selection/worker-stride execution are wired | host-visible output (`print`/`console.log`) transferred to WQ-010 |
+| WQ-010 | completed | 9 | Runtime semantic hardening | Replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution; aggregate, smoke, compare, targeted slices, and full test262 gate passed | follow-up BigInt/DataView/String wrapper coercion backlog |
 
 ## Subsystem Coverage Matrix
 
@@ -55,7 +57,8 @@ updated alongside implementation, tests, and phase documents.
 | Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-frontend --summary all` passed, 6/6 tests |
 | Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-exec --summary all` passed, 6/6 tests |
 | Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` passed, 4/4 tests |
-| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | completed | `zig build test --summary all` passed 110/110 tests; `zig build smoke --summary all` passed 45/45 scripts; full `run-test262` passed with `0/48205 errors` in 15.00s; matrix host-output dependency is out_of_scope |
+| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | completed | `zig build test --summary all` passed 110/110 tests; `zig build smoke --summary all` passed 45/45 scripts; full `run-test262` passed with `0/48205 errors` in 15.00s; host-output dependency transferred to Phase 9 |
+| Runtime semantic hardening | 9 | `matrices/runtime-semantic-hardening.md` | completed | `zig build test --summary all` passed 112/112 tests; smoke and compare passed 45/45 scripts; full `run-test262` passed with `0/48205 errors` |
 
 ## Validation Log
 
@@ -285,6 +288,25 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-26 | 8 | `./zig-out/bin/run-test262 -f tests/runner-fixtures/negative-runtime-type-mismatch.js` | 1 | Negative metadata intentionally expects `ReferenceError` but runs `print(Math.parseFloat())` and returns `StackUnderflow`, so wrong-type mismatch is rejected as unexpected failure (`Result: 1/1 errors, passed 0`) | test-tools |
 | 2026-04-26 | 8 | `tmp=$(mktemp /tmp/zjs-known-errors-XXXX.txt); printf 'tests/runner-fixtures/pass.js\\n' > \"$tmp\"; ./zig-out/bin/run-test262 -u -e \"$tmp\" -f tests/runner-fixtures/known-fail-stackunderflow.js; cat \"$tmp\"; rm -f \"$tmp\"` | 1 | Known-error update mode rewrites list with current failure and keeps existing entries (`tests/runner-fixtures/known-fail-stackunderflow.js`, `tests/runner-fixtures/pass.js`) | test-tools |
 | 2026-04-26 | 8 | `./zig-out/bin/run-test262 -c tests/runner-fixtures/exclude.conf -f tests/runner-fixtures/known-fail-stackunderflow.js` | 0 | Exclude configuration filters selected failure before execution (`prepared 0/1 tests, 1 excluded`) | test-tools |
+| 2026-04-26 | 9 | `zig build test-bytecode --summary all` | 0 | Bytecode focused gate passed after replacing host output opcode names with generic `call`, 6/6 tests | regression |
+| 2026-04-26 | 9 | `zig build test-frontend --summary all` | 0 | Frontend focused gate passed after `print`/`console.log` lowering moved to global/property/call bytecode, 21/21 tests | regression |
+| 2026-04-26 | 9 | `zig build test-exec --summary all` | 0 | Exec focused gate passed after global callable output path and indirect output-call coverage, 37/37 tests | regression |
+| 2026-04-26 | 9 | `./zig-out/bin/zjs -e 'print(1); console.log("ok"); const f = print; f(2 + 3, typeof f); const log = console.log; log("indirect")'` | 0 | CLI output path produced `1`, `ok`, `5 function`, and `indirect` through direct and indirect global/property calls | smoke |
+| 2026-04-26 | 9 | `zig build test --summary all` | 0 | Aggregate regression passed after Phase 9 runtime output hardening, 112/112 tests | regression |
+| 2026-04-26 | 9 | `zig build smoke --summary all` | 0 | Smoke gate passed after output path replacement, 45/45 scripts | regression |
+| 2026-04-26 | 9 | `zig build run-test262 --summary all` | 0 | ReleaseFast `run-test262` build step succeeded after Phase 9 changes | regression |
+| 2026-04-26 | 9 | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 200` | 0 | Targeted JSON slice passed, prepared 165/165 tests, `Result: 0/165 errors, passed 165` | test262 |
+| 2026-04-26 | 9 | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 500` | 0 | Targeted language expressions slice passed, prepared 499 selected tests, `Result: 0/499 errors, passed 499` | test262 |
+| 2026-04-26 | 9 | `./zig-out/bin/zjs -e 'print(1); console.log("ok")'` | 0 | CLI direct output check printed `1` and `ok` | smoke |
+| 2026-04-26 | 9 | `./zig-out/bin/zjs tests/zig-smoke/arith.js` | 0 | CLI file execution printed `7` for `arith.js` | smoke |
+| 2026-04-26 | 9 | `QJS=/home/aneryu/zjs/quickjs/build/qjs QJS_ZIG=/home/aneryu/zjs/zig-out/bin/zjs bun tools/compare/run_compare.js --functional-only` | 0 | Functional compare passed, 45 passed, 0 failed, 0 known-fail | compare |
+| 2026-04-26 | 9 | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test 0 100000` | 0 | Full local test262 gate passed: prepared 48205/53168 tests, excluded 4963, skipped 6005 by feature, `Result: 0/48205 errors, passed 42200` | test262 |
+| 2026-04-26 | 9 | `git diff --check` | 0 | Whitespace check passed after Phase 9 code and docs updates | regression |
+
+Correction note: Phase 8 validation rows that cite `tests/runner-fixtures/*`
+paths are historical handoff evidence only. Those fixture files are not present
+in this checkout, so the rows are superseded as current reproducible evidence by
+the recorded unit/tool gates and the full local `run-test262` gate.
 
 ## Decision Log
 
@@ -295,6 +317,7 @@ updated alongside implementation, tests, and phase documents.
 | 2026-04-24 | Track incomplete behavior through `status.zig` and phase docs. | A complete rewrite needs temporary gaps, but completed phases must not hide not-implemented behavior. | Phase tests should validate status transitions. |
 | 2026-04-24 | Add a separate error and learning ledger. | Validation logs and known-failure summaries are not enough to preserve root causes and reusable lessons. | Use `ERRORS_AND_LEARNINGS.md` and `templates/error-record.md` for non-trivial failures. |
 | 2026-04-24 | Wire Phase 8 smoke as a real golden comparator even before engine semantics pass. | A passing placeholder smoke step would hide the main remaining execution gap. | Keep `zig build smoke` failing until `zjs` produces expected script output. |
+| 2026-04-26 | Move host-visible output from Phase 8 runner dependency to Phase 9 runtime semantic hardening. | Runner parity is complete; output semantics belong to runtime global lookup/property/call behavior rather than tooling. | Validate output through normal callable execution and keep BigInt/DataView/String wrapper coercion as follow-up hardening backlog. |
 
 ## Risk Log
 
@@ -325,7 +348,7 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Continue runtime-semantic hardening: implement host-visible output through normal global lookup/call and then close remaining ECMAScript gaps (BigInt/DataView/String wrapper coercion, assert-heavy builtins) in the next phase. |
+| Next recommended action | Continue follow-up runtime hardening outside Phase 9: BigInt/DataView/String wrapper coercion and assert-heavy builtin parity gaps. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |
@@ -344,6 +367,7 @@ updated alongside implementation, tests, and phase documents.
 - Phase 6 validates stack/frame ownership, representative primitive opcode dispatch, source location tracking, shared object property ops, context exception transfer, `Engine.eval`, and deterministic job queue draining.
 - Phase 7 validates Unicode/dtoa/bignum/regexp support helpers, intrinsic bootstrap descriptors, representative builtin domains, Promise job integration, buffers, Reflect/Proxy hooks, iterator helpers, and Atomics lock-free scope.
 - Phase 8 tooling now has `zjs`, `run-test262`, `smoke`, and `test-tools` build steps. `run-test262` follows the original runner design more closely: namelists use capacity growth and sort/dedupe, known/exclude lookups use sorted lists, selection no longer parses every file's metadata, feature skip is handled during execution, workers run by index stride, tests execute in-process, raw tests preserve source-leading hashbangs, and harness includes are cached per worker without shared lock contention. Full local test262 completes under one minute with ReleaseFast: prepared 48205/53168 tests, excluded 4963, skipped 6005 by feature, `Result: 0/48205 errors, passed 42200`, elapsed 15.00s. Metadata parsing covers includes, features, flags, and negative records; includes are loaded from the harness directory in declaration order; negative records require non-zero exit and match expected stderr type when present. The previous Date/control-flow smoke output bridge has been removed; `zig build test --summary all` and `zig build smoke --summary all` now pass through real Date/control-flow/switch smoke behavior. AnnexB HTML comment handling follows the QuickJS lexer shape for `<!--` and line-start `-->`, and the tracked expressions/literals/statements/module/global/rest/built-ins slices now match the local test262 gate.
+- Phase 9 is complete. The dedicated host output opcode names and VM dispatch path were removed. `print(...)` now lowers to global lookup plus generic call, `console.log(...)` lowers through global lookup and property read before generic call, and the output sink remains the writer passed through `Engine.evalWithOutput*` / `zjs`. Aggregate tests pass 112/112, smoke and compare pass 45/45, and the full local test262 gate remains `0/48205 errors`.
 - Compare tooling now defaults to rebuilt `zig-out/bin/zjs` and in-repo `quickjs/build/qjs`; CMake was unavailable locally, so `quickjs/build/qjs` was built directly with `cc`.
 - Current checkout caveat: the parent repository is clean and records `quickjs`
   at `c707cf5eda67a97bbff7a60cb2ef124fd4a77420`; the nested
