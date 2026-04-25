@@ -2,7 +2,7 @@
 
 ## Project Goal
 
-This project will rebuild the QuickJS core JavaScript engine in Zig 0.16.0 from the current clean `src/engine/` state. The goal is a complete QuickJS core engine implementation, not an MVP, not a compatibility patch over the deleted Zig VM, and not a simplified interpreter.
+This project is rebuilding the QuickJS core JavaScript engine in Zig 0.16.0. The goal is a complete QuickJS core engine implementation, not an MVP, not a compatibility patch over the deleted Zig VM, and not a simplified interpreter.
 
 The semantic authority is the local QuickJS source at commit `64e64ebb1dd61505c256285a699c65c42941c5ed`. The primary reference files are:
 
@@ -26,10 +26,11 @@ Completeness means the selected QuickJS core engine scope has no intentional sem
 
 ## Current Repository State
 
-- `src/engine/` has been cleared. There is no active Zig engine, parser, compiler, VM, CLI adapter, test262 runner, or Zig test tree.
-- `build.zig` still references deleted paths such as `src/engine/root.zig`, `src/cli/qjs.zig`, `src/tools/test262_runner.zig`, and `src/tests/*`. Treat this as stale wiring to replace, not as active design.
-- Retained assets are `quickjs/`, `tests/zig-smoke/`, `tools/compare/`, `SPEX.md`, this design document, and the long-running redesign docs under `docs/quickjs-redesign/`.
-- `AGENTS.md` and `quickjs-zig-plan.md` still describe the previous VM-era layout. They are historical context only and are not the source of truth for the rebuild.
+- Phases 1-7 are implemented and validated through the focused Zig test gates recorded in `docs/quickjs-redesign/TRACKING.md`.
+- Phase 8 tooling is wired: `zjs`, smoke, compare, and `run-test262` build and execute through the rebuilt engine path.
+- Current local validation passes `zig build test --summary all` with 109/109 tests, `zig build smoke --summary all` with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
+- Phase 8 remains in progress because the runner parity matrix still has non-validated rows and the engine still contains narrow/transitional semantic paths that must be replaced by fuller QuickJS-aligned implementations.
+- `AGENTS.md` still references the historical `quickjs-zig-plan.md`; the active architecture and progress sources are this document plus `docs/quickjs-redesign/TRACKING.md` and the phase/matrix documents.
 
 ## Design Principles
 

@@ -1514,14 +1514,14 @@ const SimpleParser = struct {
         }
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "print")) {
             try self.advance();
-            try self.parsePrintCall();
+            try self.parsePrintCall(.print);
             return;
         }
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "console")) {
             try self.advance();
             try self.expectPunctuator(".");
             try self.expectIdentifierNamed("log");
-            try self.parsePrintCall();
+            try self.parsePrintCall(.console_log);
             return;
         }
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "assert")) {
@@ -1620,7 +1620,12 @@ const SimpleParser = struct {
         return error.UnsupportedSimpleStatement;
     }
 
-    fn parsePrintCall(self: *SimpleParser) anyerror!void {
+    const HostPrintTarget = enum {
+        print,
+        console_log,
+    };
+
+    fn parsePrintCall(self: *SimpleParser, target: HostPrintTarget) anyerror!void {
         try self.expectPunctuator("(");
         var argc: u32 = 0;
         if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
@@ -1635,11 +1640,11 @@ const SimpleParser = struct {
             }
         }
         try self.expectPunctuator(")");
-        if (argc == 1) {
-            try self.emit.emitHostPrint();
-        } else {
-            try self.emit.emitHostPrintN(argc);
-        }
+        const mode: u8 = switch (target) {
+            .print => 0,
+            .console_log => 1,
+        };
+        try self.emit.emitHostPrintNWithMode(argc, mode);
         try self.consumeSemicolon();
     }
 

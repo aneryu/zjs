@@ -2079,21 +2079,28 @@ pub const Vm = struct {
 
     fn hostPrintN(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
         const argc = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
-        frame.pc += 4;
-        var values: [8]core.Value = undefined;
-        if (argc > values.len) return self.throwUnsupported(bytecode.emitter.known.host_print_n);
+        const mode = function.code[frame.pc + 4];
+        frame.pc += 5;
+        const argc_usize = @as(usize, argc);
+        var values = try self.ctx.runtime.memory.alloc(core.Value, argc_usize);
+        errdefer self.ctx.runtime.memory.free(core.Value, values);
         var remaining = argc;
-        while (remaining > 0) {
-            remaining -= 1;
-            values[remaining] = try self.stack.pop();
+        while (remaining > 0) : (remaining -= 1) {
+            values[remaining - 1] = try self.stack.pop();
         }
         defer {
-            var i: u32 = 0;
-            while (i < argc) : (i += 1) values[i].free(self.ctx.runtime);
+            var i: usize = 0;
+            while (i < argc_usize) : (i += 1) values[i].free(self.ctx.runtime);
+            self.ctx.runtime.memory.free(core.Value, values);
         }
+        try self.hostPrintValues(mode, values);
+    }
+
+    fn hostPrintValues(self: *Vm, mode: u8, values: []core.Value) !void {
+        _ = mode;
         if (self.output) |writer| {
-            var i: u32 = 0;
-            while (i < argc) : (i += 1) {
+            var i: usize = 0;
+            while (i < values.len) : (i += 1) {
                 if (i != 0) try writer.print(" ", .{});
                 try printValue(self.ctx.runtime, writer, values[i]);
             }

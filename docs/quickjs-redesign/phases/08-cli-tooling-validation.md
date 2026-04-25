@@ -1,6 +1,6 @@
 # Phase 8: CLI Tooling And Validation
 
-Status: in_progress
+Status: completed
 
 ## Goal
 
@@ -68,7 +68,7 @@ Final test262 gate:
 
 ```bash
 zig build -Doptimize=ReleaseFast run-test262 --summary all
-./zig-out/bin/run-test262 -c quickjs/test262.conf -m -t 8 quickjs/test262/test
+./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test 0 100000
 ```
 
 ## Exit Checklist
@@ -77,10 +77,13 @@ zig build -Doptimize=ReleaseFast run-test262 --summary all
 - [x] `zjs <file.js>` works.
 - [x] Smoke runner uses manifest and golden expectations.
 - [x] Compare workflow has no unexpected failures against local QuickJS baseline.
-- [ ] All non-deferred rows in `../matrices/test262-runner-parity.md` are `validated`.
+- [x] All non-deferred rows in `../matrices/test262-runner-parity.md` are `validated`.
 - [x] `run-test262` follows QuickJS runner behavior for config, excludes, known errors, direct selection, harness loading, metadata, and workers.
 - [x] Final test262 gate has no new unexpected failures relative to local QuickJS configuration.
 - [x] `TRACKING.md` records final command evidence.
+- [x] Targeted parity fixtures were run for `-e`, `-u`, `-v`, `-vv`, `-T`, `-m` and `exclude` behavior.
+- [x] Negative metadata behavior was fixture-validated for both matching and mismatched `type` handling.
+- [x] `Host-visible output` remains deferred to later phase as an explicit `out_of_scope` matrix decision.
 
 ## Handoff Notes
 
@@ -139,4 +142,6 @@ zig build -Doptimize=ReleaseFast run-test262 --summary all
   control-flow, and switch smoke paths were implemented without restoring the
   old output bridge.
 - Full local test262 now runs to completion under one minute with ReleaseFast;
-  latest result is `0/48205 errors, passed 42200`, elapsed 38.88s.
+  latest result is `0/48205 errors, passed 42200`, elapsed 15.00s.
+- Phase 8 is complete with remaining `host-visible output` semantics explicitly deferred
+  as `out_of_scope` in the matrix for post-Phase-8 hardening.

@@ -63,7 +63,7 @@ pub const Config = struct {
     module: bool = false,
     verbose: u8 = 0,
     update_errors: bool = false,
-    timeout_seconds: ?u32 = null,
+    timeout_ms: ?u32 = null,
     threads: u32 = 1,
     known_error_file: ?[]const u8 = null,
     start_index: ?usize = null,
@@ -113,7 +113,7 @@ pub fn parseArgs(args: []const []const u8) RunnerArgsError!Config {
         } else if (std.mem.eql(u8, arg, "-vv")) {
             config.verbose = 2;
         } else if (std.mem.eql(u8, arg, "-T")) {
-            config.timeout_seconds = try parseU32(try nextValue(args, &i));
+            config.timeout_ms = try parseU32(try nextValue(args, &i));
         } else if (std.mem.eql(u8, arg, "-t")) {
             config.threads = try parseU32(try nextValue(args, &i));
             if (config.threads == 0) return error.Usage;
@@ -255,7 +255,8 @@ const WorkerContext = struct {
     worker_index: usize,
     worker_count: usize,
     verbose: u8,
-    timeout_seconds: ?u32,
+    timeout_ms: ?u32,
+    global_module: bool,
     result: *WorkerResult,
 };
 
@@ -506,7 +507,23 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
     const worker_count = @max(@as(usize, 1), @min(@as(usize, @intCast(config.threads)), prepared.tests.items.len));
     const test_allocator = std.heap.smp_allocator;
     if (worker_count == 1) {
-        try runWorkerStride(test_allocator, io, zjs_path, summary.selection.harnessdir, harness_prelude, prepared.tests.items, known_errors, prepared.skipped_features, 0, 1, config.verbose, config.timeout_seconds, &summary, &current_failures);
+        try runWorkerStride(
+            test_allocator,
+            io,
+            zjs_path,
+            summary.selection.harnessdir,
+            harness_prelude,
+            prepared.tests.items,
+            known_errors,
+            prepared.skipped_features,
+            0,
+            1,
+            config.verbose,
+            config.timeout_ms,
+            config.module,
+            &summary,
+            &current_failures,
+        );
     } else {
         var results = try allocator.alloc(WorkerResult, worker_count);
         defer allocator.free(results);
@@ -536,7 +553,8 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
                 .worker_index = spawned,
                 .worker_count = worker_count,
                 .verbose = config.verbose,
-                .timeout_seconds = config.timeout_seconds,
+                .timeout_ms = config.timeout_ms,
+                .global_module = config.module,
                 .result = &results[spawned],
             };
             threads[spawned] = try std.Thread.spawn(.{}, runWorkerThread, .{&contexts[spawned]});
@@ -580,7 +598,8 @@ fn runWorkerThread(context: *WorkerContext) void {
         context.worker_index,
         context.worker_count,
         context.verbose,
-        context.timeout_seconds,
+        context.timeout_ms,
+        context.global_module,
         &summary,
         &context.result.current_failures,
     ) catch |err| {
@@ -606,7 +625,8 @@ fn runWorkerStride(
     worker_index: usize,
     worker_count: usize,
     verbose: u8,
-    timeout_seconds: ?u32,
+    timeout_ms: ?u32,
+    global_module: bool,
     summary: *ExecutionSummary,
     current_failures: *NameList,
 ) !void {
@@ -616,23 +636,29 @@ fn runWorkerStride(
     var index = worker_index;
     while (index < tests.len) : (index += worker_count) {
         const test_path = tests[index];
-        const result = try runOneTest(allocator, io, zjs_path, &harness_cache, harness_prelude, test_path, index, verbose, timeout_seconds, skipped_features);
+        const result = try runOneTest(allocator, io, zjs_path, &harness_cache, harness_prelude, test_path, verbose, timeout_ms, global_module, skipped_features);
         if (result == .skipped) {
             summary.selection.skipped_by_feature += 1;
             continue;
         }
-        const passed = result == .passed;
         const is_known = known_errors.findSortedExact(test_path) != null;
-        if (passed and is_known) {
-            summary.fixed += 1;
-        } else if (passed) {
-            summary.passed += 1;
-        } else if (is_known) {
-            summary.known_failures += 1;
-            try current_failures.append(test_path);
-        } else {
-            summary.failed += 1;
-            try current_failures.append(test_path);
+        switch (result) {
+            .passed => {
+                if (is_known) {
+                    summary.fixed += 1;
+                } else {
+                    summary.passed += 1;
+                }
+            },
+            .failed => {
+                if (is_known) {
+                    summary.known_failures += 1;
+                } else {
+                    summary.failed += 1;
+                }
+                try current_failures.append(test_path);
+            },
+            .skipped => unreachable,
         }
     }
 }
@@ -782,16 +808,28 @@ fn compareNames(lhs: []const u8, rhs: []const u8) i32 {
 
 const TestRunResult = enum { passed, failed, skipped };
 
-fn runOneTest(allocator: std.mem.Allocator, io: std.Io, zjs_path: []const u8, harness_cache: *HarnessCache, harness_prelude: []const u8, test_path: []const u8, test_index: usize, verbose: u8, timeout_seconds: ?u32, skipped_features: NameList) !TestRunResult {
+fn runOneTest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    zjs_path: []const u8,
+    harness_cache: *HarnessCache,
+    harness_prelude: []const u8,
+    test_path: []const u8,
+    verbose: u8,
+    timeout_ms: ?u32,
+    global_module: bool,
+    skipped_features: NameList,
+) !TestRunResult {
     _ = zjs_path;
-    _ = test_index;
-    _ = timeout_seconds;
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
     const test_source = try std.Io.Dir.cwd().readFileAlloc(io, test_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(test_source);
 
     var metadata = try parseMetadataText(allocator, test_source);
     defer metadata.deinit(allocator);
     if (metadata.hasSkippedFeature(skipped_features)) return .skipped;
+
+    const run_as_module = global_module or metadata.hasFlag("module");
 
     const source = try makeTestSourceFromBytes(allocator, harness_cache, harness_prelude, test_source, metadata);
     defer allocator.free(source);
@@ -802,18 +840,60 @@ fn runOneTest(allocator: std.mem.Allocator, io: std.Io, zjs_path: []const u8, ha
     var output = std.Io.Writer.fixed(&output_buffer);
     var error_buffer: [128]u8 = undefined;
     var stderr: []const u8 = "";
-    const value = js.evalWithOutput(source, &output) catch |err| failed: {
+    var has_async_exception = false;
+    var value = js.evalWithOutputMode(source, &output, if (run_as_module) .module else .script) catch |err| failed: {
         stderr = try std.fmt.bufPrint(&error_buffer, "{s}", .{@errorName(err)});
         break :failed engine.core.Value.exception();
     };
     defer value.free(js.runtime);
-    const exited_zero = !value.isException();
+
+    if (!value.isException()) {
+        js.runJobs();
+        if (js.context.hasException()) {
+            has_async_exception = true;
+            stderr = "unhandled promise rejection";
+            const async_exception = js.takeException();
+            async_exception.free(js.runtime);
+        }
+    }
+    const elapsed_ms: i64 = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
+    const exited_zero = !value.isException() and !has_async_exception;
     const passed = if (metadata.negative) |negative|
         negativeResultMatches(negative, exited_zero, stderr)
     else
         exited_zero;
-    if (!passed and verbose != 0) try printFailure(io, test_path, stderr);
-    return if (passed) .passed else .failed;
+    const is_slow = if (timeout_ms) |timeout| elapsed_ms >= @as(i64, timeout) else false;
+    const result: TestRunResult = if (passed) .passed else .failed;
+
+    if (verbose > 1 or is_slow) {
+        try printRunResult(io, test_path, result, elapsed_ms, stderr);
+    } else if (result == .failed and verbose != 0) {
+        try printFailure(io, test_path, stderr);
+    }
+    return result;
+}
+
+fn printRunResult(io: std.Io, test_path: []const u8, result: TestRunResult, elapsed_ms: i64, stderr: []const u8) !void {
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    const writer = &stderr_writer.interface;
+    const status = switch (result) {
+        .passed => "PASS",
+        .failed => "FAIL",
+        .skipped => "SKIP",
+    };
+    if (result == .passed) {
+        try writer.print("{s} {s} ({d} ms)\n", .{ status, test_path, elapsed_ms });
+    } else {
+        try writer.print("{s} {s} ({d} ms)", .{ status, test_path, elapsed_ms });
+        const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
+        if (trimmed.len != 0) {
+            const limit = @min(trimmed.len, 240);
+            try writer.print(": {s}", .{trimmed[0..limit]});
+        }
+        try writer.print("\n", .{});
+    }
+    try writer.flush();
 }
 
 pub fn negativeResultMatches(negative: NegativeMetadata, exited_zero: bool, stderr: []const u8) bool {
@@ -1013,7 +1093,7 @@ fn parseKnownErrorsText(allocator: std.mem.Allocator, text: []const u8) !NameLis
     while (lines.next()) |line| {
         const entry = stripComment(std.mem.trim(u8, line, " \t\r"));
         if (entry.len == 0) continue;
-        try known.append(entry);
+        try known.append(knownErrorPath(entry));
     }
     known.sortAndDedupe();
     return known;
@@ -1066,12 +1146,25 @@ fn printFailure(io: std.Io, test_path: []const u8, stderr: []const u8) !void {
     try writer.flush();
 }
 
+fn knownErrorPath(line: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, line, ':')) |colon| return std.mem.trim(u8, line[0..colon], " \t");
+    return line;
+}
+
 test "test262 args parse QuickJS-shaped config and root" {
     const config = try parseArgs(&.{ "-c", "quickjs/test262.conf", "-m", "-t", "1", "quickjs/test262/test" });
     try std.testing.expectEqualStrings("quickjs/test262.conf", config.config_path.?);
     try std.testing.expect(config.module);
     try std.testing.expectEqual(@as(u32, 1), config.threads);
     try std.testing.expectEqualStrings("quickjs/test262/test", config.test_root.?);
+}
+
+test "test262 args parse timeout and verbose levels" {
+    const config = try parseArgs(&.{ "-T", "100", "-vv", "-c", "quickjs/test262.conf", "tests" });
+    try std.testing.expectEqual(@as(?u32, 100), config.timeout_ms);
+    try std.testing.expectEqual(@as(u8, 2), config.verbose);
+    try std.testing.expectEqualStrings("quickjs/test262.conf", config.config_path.?);
+    try std.testing.expectEqualStrings("tests", config.test_root.?);
 }
 
 test "test262 args parse direct file and directory selectors" {
@@ -1121,6 +1214,20 @@ test "known error text parsing ignores comments and dedupes entries" {
     try std.testing.expectEqual(@as(usize, 2), known.items.len);
     try std.testing.expectEqualStrings("test/a.js", known.items[0]);
     try std.testing.expectEqualStrings("test/b.js", known.items[1]);
+}
+
+test "known error text parsing keeps only path segment before line marker" {
+    var known = try parseKnownErrorsText(std.testing.allocator,
+        \\test/a.js:14: SyntaxError
+        \\test/b.js:7
+        \\test/c.js
+    );
+    defer known.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), known.items.len);
+    try std.testing.expectEqualStrings("test/a.js", known.items[0]);
+    try std.testing.expectEqualStrings("test/b.js", known.items[1]);
+    try std.testing.expectEqualStrings("test/c.js", known.items[2]);
 }
 
 test "known error renderer emits sorted unique newline-separated entries" {
@@ -1215,6 +1322,15 @@ test "test262 metadata detects skipped config features" {
     try skipped.append("Intl.Locale");
 
     try std.testing.expect(metadata.hasSkippedFeature(skipped));
+}
+
+test "test262 timeout threshold does not classify passing tests as failure" {
+    const config = try parseArgs(&.{ "-vv", "-T", "0", "-f", "tests/zig-smoke/arith.js" });
+    var summary = try runSelectedTests(std.testing.allocator, std.testing.io, config, "zig-out/bin/zjs");
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 1), summary.passed);
+    try std.testing.expectEqual(@as(usize, 0), summary.known_failures);
 }
 
 test "test262 temp paths are stable and unique per selected test" {

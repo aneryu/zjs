@@ -129,6 +129,18 @@ test "Engine eval executes simple variable assignment and print" {
     try std.testing.expectEqualStrings("12\n", stream.buffered());
 }
 
+test "Engine eval executes console.log with many arguments" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput("console.log(1,2,3,4,5,6,7,8,9,10);", &stream);
+    defer result.free(js.runtime);
+    const output = stream.buffered();
+    try std.testing.expectEqualStrings("1 2 3 4 5 6 7 8 9 10\n", output);
+}
+
 test "Engine eval executes simple template interpolation" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();

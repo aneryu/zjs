@@ -39,21 +39,48 @@ pub const Engine = struct {
     }
 
     pub fn eval(self: *Engine, source_text: []const u8) !core.Value {
-        var compiled = try frontend.parser.parse(self.runtime, source_text, .{ .mode = .script, .filename = "<eval>" });
-        defer compiled.deinit();
-        if (compiled.syntax_error != null) return error.SyntaxError;
-        var vm_instance = exec.Vm.init(self.context);
-        defer vm_instance.deinit();
-        return vm_instance.run(&compiled.function);
+        return self.evalMode(source_text, .script);
+    }
+
+    pub fn evalModule(self: *Engine, source_text: []const u8) !core.Value {
+        return self.evalMode(source_text, .module);
+    }
+
+    pub fn evalMode(self: *Engine, source_text: []const u8, mode: frontend.parser.Mode) !core.Value {
+        return self.evalModeWithOutput(source_text, null, mode);
     }
 
     pub fn evalWithOutput(self: *Engine, source_text: []const u8, output: *std.Io.Writer) !core.Value {
-        var compiled = try frontend.parser.parse(self.runtime, source_text, .{ .mode = .script, .filename = "<eval>" });
+        return self.evalWithOutputMode(source_text, output, .script);
+    }
+
+    pub fn evalWithOutputMode(
+        self: *Engine,
+        source_text: []const u8,
+        output: *std.Io.Writer,
+        mode: frontend.parser.Mode,
+    ) !core.Value {
+        return self.evalModeWithOutput(source_text, output, mode);
+    }
+
+    fn evalModeWithOutput(
+        self: *Engine,
+        source_text: []const u8,
+        output: ?*std.Io.Writer,
+        mode: frontend.parser.Mode,
+    ) !core.Value {
+        var compiled = try frontend.parser.parse(self.runtime, source_text, .{ .mode = mode, .filename = "<eval>" });
         defer compiled.deinit();
         if (compiled.syntax_error != null) return error.SyntaxError;
-        var vm_instance = exec.Vm.initWithOutput(self.context, output);
-        defer vm_instance.deinit();
-        return vm_instance.run(&compiled.function);
+        if (output) |writer| {
+            var vm_instance = exec.Vm.initWithOutput(self.context, writer);
+            defer vm_instance.deinit();
+            return vm_instance.run(&compiled.function);
+        } else {
+            var vm_instance = exec.Vm.init(self.context);
+            defer vm_instance.deinit();
+            return vm_instance.run(&compiled.function);
+        }
     }
 
     pub fn runJobs(self: *Engine) void {

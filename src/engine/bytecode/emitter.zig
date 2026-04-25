@@ -54,6 +54,13 @@ pub const Emitter = struct {
         try self.emitKnown(known.host_print);
     }
 
+    pub fn emitHostPrintMode(self: *Emitter, mode: u8) !void {
+        var bytes: [2]u8 = undefined;
+        bytes[0] = known.host_print;
+        bytes[1] = mode;
+        try self.append(&bytes);
+    }
+
     pub fn emitGetVar(self: *Emitter, atom_id: atom.Atom) !void {
         try self.emitKnownAtom(known.get_var, atom_id);
     }
@@ -144,7 +151,15 @@ pub const Emitter = struct {
     }
 
     pub fn emitHostPrintN(self: *Emitter, argc: u32) !void {
-        try self.emitKnownU32(known.host_print_n, argc);
+        try self.emitHostPrintNWithMode(argc, 0);
+    }
+
+    pub fn emitHostPrintNWithMode(self: *Emitter, argc: u32, mode: u8) !void {
+        var bytes: [6]u8 = undefined;
+        bytes[0] = known.host_print_n;
+        std.mem.writeInt(u32, bytes[1..5], argc, .little);
+        bytes[5] = mode;
+        try self.append(bytes[0..6]);
     }
 
     pub fn emitSetProp(self: *Emitter, atom_id: atom.Atom) !void {
