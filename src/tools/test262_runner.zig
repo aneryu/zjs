@@ -1,4 +1,5 @@
 const std = @import("std");
+const engine = @import("quickjs_zig_engine");
 
 pub const RunnerArgsError = error{
     Usage,
@@ -8,6 +9,52 @@ pub const RunnerArgsError = error{
 
 pub const RunnerError = error{
     ConfigParse,
+};
+
+pub const NegativeMetadata = struct {
+    phase: ?[]const u8 = null,
+    type_name: ?[]const u8 = null,
+
+    pub fn deinit(self: *NegativeMetadata, allocator: std.mem.Allocator) void {
+        if (self.phase) |value| allocator.free(value);
+        if (self.type_name) |value| allocator.free(value);
+    }
+};
+
+pub const TestMetadata = struct {
+    includes: NameList,
+    features: NameList,
+    flags: NameList,
+    negative: ?NegativeMetadata = null,
+
+    pub fn init(allocator: std.mem.Allocator) TestMetadata {
+        return .{
+            .includes = NameList.init(allocator),
+            .features = NameList.init(allocator),
+            .flags = NameList.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *TestMetadata, allocator: std.mem.Allocator) void {
+        self.includes.deinit();
+        self.features.deinit();
+        self.flags.deinit();
+        if (self.negative) |*negative| negative.deinit(allocator);
+    }
+
+    pub fn hasSkippedFeature(self: TestMetadata, skipped_features: NameList) bool {
+        for (self.features.items) |feature| {
+            if (skipped_features.contains(feature)) return true;
+        }
+        return false;
+    }
+
+    pub fn hasFlag(self: TestMetadata, name: []const u8) bool {
+        for (self.flags.items) |flag| {
+            if (std.mem.eql(u8, flag, name)) return true;
+        }
+        return false;
+    }
 };
 
 pub const Config = struct {
@@ -143,6 +190,7 @@ pub const SelectionSummary = struct {
     total_tests: usize = 0,
     selected_tests: usize = 0,
     excluded_tests: usize = 0,
+    skipped_by_feature: usize = 0,
     skipped_by_index: usize = 0,
     harnessdir: ?[]const u8 = null,
     errorfile: ?[]const u8 = null,
@@ -156,9 +204,11 @@ pub const SelectionSummary = struct {
 pub const PreparedSelection = struct {
     tests: NameList,
     summary: SelectionSummary,
+    skipped_features: NameList,
 
     pub fn deinit(self: *PreparedSelection, allocator: std.mem.Allocator) void {
         self.tests.deinit();
+        self.skipped_features.deinit();
         self.summary.deinit(allocator);
     }
 };
@@ -175,9 +225,102 @@ pub const ExecutionSummary = struct {
     }
 };
 
+const WorkerResult = struct {
+    passed: usize = 0,
+    failed: usize = 0,
+    known_failures: usize = 0,
+    fixed: usize = 0,
+    skipped_by_feature: usize = 0,
+    current_failures: NameList,
+    err: ?anyerror = null,
+
+    fn init(allocator: std.mem.Allocator) WorkerResult {
+        return .{ .current_failures = NameList.init(allocator) };
+    }
+
+    fn deinit(self: *WorkerResult) void {
+        self.current_failures.deinit();
+    }
+};
+
+const WorkerContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    zjs_path: []const u8,
+    harnessdir: ?[]const u8,
+    harness_prelude: []const u8,
+    tests: []const []const u8,
+    known_errors: NameList,
+    skipped_features: NameList,
+    worker_index: usize,
+    worker_count: usize,
+    verbose: u8,
+    timeout_seconds: ?u32,
+    result: *WorkerResult,
+};
+
+const HarnessCache = struct {
+    const Entry = struct {
+        name: []const u8,
+        bytes: ?[]const u8,
+    };
+
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    harnessdir: ?[]const u8,
+    entries: []Entry = &.{},
+    capacity: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8) HarnessCache {
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .harnessdir = harnessdir,
+        };
+    }
+
+    fn deinit(self: *HarnessCache) void {
+        for (self.entries) |entry| {
+            self.allocator.free(entry.name);
+            if (entry.bytes) |bytes| self.allocator.free(bytes);
+        }
+        if (self.capacity != 0) self.allocator.free(self.entries.ptr[0..self.capacity]);
+        self.entries = &.{};
+        self.capacity = 0;
+    }
+
+    fn get(self: *HarnessCache, basename: []const u8) !?[]const u8 {
+        for (self.entries) |entry| {
+            if (std.mem.eql(u8, entry.name, basename)) return entry.bytes;
+        }
+
+        const bytes = try readHarnessFile(self.allocator, self.io, self.harnessdir, basename);
+        try self.append(.{
+            .name = try self.allocator.dupe(u8, basename),
+            .bytes = bytes,
+        });
+        return bytes;
+    }
+
+    fn append(self: *HarnessCache, entry: Entry) !void {
+        if (self.entries.len == self.capacity) {
+            const next_capacity = if (self.capacity == 0) 16 else self.capacity * 2;
+            const next = try self.allocator.alloc(Entry, next_capacity);
+            @memcpy(next[0..self.entries.len], self.entries);
+            if (self.capacity != 0) self.allocator.free(self.entries.ptr[0..self.capacity]);
+            self.entries = next[0..self.entries.len];
+            self.capacity = next_capacity;
+        }
+        const storage: []Entry = @constCast(self.entries.ptr[0..self.capacity]);
+        storage[self.entries.len] = entry;
+        self.entries = storage[0 .. self.entries.len + 1];
+    }
+};
+
 pub const NameList = struct {
     allocator: std.mem.Allocator,
     items: []const []const u8 = &.{},
+    capacity: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) NameList {
         return .{ .allocator = allocator };
@@ -185,16 +328,23 @@ pub const NameList = struct {
 
     pub fn deinit(self: *NameList) void {
         for (self.items) |item| self.allocator.free(item);
-        if (self.items.len != 0) self.allocator.free(self.items);
+        if (self.capacity != 0) self.allocator.free(self.items.ptr[0..self.capacity]);
         self.items = &.{};
+        self.capacity = 0;
     }
 
     pub fn appendOwned(self: *NameList, item: []const u8) !void {
-        const next = try self.allocator.alloc([]const u8, self.items.len + 1);
-        @memcpy(next[0..self.items.len], self.items);
-        if (self.items.len != 0) self.allocator.free(self.items);
-        next[self.items.len] = item;
-        self.items = next;
+        if (self.items.len == self.capacity) {
+            const next_capacity = if (self.capacity == 0) 8 else self.capacity * 2;
+            const next = try self.allocator.alloc([]const u8, next_capacity);
+            @memcpy(next[0..self.items.len], self.items);
+            if (self.capacity != 0) self.allocator.free(self.items.ptr[0..self.capacity]);
+            self.items = next[0..self.items.len];
+            self.capacity = next_capacity;
+        }
+        const storage: [][]const u8 = @constCast(self.items.ptr[0..self.capacity]);
+        storage[self.items.len] = item;
+        self.items = storage[0 .. self.items.len + 1];
     }
 
     pub fn append(self: *NameList, item: []const u8) !void {
@@ -218,12 +368,58 @@ pub const NameList = struct {
         self.items = mutable[0..write];
     }
 
+    pub fn dedupePreserveOrder(self: *NameList) void {
+        if (self.items.len < 2) return;
+        const mutable: [][]const u8 = @constCast(self.items);
+        var write: usize = 0;
+        for (mutable) |item| {
+            var duplicate = false;
+            for (mutable[0..write]) |existing| {
+                if (std.mem.eql(u8, existing, item)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                self.allocator.free(item);
+            } else {
+                mutable[write] = item;
+                write += 1;
+            }
+        }
+        self.items = mutable[0..write];
+    }
+
     pub fn contains(self: NameList, needle: []const u8) bool {
         for (self.items) |item| {
             if (std.mem.eql(u8, item, needle)) return true;
             if (std.mem.endsWith(u8, item, "/") and std.mem.startsWith(u8, needle, item)) return true;
         }
         return false;
+    }
+
+    pub fn findSortedExact(self: NameList, needle: []const u8) ?usize {
+        var low: usize = 0;
+        var high: usize = self.items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const cmp = compareNames(self.items[mid], needle);
+            if (cmp < 0) {
+                low = mid + 1;
+            } else if (cmp > 0) {
+                high = mid;
+            } else {
+                return mid;
+            }
+        }
+        return null;
+    }
+
+    pub fn move(self: *NameList) NameList {
+        const out = self.*;
+        self.items = &.{};
+        self.capacity = 0;
+        return out;
     }
 };
 
@@ -283,6 +479,7 @@ pub fn collectSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
         .total_tests = prepared.summary.total_tests,
         .selected_tests = prepared.summary.selected_tests,
         .excluded_tests = prepared.summary.excluded_tests,
+        .skipped_by_feature = prepared.summary.skipped_by_feature,
         .skipped_by_index = prepared.summary.skipped_by_index,
         .harnessdir = if (prepared.summary.harnessdir) |value| try allocator.dupe(u8, value) else null,
         .errorfile = if (prepared.summary.errorfile) |value| try allocator.dupe(u8, value) else null,
@@ -303,10 +500,129 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
     };
     prepared.summary = .{};
     errdefer summary.deinit(allocator);
+    const harness_prelude = try makeHarnessPrelude(allocator, io, summary.selection.harnessdir);
+    defer allocator.free(harness_prelude);
 
-    for (prepared.tests.items) |test_path| {
-        const passed = try runOneTest(allocator, io, zjs_path, summary.selection.harnessdir, test_path, config.verbose);
-        const is_known = known_errors.contains(test_path);
+    const worker_count = @max(@as(usize, 1), @min(@as(usize, @intCast(config.threads)), prepared.tests.items.len));
+    const test_allocator = std.heap.smp_allocator;
+    if (worker_count == 1) {
+        try runWorkerStride(test_allocator, io, zjs_path, summary.selection.harnessdir, harness_prelude, prepared.tests.items, known_errors, prepared.skipped_features, 0, 1, config.verbose, config.timeout_seconds, &summary, &current_failures);
+    } else {
+        var results = try allocator.alloc(WorkerResult, worker_count);
+        defer allocator.free(results);
+        var contexts = try allocator.alloc(WorkerContext, worker_count);
+        defer allocator.free(contexts);
+        var threads = try allocator.alloc(std.Thread, worker_count);
+        defer allocator.free(threads);
+
+        for (results) |*result| result.* = WorkerResult.init(test_allocator);
+        defer for (results) |*result| result.deinit();
+
+        var spawned: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < spawned) : (i += 1) threads[i].join();
+        }
+        while (spawned < worker_count) : (spawned += 1) {
+            contexts[spawned] = .{
+                .allocator = test_allocator,
+                .io = io,
+                .zjs_path = zjs_path,
+                .harnessdir = summary.selection.harnessdir,
+                .harness_prelude = harness_prelude,
+                .tests = prepared.tests.items,
+                .known_errors = known_errors,
+                .skipped_features = prepared.skipped_features,
+                .worker_index = spawned,
+                .worker_count = worker_count,
+                .verbose = config.verbose,
+                .timeout_seconds = config.timeout_seconds,
+                .result = &results[spawned],
+            };
+            threads[spawned] = try std.Thread.spawn(.{}, runWorkerThread, .{&contexts[spawned]});
+        }
+
+        for (threads) |thread| thread.join();
+
+        for (results) |*result| {
+            if (result.err) |err| return err;
+            summary.passed += result.passed;
+            summary.failed += result.failed;
+            summary.known_failures += result.known_failures;
+            summary.fixed += result.fixed;
+            summary.selection.skipped_by_feature += result.skipped_by_feature;
+            for (result.current_failures.items) |failure| try current_failures.append(failure);
+        }
+    }
+
+    if (config.update_errors and summary.selection.errorfile != null) {
+        var merged_failures = try mergeKnownErrorsForUpdate(allocator, known_errors, prepared.tests, current_failures);
+        defer merged_failures.deinit();
+        try writeKnownErrors(allocator, io, summary.selection.errorfile.?, merged_failures);
+    }
+
+    prepared.tests.deinit();
+    prepared.skipped_features.deinit();
+    return summary;
+}
+
+fn runWorkerThread(context: *WorkerContext) void {
+    var summary = ExecutionSummary{ .selection = .{} };
+    runWorkerStride(
+        context.allocator,
+        context.io,
+        context.zjs_path,
+        context.harnessdir,
+        context.harness_prelude,
+        context.tests,
+        context.known_errors,
+        context.skipped_features,
+        context.worker_index,
+        context.worker_count,
+        context.verbose,
+        context.timeout_seconds,
+        &summary,
+        &context.result.current_failures,
+    ) catch |err| {
+        context.result.err = err;
+        return;
+    };
+    context.result.passed = summary.passed;
+    context.result.failed = summary.failed;
+    context.result.known_failures = summary.known_failures;
+    context.result.fixed = summary.fixed;
+    context.result.skipped_by_feature = summary.selection.skipped_by_feature;
+}
+
+fn runWorkerStride(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    zjs_path: []const u8,
+    harnessdir: ?[]const u8,
+    harness_prelude: []const u8,
+    tests: []const []const u8,
+    known_errors: NameList,
+    skipped_features: NameList,
+    worker_index: usize,
+    worker_count: usize,
+    verbose: u8,
+    timeout_seconds: ?u32,
+    summary: *ExecutionSummary,
+    current_failures: *NameList,
+) !void {
+    var harness_cache = HarnessCache.init(allocator, io, harnessdir);
+    defer harness_cache.deinit();
+
+    var index = worker_index;
+    while (index < tests.len) : (index += worker_count) {
+        const test_path = tests[index];
+        const result = try runOneTest(allocator, io, zjs_path, &harness_cache, harness_prelude, test_path, index, verbose, timeout_seconds, skipped_features);
+        if (result == .skipped) {
+            summary.selection.skipped_by_feature += 1;
+            continue;
+        }
+        const passed = result == .passed;
+        const is_known = known_errors.findSortedExact(test_path) != null;
         if (passed and is_known) {
             summary.fixed += 1;
         } else if (passed) {
@@ -319,15 +635,6 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
             try current_failures.append(test_path);
         }
     }
-
-    if (config.update_errors and summary.selection.errorfile != null) {
-        var merged_failures = try mergeKnownErrorsForUpdate(allocator, known_errors, prepared.tests, current_failures);
-        defer merged_failures.deinit();
-        try writeKnownErrors(allocator, io, summary.selection.errorfile.?, merged_failures);
-    }
-
-    prepared.tests.deinit();
-    return summary;
 }
 
 pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config) !PreparedSelection {
@@ -382,6 +689,7 @@ pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
     return .{
         .tests = selected,
         .summary = summary,
+        .skipped_features = loaded.skipped_features.move(),
     };
 }
 
@@ -472,43 +780,73 @@ fn compareNames(lhs: []const u8, rhs: []const u8) i32 {
     }
 }
 
-fn runOneTest(allocator: std.mem.Allocator, io: std.Io, zjs_path: []const u8, harnessdir: ?[]const u8, test_path: []const u8, verbose: u8) !bool {
-    const source = try makeTestSource(allocator, io, harnessdir, test_path);
+const TestRunResult = enum { passed, failed, skipped };
+
+fn runOneTest(allocator: std.mem.Allocator, io: std.Io, zjs_path: []const u8, harness_cache: *HarnessCache, harness_prelude: []const u8, test_path: []const u8, test_index: usize, verbose: u8, timeout_seconds: ?u32, skipped_features: NameList) !TestRunResult {
+    _ = zjs_path;
+    _ = test_index;
+    _ = timeout_seconds;
+    const test_source = try std.Io.Dir.cwd().readFileAlloc(io, test_path, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(test_source);
+
+    var metadata = try parseMetadataText(allocator, test_source);
+    defer metadata.deinit(allocator);
+    if (metadata.hasSkippedFeature(skipped_features)) return .skipped;
+
+    const source = try makeTestSourceFromBytes(allocator, harness_cache, harness_prelude, test_source, metadata);
     defer allocator.free(source);
 
-    const temp_path = ".zig-cache/run-test262-current.js";
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = temp_path, .data = source });
-    defer std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
-
-    const result = try std.process.run(allocator, io, .{
-        .argv = &.{ zjs_path, temp_path },
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    const passed = switch (result.term) {
-        .exited => |code| code == 0,
-        else => false,
+    var js = try engine.Engine.init(allocator);
+    defer js.deinit();
+    var output_buffer: [64 * 1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var error_buffer: [128]u8 = undefined;
+    var stderr: []const u8 = "";
+    const value = js.evalWithOutput(source, &output) catch |err| failed: {
+        stderr = try std.fmt.bufPrint(&error_buffer, "{s}", .{@errorName(err)});
+        break :failed engine.core.Value.exception();
     };
-    if (!passed and verbose != 0) try printFailure(io, test_path, result.stderr);
-    return passed;
+    defer value.free(js.runtime);
+    const exited_zero = !value.isException();
+    const passed = if (metadata.negative) |negative|
+        negativeResultMatches(negative, exited_zero, stderr)
+    else
+        exited_zero;
+    if (!passed and verbose != 0) try printFailure(io, test_path, stderr);
+    return if (passed) .passed else .failed;
 }
 
-fn makeTestSource(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8, test_path: []const u8) ![]u8 {
+pub fn negativeResultMatches(negative: NegativeMetadata, exited_zero: bool, stderr: []const u8) bool {
+    if (exited_zero) return false;
+    if (negative.type_name) |type_name| {
+        if (std.mem.indexOf(u8, stderr, type_name) == null) return false;
+    }
+    if (negative.phase) |phase| {
+        if (std.mem.eql(u8, phase, "parse")) {
+            return negative.type_name != null and std.mem.eql(u8, negative.type_name.?, "SyntaxError");
+        }
+        if (std.mem.eql(u8, phase, "runtime") or std.mem.eql(u8, phase, "resolution")) return true;
+        return false;
+    }
+    return true;
+}
+
+pub fn tempTestPath(buffer: []u8, test_path: []const u8, test_index: usize) ![]const u8 {
+    const hash = std.hash.Wyhash.hash(test_index, test_path);
+    return std.fmt.bufPrint(buffer, ".zig-cache/run-test262-{d}-{x}.js", .{ test_index, hash });
+}
+
+fn makeHarnessPrelude(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const u8) ![]u8 {
     const sta = try readHarnessFile(allocator, io, harnessdir, "sta.js");
     defer if (sta) |bytes| allocator.free(bytes);
     const assert = try readHarnessFile(allocator, io, harnessdir, "assert.js");
     defer if (assert) |bytes| allocator.free(bytes);
-    const test_source = try std.Io.Dir.cwd().readFileAlloc(io, test_path, allocator, .limited(16 * 1024 * 1024));
-    defer allocator.free(test_source);
 
     const sta_len = if (sta) |bytes| bytes.len else 0;
     const assert_len = if (assert) |bytes| bytes.len else 0;
-    const total_len = sta_len + assert_len + test_source.len +
+    const total_len = sta_len + assert_len +
         @as(usize, if (sta != null) 1 else 0) +
-        @as(usize, if (assert != null) 1 else 0) + 1;
+        @as(usize, if (assert != null) 1 else 0);
     const out = try allocator.alloc(u8, total_len);
     var offset: usize = 0;
     if (sta) |bytes| {
@@ -522,6 +860,40 @@ fn makeTestSource(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]const
         offset += bytes.len;
         out[offset] = '\n';
         offset += 1;
+    }
+    return out[0..offset];
+}
+
+fn makeTestSource(allocator: std.mem.Allocator, io: std.Io, harness_cache: *HarnessCache, harness_prelude: []const u8, test_path: []const u8, metadata: TestMetadata) ![]u8 {
+    const test_source = try std.Io.Dir.cwd().readFileAlloc(io, test_path, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(test_source);
+    return makeTestSourceFromBytes(allocator, harness_cache, harness_prelude, test_source, metadata);
+}
+
+fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *HarnessCache, harness_prelude: []const u8, test_source: []const u8, metadata: TestMetadata) ![]u8 {
+    if (metadata.hasFlag("raw")) {
+        const out = try allocator.alloc(u8, test_source.len + 1);
+        @memcpy(out[0..test_source.len], test_source);
+        out[test_source.len] = '\n';
+        return out;
+    }
+
+    var includes_len: usize = 0;
+    for (metadata.includes.items) |include_name| {
+        if (try harness_cache.get(include_name)) |bytes| includes_len += bytes.len + 1;
+    }
+    const total_len = harness_prelude.len + includes_len + test_source.len + 1;
+    const out = try allocator.alloc(u8, total_len);
+    var offset: usize = 0;
+    @memcpy(out[offset..][0..harness_prelude.len], harness_prelude);
+    offset += harness_prelude.len;
+    for (metadata.includes.items) |include_name| {
+        if (try harness_cache.get(include_name)) |bytes| {
+            @memcpy(out[offset..][0..bytes.len], bytes);
+            offset += bytes.len;
+            out[offset] = '\n';
+            offset += 1;
+        }
     }
     @memcpy(out[offset..][0..test_source.len], test_source);
     offset += test_source.len;
@@ -538,6 +910,89 @@ fn readHarnessFile(allocator: std.mem.Allocator, io: std.Io, harnessdir: ?[]cons
         error.FileNotFound => null,
         else => |e| return e,
     };
+}
+
+fn loadMetadataFromFile(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) !TestMetadata {
+    const bytes = try readMetadataPrefix(allocator, io, test_path);
+    defer allocator.free(bytes);
+    return parseMetadataText(allocator, bytes);
+}
+
+fn readMetadataPrefix(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) ![]u8 {
+    const max_metadata_probe = 64 * 1024;
+    const file = try std.Io.Dir.cwd().openFile(io, test_path, .{});
+    defer file.close(io);
+    const buffer = try allocator.alloc(u8, max_metadata_probe);
+    errdefer allocator.free(buffer);
+    const len = try file.readPositionalAll(io, buffer, 0);
+    if (len == buffer.len) return buffer;
+    const exact = try allocator.dupe(u8, buffer[0..len]);
+    allocator.free(buffer);
+    return exact;
+}
+
+pub fn parseMetadataText(allocator: std.mem.Allocator, source: []const u8) !TestMetadata {
+    var metadata = TestMetadata.init(allocator);
+    errdefer metadata.deinit(allocator);
+
+    const start_marker = "/*---";
+    const end_marker = "---*/";
+    const start = std.mem.indexOf(u8, source, start_marker) orelse return metadata;
+    const body_start = start + start_marker.len;
+    const end = std.mem.indexOfPos(u8, source, body_start, end_marker) orelse return metadata;
+    const body = source[body_start..end];
+
+    var in_negative = false;
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+
+        if (std.mem.eql(u8, line, "negative:")) {
+            if (metadata.negative == null) metadata.negative = .{};
+            in_negative = true;
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
+            const key = std.mem.trim(u8, line[0..colon], " \t");
+            const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+            if (std.mem.eql(u8, key, "includes")) {
+                try parseMetadataList(&metadata.includes, value);
+                in_negative = false;
+            } else if (std.mem.eql(u8, key, "features")) {
+                try parseMetadataList(&metadata.features, value);
+                in_negative = false;
+            } else if (std.mem.eql(u8, key, "flags")) {
+                try parseMetadataList(&metadata.flags, value);
+                in_negative = false;
+            } else if (in_negative and std.mem.eql(u8, key, "phase")) {
+                if (metadata.negative == null) metadata.negative = .{};
+                if (metadata.negative.?.phase) |old| allocator.free(old);
+                metadata.negative.?.phase = try allocator.dupe(u8, value);
+            } else if (in_negative and std.mem.eql(u8, key, "type")) {
+                if (metadata.negative == null) metadata.negative = .{};
+                if (metadata.negative.?.type_name) |old| allocator.free(old);
+                metadata.negative.?.type_name = try allocator.dupe(u8, value);
+            } else {
+                in_negative = false;
+            }
+        }
+    }
+
+    metadata.includes.dedupePreserveOrder();
+    metadata.features.sortAndDedupe();
+    metadata.flags.sortAndDedupe();
+    return metadata;
+}
+
+fn parseMetadataList(list: *NameList, value: []const u8) !void {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']') return;
+    var entries = std.mem.splitScalar(u8, trimmed[1 .. trimmed.len - 1], ',');
+    while (entries.next()) |entry| {
+        const name = std.mem.trim(u8, entry, " \t\r\n\"");
+        if (name.len != 0) try list.append(name);
+    }
 }
 
 fn loadKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const u8) !NameList {
@@ -702,4 +1157,73 @@ test "known error update preserves unselected existing failures" {
     try std.testing.expectEqual(@as(usize, 2), merged.items.len);
     try std.testing.expectEqualStrings("test/b.js", merged.items[0]);
     try std.testing.expectEqualStrings("test/c.js", merged.items[1]);
+}
+
+test "test262 metadata parses includes in order plus features flags and negative data" {
+    var metadata = try parseMetadataText(std.testing.allocator,
+        \\/*---
+        \\description: metadata fixture
+        \\includes: [propertyHelper.js, compareArray.js, propertyHelper.js]
+        \\features: [Symbol, BigInt]
+        \\flags: [onlyStrict, module]
+        \\negative:
+        \\  phase: runtime
+        \\  type: TypeError
+        \\---*/
+        \\throw new TypeError();
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), metadata.includes.items.len);
+    try std.testing.expectEqualStrings("propertyHelper.js", metadata.includes.items[0]);
+    try std.testing.expectEqualStrings("compareArray.js", metadata.includes.items[1]);
+    try std.testing.expect(metadata.features.contains("Symbol"));
+    try std.testing.expect(metadata.features.contains("BigInt"));
+    try std.testing.expect(metadata.flags.contains("onlyStrict"));
+    try std.testing.expect(metadata.flags.contains("module"));
+    try std.testing.expectEqualStrings("runtime", metadata.negative.?.phase.?);
+    try std.testing.expectEqualStrings("TypeError", metadata.negative.?.type_name.?);
+}
+
+test "test262 negative result matching requires expected type when present" {
+    const runtime_type = NegativeMetadata{
+        .phase = "runtime",
+        .type_name = "TypeError",
+    };
+    try std.testing.expect(negativeResultMatches(runtime_type, false, "TypeError: bad value"));
+    try std.testing.expect(!negativeResultMatches(runtime_type, false, "SyntaxError: bad syntax"));
+    try std.testing.expect(!negativeResultMatches(runtime_type, true, ""));
+
+    const parse_type = NegativeMetadata{
+        .phase = "parse",
+        .type_name = "SyntaxError",
+    };
+    try std.testing.expect(negativeResultMatches(parse_type, false, "SyntaxError: unexpected token"));
+    try std.testing.expect(!negativeResultMatches(parse_type, false, "TypeError: wrong phase"));
+}
+
+test "test262 metadata detects skipped config features" {
+    var metadata = try parseMetadataText(std.testing.allocator,
+        \\/*---
+        \\features: [Intl.Locale, ArrayBuffer]
+        \\---*/
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    var skipped = NameList.init(std.testing.allocator);
+    defer skipped.deinit();
+    try skipped.append("Intl.Locale");
+
+    try std.testing.expect(metadata.hasSkippedFeature(skipped));
+}
+
+test "test262 temp paths are stable and unique per selected test" {
+    var first_buf: [128]u8 = undefined;
+    var second_buf: [128]u8 = undefined;
+    const first = try tempTestPath(&first_buf, "test/a.js", 0);
+    const second = try tempTestPath(&second_buf, "test/a.js", 1);
+
+    try std.testing.expect(std.mem.startsWith(u8, first, ".zig-cache/run-test262-0-"));
+    try std.testing.expect(std.mem.startsWith(u8, second, ".zig-cache/run-test262-1-"));
+    try std.testing.expect(!std.mem.eql(u8, first, second));
 }

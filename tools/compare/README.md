@@ -47,7 +47,7 @@ QJS_ZIG=/path/to/zjs
 
 1. `QJS` 环境变量
 2. `build/qjs`
-3. `../quickjs/build/qjs`
+3. `quickjs/build/qjs`
 
 可手动指定：
 

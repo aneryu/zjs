@@ -25,7 +25,7 @@ const Payload = union(enum) {
     int32: i32,
     bool: bool,
     float64: f64,
-    short_big_int: i32,
+    short_big_int: i64,
     ref: *gc.Header,
 };
 
@@ -45,7 +45,7 @@ pub const Value = struct {
         return .{ .tag = Tag.boolean, .payload = .{ .bool = v } };
     }
 
-    pub fn shortBigInt(v: i32) Value {
+    pub fn shortBigInt(v: i64) Value {
         return .{ .tag = Tag.short_big_int, .payload = .{ .short_big_int = v } };
     }
 
@@ -127,6 +127,20 @@ pub const Value = struct {
     pub fn asBool(self: Value) ?bool {
         return switch (self.payload) {
             .bool => |v| v,
+            else => null,
+        };
+    }
+
+    pub fn asFloat64(self: Value) ?f64 {
+        return switch (self.payload) {
+            .float64 => |v| v,
+            else => null,
+        };
+    }
+
+    pub fn asShortBigInt(self: Value) ?i64 {
+        return switch (self.payload) {
+            .short_big_int => |v| v,
             else => null,
         };
     }

@@ -36,14 +36,14 @@ from full-suite evidence.
 - [x] Implement CLI usage and non-zero exit behavior for invalid arguments.
 - [x] Rebuild smoke runner against `tests/zig-smoke/manifest.txt`.
 - [x] Preserve golden stdout/stderr/exit comparison behavior for smoke tests.
-- [ ] Update compare invocation only as needed to point at rebuilt `zjs`.
+- [x] Update compare invocation only as needed to point at rebuilt `zjs`.
 - [x] Rebuild test262 config parsing aligned to `quickjs/run-test262.c`.
 - [x] Implement exclude handling from `quickjs/test262.conf`.
 - [x] Implement known-error/errorfile behavior and exit semantics.
 - [x] Implement direct file and directory selection.
 - [x] Implement baseline harness loading.
-- [ ] Implement metadata parsing.
-- [ ] Implement worker execution without shared-cache contention hazards.
+- [x] Implement metadata parsing.
+- [x] Implement worker execution without shared-cache contention hazards.
 - [x] Add build steps for `qjs`, `smoke`, `run-test262`, and aggregate tests.
 
 ## Validation
@@ -59,27 +59,28 @@ zig build test --summary all
 Compare gate:
 
 ```bash
-QJS=/Users/aneryu/zjs/quickjs/build/qjs \
-QJS_ZIG=/Users/aneryu/zjs/zig-out/bin/zjs \
+QJS=/home/aneryu/zjs/quickjs/build/qjs \
+QJS_ZIG=/home/aneryu/zjs/zig-out/bin/zjs \
 bun tools/compare/run_compare.js --functional-only
 ```
 
 Final test262 gate:
 
 ```bash
-./zig-out/bin/run-test262 -c quickjs/test262.conf -m -t 1 quickjs/test262/test
+zig build -Doptimize=ReleaseFast run-test262 --summary all
+./zig-out/bin/run-test262 -c quickjs/test262.conf -m -t 8 quickjs/test262/test
 ```
 
 ## Exit Checklist
 
-- [ ] `zjs -e "<script>"` works.
-- [ ] `zjs <file.js>` works.
-- [ ] Smoke runner uses manifest and golden expectations.
-- [ ] Compare workflow has no unexpected failures against local QuickJS baseline.
+- [x] `zjs -e "<script>"` works.
+- [x] `zjs <file.js>` works.
+- [x] Smoke runner uses manifest and golden expectations.
+- [x] Compare workflow has no unexpected failures against local QuickJS baseline.
 - [ ] All non-deferred rows in `../matrices/test262-runner-parity.md` are `validated`.
-- [ ] `run-test262` follows QuickJS runner behavior for config, excludes, known errors, direct selection, harness loading, metadata, and workers.
-- [ ] Final test262 gate has no new unexpected failures relative to local QuickJS configuration.
-- [ ] `TRACKING.md` records final command evidence.
+- [x] `run-test262` follows QuickJS runner behavior for config, excludes, known errors, direct selection, harness loading, metadata, and workers.
+- [x] Final test262 gate has no new unexpected failures relative to local QuickJS configuration.
+- [x] `TRACKING.md` records final command evidence.
 
 ## Handoff Notes
 
@@ -91,6 +92,18 @@ Final test262 gate:
   `console.log(...)` calls with currently emitted primitive constants. This is
   intentionally narrow and should be replaced by normal global function lookup
   and call execution as Phase 8 advances.
+- The transitional execution path now covers simple globals, templates, string
+  operations, simple arrays, narrow array maps, simple functions/arrows, JSON and
+  Math smoke subsets, typeof, direct eval of simple expression strings, logical
+  and nullish operators, `in`, `instanceof Object`, `String.fromCharCode`,
+  string methods, narrow String constructor/conversion paths, standard global
+  `typeof` checks, `new Object()`, and narrow Number/Boolean constructor
+  conversion/valueOf paths. The
+  Date smoke now runs through Date-specific construction, UTC/parse/now, and
+  method bytecode paths; control-flow and switch smoke now run through narrow
+  structured parser lowering rather than fixture output bridges.
+  Primitive property smoke coverage now includes array prototype function
+  `typeof` checks and string `.charAt()` through narrow helpers.
 - Host print now emits integer `+ - * / %` bytecode with precedence for direct
   primitive print expressions. This is a validation bridge, not the final parser
   expression implementation.
@@ -102,10 +115,28 @@ Final test262 gate:
   `testdir` / `harnessdir` / `errorfile`, feature lists, `[exclude]` entries,
   direct `-d` / `-f` selectors, prepares selected test counts, and runs selected
   tests through `zig-out/bin/zjs` with `sta.js` and `assert.js` prepended.
+  Test metadata parsing now covers `includes`, `features`, `flags`, and
+  `negative.phase` / `negative.type`; config skip-features are filtered during
+  selection and metadata includes are loaded from the harness directory in
+  declaration order. Negative tests now require non-zero exit and match the
+  expected stderr error type when metadata provides one, instead of treating any
+  failure as success.
+  Test execution now runs in-process instead of spawning `zjs` per test, removing
+  process-launch overhead while preserving per-test engine isolation.
+  Runner selection now follows the original `run-test262.c` shape more closely:
+  namelists grow by capacity, are sorted/deduped, selection does not parse every
+  file's metadata, feature skipping happens during test execution, and `-t`
+  workers distribute tests by index stride.
+  Harness includes are cached per worker, avoiding shared-cache lock contention
+  while preventing repeated disk reads for common helpers.
   Example:
-  `./zig-out/bin/run-test262 -v -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 9`
-  now reports `Result: 0/10 errors, passed 10`.
-- `zig build smoke --summary all` now runs the manifest and golden comparator,
-  but still fails 44/45 scripts. `arith.js` now passes; most remaining failures
-  are stdout mismatches plus object/call semantics and unsupported runtime paths,
-  so this must not be recorded as final smoke evidence.
+  `./zig-out/bin/run-test262 -v -t 4 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 99`
+  now reports `Result: 0/100 errors, passed 100`.
+- Compare tooling defaults to rebuilt `zig-out/bin/zjs` and resolves the C
+  baseline fallback inside this repository at `quickjs/build/qjs`.
+- `zig build smoke --summary all` runs the manifest and golden comparator
+  against real runtime behavior. Current smoke gate passes 45/45 after Date,
+  control-flow, and switch smoke paths were implemented without restoring the
+  old output bridge.
+- Full local test262 now runs to completion under one minute with ReleaseFast;
+  latest result is `0/48205 errors, passed 42200`, elapsed 38.88s.

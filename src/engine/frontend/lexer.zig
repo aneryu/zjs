@@ -18,7 +18,7 @@ pub const Lexer = struct {
         if (self.index >= self.source.len) return self.emit(.eof, "", start, null);
 
         const c = self.peek();
-        if (std.ascii.isAlphabetic(c) or c == '_' or c == '$') return self.identifier(start);
+        if (std.ascii.isAlphabetic(c) or c == '_' or c == '$' or c >= 0x80 or self.startsUnicodeEscape()) return self.identifier(start);
         if (std.ascii.isDigit(c)) return self.numeric(start);
         if (c == '#') return self.privateIdentifier(start);
         if (c == '\'' or c == '"') return self.string(start, c);
@@ -30,13 +30,36 @@ pub const Lexer = struct {
             self.bump();
             return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
         }
+        if ((c == '=' or c == '!' or c == '<' or c == '>') and self.index + 1 < self.source.len and self.source[self.index + 1] == '=') {
+            self.bump();
+            self.bump();
+            if ((c == '=' or c == '!') and self.index < self.source.len and self.source[self.index] == '=') self.bump();
+            return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
+        }
+        if ((c == '&' or c == '|' or c == '?') and self.index + 1 < self.source.len and self.source[self.index + 1] == c) {
+            self.bump();
+            self.bump();
+            return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
+        }
 
         self.bump();
         return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
     }
 
     fn identifier(self: *Lexer, start: source_pos.Position) token.Token {
-        while (self.index < self.source.len and isIdentContinue(self.peek())) self.bump();
+        while (self.index < self.source.len) {
+            const c = self.peek();
+            if (isIdentContinue(c)) {
+                self.bump();
+                continue;
+            }
+            if (c < 0x80) {
+                if (self.consumeUnicodeEscape()) continue;
+                break;
+            }
+            if (self.startsUtf8LineSeparator()) break;
+            self.bump();
+        }
         const lexeme = self.source[start.offset..self.index];
         return if (token.keywordFor(lexeme)) |keyword|
             self.emit(.keyword, lexeme, start, keyword)
@@ -46,9 +69,55 @@ pub const Lexer = struct {
 
     fn privateIdentifier(self: *Lexer, start: source_pos.Position) !token.Token {
         self.bump();
-        if (self.index >= self.source.len or !isIdentStart(self.peek())) return error.InvalidPrivateName;
-        while (self.index < self.source.len and isIdentContinue(self.peek())) self.bump();
+        if (self.index >= self.source.len) return error.InvalidPrivateName;
+        const first = self.peek();
+        if (isIdentStart(first)) {
+            self.bump();
+        } else if (first < 0x80) {
+            if (!self.consumeUnicodeEscape()) return error.InvalidPrivateName;
+        } else {
+            if (self.startsUtf8LineSeparator()) return error.InvalidPrivateName;
+            self.bump();
+        }
+        while (self.index < self.source.len) {
+            const c = self.peek();
+            if (isIdentContinue(c)) {
+                self.bump();
+                continue;
+            }
+            if (c < 0x80) {
+                if (self.consumeUnicodeEscape()) continue;
+                break;
+            }
+            if (self.startsUtf8LineSeparator()) break;
+            self.bump();
+        }
         return self.emit(.private_identifier, self.source[start.offset..self.index], start, null);
+    }
+
+    fn startsUnicodeEscape(self: Lexer) bool {
+        return self.index + 1 < self.source.len and self.source[self.index] == '\\' and self.source[self.index + 1] == 'u';
+    }
+
+    fn consumeUnicodeEscape(self: *Lexer) bool {
+        if (!self.startsUnicodeEscape()) return false;
+        self.bump();
+        self.bump();
+        if (self.index < self.source.len and self.peek() == '{') {
+            self.bump();
+            var saw_digit = false;
+            while (self.index < self.source.len and self.peek() != '}') {
+                if (!std.ascii.isHex(self.peek())) return false;
+                saw_digit = true;
+                self.bump();
+            }
+            if (!saw_digit or self.index >= self.source.len or self.peek() != '}') return false;
+            self.bump();
+            return true;
+        }
+        var count: usize = 0;
+        while (count < 4 and self.index < self.source.len and std.ascii.isHex(self.peek())) : (count += 1) self.bump();
+        return count == 4;
     }
 
     fn numeric(self: *Lexer, start: source_pos.Position) token.Token {
@@ -85,6 +154,7 @@ pub const Lexer = struct {
             const c = self.peek();
             self.bump();
             if (escaped) {
+                if (c == '\r' and self.index < self.source.len and self.peek() == '\n') self.bump();
                 escaped = false;
                 continue;
             }
@@ -124,27 +194,71 @@ pub const Lexer = struct {
     }
 
     fn skipTrivia(self: *Lexer) !void {
+        var allow_html_close = self.previous == null or self.position.column == 1;
         while (self.index < self.source.len) {
+            if (self.index == 0 and self.startsWith("#!")) {
+                self.skipLineComment();
+                allow_html_close = true;
+                continue;
+            }
+            if (self.startsUtf8LineSeparator()) {
+                self.consumeUtf8LineSeparator();
+                allow_html_close = true;
+                continue;
+            }
             const c = self.peek();
             if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+                if (c == '\r' or c == '\n') allow_html_close = true;
                 self.bump();
                 continue;
             }
+            if (self.startsWith("<!--")) {
+                self.skipLineComment();
+                continue;
+            }
+            if (allow_html_close and self.startsWith("-->")) {
+                self.skipLineComment();
+                continue;
+            }
             if (c == '/' and self.index + 1 < self.source.len and self.source[self.index + 1] == '/') {
-                while (self.index < self.source.len and self.peek() != '\n') self.bump();
+                self.skipLineComment();
                 continue;
             }
             if (c == '/' and self.index + 1 < self.source.len and self.source[self.index + 1] == '*') {
                 self.bump();
                 self.bump();
-                while (self.index + 1 < self.source.len and !(self.peek() == '*' and self.source[self.index + 1] == '/')) self.bump();
+                var saw_line_terminator = false;
+                while (self.index + 1 < self.source.len and !(self.peek() == '*' and self.source[self.index + 1] == '/')) {
+                    if (self.peek() == '\r' or self.peek() == '\n' or self.startsUtf8LineSeparator()) saw_line_terminator = true;
+                    self.bump();
+                }
                 if (self.index + 1 >= self.source.len) return error.UnterminatedComment;
                 self.bump();
                 self.bump();
+                if (saw_line_terminator) allow_html_close = true;
                 continue;
             }
             return;
         }
+    }
+
+    fn skipLineComment(self: *Lexer) void {
+        while (self.index < self.source.len and self.peek() != '\r' and self.peek() != '\n' and !self.startsUtf8LineSeparator()) self.bump();
+    }
+
+    fn startsWith(self: Lexer, bytes: []const u8) bool {
+        return self.index + bytes.len <= self.source.len and std.mem.eql(u8, self.source[self.index .. self.index + bytes.len], bytes);
+    }
+
+    fn startsUtf8LineSeparator(self: Lexer) bool {
+        return self.startsWith("\u{2028}") or self.startsWith("\u{2029}");
+    }
+
+    fn consumeUtf8LineSeparator(self: *Lexer) void {
+        self.index += 3;
+        self.position.offset += 3;
+        self.position.line += 1;
+        self.position.column = 1;
     }
 
     fn emit(self: *Lexer, kind: token.Kind, lexeme: []const u8, start: source_pos.Position, keyword: ?token.Keyword) token.Token {

@@ -16,7 +16,7 @@ const cBin =
     process.env.QJS ||
     (fs.existsSync(path.join(root, 'build', 'qjs'))
         ? path.join(root, 'build', 'qjs')
-        : path.join(root, '..', 'quickjs', 'build', 'qjs'));
+        : path.join(root, 'quickjs', 'build', 'qjs'));
 
 let mode = 'both';
 let iters = parseInteger(process.env.BENCH_ITERS, 5);

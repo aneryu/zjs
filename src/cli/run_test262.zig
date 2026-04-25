@@ -51,6 +51,7 @@ fn printSummary(io: std.Io, summary: runner.ExecutionSummary) !void {
         .{ summary.selection.selected_tests, summary.selection.total_tests },
     );
     if (summary.selection.excluded_tests != 0) try stdout.print(", {d} excluded", .{summary.selection.excluded_tests});
+    if (summary.selection.skipped_by_feature != 0) try stdout.print(", {d} skipped by feature", .{summary.selection.skipped_by_feature});
     if (summary.selection.skipped_by_index != 0) try stdout.print(", {d} skipped by index", .{summary.selection.skipped_by_index});
     try stdout.print("\n", .{});
     if (summary.selection.harnessdir) |harnessdir| try stdout.print("harness: {s}\n", .{harnessdir});

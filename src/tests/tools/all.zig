@@ -63,3 +63,42 @@ test "test262 config text parses paths features and excludes" {
     try std.testing.expectEqual(@as(usize, 1), loaded.enabled_features.items.len);
     try std.testing.expectEqual(@as(usize, 1), loaded.skipped_features.items.len);
 }
+
+test "test262 metadata helper parses runner-critical fields" {
+    var metadata = try test262_runner.parseMetadataText(std.testing.allocator,
+        \\/*---
+        \\includes: [propertyHelper.js, compareArray.js]
+        \\features: [BigInt]
+        \\flags: [module]
+        \\negative:
+        \\  phase: parse
+        \\  type: SyntaxError
+        \\---*/
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("propertyHelper.js", metadata.includes.items[0]);
+    try std.testing.expectEqualStrings("compareArray.js", metadata.includes.items[1]);
+    try std.testing.expect(metadata.features.contains("BigInt"));
+    try std.testing.expect(metadata.flags.contains("module"));
+    try std.testing.expectEqualStrings("parse", metadata.negative.?.phase.?);
+    try std.testing.expectEqualStrings("SyntaxError", metadata.negative.?.type_name.?);
+}
+
+test "test262 negative helper does not accept wrong failure type" {
+    const negative = test262_runner.NegativeMetadata{
+        .phase = "runtime",
+        .type_name = "TypeError",
+    };
+    try std.testing.expect(test262_runner.negativeResultMatches(negative, false, "TypeError: invalid"));
+    try std.testing.expect(!test262_runner.negativeResultMatches(negative, false, "SyntaxError: invalid"));
+}
+
+test "test262 temp source helper avoids shared worker path" {
+    var first_buf: [128]u8 = undefined;
+    var second_buf: [128]u8 = undefined;
+    const first = try test262_runner.tempTestPath(&first_buf, "test/a.js", 0);
+    const second = try test262_runner.tempTestPath(&second_buf, "test/b.js", 0);
+
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+}

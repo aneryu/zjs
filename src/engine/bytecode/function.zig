@@ -27,6 +27,7 @@ pub const Bytecode = struct {
     var_count: u16 = 0,
     stack_size: u16 = 0,
     code: []u8 = &.{},
+    atom_operands: []atom.Atom = &.{},
     constants: constant.Pool,
     scopes: []scope.ScopeRecord = &.{},
     module_record: ?module.Record = null,
@@ -43,6 +44,8 @@ pub const Bytecode = struct {
 
     pub fn deinit(self: *Bytecode, rt: anytype) void {
         self.atoms.free(self.name);
+        for (self.atom_operands) |atom_id| self.atoms.free(atom_id);
+        if (self.atom_operands.len != 0) self.memory.free(atom.Atom, self.atom_operands);
         if (self.code.len != 0) self.memory.free(u8, self.code);
         self.constants.deinit(rt);
         for (self.scopes) |*scope_record| scope_record.deinit();
@@ -50,6 +53,7 @@ pub const Bytecode = struct {
         if (self.module_record) |*record| record.deinit();
         if (self.debug_table) |*table| table.deinit();
         self.code = &.{};
+        self.atom_operands = &.{};
         self.scopes = &.{};
         self.module_record = null;
         self.debug_table = null;
@@ -65,6 +69,15 @@ pub const Bytecode = struct {
 
     pub fn addConstant(self: *Bytecode, value: Value) !u32 {
         return self.constants.append(value);
+    }
+
+    pub fn retainAtomOperand(self: *Bytecode, atom_id: atom.Atom) !void {
+        const next = try self.memory.alloc(atom.Atom, self.atom_operands.len + 1);
+        errdefer self.memory.free(atom.Atom, next);
+        @memcpy(next[0..self.atom_operands.len], self.atom_operands);
+        next[self.atom_operands.len] = self.atoms.dup(atom_id);
+        if (self.atom_operands.len != 0) self.memory.free(atom.Atom, self.atom_operands);
+        self.atom_operands = next;
     }
 
     pub fn addScope(self: *Bytecode, parent: ?u32) !*scope.ScopeRecord {

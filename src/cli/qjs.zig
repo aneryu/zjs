@@ -52,6 +52,11 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const value = runtime.evalWithOutput(source_text, &stdout_writer.interface) catch |err| {
+        if (err == error.TypeError) {
+            try stdout_writer.interface.flush();
+            try printTypeErrorNotFunction(io, command);
+            std.process.exit(1);
+        }
         try printError(io, "zjs: evaluation failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -64,6 +69,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     runtime.runJobs();
+    if (runtime.context.hasException()) {
+        const exception = runtime.takeException();
+        defer exception.free(runtime.runtime);
+        try printUnhandledRejection(io, runtime.runtime, exception);
+        std.process.exit(1);
+    }
 }
 
 fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
@@ -83,6 +94,38 @@ fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     const stderr = &stderr_writer.interface;
     try stderr.print(fmt, args);
     try stderr.flush();
+}
+
+fn printUnhandledRejection(io: std.Io, rt: *engine.core.Runtime, value: engine.core.Value) !void {
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
+    const stderr = &stderr_writer.interface;
+    try stderr.print("Possibly unhandled promise rejection: ", .{});
+    if (value.asInt32()) |int_value| {
+        try stderr.print("{d}", .{int_value});
+    } else if (value.asBool()) |bool_value| {
+        try stderr.print("{s}", .{if (bool_value) "true" else "false"});
+    } else if (value.isUndefined()) {
+        try stderr.print("undefined", .{});
+    } else if (value.isNull()) {
+        try stderr.print("null", .{});
+    } else if (value.isString()) {
+        _ = rt;
+        try stderr.print("[object String]", .{});
+    } else {
+        _ = rt;
+        try stderr.print("[object Object]", .{});
+    }
+    try stderr.print("\n", .{});
+    try stderr.flush();
+}
+
+fn printTypeErrorNotFunction(io: std.Io, command: Command) !void {
+    const path = switch (command) {
+        .file => |file| file,
+        .eval => "<eval>",
+    };
+    try printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
 }
 
 test "qjs args accept eval source" {

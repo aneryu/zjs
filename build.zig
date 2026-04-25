@@ -24,6 +24,24 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = engine_mod },
+        },
+    });
+    const test262_engine_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/engine/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    const test262_runner_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/test262_runner.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
+        },
     });
     const smoke_runner_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/smoke_runner.zig"),
@@ -45,10 +63,10 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/cli/run_test262.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = .ReleaseFast,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "test262_runner", .module = test262_runner_mod },
+                .{ .name = "test262_runner", .module = test262_runner_fast_mod },
             },
         }),
     });
