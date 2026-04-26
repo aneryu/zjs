@@ -3,6 +3,7 @@
 ## 位置
 
 - Bun 主脚本：`tools/compare/run_compare.js`
+- QuickJS microbench 迁移 runner：`tools/compare/run_microbench.js`
 - Shell 包装入口：`tools/compare/compare.sh`
 - 兼容旧入口：`tests/zig-smoke/run_compare.sh`
 
@@ -165,3 +166,50 @@ bash tools/compare/run_compare.sh --performance-only --iters 2 --warmup 0 --scri
 
 - 默认会返回非 0 退出码
 - 默认不会继续把失败脚本纳入性能统计
+
+## QuickJS microbench 迁移
+
+`quickjs/tests/microbench.js` 依赖 QuickJS 专用模块 `qjs:std` / `qjs:os`，
+不能直接由当前 `zjs` 执行。迁移 runner 把基准项拆成独立脚本，由外部
+Bun 进程计时，并在计时前对比 C `qjs` 与 `zjs` 的 stdout、stderr、退出码。
+只有行为一致的 case 会进入性能统计；若后续新增的 case 暂不支持，会标记为
+`unsupported`。当前主路径使用 zjs 可执行的迁移脚本片段，覆盖 58 个
+QuickJS microbench 派生 case，默认应为 0 个 unsupported。该路径会通过 zjs VM
+执行生成的脚本，不使用 `quickjs/tests/microbench.js` 的 CLI 特判。
+
+```bash
+bun tools/compare/run_microbench.js --iters 10 --warmup 3 --include-unsupported
+```
+
+也可以通过 Zig 构建入口运行默认 microbench：
+
+```bash
+zig build microbench -Doptimize=ReleaseFast --summary all
+```
+
+列出已迁移的 case：
+
+```bash
+bun tools/compare/run_microbench.js --list
+```
+
+按 case 或 category 过滤：
+
+```bash
+bun tools/compare/run_microbench.js --case int_sum
+bun tools/compare/run_microbench.js --category arithmetic
+```
+
+输出 JSON 报告：
+
+```bash
+bun tools/compare/run_microbench.js --json
+bun tools/compare/run_microbench.js --output /tmp/zjs-microbench.json
+```
+
+JSON 报告包含：
+
+- `qjs` / `zjs`：参与对比的二进制路径
+- `iters` / `warmup`：采样设置
+- `summary`：兼容、跳过、unsupported 数量和几何平均
+- `cases`：每个 case 的状态、样本、平均值、中位数、最小值、最大值、标准差和 `zjs/qjs` 比值

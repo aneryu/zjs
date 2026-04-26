@@ -3,6 +3,11 @@
 Purpose: make Phase 6 track bytecode execution at opcode level. Phase 4 owns
 opcode metadata; Phase 6 owns handlers and semantic execution tests.
 
+Architecture repair note: historical `validated` rows prove metadata, fixture,
+or local-baseline coverage for the recorded phase. They do not remove the
+current `exec/vm.zig` unsupported fallback or the need to extract domain
+semantics out of VM dispatch during architecture repair.
+
 ## Phase 4 Metadata Matrix
 
 | Area | QuickJS owner | Zig owner | Required behavior | Required tests | Status |

@@ -9,12 +9,12 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Active phase | Phase 9: Runtime Semantic Hardening |
-| Overall status | phase_9_complete |
+| Active phase | Architecture Repair: Parser-First Semantic Completion |
+| Overall status | architecture_repair_active |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 8 tooling is complete; `run-test262` now parses QuickJS-shaped args, config paths, feature lists, config excludes, direct selectors, index spans, and test metadata (`includes`, `features`, `flags`, `negative`), runs selected tests in-process with baseline plus metadata harness prepended in declaration order, and classifies known/new/fixed failures from `errorfile` with `-u` rewrite support. Phase 9 replaced host-visible output opcodes with normal global lookup, property access, callable values, generic call execution, completed the BigInt/DataView/String wrapper coercion follow-up, moved DataView/String wrapper payloads onto object-owned internal storage, added GC-backed multi-limb BigInt payloads plus BigInt language-operator arithmetic/bitwise/shift execution, and repaired reviewed DataView numeric/BigInt setters plus ArrayBuffer slice byte copying |
+| Current engine state | Phase 8 tooling is complete and Phase 9 runtime semantic hardening passed the local baseline. Architecture repair is now active because those gates prove fixture/baseline compatibility, not blanket QuickJS semantic completeness; frontend, exec, builtins, libs, and GC still have recorded transitional or placeholder paths. |
 | Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
-| Current validation state | `zig build test --summary all` passes 132/132 tests and now includes direct test262 runner self-tests; `zig build smoke --summary all` passes 45/45 scripts; DataView target slice passes 561/561 after reviewed setter/slice repairs; BigInt targeted test262 passes after multi-limb heap payload and operator alignment; BigInt bitwise/shift language expression slices pass; `git diff --check` passes; full local test262 gate completes at `Result: 0/48205 errors, passed 42200`; `zig build run-test262 --summary all` builds the ReleaseFast runner; functional compare passes 45/45 scripts; targeted JSON and language expression slices pass |
+| Current validation state | Architecture repair gates pass: `zig build test --summary all` 133/133, `zig build test-frontend --summary all` 21/21, `zig build smoke --summary all` 45/45, JSON target slice 21/21, BigInt target slice 77/77, and `git diff --check`; prior full local test262 remains recorded at `Result: 0/48205 errors, passed 42200`. |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -30,6 +30,7 @@ updated alongside implementation, tests, and phase documents.
 | 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
 | 8 CLI Tooling And Validation | completed | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Host-visible output transferred to Phase 9 runtime hardening |
 | 9 Runtime Semantic Hardening | completed | `phases/09-runtime-semantic-hardening.md` | `matrices/runtime-semantic-hardening.md` | BigInt/DataView/String wrapper coercion follow-up completed |
+| AR Architecture Repair | in_progress | `ARCHITECTURE_REPAIR_PLAN.md` | source-aligned matrices | Parser-first semantic-completion boundary and status calibration |
 
 ## Work Queue
 
@@ -45,25 +46,38 @@ updated alongside implementation, tests, and phase documents.
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
 | WQ-009 | completed | 8 | CLI and validation tooling | Full local test262 gate executes in 15.00s with zero selected failures; known-error classification/update, metadata parsing/includes/filtering, raw hashbang handling, compare path defaults, in-process test execution, worker-local harness caching, and QuickJS-style namelist/selection/worker-stride execution are wired | host-visible output (`print`/`console.log`) transferred to WQ-010 |
 | WQ-010 | completed | 9 | Runtime semantic hardening | Replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution; BigInt/DataView/String wrapper coercion follow-up implemented with focused regression coverage | none |
+| WQ-011 | in_progress | AR | Architecture repair | Calibrated `status.zig` maturity states, recorded parser-first repair plan, started allocator/OOM hardening, and isolated `SimpleParser` behind an explicit transitional boundary; next action is adding the first token-driven parser/lowering slice | none |
 
 ## Subsystem Coverage Matrix
 
 | Subsystem | Phase | Matrix | Status | Latest validation |
 |---|---|---|---|---|
-| Source baseline and status table | 1 | none | completed | `zig build test-quickjs-port --summary all` passed, 4/4 tests |
-| Core runtime invariants | 2 | `matrices/core-runtime-invariants.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-core --summary all` passed, 21/21 tests |
-| Object and property semantics | 3 | `matrices/object-property-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-core --summary all` passed, 31/31 tests |
-| Opcode metadata | 4 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-bytecode --summary all` passed, 5/5 tests |
-| Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-frontend --summary all` passed, 6/6 tests |
-| Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-exec --summary all` passed, 6/6 tests |
-| Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | completed | `ZIG_GLOBAL_CACHE_DIR=/Users/aneryu/zjs/.zig-cache/global zig build test-builtins --summary all` passed, 4/4 tests |
-| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | completed | `zig build test --summary all` passed 110/110 tests; `zig build smoke --summary all` passed 45/45 scripts; full `run-test262` passed with `0/48205 errors` in 15.00s; host-output dependency transferred to Phase 9 |
-| Runtime semantic hardening | 9 | `matrices/runtime-semantic-hardening.md` | completed | `zig build test --summary all` passed 132/132 tests; `zig build smoke --summary all` passed 45/45 scripts; BigInt/DataView/String targeted test262 slices passed; reviewed DataView setter and ArrayBuffer slice repairs passed focused scripts and DataView 561/561; full local test262 gate passed with `0/48205 errors`; `git diff --check` passed |
+| Source baseline and status table | 1 | none | semantic_complete | `zig build test-quickjs-port --summary all` passed, 4/4 tests before architecture repair |
+| Core runtime invariants | 2 | `matrices/core-runtime-invariants.md` | fixture_validated | Focused core fixtures pass; GC cycle removal remains a recorded architecture repair gap |
+| Object and property semantics | 3 | `matrices/object-property-matrix.md` | fixture_validated | Focused object/property fixtures pass |
+| Opcode metadata | 4 | `matrices/opcode-execution-matrix.md` | fixture_validated | Focused bytecode metadata fixtures pass |
+| Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | baseline_validated | Local baseline passes, but `SimpleParser` remains transitional and parser-first repair is active |
+| Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | baseline_validated | Local baseline passes, but VM still owns broad semantic domains and has unsupported fallback paths |
+| Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | fixture_validated | Focused fixtures pass; several builtin/library domains remain scaffold or narrow helper implementations |
+| CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | baseline_validated | Tooling and local test262 baseline pass |
+| Runtime semantic hardening | 9 | `matrices/runtime-semantic-hardening.md` | baseline_validated | Phase 9 repairs passed aggregate, smoke, targeted, and full local test262 gates |
 
 ## Validation Log
 
 | Date | Phase | Command | Exit | Result | Evidence type |
 |---|---|---|---|---|---|
+| 2026-04-26 | microbench | `zig build test --summary all` | 0 | Aggregate gate passed after microbench unsupported-case repairs, 134/134 tests | regression |
+| 2026-04-26 | microbench | `zig build smoke --summary all` | 0 | Smoke gate passed after microbench unsupported-case repairs, 45/45 scripts | regression |
+| 2026-04-26 | microbench | `zig build microbench --summary all` | 0 | VM-executed QuickJS microbench migration passed with 58/58 compatible cases, 0 unsupported, 0 skipped | compare |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after parser path boundary, 133/133 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after parser path boundary, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 20` | 0 | JSON target slice passed after parser path boundary, 21/21 tests | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after parser path boundary | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after adding parse-path boundary around transitional compiler/scanner paths, 21/21 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after status calibration and BigInt allocator/OOM hardening, 133/133 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after architecture repair slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/BigInt 0 1000` | 0 | BigInt target slice passed after allocator and comparison cleanup, 77/77 tests | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after architecture repair slice | hygiene |
 | 2026-04-26 | review-fix | `zig build test --summary all` | 0 | Aggregate test gate now includes direct test262 runner self-tests and passed 132/132 tests | regression |
 | 2026-04-26 | review-fix | `zig build test-exec --summary all` | 0 | Exec gate passed after DataView setter coercion, BigInt setter, and ArrayBuffer slice repairs, 39/39 tests | regression |
 | 2026-04-26 | review-fix | `zig build smoke --summary all` | 0 | Smoke gate passed after review fixes, 45/45 scripts | regression |

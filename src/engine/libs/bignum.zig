@@ -1,16 +1,16 @@
 const std = @import("std");
 
 const limb_bits = 32;
-const Limb = u32;
+pub const Limb = u32;
 const DoubleLimb = u64;
 
 pub const BigInt = struct {
     negative: bool = false,
     limbs: []Limb = &.{},
-    allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator: std.mem.Allocator,
 
-    pub fn fromInt(value: i128) BigInt {
-        return fromIntAlloc(std.heap.page_allocator, value) catch unreachable;
+    pub fn fromInt(allocator: std.mem.Allocator, value: i128) !BigInt {
+        return fromIntAlloc(allocator, value);
     }
 
     pub fn fromIntAlloc(allocator: std.mem.Allocator, value: i128) !BigInt {
@@ -48,16 +48,16 @@ pub const BigInt = struct {
         return self.limbs.len == 0;
     }
 
-    pub fn add(self: BigInt, other: BigInt) BigInt {
-        return addAlloc(self.allocator, self, other) catch unreachable;
+    pub fn add(self: BigInt, other: BigInt) !BigInt {
+        return addAlloc(self.allocator, self, other);
     }
 
-    pub fn sub(self: BigInt, other: BigInt) BigInt {
-        return subAlloc(self.allocator, self, other) catch unreachable;
+    pub fn sub(self: BigInt, other: BigInt) !BigInt {
+        return subAlloc(self.allocator, self, other);
     }
 
-    pub fn mul(self: BigInt, other: BigInt) BigInt {
-        return mulAlloc(self.allocator, self, other) catch unreachable;
+    pub fn mul(self: BigInt, other: BigInt) !BigInt {
+        return mulAlloc(self.allocator, self, other);
     }
 
     pub fn div(self: BigInt, other: BigInt) !BigInt {
@@ -77,9 +77,7 @@ pub const BigInt = struct {
     }
 
     pub fn compare(self: BigInt, other: BigInt) std.math.Order {
-        if (self.negative != other.negative) return if (self.negative) .lt else .gt;
-        const abs_order = compareAbs(self, other);
-        return if (self.negative) invertOrder(abs_order) else abs_order;
+        return compareParts(self.negative, self.limbs, other.negative, other.limbs);
     }
 
     pub fn formatBase10Alloc(self: BigInt, allocator: std.mem.Allocator) ![]u8 {
@@ -291,7 +289,7 @@ pub const BigInt = struct {
             self.limbs[index] = @intCast(current / divisor);
             remainder = current % divisor;
         }
-        self.* = normalize(self.*);
+        self.* = try normalize(self.*);
         return @intCast(remainder);
     }
 
@@ -347,8 +345,8 @@ pub fn divRemAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !stru
     return .{ quotient, remainder };
 }
 
-pub fn parseBase10(bytes: []const u8) !BigInt {
-    return parseBase10Alloc(std.heap.page_allocator, bytes);
+pub fn parseBase10(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
+    return parseBase10Alloc(allocator, bytes);
 }
 
 pub fn parseBase10Alloc(allocator: std.mem.Allocator, bytes: []const u8) !BigInt {
@@ -370,6 +368,12 @@ pub fn pow2(allocator: std.mem.Allocator, bits: usize) !BigInt {
     @memset(limbs, 0);
     limbs[limb_index] = @as(Limb, 1) << offset;
     return .{ .limbs = limbs, .allocator = allocator };
+}
+
+pub fn compareParts(lhs_negative: bool, lhs_limbs: []const Limb, rhs_negative: bool, rhs_limbs: []const Limb) std.math.Order {
+    if (lhs_negative != rhs_negative) return if (lhs_negative) .lt else .gt;
+    const abs_order = compareAbsParts(lhs_limbs, rhs_limbs);
+    return if (lhs_negative) invertOrder(abs_order) else abs_order;
 }
 
 fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struct { BigInt, BigInt } {
@@ -395,7 +399,7 @@ fn divRemAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !struc
             try setBit(&quotient, bit);
         }
     }
-    return .{ normalize(quotient), normalize(remainder) };
+    return .{ try normalize(quotient), try normalize(remainder) };
 }
 
 pub fn addAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
@@ -562,32 +566,40 @@ fn fromTwosComplement(allocator: std.mem.Allocator, limbs: []const Limb, width: 
         carry = sum >> limb_bits;
         if (carry == 0) break;
     }
-    var out = normalize(.{ .negative = true, .limbs = out_limbs, .allocator = allocator });
+    var out = try normalize(.{ .negative = true, .limbs = out_limbs, .allocator = allocator });
     out.negative = !out.isZero();
     return out;
 }
 
 fn compareAbs(lhs: BigInt, rhs: BigInt) std.math.Order {
-    if (lhs.limbs.len != rhs.limbs.len) return std.math.order(lhs.limbs.len, rhs.limbs.len);
-    var i = lhs.limbs.len;
+    return compareAbsParts(lhs.limbs, rhs.limbs);
+}
+
+fn compareAbsParts(lhs_limbs: []const Limb, rhs_limbs: []const Limb) std.math.Order {
+    if (lhs_limbs.len != rhs_limbs.len) return std.math.order(lhs_limbs.len, rhs_limbs.len);
+    var i = lhs_limbs.len;
     while (i > 0) {
         i -= 1;
-        if (lhs.limbs[i] != rhs.limbs[i]) return std.math.order(lhs.limbs[i], rhs.limbs[i]);
+        if (lhs_limbs[i] != rhs_limbs[i]) return std.math.order(lhs_limbs[i], rhs_limbs[i]);
     }
     return .eq;
 }
 
-fn normalize(value: BigInt) BigInt {
-    var len = value.limbs.len;
-    while (len > 0 and value.limbs[len - 1] == 0) : (len -= 1) {}
+fn normalize(value: BigInt) !BigInt {
+    var owned = value;
+    errdefer if (owned.limbs.len != 0) owned.allocator.free(owned.limbs);
+
+    var len = owned.limbs.len;
+    while (len > 0 and owned.limbs[len - 1] == 0) : (len -= 1) {}
     if (len == 0) {
-        if (value.limbs.len != 0) value.allocator.free(value.limbs);
-        return .{ .allocator = value.allocator };
+        if (owned.limbs.len != 0) owned.allocator.free(owned.limbs);
+        owned.limbs = &.{};
+        return .{ .allocator = owned.allocator };
     }
-    if (len != value.limbs.len) {
-        return .{ .negative = value.negative, .limbs = value.allocator.realloc(value.limbs, len) catch unreachable, .allocator = value.allocator };
+    if (len != owned.limbs.len) {
+        owned.limbs = try owned.allocator.realloc(owned.limbs, len);
     }
-    return .{ .negative = value.negative, .limbs = value.limbs, .allocator = value.allocator };
+    return .{ .negative = owned.negative, .limbs = owned.limbs, .allocator = owned.allocator };
 }
 
 fn invertOrder(order: std.math.Order) std.math.Order {

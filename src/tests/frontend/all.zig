@@ -81,6 +81,7 @@ test "source positions and syntax errors carry filename line and column" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error != null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.syntax_error_guard, parsed.parse_path);
     try std.testing.expectEqual(@as(u32, 2), parsed.syntax_error.?.position.line);
     try std.testing.expectEqualStrings("Unexpected end of input", parsed.syntax_error.?.message);
     try std.testing.expectEqualStrings("bad.js", rt.atoms.name(parsed.syntax_error.?.filename).?);
@@ -94,6 +95,7 @@ test "script parse mode emits bytecode metadata without AST execution" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.token_metadata_scanner, parsed.parse_path);
     try std.testing.expect(!parsed.function.flags.is_strict);
     try std.testing.expect(parsed.hasFeature(.statement));
     try std.testing.expect(parsed.hasFeature(.expression));
@@ -108,6 +110,9 @@ test "print calls emit global lookup property lookup and generic call bytecode" 
 
     var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
     defer parsed.deinit();
+
+    try std.testing.expect(parsed.usedTransitionalCompiler());
+    try std.testing.expectEqual(frontend.parser.ParsePath.transitional_fixture_compiler, parsed.parse_path);
 
     var get_var_count: usize = 0;
     var get_prop_count: usize = 0;
@@ -208,10 +213,12 @@ test "unsupported simple candidate falls back to transitional scanner" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; print(arr.length); print(typeof arr.map);", .{ .mode = .script, .filename = "fallback.js" });
+    var parsed = try frontend.parser.parse(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.token_metadata_scanner, parsed.parse_path);
+    try std.testing.expect(!parsed.usedTransitionalCompiler());
 }
 
 test "arrow early errors reject non-simple strict and invalid rest parameters" {

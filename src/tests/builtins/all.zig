@@ -15,24 +15,24 @@ test "support libraries cover unicode dtoa bignum and regexp basics" {
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("12.5", try libs.dtoa.formatNumber(&buf, n));
 
-    var forty = try libs.bignum.parseBase10("40");
+    var forty = try libs.bignum.parseBase10(std.testing.allocator, "40");
     defer forty.deinit();
-    var two = libs.bignum.BigInt.fromInt(2);
+    var two = try libs.bignum.BigInt.fromInt(std.testing.allocator, 2);
     defer two.deinit();
-    var big = forty.add(two);
+    var big = try forty.add(two);
     defer big.deinit();
     const big_text = try big.formatBase10Alloc(std.testing.allocator);
     defer std.testing.allocator.free(big_text);
     try std.testing.expectEqualStrings("42", big_text);
-    var zero = libs.bignum.BigInt.fromInt(0);
+    var zero = try libs.bignum.BigInt.fromInt(std.testing.allocator, 0);
     defer zero.deinit();
     try std.testing.expectError(error.DivisionByZero, big.div(zero));
-    var huge = try libs.bignum.parseBase10("12345678901234567890123456789012345678901234567890");
+    var huge = try libs.bignum.parseBase10(std.testing.allocator, "12345678901234567890123456789012345678901234567890");
     defer huge.deinit();
     const huge_text = try huge.formatBase10Alloc(std.testing.allocator);
     defer std.testing.allocator.free(huge_text);
     try std.testing.expectEqualStrings("12345678901234567890123456789012345678901234567890", huge_text);
-    var divisor = libs.bignum.BigInt.fromInt(97);
+    var divisor = try libs.bignum.BigInt.fromInt(std.testing.allocator, 97);
     defer divisor.deinit();
     var quotient = try huge.div(divisor);
     defer quotient.deinit();
@@ -44,9 +44,9 @@ test "support libraries cover unicode dtoa bignum and regexp basics" {
     defer std.testing.allocator.free(remainder_text);
     try std.testing.expectEqualStrings("127275040218913071032200585453735522462899325442", quotient_text);
     try std.testing.expectEqualStrings("16", remainder_text);
-    var neg_seven = libs.bignum.BigInt.fromInt(-7);
+    var neg_seven = try libs.bignum.BigInt.fromInt(std.testing.allocator, -7);
     defer neg_seven.deinit();
-    var three = libs.bignum.BigInt.fromInt(3);
+    var three = try libs.bignum.BigInt.fromInt(std.testing.allocator, 3);
     defer three.deinit();
     var neg_q = try neg_seven.div(three);
     defer neg_q.deinit();
@@ -112,11 +112,11 @@ test "object function array string number boolean symbol bigint math date json r
     defer rt.atoms.free(sym);
     try std.testing.expectEqualStrings("desc", builtins.symbol.description(&rt.atoms, sym).?);
 
-    var five = libs.bignum.BigInt.fromInt(5);
+    var five = try libs.bignum.BigInt.fromInt(std.testing.allocator, 5);
     defer five.deinit();
-    var seven = libs.bignum.BigInt.fromInt(7);
+    var seven = try libs.bignum.BigInt.fromInt(std.testing.allocator, 7);
     defer seven.deinit();
-    var twelve = builtins.bigint.add(five, seven);
+    var twelve = try builtins.bigint.add(five, seven);
     defer twelve.deinit();
     const twelve_text = try twelve.formatBase10Alloc(std.testing.allocator);
     defer std.testing.allocator.free(twelve_text);

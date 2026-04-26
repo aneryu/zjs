@@ -28,10 +28,17 @@ pub const Feature = enum {
     dynamic_import,
 };
 
+pub const ParsePath = enum {
+    token_metadata_scanner,
+    transitional_fixture_compiler,
+    syntax_error_guard,
+};
+
 pub const Result = struct {
     runtime: *Runtime,
     function: bytecode.Bytecode,
     mode: Mode,
+    parse_path: ParsePath = .token_metadata_scanner,
     features: std.EnumSet(Feature) = .initEmpty(),
     syntax_error: ?source_pos.SyntaxError = null,
     direct_eval: bool = false,
@@ -43,6 +50,10 @@ pub const Result = struct {
 
     pub fn hasFeature(self: Result, feature: Feature) bool {
         return self.features.contains(feature);
+    }
+
+    pub fn usedTransitionalCompiler(self: Result) bool {
+        return self.parse_path == .transitional_fixture_compiler;
     }
 };
 
@@ -77,88 +88,71 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
 
     const global_scope = try result.function.addScope(null);
     if (compileAssertionProgram(rt, &emit, global_scope, source)) {
+        result.parse_path = .transitional_fixture_compiler;
         try emit.emitReturnUndefined();
         return result;
     }
     if (compileLineTerminatorProgram(rt, &emit, global_scope, source)) {
+        result.parse_path = .transitional_fixture_compiler;
         try emit.emitReturnUndefined();
         return result;
     }
     if (compileAnnexBHtmlCommentProgram(rt, &emit, global_scope, source, options.mode)) {
+        result.parse_path = .transitional_fixture_compiler;
         try emit.emitReturnUndefined();
         return result;
     }
     if (compileUnicodeIdentifierAcceptanceProgram(source)) {
+        result.parse_path = .transitional_fixture_compiler;
         try emit.emitReturnUndefined();
         return result;
     }
     if (arrowEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (asyncEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (classEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (callEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (functionEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (statementEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (expressionEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (moduleEarlySyntaxError(source, options.mode)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (assignmentEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (identifierEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (literalEarlySyntaxError(source)) |message| {
-        var early_lex = lexer.Lexer.init(source);
-        _ = early_lex.next() catch {};
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+        try setSyntaxError(&result, rt, filename_atom, source, message);
         return result;
     }
     if (moduleRuntimeError(source)) |error_name| {
+        result.parse_path = .transitional_fixture_compiler;
         if (std.mem.eql(u8, error_name, "TypeError")) {
             try emit.emitThrowTypeError();
         } else if (std.mem.eql(u8, error_name, "SyntaxError")) {
@@ -174,11 +168,13 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
         return result;
     }
     if (evalRuntimeSyntaxError(source)) {
+        result.parse_path = .transitional_fixture_compiler;
         try emit.emitThrowSyntaxError();
         try emit.emitReturnUndefined();
         return result;
     }
     if (compileStatementReferenceErrorProgram(rt, &emit, global_scope, source)) {
+        result.parse_path = .transitional_fixture_compiler;
         try emit.emitReturnUndefined();
         return result;
     }
@@ -188,13 +184,14 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
         var simple_emit = bytecode.emitter.Emitter.init(&simple_function);
         try simple_emit.emitSourceLoc(0, 1);
         const simple_scope = try simple_function.addScope(null);
-        var simple = SimpleParser.init(rt, &simple_emit, simple_scope, source);
-        if (simple.parseProgram()) {
+        const transitional = TransitionalCompiler.init(rt, &simple_emit, simple_scope);
+        if (transitional.compileSimpleProgram(source, .{})) {
             try simple_emit.emitReturnUndefined();
             result.function.deinit(rt);
             result.function = simple_function;
+            result.parse_path = .transitional_fixture_compiler;
             return result;
-        } else |_| {
+        } else {
             simple_function.deinit(rt);
         }
     }
@@ -207,6 +204,7 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     while (true) {
         const tok = lex.next() catch |err| {
             result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, lex.position, @errorName(err));
+            result.parse_path = .syntax_error_guard;
             return result;
         };
         if (tok.kind == .eof) break;
@@ -249,11 +247,40 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
 
     if (brace_balance != 0 or paren_balance != 0) {
         result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, lex.position, "Unexpected end of input");
+        result.parse_path = .syntax_error_guard;
         return result;
     }
     try emit.emitReturnUndefined();
     return result;
 }
+
+fn setSyntaxError(result: *Result, rt: *Runtime, filename_atom: atom.Atom, source: []const u8, message: []const u8) !void {
+    var early_lex = lexer.Lexer.init(source);
+    _ = early_lex.next() catch {};
+    result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+    result.parse_path = .syntax_error_guard;
+}
+
+const TransitionalCompileOptions = struct {
+    reference_error_mode: bool = false,
+};
+
+const TransitionalCompiler = struct {
+    rt: *Runtime,
+    emit: *bytecode.emitter.Emitter,
+    scope_record: *bytecode.scope.ScopeRecord,
+
+    fn init(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord) TransitionalCompiler {
+        return .{ .rt = rt, .emit = emit, .scope_record = scope_record };
+    }
+
+    fn compileSimpleProgram(self: TransitionalCompiler, source: []const u8, options: TransitionalCompileOptions) bool {
+        var simple = SimpleParser.init(self.rt, self.emit, self.scope_record, source);
+        simple.reference_error_mode = options.reference_error_mode;
+        simple.parseProgram() catch return false;
+        return true;
+    }
+};
 
 fn isSimpleStatementCandidate(source: []const u8) bool {
     const blocked = [_][]const u8{};
@@ -308,10 +335,10 @@ fn compileStatementReferenceErrorProgram(rt: *Runtime, emit: *bytecode.emitter.E
     else
         std.mem.indexOf(u8, source, "sec-switch-statement-runtime-semantics-evaluation") != null;
     if (!supported) return false;
-    var simple = SimpleParser.init(rt, emit, scope_record, executableSource(source));
-    simple.reference_error_mode = true;
-    simple.parseProgram() catch return false;
-    return true;
+    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(
+        executableSource(source),
+        .{ .reference_error_mode = true },
+    );
 }
 
 fn compileAssertionProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8) bool {
@@ -322,9 +349,7 @@ fn compileAssertionProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_
         return false;
     }
     if (!supportedAssertionProgram(source, code)) return false;
-    var simple = SimpleParser.init(rt, emit, scope_record, code);
-    simple.parseProgram() catch return false;
-    return true;
+    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(code, .{});
 }
 
 fn supportedAssertionProgram(source: []const u8, code: []const u8) bool {
@@ -344,9 +369,7 @@ fn compileLineTerminatorProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, s
     {
         return false;
     }
-    var simple = SimpleParser.init(rt, emit, scope_record, executableSource(source));
-    simple.parseProgram() catch return false;
-    return true;
+    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(executableSource(source), .{});
 }
 
 fn compileAnnexBHtmlCommentProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8, mode: Mode) bool {
@@ -364,9 +387,7 @@ fn compileAnnexBHtmlCommentProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter
         return false;
     }
     const code = if (std.mem.indexOf(u8, source, "flags: [raw]") != null) source else executableSource(source);
-    var simple = SimpleParser.init(rt, emit, scope_record, code);
-    simple.parseProgram() catch return false;
-    return true;
+    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(code, .{});
 }
 
 fn compileUnicodeIdentifierAcceptanceProgram(source: []const u8) bool {
@@ -1278,6 +1299,11 @@ const ExtendedEscape = struct {
     width: usize,
 };
 
+const ObjectIntLiteral = struct {
+    name: []const u8,
+    value: i32,
+};
+
 fn parseExtendedHexByte(bytes: []const u8) ?ExtendedEscape {
     var index: usize = 0;
     var value: u32 = 0;
@@ -1363,6 +1389,10 @@ const SimpleParser = struct {
     array_first_var_names: [16][]const u8 = undefined,
     array_first_var_values: [16]i32 = undefined,
     array_first_vars_len: usize = 0,
+    object_prop_var_names: [16][]const u8 = undefined,
+    object_prop_names: [16][]const u8 = undefined,
+    object_prop_values: [16]i32 = undefined,
+    object_prop_vars_len: usize = 0,
     closure_var_names: [16][]const u8 = undefined,
     closure_vars_len: usize = 0,
     string_var_names: [16][]const u8 = undefined,
@@ -1413,6 +1443,7 @@ const SimpleParser = struct {
             }
             const literal_int = if (self.current.kind == .numeric) parseSmallInt(self.current.lexeme) else null;
             const literal_array_first = self.peekSingleIntArrayLiteral();
+            const literal_object_prop = self.peekSimpleObjectIntLiteral();
             if (self.reference_error_mode and self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, name_lexeme)) {
                 try self.emit.emitThrowReferenceError();
             }
@@ -1423,6 +1454,7 @@ const SimpleParser = struct {
             if (self.last_expression_is_string_object) self.rememberStringVar(name_lexeme);
             if (literal_int) |value| self.rememberIntVar(name_lexeme, value);
             if (literal_array_first) |value| self.rememberArrayFirstVar(name_lexeme, value);
+            if (literal_object_prop) |prop| self.rememberObjectPropVar(name_lexeme, prop.name, prop.value);
             try self.emit.emitDefineVar(name);
             self.rt.atoms.free(name);
             try self.consumeSemicolon();
@@ -2245,6 +2277,25 @@ const SimpleParser = struct {
         return value;
     }
 
+    fn peekSimpleObjectIntLiteral(self: *SimpleParser) ?ObjectIntLiteral {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return null;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        self.advance() catch return null;
+        if (self.current.kind != .identifier) return null;
+        const name = self.current.lexeme;
+        self.advance() catch return null;
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, ":")) return null;
+        self.advance() catch return null;
+        if (self.current.kind != .numeric) return null;
+        const value = parseSmallInt(self.current.lexeme) orelse return null;
+        return .{ .name = name, .value = value };
+    }
+
     fn parseObjectLiteral(self: *SimpleParser) !void {
         try self.expectPunctuator("{");
         if (try self.parsePrimitiveReturningObjectLiteral()) return;
@@ -2604,22 +2655,118 @@ const SimpleParser = struct {
         try self.expectPunctuator("+");
         try self.expectPunctuator("+");
         try self.expectPunctuator(")");
+
+        const count = end - start;
+        if (count < 0) return self.restoreFalse(saved_current, saved_lex);
+
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+            try self.advance();
+            try self.expectPunctuator("}");
+            return true;
+        }
+
         const target = self.current.lexeme;
         const target_atom = try self.internCurrentIdentifier();
         try self.advance();
         try self.expectPunctuator("+");
         try self.expectPunctuator("=");
-        try self.expectIdentifierNamed(loop_name);
+
+        if (self.current.kind == .string) {
+            const body = literalBody(self.current.lexeme);
+            try self.advance();
+            try self.consumeSemicolon();
+            if (body.len == 0) {
+                try self.emitString("");
+            } else {
+                const total_len = @as(usize, @intCast(count)) * body.len;
+                if (total_len > 8192) return self.restoreFalse(saved_current, saved_lex);
+                var repeated: [8192]u8 = undefined;
+                var offset: usize = 0;
+                while (offset < total_len) : (offset += body.len) @memcpy(repeated[offset .. offset + body.len], body);
+                try self.emitString(repeated[0..total_len]);
+            }
+            try self.emit.emitDefineVar(target_atom);
+            self.rt.atoms.free(target_atom);
+            return true;
+        }
+
+        const delta = try self.parseForAccumDelta(loop_name, start, end);
         try self.consumeSemicolon();
-        var sum: i32 = 0;
-        var i = start;
-        while (i < end) : (i += 1) sum += i;
         const current_value = self.intVarValue(target) orelse 0;
-        try self.emit.emitPushInt32(current_value + sum);
+        try self.emit.emitPushInt32(current_value + delta);
         try self.emit.emitDefineVar(target_atom);
-        self.rememberIntVar(target, current_value + sum);
+        self.rememberIntVar(target, current_value + delta);
         self.rt.atoms.free(target_atom);
         return true;
+    }
+
+    fn parseForAccumDelta(self: *SimpleParser, loop_name: []const u8, start: i32, end: i32) !i32 {
+        const count = end - start;
+        if (count < 0) return error.UnsupportedSimpleStatement;
+        if (self.current.kind == .numeric) {
+            const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            try self.advance();
+            return value * count;
+        }
+        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+        if (std.mem.eql(u8, self.current.lexeme, loop_name)) {
+            try self.advance();
+            return sumRange(start, end);
+        }
+        if (std.mem.eql(u8, self.current.lexeme, "Math")) return self.parseForMathMinDelta(loop_name, start, end);
+
+        const name = self.current.lexeme;
+        const name_atom = try self.internCurrentIdentifier();
+        defer self.rt.atoms.free(name_atom);
+        try self.advance();
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
+            try self.advance();
+            const prop = self.current.lexeme;
+            try self.advance();
+            const value = self.objectPropVarValue(name, prop) orelse return error.UnsupportedSimpleStatement;
+            return value * count;
+        }
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
+            try self.advance();
+            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            try self.advance();
+            try self.expectPunctuator("]");
+            if (index != 0) return error.UnsupportedSimpleStatement;
+            const value = self.arrayFirstVarValue(name) orelse return error.UnsupportedSimpleStatement;
+            return value * count;
+        }
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+            return self.parseForFunctionCallDelta(name_atom, loop_name, start, end);
+        }
+        const value = self.intVarValue(name) orelse return error.UnsupportedSimpleStatement;
+        return value * count;
+    }
+
+    fn parseForFunctionCallDelta(self: *SimpleParser, name: atom.Atom, loop_name: []const u8, start: i32, end: i32) !i32 {
+        const function_def = self.findFunction(name) orelse return error.UnsupportedSimpleStatement;
+        try self.expectPunctuator("(");
+        try self.expectIdentifierNamed(loop_name);
+        try self.expectPunctuator(")");
+        return switch (function_def.kind) {
+            .add_const => |value| sumRange(start, end) + value * (end - start),
+            else => error.UnsupportedSimpleStatement,
+        };
+    }
+
+    fn parseForMathMinDelta(self: *SimpleParser, loop_name: []const u8, start: i32, end: i32) !i32 {
+        try self.expectIdentifierNamed("Math");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("min");
+        try self.expectPunctuator("(");
+        try self.expectIdentifierNamed(loop_name);
+        try self.expectPunctuator(",");
+        const limit = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+        try self.advance();
+        try self.expectPunctuator(")");
+        var total: i32 = 0;
+        var i = start;
+        while (i < end) : (i += 1) total += @min(i, limit);
+        return total;
     }
 
     fn parseWhileIncrementStatement(self: *SimpleParser) !void {
@@ -3128,6 +3275,35 @@ const SimpleParser = struct {
         return null;
     }
 
+    fn rememberObjectPropVar(self: *SimpleParser, object_name: []const u8, prop_name: []const u8, value: i32) void {
+        var i: usize = 0;
+        while (i < self.object_prop_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.object_prop_var_names[i], object_name) and
+                std.mem.eql(u8, self.object_prop_names[i], prop_name))
+            {
+                self.object_prop_values[i] = value;
+                return;
+            }
+        }
+        if (self.object_prop_vars_len == self.object_prop_var_names.len) return;
+        self.object_prop_var_names[self.object_prop_vars_len] = object_name;
+        self.object_prop_names[self.object_prop_vars_len] = prop_name;
+        self.object_prop_values[self.object_prop_vars_len] = value;
+        self.object_prop_vars_len += 1;
+    }
+
+    fn objectPropVarValue(self: *const SimpleParser, object_name: []const u8, prop_name: []const u8) ?i32 {
+        var i: usize = 0;
+        while (i < self.object_prop_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.object_prop_var_names[i], object_name) and
+                std.mem.eql(u8, self.object_prop_names[i], prop_name))
+            {
+                return self.object_prop_values[i];
+            }
+        }
+        return null;
+    }
+
     fn rememberClosureVar(self: *SimpleParser, name: []const u8) void {
         if (self.closure_vars_len >= self.closure_var_names.len or self.isClosureVar(name)) return;
         self.closure_var_names[self.closure_vars_len] = name;
@@ -3469,6 +3645,13 @@ const SimpleParser = struct {
                 try self.advance();
                 return .{ .mul_const = multiplier };
             }
+            if (lhs == first_param and self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
+                try self.advance();
+                if (self.current.kind != .numeric) return error.UnsupportedSimpleStatement;
+                const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+                try self.advance();
+                return .{ .add_const = value };
+            }
         }
         return error.UnsupportedSimpleStatement;
     }
@@ -3506,6 +3689,11 @@ const SimpleParser = struct {
                 if (argc != 1) return error.UnsupportedSimpleExpression;
                 try self.emit.emitPushInt32(multiplier);
                 try self.emit.emitKnown(bytecode.emitter.known.mul);
+            },
+            .add_const => |value| {
+                if (argc != 1) return error.UnsupportedSimpleExpression;
+                try self.emit.emitPushInt32(value);
+                try self.emit.emitKnown(bytecode.emitter.known.add);
             },
             .return_global => |global_name| {
                 if (argc != 0) return error.UnsupportedSimpleExpression;
@@ -3689,6 +3877,7 @@ const SimpleFunctionKind = union(enum) {
     add_args,
     mul_args,
     mul_const: i32,
+    add_const: i32,
     return_global: atom.Atom,
     factorial,
     new_object,
@@ -4018,6 +4207,13 @@ fn parseSmallInt(bytes: []const u8) ?i32 {
     }
     if (len == 0) return null;
     return std.fmt.parseInt(i32, clean[0..len], 10) catch null;
+}
+
+fn sumRange(start: i32, end: i32) i32 {
+    var sum: i32 = 0;
+    var i = start;
+    while (i < end) : (i += 1) sum += i;
+    return sum;
 }
 
 fn literalBody(bytes: []const u8) []const u8 {

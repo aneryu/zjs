@@ -34,6 +34,15 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
+    const qjs_cli_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/qjs.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
+        },
+    });
     const test262_runner_fast_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/test262_runner.zig"),
         .target = target,
@@ -57,6 +66,12 @@ pub fn build(b: *std.Build) void {
     const install_qjs = b.addInstallArtifact(qjs_exe, .{});
     const qjs_step = b.step("qjs", "Build and install zjs");
     qjs_step.dependOn(&install_qjs.step);
+
+    const qjs_fast_exe = b.addExecutable(.{
+        .name = "zjs",
+        .root_module = qjs_cli_fast_mod,
+    });
+    const install_qjs_fast = b.addInstallArtifact(qjs_fast_exe, .{});
 
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
@@ -84,6 +99,11 @@ pub fn build(b: *std.Build) void {
     run_smoke.addArg("tests/zig-smoke/manifest.txt");
     const smoke_step = b.step("smoke", "Run JS smoke scripts against zjs");
     smoke_step.dependOn(&run_smoke.step);
+
+    const run_microbench = b.addSystemCommand(&.{ "bun", "tools/compare/run_microbench.js" });
+    run_microbench.step.dependOn(&install_qjs_fast.step);
+    const microbench_step = b.step("microbench", "Run QuickJS microbench comparison against zjs");
+    microbench_step.dependOn(&run_microbench.step);
 
     const quickjs_port_tests = b.addTest(.{
         .root_module = b.createModule(.{

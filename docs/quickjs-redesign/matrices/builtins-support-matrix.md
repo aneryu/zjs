@@ -5,6 +5,11 @@ builtin domains. A domain is not `validated` until constructor/prototype setup,
 property descriptors, behavior tests, and shared object/property/call paths are
 all covered.
 
+Architecture repair note: the status rows below are historical Phase 7 fixture
+evidence. Several builtin and support-library modules are still narrow helpers
+or scaffolds, so the subsystem is `fixture_validated`, not `semantic_complete`,
+until the repair plan replaces placeholder constructor/prototype/library paths.
+
 ## Support Libraries
 
 | Domain | QuickJS owner | Zig owner | Required coverage | Required tests | Status |

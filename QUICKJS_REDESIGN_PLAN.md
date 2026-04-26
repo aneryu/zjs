@@ -26,10 +26,11 @@ Completeness means the selected QuickJS core engine scope has no intentional sem
 
 ## Current Repository State
 
-- Phases 1-9 are implemented and validated through the focused Zig, smoke, compare, and test262 gates recorded in `docs/quickjs-redesign/TRACKING.md`.
+- Phases 1-9 are implemented through the focused Zig, smoke, compare, and test262 gates recorded in `docs/quickjs-redesign/TRACKING.md`; those gates are now treated as fixture/baseline evidence, not a blanket semantic-complete claim.
 - Phase 8 tooling is complete: `zjs`, smoke, compare, and `run-test262` build and execute through the rebuilt engine path.
-- Current local validation passes `zig build test --summary all` with 132/132 tests, `zig build smoke --summary all` with 45/45 scripts, functional compare with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
+- Current local validation passes `zig build test --summary all` with 133/133 tests, `zig build smoke --summary all` with 45/45 scripts, functional compare with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
 - Phase 9 runtime semantic hardening replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution. It also completed the BigInt/DataView/String-wrapper coercion follow-up with GC-backed multi-limb BigInt payloads, object-owned DataView/String wrapper storage, and targeted test262 coverage.
+- Architecture repair is active in `docs/quickjs-redesign/ARCHITECTURE_REPAIR_PLAN.md`: the first track calibrates status truth, and the next semantic-completion track is parser-first.
 
 ## Design Principles
 
@@ -51,6 +52,7 @@ This root document is the architecture contract. Detailed execution state lives 
 |---|---|
 | `docs/quickjs-redesign/README.md` | Index, document ownership, and update rules for the redesign docs. |
 | `docs/quickjs-redesign/TRACKING.md` | Current phase board, validation log, decision log, risk log, and handoff notes. |
+| `docs/quickjs-redesign/ARCHITECTURE_REPAIR_PLAN.md` | Status calibration and parser-first architecture repair queue. |
 | `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fix evidence, and reusable lessons. |
 | `docs/quickjs-redesign/errors/README.md` | Storage rules for long-form per-error records. |
 | `docs/quickjs-redesign/phases/01-bootstrap-source-baseline.md` | Phase 1 bootstrap, build wiring, source baseline, and status table plan. |
@@ -282,14 +284,17 @@ The Zig layout intentionally avoids an extra `quickjs/` layer under `src/engine`
 
 - `not_started`: directory or API may exist, but no semantic claim is made.
 - `in_progress`: implementation exists but may contain guarded incomplete paths.
-- `validated`: subsystem has source mapping, focused Zig tests, allocator/leak checks where relevant, and representative smoke or compare coverage once the CLI exists.
+- `source_mapped`: QuickJS source ownership is recorded, but behavior is not yet validated.
+- `fixture_validated`: source mapping plus focused Zig fixtures cover the scoped behavior.
+- `baseline_validated`: the scoped behavior also passes the current smoke/test262 baseline.
+- `semantic_complete`: no known in-scope public path in that subsystem returns a placeholder, unsupported, or fixture-only result.
 - `out_of_scope`: intentionally excluded by this plan, with a reason.
 
 Rules:
 
-- `validated` is allowed only when no public path in that subsystem returns a not-implemented error for in-scope QuickJS behavior.
+- `semantic_complete` is allowed only when no public path in that subsystem returns a not-implemented error for in-scope QuickJS behavior.
 - `out_of_scope` is allowed only for `qjsc`, `quickjs-libc`, std/os modules, full C ABI, and other exclusions listed in `Out Of Scope`.
-- Phase tests must fail if an in-scope subsystem is marked `validated` without a source mapping entry.
+- Phase tests must fail if an active in-scope subsystem status lacks a source mapping entry.
 - Reviews should read `status.zig` first to see which gaps are real phase gaps and which are accidental regressions.
 
 ## Public API
@@ -370,7 +375,7 @@ Builtins and libraries:
 - Recreate the source tree exactly as defined in `Project Directory Layout`, starting with `src/engine/root.zig`, `src/engine/source.zig`, `src/engine/status.zig`, and empty subsystem `root.zig` files.
 - Replace stale `build.zig` wiring with only roots that exist.
 - Add a QuickJS source baseline module recording commit, included files, excluded components, source mappings, and subsystem status.
-- Add `status.zig` coverage states and tests that prevent accidental `validated` claims without source mappings.
+- Add `status.zig` coverage states and tests that prevent accidental active-status claims without source mappings.
 - Add `src/tests/quickjs_port.zig`.
 - Add `zig build test-quickjs-port --summary all`.
 - Initial tests assert the QuickJS commit, source registry, and out-of-scope components.
@@ -434,7 +439,7 @@ Each phase is complete only when all relevant criteria below are true:
 
 | Phase | Required evidence |
 |---|---|
-| 1 | Source tree exists, stale build roots are removed, `test-quickjs-port` passes, and `status.zig` marks only bootstrap metadata as validated. |
+| 1 | Source tree exists, stale build roots are removed, `test-quickjs-port` passes, and `status.zig` marks only bootstrap metadata as semantically complete. |
 | 2 | Runtime/context init-deinit is leak-free, QuickJS value/atom/class constants are locked by tests, and no old VM imports exist. |
 | 3 | Ordinary object and array property semantics pass focused tests for descriptors, prototypes, extensibility, deletion, enumeration, and array length. |
 | 4 | Opcode order and bytecode metadata match QuickJS tables, bytecode allocations are owned and freed deterministically, and module/debug metadata tests pass. |

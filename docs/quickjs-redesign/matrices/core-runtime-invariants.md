@@ -4,6 +4,10 @@ Purpose: make Phase 2 reviewable at subsystem and invariant level. A row can be
 marked `validated` only when the source mapping, focused tests, ownership notes,
 and status entry all exist.
 
+Architecture repair note: Phase 2 core fixtures passed, but GC cycle removal is
+still scaffolded. The core runtime subsystem is therefore `fixture_validated`
+until cycle handling is implemented or explicitly scoped out.
+
 ## Runtime Foundation Matrix
 
 | Area | QuickJS owner | Zig owner | Required invariants | Required tests | Status |

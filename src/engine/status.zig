@@ -4,7 +4,10 @@ const std = @import("std");
 pub const PortState = enum {
     not_started,
     in_progress,
-    validated,
+    source_mapped,
+    fixture_validated,
+    baseline_validated,
+    semantic_complete,
     out_of_scope,
 };
 
@@ -40,7 +43,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .source_baseline,
         .phase = 1,
-        .state = .validated,
+        .state = .semantic_complete,
         .zig_paths = &.{ "src/engine/source.zig", "src/engine/status.zig" },
         .quickjs_sources = &.{
             "quickjs/quickjs.c",
@@ -52,14 +55,14 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .core_runtime,
         .phase = 2,
-        .state = .validated,
+        .state = .fixture_validated,
         .zig_paths = &.{"src/engine/core"},
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/quickjs.h", "quickjs/list.h" },
     },
     .{
         .subsystem = .object_property,
         .phase = 3,
-        .state = .validated,
+        .state = .fixture_validated,
         .zig_paths = &.{
             "src/engine/core/object.zig",
             "src/engine/core/property.zig",
@@ -72,7 +75,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .frontend,
         .phase = 5,
-        .state = .validated,
+        .state = .baseline_validated,
         .zig_paths = &.{
             "src/engine/frontend/token.zig",
             "src/engine/frontend/lexer.zig",
@@ -86,7 +89,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .bytecode,
         .phase = 4,
-        .state = .validated,
+        .state = .fixture_validated,
         .zig_paths = &.{
             "src/engine/bytecode/opcode.zig",
             "src/engine/bytecode/format.zig",
@@ -101,7 +104,7 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .exec,
         .phase = 6,
-        .state = .validated,
+        .state = .baseline_validated,
         .zig_paths = &.{
             "src/engine/exec/vm.zig",
             "src/engine/exec/frame.zig",
@@ -121,21 +124,21 @@ pub const records = [_]SubsystemStatus{
     .{
         .subsystem = .builtins,
         .phase = 7,
-        .state = .validated,
+        .state = .fixture_validated,
         .zig_paths = &.{ "src/engine/builtins", "src/engine/libs" },
         .quickjs_sources = &.{ "quickjs/quickjs.c", "quickjs/libregexp.c", "quickjs/dtoa.c" },
     },
     .{
         .subsystem = .libs,
         .phase = 7,
-        .state = .validated,
+        .state = .fixture_validated,
         .zig_paths = &.{"src/engine/libs"},
         .quickjs_sources = &.{ "quickjs/libregexp.c", "quickjs/libunicode.c", "quickjs/quickjs.c", "quickjs/dtoa.c" },
     },
     .{
         .subsystem = .cli_tooling,
         .phase = 8,
-        .state = .validated,
+        .state = .baseline_validated,
         .zig_paths = &.{ "src/cli", "src/tools" },
         .quickjs_sources = &.{ "quickjs/qjs.c", "quickjs/run-test262.c", "quickjs/test262.conf" },
     },
@@ -148,11 +151,38 @@ pub fn recordFor(subsystem: Subsystem) ?SubsystemStatus {
     return null;
 }
 
-pub fn validatedRecordsHaveMappings() bool {
+pub fn activeRecordsHaveMappings() bool {
     for (records) |record| {
-        if (record.state == .validated and !record.hasSourceMapping()) return false;
+        if (requiresSourceMapping(record.state) and !record.hasSourceMapping()) return false;
     }
     return true;
+}
+
+pub fn validatedRecordsHaveMappings() bool {
+    return activeRecordsHaveMappings();
+}
+
+pub fn requiresSourceMapping(state: PortState) bool {
+    return switch (state) {
+        .not_started, .out_of_scope => false,
+        .in_progress, .source_mapped, .fixture_validated, .baseline_validated, .semantic_complete => true,
+    };
+}
+
+pub fn hasKnownSemanticGap(subsystem: Subsystem) bool {
+    return switch (subsystem) {
+        .core_runtime,
+        .frontend,
+        .exec,
+        .builtins,
+        .libs,
+        => true,
+        .source_baseline,
+        .object_property,
+        .bytecode,
+        .cli_tooling,
+        => false,
+    };
 }
 
 pub fn stateName(state: PortState) []const u8 {
@@ -163,6 +193,14 @@ pub fn subsystemCount() usize {
     return records.len;
 }
 
-test "validated status cannot exist without QuickJS source mapping" {
-    try std.testing.expect(validatedRecordsHaveMappings());
+test "active status cannot exist without QuickJS source mapping" {
+    try std.testing.expect(activeRecordsHaveMappings());
+}
+
+test "semantic complete status cannot hide known architecture gaps" {
+    for (records) |record| {
+        if (record.state == .semantic_complete) {
+            try std.testing.expect(!hasKnownSemanticGap(record.subsystem));
+        }
+    }
 }

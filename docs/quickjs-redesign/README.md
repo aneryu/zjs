@@ -9,6 +9,7 @@ progress, phase-level details, validation evidence, and handoff state.
 | File | Purpose |
 |---|---|
 | `TRACKING.md` | Current phase board, validation log, decision log, risk log, and handoff notes. |
+| `ARCHITECTURE_REPAIR_PLAN.md` | Active architecture repair queue for status calibration and parser-first semantic completion. |
 | `ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fixes, regression evidence, and reusable lessons. |
 | `errors/README.md` | Storage rules for long-form per-error records. |
 | `archive/README.md` | Storage rules for superseded historical records that are no longer active status sources. |
@@ -56,8 +57,12 @@ progress, phase-level details, validation evidence, and handoff state.
 
 - `not_started`: no implementation claim.
 - `in_progress`: implementation exists, but incomplete paths may remain.
+- `source_mapped`: QuickJS source ownership is recorded, but behavior is not yet validated.
+- `fixture_validated`: focused Zig fixtures pass for the scoped behavior.
+- `baseline_validated`: the scoped behavior passes the current local smoke/test262 baseline.
+- `semantic_complete`: no known in-scope public placeholder remains for that subsystem.
 - `blocked`: progress is stopped on a concrete dependency or decision.
-- `validated`: phase or subsystem passed its documented exit checks.
+- `validated`: historical matrix wording meaning the row passed its documented exit checks; prefer the more specific status terms above for new work.
 - `completed`: phase exit checklist is satisfied and reflected in `TRACKING.md`.
 - `out_of_scope`: intentionally excluded by the root plan.
 

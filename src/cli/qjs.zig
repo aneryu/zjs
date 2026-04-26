@@ -9,7 +9,12 @@ pub const CliError = error{
 
 pub const Command = union(enum) {
     eval: []const u8,
-    file: []const u8,
+    file: FileCommand,
+};
+
+pub const FileCommand = struct {
+    path: []const u8,
+    script_args: []const []const u8,
 };
 
 pub fn parseArgs(args: []const []const u8) CliError!Command {
@@ -19,7 +24,7 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         if (args.len != 2) return error.Usage;
         return .{ .eval = args[1] };
     }
-    if (args.len == 1 and args[0].len != 0 and args[0][0] != '-') return .{ .file = args[0] };
+    if (args[0].len != 0 and args[0][0] != '-') return .{ .file = .{ .path = args[0], .script_args = args[0..] } };
     return error.Usage;
 }
 
@@ -36,8 +41,8 @@ pub fn main(init: std.process.Init) !void {
 
     const source_text = switch (command) {
         .eval => |source| source,
-        .file => |path| std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size)) catch |err| {
-            try printError(io, "zjs: unable to read {s}: {s}\n", .{ path, @errorName(err) });
+        .file => |file| std.Io.Dir.cwd().readFileAlloc(io, file.path, allocator, .limited(max_source_size)) catch |err| {
+            try printError(io, "zjs: unable to read {s}: {s}\n", .{ file.path, @errorName(err) });
             std.process.exit(1);
         },
     };
@@ -85,7 +90,7 @@ fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []cons
 }
 
 fn printUsage(io: std.Io) !void {
-    try printError(io, "usage: zjs -e <script>\n       zjs <file.js>\n", .{});
+    try printError(io, "usage: zjs -e <script>\n       zjs <file.js> [args...]\n", .{});
 }
 
 fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
@@ -122,7 +127,7 @@ fn printUnhandledRejection(io: std.Io, rt: *engine.core.Runtime, value: engine.c
 
 fn printTypeErrorNotFunction(io: std.Io, command: Command) !void {
     const path = switch (command) {
-        .file => |file| file,
+        .file => |file| file.path,
         .eval => "<eval>",
     };
     try printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
@@ -135,7 +140,13 @@ test "qjs args accept eval source" {
 
 test "qjs args accept one file" {
     const command = try parseArgs(&.{"input.js"});
-    try std.testing.expectEqualStrings("input.js", command.file);
+    try std.testing.expectEqualStrings("input.js", command.file.path);
+}
+
+test "qjs args accept file script arguments" {
+    const command = try parseArgs(&.{ "input.js", "empty_loop" });
+    try std.testing.expectEqualStrings("input.js", command.file.path);
+    try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
 }
 
 test "qjs args reject missing source" {

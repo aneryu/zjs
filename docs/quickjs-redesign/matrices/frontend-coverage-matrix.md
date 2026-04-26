@@ -4,6 +4,11 @@ Purpose: split Phase 5 into parser and emitter work that can be implemented and
 reviewed in small, source-aligned slices. This matrix forbids a standalone AST
 execution path; every executable syntax feature must emit bytecode metadata.
 
+Architecture repair note: historical `validated` rows below mean the Phase 5
+fixtures and local baseline evidence passed. They do not mean the current
+`SimpleParser` path is semantically complete. Parser-first repair is tracked in
+`../ARCHITECTURE_REPAIR_PLAN.md`.
+
 ## Lexer Matrix
 
 | Area | QuickJS owner | Zig owner | Required coverage | Required fixtures | Status |

@@ -8,7 +8,8 @@ test "qjs args accept eval source and one file" {
     try std.testing.expectEqualStrings("1", eval_command.eval);
 
     const file_command = try qjs_cli.parseArgs(&.{"input.js"});
-    try std.testing.expectEqualStrings("input.js", file_command.file);
+    try std.testing.expectEqualStrings("input.js", file_command.file.path);
+    try std.testing.expectEqual(@as(usize, 1), file_command.file.script_args.len);
 }
 
 test "qjs args reject invalid forms" {

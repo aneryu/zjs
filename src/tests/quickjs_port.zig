@@ -24,8 +24,16 @@ test "all status records have source ownership" {
     }
 }
 
-test "validated statuses require source mappings" {
-    try std.testing.expect(engine.status.validatedRecordsHaveMappings());
+test "active statuses require source mappings" {
+    try std.testing.expect(engine.status.activeRecordsHaveMappings());
+}
+
+test "semantic complete statuses do not mask known architecture gaps" {
+    for (engine.status.records) |record| {
+        if (record.state == .semantic_complete) {
+            try std.testing.expect(!engine.status.hasKnownSemanticGap(record.subsystem));
+        }
+    }
 }
 
 test "bootstrap root exposes only metadata and empty namespaces" {

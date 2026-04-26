@@ -623,7 +623,7 @@ pub const Vm = struct {
                     try self.stack.push(core.Value.float64(std.math.nan(f64)));
                 }
             },
-            3 => try self.pushNumber(1704067200000),
+            3 => try self.pushNumber(currentTimeMs()),
             else => return self.throwUnsupported(bytecode.emitter.known.date_static),
         }
     }
@@ -1202,8 +1202,16 @@ pub const Vm = struct {
         const object_value = try self.stack.pop();
         defer object_value.free(self.ctx.runtime);
         const object = try self.expectObject(object_value, bytecode.emitter.known.collection_method);
+        const prop_name: []const u8 = if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.weakset) "__set_value" else "__map_key";
+        const matched = try self.collectionKeyMatches(object, key, prop_name);
+        if (matched) {
+            try self.defineValueProperty(object, prop_name, core.Value.undefinedValue());
+            if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.weakmap) {
+                try self.defineValueProperty(object, "__map_value", core.Value.undefinedValue());
+            }
+        }
         try self.defineIntProperty(object, "size", 0);
-        try self.stack.push(core.Value.undefinedValue());
+        try self.stack.push(core.Value.boolean(matched));
     }
 
     fn collectionClear(self: *Vm) !void {
@@ -2392,6 +2400,14 @@ pub const Vm = struct {
     }
 };
 
+fn currentTimeMs() f64 {
+    var tv: std.c.timeval = undefined;
+    if (std.c.gettimeofday(&tv, null) == 0) {
+        return @as(f64, @floatFromInt(tv.sec)) * 1000.0 + @as(f64, @floatFromInt(@divTrunc(tv.usec, 1000)));
+    }
+    return 0;
+}
+
 const GlobalSlot = struct {
     name: core.Atom,
     value: core.Value,
@@ -2541,16 +2557,6 @@ fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.Big
         .left => if (negative_shift) lhs.shr(allocator, amount) else lhs.shl(allocator, amount),
         .right => if (negative_shift) lhs.shl(allocator, amount) else lhs.shr(allocator, amount),
     };
-}
-
-fn cloneBigIntValueForCompare(value: core.Value) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(std.heap.page_allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.value.cloneWithAllocator(std.heap.page_allocator);
-    }
-    return error.TypeError;
 }
 
 fn isFunctionObject(value: core.Value) bool {
@@ -2998,11 +3004,7 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
 
 fn valuesEqual(a: core.Value, b: core.Value) bool {
     if (a.isBigInt() and b.isBigInt()) {
-        var lhs = cloneBigIntValueForCompare(a) catch return false;
-        defer lhs.deinit();
-        var rhs = cloneBigIntValueForCompare(b) catch return false;
-        defer rhs.deinit();
-        return lhs.compare(rhs) == .eq;
+        return (compareBigIntValues(a, b) orelse return false) == .eq;
     }
     if (a.asInt32()) |ai| {
         if (b.asInt32()) |bi| return ai == bi;
@@ -3015,6 +3017,42 @@ fn valuesEqual(a: core.Value, b: core.Value) bool {
         return (compareStringValues(a, b) orelse 1) == 0;
     }
     return a.same(b);
+}
+
+fn compareBigIntValues(a: core.Value, b: core.Value) ?std.math.Order {
+    var lhs_scratch: [2]bignum.Limb = undefined;
+    var rhs_scratch: [2]bignum.Limb = undefined;
+    const lhs = bigIntParts(a, &lhs_scratch) orelse return null;
+    const rhs = bigIntParts(b, &rhs_scratch) orelse return null;
+    return bignum.compareParts(lhs.negative, lhs.limbs, rhs.negative, rhs.limbs);
+}
+
+const BigIntParts = struct {
+    negative: bool,
+    limbs: []const bignum.Limb,
+};
+
+fn bigIntParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntParts {
+    if (value.asShortBigInt()) |short| {
+        const signed: i128 = short;
+        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
+        var len: usize = 0;
+        while (magnitude != 0) {
+            scratch[len] = @truncate(magnitude);
+            magnitude >>= 32;
+            len += 1;
+        }
+        return .{
+            .negative = short < 0,
+            .limbs = scratch[0..len],
+        };
+    }
+    if (value.isBigInt() and value.refHeader() != null) {
+        const header = value.refHeader().?;
+        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
+        return .{ .negative = big.value.negative, .limbs = big.value.limbs };
+    }
+    return null;
 }
 
 fn valuesLooseEqual(a: core.Value, b: core.Value) bool {

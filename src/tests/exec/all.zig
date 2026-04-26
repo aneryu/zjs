@@ -215,7 +215,7 @@ test "Engine eval executes JSON smoke subset" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 
-    var output_buffer: [256]u8 = undefined;
+    var output_buffer: [512]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\const obj = { a: 1, b: 2 };
@@ -361,6 +361,53 @@ test "Engine eval executes control-flow smoke fixtures" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("10\n3\nneg zero pos\ntwo\n", stream.buffered());
+}
+
+test "Engine eval executes microbench-compatible loop fixtures" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let empty = 0;
+        \\for (let i = 0; i < 10; i++) {
+        \\}
+        \\print(empty);
+        \\let obj = { a: 1, b: 2 };
+        \\let propSum = 0;
+        \\for (let i = 0; i < 10; i++) propSum += obj.a;
+        \\print(propSum);
+        \\let tab = [3];
+        \\let arraySum = 0;
+        \\for (let i = 0; i < 10; i++) arraySum += tab[0];
+        \\print(arraySum);
+        \\function f(x) { return x + 1; }
+        \\let callSum = 0;
+        \\for (let i = 0; i < 10; i++) callSum += f(i);
+        \\print(callSum);
+        \\let minSum = 0;
+        \\for (let i = 0; i < 10; i++) minSum += Math.min(i, 5);
+        \\print(minSum);
+        \\let s = "";
+        \\for (let i = 0; i < 10; i++) s += "x";
+        \\print(s.length);
+        \\let typed = new Int32Array(new ArrayBuffer(16));
+        \\print(typed.length);
+        \\let map = new Map();
+        \\map.set("a", 1);
+        \\print(map.delete("a"));
+        \\print(map.has("a"));
+        \\let weak = new WeakMap();
+        \\let key = {};
+        \\weak.set(key, 2);
+        \\print(weak.delete(key));
+        \\print(weak.has(key));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("0\n10\n30\n55\n35\n10\n4\ntrue\nfalse\ntrue\nfalse\n", stream.buffered());
 }
 
 test "Engine eval executes primitive property smoke subset" {

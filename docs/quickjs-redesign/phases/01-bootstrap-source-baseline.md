@@ -40,8 +40,8 @@ port status tracking, and the first Zig test gate.
 - [x] Create directory tree from the root plan.
 - [x] Add empty subsystem root modules that compile.
 - [x] Add `source.zig` with QuickJS commit, included source list, excluded components, and source mapping entries.
-- [x] Add `status.zig` with subsystem records and states: `not_started`, `in_progress`, `validated`, `out_of_scope`.
-- [x] Add tests that reject `validated` status without source mapping.
+- [x] Add `status.zig` with subsystem records and active maturity states.
+- [x] Add tests that reject active status without source mapping.
 - [x] Replace stale `build.zig` references to deleted files with only existing roots.
 - [x] Add `test-quickjs-port` build step.
 - [x] Ensure the root module exports only stable placeholder API names needed by tests.
