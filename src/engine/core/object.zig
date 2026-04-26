@@ -41,6 +41,8 @@ pub const Object = struct {
     length_writable: bool = true,
     properties: []property.Entry = &.{},
     exotic: ?ExoticMethods = null,
+    byte_storage: []u8 = &.{},
+    string_data: ?Value = null,
 
     pub fn create(rt: *Runtime, class_id: class.ClassId, prototype: ?*Object) !*Object {
         const self = try rt.memory.create(Object);
@@ -74,6 +76,8 @@ pub const Object = struct {
             entry.slot.destroy(rt);
         }
         if (self.properties.len != 0) rt.memory.free(property.Entry, self.properties);
+        if (self.byte_storage.len != 0) rt.memory.free(u8, self.byte_storage);
+        if (self.string_data) |stored| stored.free(rt);
         rt.shapes.release(self.shape_ref);
         rt.memory.destroy(Object, self);
     }

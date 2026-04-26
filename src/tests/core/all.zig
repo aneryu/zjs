@@ -36,6 +36,18 @@ test "primitive value predicates match QuickJS helpers" {
     try std.testing.expectEqual(@as(?i32, null), core.Value.float64(7).asInt32());
 }
 
+test "heap BigInt value uses reserved QuickJS tag" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const big = try core.bigint.BigInt.create(rt, @as(i128, 1) << 90);
+    const value = big.valueRef();
+    defer value.free(rt);
+
+    try std.testing.expect(value.isBigInt());
+    try std.testing.expectEqual(core.gc.RefKind.big_int, value.refHeader().?.kind);
+}
+
 test "runtime and context init-deinit are leak free" {
     var i: usize = 0;
     while (i < 3) : (i += 1) {

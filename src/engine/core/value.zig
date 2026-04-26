@@ -49,6 +49,10 @@ pub const Value = struct {
         return .{ .tag = Tag.short_big_int, .payload = .{ .short_big_int = v } };
     }
 
+    pub fn bigInt(header: *gc.Header) Value {
+        return .{ .tag = Tag.big_int, .payload = .{ .ref = header } };
+    }
+
     pub fn string(header: *gc.Header) Value {
         return .{ .tag = Tag.string, .payload = .{ .ref = header } };
     }

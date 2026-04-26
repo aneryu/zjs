@@ -1,5 +1,6 @@
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
+const bignum = @import("../libs/bignum.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 
@@ -61,10 +62,10 @@ pub const Vm = struct {
                 bytecode.emitter.known.for_in_concat => try self.forInConcat(function, &frame),
                 bytecode.emitter.known.new_array_buffer => try self.newArrayBuffer(),
                 bytecode.emitter.known.new_typed_array => try self.newTypedArray(function, &frame),
-                bytecode.emitter.known.new_dataview => try self.newDataView(),
+                bytecode.emitter.known.new_dataview => try self.newDataView(function, &frame),
                 bytecode.emitter.known.arraybuffer_slice => try self.arrayBufferSlice(),
                 bytecode.emitter.known.dataview_get => try self.dataViewGet(function, &frame),
-                bytecode.emitter.known.dataview_set => try self.dataViewSet(),
+                bytecode.emitter.known.dataview_set => try self.dataViewSet(function, &frame),
                 bytecode.emitter.known.new_collection => try self.newCollection(function, &frame),
                 bytecode.emitter.known.collection_method => try self.collectionMethod(function, &frame),
                 bytecode.emitter.known.uri_call => try self.uriCall(function, &frame),
@@ -76,6 +77,7 @@ pub const Vm = struct {
                 bytecode.emitter.known.new_promise => try self.newPromise(),
                 bytecode.emitter.known.instanceof_named => try self.instanceofNamed(function, &frame),
                 bytecode.emitter.known.new_regexp => try self.newRegExp(),
+                bytecode.emitter.known.new_string_object => try self.newStringObject(function, &frame),
                 bytecode.emitter.known.regexp_method => try self.regExpMethod(function, &frame),
                 bytecode.emitter.known.new_closure => try self.newClosure(function, &frame),
                 bytecode.emitter.known.call_closure => try self.callClosure(function, &frame),
@@ -127,6 +129,7 @@ pub const Vm = struct {
                 bytecode.emitter.known.factorial => try self.factorial(),
                 240...251 => try self.binaryOp(op),
                 253...255 => try self.compareInt(op),
+                bytecode.emitter.known.bit_not => try self.unaryInt(op),
                 224...229 => try self.unaryInt(op),
                 else => return self.throwUnsupported(op),
             }
@@ -264,6 +267,11 @@ pub const Vm = struct {
             try self.binaryStringAdd(a, b);
             return;
         }
+        if (a.isBigInt() or b.isBigInt()) {
+            if (!a.isBigInt() or !b.isBigInt()) return self.throwTypeError();
+            try self.binaryBigIntOp(op, a, b);
+            return;
+        }
         if (a.isNumber() and b.isNumber()) {
             try self.binaryNumberOp(op, a, b);
             return;
@@ -271,21 +279,55 @@ pub const Vm = struct {
         const lhs = a.asInt32() orelse return self.throwUnsupported(op);
         const rhs = b.asInt32() orelse return self.throwUnsupported(op);
         const out = switch (op) {
-            240 => lhs * rhs,
-            241 => @divTrunc(lhs, rhs),
-            242 => @rem(lhs, rhs),
-            243 => lhs + rhs,
-            244 => lhs - rhs,
-            245 => lhs << @intCast(rhs & 31),
-            246 => lhs >> @intCast(rhs & 31),
-            247 => @as(i32, @bitCast(@as(u32, @bitCast(lhs)) >> @intCast(rhs & 31))),
-            248 => lhs & rhs,
-            249 => lhs ^ rhs,
-            250 => lhs | rhs,
-            251 => powI32(lhs, rhs),
+            bytecode.emitter.known.mul => lhs * rhs,
+            bytecode.emitter.known.div => @divTrunc(lhs, rhs),
+            bytecode.emitter.known.mod => @rem(lhs, rhs),
+            bytecode.emitter.known.add => lhs + rhs,
+            bytecode.emitter.known.sub => lhs - rhs,
+            bytecode.emitter.known.shl => lhs << @intCast(rhs & 31),
+            bytecode.emitter.known.sar => lhs >> @intCast(rhs & 31),
+            bytecode.emitter.known.shr => @as(i32, @bitCast(@as(u32, @bitCast(lhs)) >> @intCast(rhs & 31))),
+            bytecode.emitter.known.bit_and => lhs & rhs,
+            bytecode.emitter.known.bit_xor => lhs ^ rhs,
+            bytecode.emitter.known.bit_or => lhs | rhs,
+            bytecode.emitter.known.pow => powI32(lhs, rhs),
             else => unreachable,
         };
         try self.stack.push(core.Value.int32(out));
+    }
+
+    fn binaryBigIntOp(self: *Vm, op: u8, a: core.Value, b: core.Value) !void {
+        var lhs = try cloneBigIntValue(self.ctx.runtime, a);
+        defer lhs.deinit();
+        var rhs = try cloneBigIntValue(self.ctx.runtime, b);
+        defer rhs.deinit();
+        const allocator = self.ctx.runtime.memory.allocator;
+        var out = switch (op) {
+            bytecode.emitter.known.mul => try bignum.mulAlloc(allocator, lhs, rhs),
+            bytecode.emitter.known.div => lhs.div(rhs) catch |err| switch (err) {
+                error.DivisionByZero => return error.RangeError,
+                else => return err,
+            },
+            bytecode.emitter.known.mod => lhs.rem(rhs) catch |err| switch (err) {
+                error.DivisionByZero => return error.RangeError,
+                else => return err,
+            },
+            bytecode.emitter.known.add => try bignum.addAlloc(allocator, lhs, rhs),
+            bytecode.emitter.known.sub => try bignum.subAlloc(allocator, lhs, rhs),
+            bytecode.emitter.known.pow => lhs.pow(rhs, allocator) catch |err| switch (err) {
+                error.NegativeExponent, error.BigIntTooLarge => return error.RangeError,
+                else => return err,
+            },
+            bytecode.emitter.known.bit_and => try lhs.bitwise(rhs, allocator, .@"and"),
+            bytecode.emitter.known.bit_xor => try lhs.bitwise(rhs, allocator, .xor),
+            bytecode.emitter.known.bit_or => try lhs.bitwise(rhs, allocator, .@"or"),
+            bytecode.emitter.known.shl => try shiftBigInt(allocator, lhs, rhs, .left),
+            bytecode.emitter.known.sar => try shiftBigInt(allocator, lhs, rhs, .right),
+            bytecode.emitter.known.shr => return self.throwTypeError(),
+            else => return self.throwUnsupported(op),
+        };
+        defer out.deinit();
+        try self.pushBigIntValue(out);
     }
 
     fn binaryNumberOp(self: *Vm, op: u8, a: core.Value, b: core.Value) !void {
@@ -327,6 +369,23 @@ pub const Vm = struct {
                 255 => cmp > 0,
                 bytecode.emitter.known.gte => cmp >= 0,
                 else => false,
+            };
+            try self.stack.push(core.Value.boolean(out));
+            return;
+        }
+        if (a.isBigInt() or b.isBigInt()) {
+            if (!a.isBigInt() or !b.isBigInt()) return self.throwTypeError();
+            var lhs = try cloneBigIntValue(self.ctx.runtime, a);
+            defer lhs.deinit();
+            var rhs = try cloneBigIntValue(self.ctx.runtime, b);
+            defer rhs.deinit();
+            const cmp = lhs.compare(rhs);
+            const out = switch (op) {
+                253 => cmp == .lt,
+                254 => cmp == .lt or cmp == .eq,
+                255 => cmp == .gt,
+                bytecode.emitter.known.gte => cmp == .gt or cmp == .eq,
+                else => return self.throwUnsupported(op),
             };
             try self.stack.push(core.Value.boolean(out));
             return;
@@ -796,13 +855,51 @@ pub const Vm = struct {
         try self.stack.push(value);
     }
 
+    fn newStringObject(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+        const argc = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
+        frame.pc += 4;
+        var args: [8]core.Value = undefined;
+        if (argc > args.len) return self.throwUnsupported(bytecode.emitter.known.new_string_object);
+        var remaining = argc;
+        while (remaining > 0) {
+            remaining -= 1;
+            args[remaining] = try self.stack.pop();
+        }
+        defer {
+            var i: usize = 0;
+            while (i < argc) : (i += 1) args[i].free(self.ctx.runtime);
+        }
+
+        var buffer = std.ArrayList(u8).empty;
+        defer buffer.deinit(self.ctx.runtime.memory.allocator);
+        if (argc >= 1) try appendValueString(self.ctx.runtime, &buffer, args[0]);
+
+        const object = try core.Object.create(self.ctx.runtime, core.class.ids.string, null);
+        errdefer core.Object.destroyFromHeader(self.ctx.runtime, &object.header);
+        const ctor = try core.string.String.createUtf8(self.ctx.runtime, "String");
+        const ctor_value = ctor.value();
+        defer ctor_value.free(self.ctx.runtime);
+        try self.defineValueProperty(object, "__zjs_constructor", ctor_value);
+        const data = try core.string.String.createUtf8(self.ctx.runtime, buffer.items);
+        const data_value = data.value();
+        defer data_value.free(self.ctx.runtime);
+        object.string_data = data_value.dup();
+        try self.defineValueProperty(object, "__zjs_string_data", data_value);
+        try self.defineIntProperty(object, "length", @intCast(buffer.items.len));
+        const value = object.value();
+        defer value.free(self.ctx.runtime);
+        try self.stack.push(value);
+    }
+
     fn newArrayBuffer(self: *Vm) !void {
         const length_value = try self.stack.pop();
         defer length_value.free(self.ctx.runtime);
-        const byte_length: i32 = length_value.asInt32() orelse 0;
+        const byte_length_usize = try toIndexUsize(self.ctx.runtime, length_value);
         const object = try core.Object.create(self.ctx.runtime, core.class.ids.array_buffer, null);
         errdefer core.Object.destroyFromHeader(self.ctx.runtime, &object.header);
-        try self.defineIntProperty(object, "byteLength", byte_length);
+        object.byte_storage = try self.ctx.runtime.memory.alloc(u8, byte_length_usize);
+        @memset(object.byte_storage, 0);
+        try self.defineIntProperty(object, "byteLength", @intCast(byte_length_usize));
         const value = object.value();
         defer value.free(self.ctx.runtime);
         try self.stack.push(value);
@@ -824,17 +921,44 @@ pub const Vm = struct {
         try self.stack.push(value);
     }
 
-    fn newDataView(self: *Vm) !void {
-        const buffer_value = try self.stack.pop();
-        defer buffer_value.free(self.ctx.runtime);
-        const byte_length = try self.objectIntProperty(buffer_value, "byteLength");
+    fn newDataView(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+        const argc = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
+        frame.pc += 4;
+        var args: [8]core.Value = undefined;
+        if (argc > args.len) return self.throwUnsupported(bytecode.emitter.known.new_dataview);
+        var remaining = argc;
+        while (remaining > 0) {
+            remaining -= 1;
+            args[remaining] = try self.stack.pop();
+        }
+        defer {
+            var i: usize = 0;
+            while (i < argc) : (i += 1) args[i].free(self.ctx.runtime);
+        }
+        if (argc < 1) return self.throwUnsupported(bytecode.emitter.known.new_dataview);
+
+        const buffer_value = args[0];
+        const buffer_length_i32 = try self.objectIntProperty(buffer_value, "byteLength");
+        if (buffer_length_i32 < 0) return error.RangeError;
+        const buffer_length: usize = @intCast(buffer_length_i32);
+        const byte_offset = if (argc >= 2)
+            try toIndexUsize(self.ctx.runtime, args[1])
+        else
+            @as(usize, 0);
+        if (byte_offset > buffer_length) return error.RangeError;
+        const view_length = if (argc >= 3 and !args[2].isUndefined())
+            try toIndexUsize(self.ctx.runtime, args[2])
+        else
+            buffer_length - byte_offset;
+        if (byte_offset + view_length > buffer_length) return error.RangeError;
+
         const object = try core.Object.create(self.ctx.runtime, core.class.ids.dataview, null);
         errdefer core.Object.destroyFromHeader(self.ctx.runtime, &object.header);
         const buffer_key = try self.ctx.runtime.internAtom("buffer");
         defer self.ctx.runtime.atoms.free(buffer_key);
         try object.defineOwnProperty(self.ctx.runtime, buffer_key, core.Descriptor.data(buffer_value, true, true, true));
-        try self.defineIntProperty(object, "byteLength", byte_length);
-        try self.defineIntProperty(object, "byteOffset", 0);
+        try self.defineIntProperty(object, "byteLength", @intCast(view_length));
+        try self.defineIntProperty(object, "byteOffset", @intCast(byte_offset));
         const value = object.value();
         defer value.free(self.ctx.runtime);
         try self.stack.push(value);
@@ -847,66 +971,126 @@ pub const Vm = struct {
         defer start_value.free(self.ctx.runtime);
         const buffer_value = try self.stack.pop();
         defer buffer_value.free(self.ctx.runtime);
-        const length = end_value.asInt32() orelse try self.objectIntProperty(buffer_value, "byteLength");
+        const buffer = try self.expectObject(buffer_value, bytecode.emitter.known.arraybuffer_slice);
+        if (buffer.class_id != core.class.ids.array_buffer) return self.throwUnsupported(bytecode.emitter.known.arraybuffer_slice);
+        const source_length_i32 = try self.objectIntProperty(buffer_value, "byteLength");
+        if (source_length_i32 < 0) return error.RangeError;
+        const source_length: usize = @intCast(source_length_i32);
+        const start = @min(try toIndexUsize(self.ctx.runtime, start_value), source_length);
+        const end = @min(try toIndexUsize(self.ctx.runtime, end_value), source_length);
+        const length = if (end > start) end - start else 0;
         const object = try core.Object.create(self.ctx.runtime, core.class.ids.array_buffer, null);
         errdefer core.Object.destroyFromHeader(self.ctx.runtime, &object.header);
-        try self.defineIntProperty(object, "byteLength", length);
+        object.byte_storage = try self.ctx.runtime.memory.alloc(u8, length);
+        if (length != 0) {
+            @memcpy(object.byte_storage, buffer.byte_storage[start..end]);
+        }
+        try self.defineIntProperty(object, "byteLength", @intCast(length));
         const value = object.value();
         defer value.free(self.ctx.runtime);
         try self.stack.push(value);
     }
 
     fn dataViewGet(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-        const kind = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
+        const encoded = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
         frame.pc += 4;
-        const index_value = try self.stack.pop();
-        defer index_value.free(self.ctx.runtime);
+        const kind = encoded >> 16;
+        const argc = encoded & 0xffff;
+        var args: [8]core.Value = undefined;
+        if (argc > args.len) return self.throwUnsupported(bytecode.emitter.known.dataview_get);
+        var remaining = argc;
+        while (remaining > 0) {
+            remaining -= 1;
+            args[remaining] = try self.stack.pop();
+        }
+        defer {
+            var i: usize = 0;
+            while (i < argc) : (i += 1) args[i].free(self.ctx.runtime);
+        }
         const view_value = try self.stack.pop();
         defer view_value.free(self.ctx.runtime);
-        if (kind == 0) {
-            try self.stack.push(core.Value.int32(0));
-            return;
-        }
         const view = try self.expectObject(view_value, bytecode.emitter.known.dataview_get);
-        const index = try toIndexUsize(self.ctx.runtime, index_value);
-        var out: i64 = 0;
+        const index = if (argc >= 1) try toIndexUsize(self.ctx.runtime, args[0]) else @as(usize, 0);
+        const little_endian = argc >= 2 and isTruthy(args[1]);
+        const width = dataViewKindWidth(kind);
+        try self.checkDataViewBounds(view, index, width, bytecode.emitter.known.dataview_get);
+        const absolute = @as(usize, @intCast(try self.getIntProperty(view, "byteOffset", bytecode.emitter.known.dataview_get))) + index;
+        var bytes: [8]u8 = undefined;
         var i: usize = 0;
-        while (i < 8) : (i += 1) {
-            out = (out << 8) | @as(i64, try self.dataViewByte(view, index + i));
+        const buffer = try self.dataViewBuffer(view, bytecode.emitter.known.dataview_get);
+        while (i < width) : (i += 1) bytes[i] = buffer.byte_storage[absolute + i];
+        const endian: std.builtin.Endian = if (little_endian) .little else .big;
+        switch (kind) {
+            1 => try self.stack.push(core.Value.int32(@as(i8, @bitCast(bytes[0])))),
+            2 => try self.stack.push(core.Value.int32(bytes[0])),
+            3 => try self.stack.push(core.Value.int32(std.mem.readInt(i16, bytes[0..2], endian))),
+            4 => try self.stack.push(core.Value.int32(std.mem.readInt(u16, bytes[0..2], endian))),
+            5 => try self.stack.push(core.Value.int32(std.mem.readInt(i32, bytes[0..4], endian))),
+            6 => try self.pushNumber(@floatFromInt(std.mem.readInt(u32, bytes[0..4], endian))),
+            7 => try self.pushNumber(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], endian))))),
+            8 => try self.pushNumber(@bitCast(std.mem.readInt(u64, bytes[0..8], endian))),
+            9 => try self.pushBigIntI128(std.mem.readInt(i64, bytes[0..8], endian)),
+            10 => try self.pushBigIntI128(@intCast(std.mem.readInt(u64, bytes[0..8], endian))),
+            else => return self.throwUnsupported(bytecode.emitter.known.dataview_get),
         }
-        try self.stack.push(core.Value.shortBigInt(out));
     }
 
-    fn dataViewSet(self: *Vm) !void {
-        const written_value = try self.stack.pop();
-        defer written_value.free(self.ctx.runtime);
-        const index_value = try self.stack.pop();
-        defer index_value.free(self.ctx.runtime);
+    fn dataViewSet(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+        const encoded = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
+        frame.pc += 4;
+        const kind = encoded >> 16;
+        const argc = encoded & 0xffff;
+        var args: [8]core.Value = undefined;
+        if (argc > args.len) return self.throwUnsupported(bytecode.emitter.known.dataview_set);
+        var remaining = argc;
+        while (remaining > 0) {
+            remaining -= 1;
+            args[remaining] = try self.stack.pop();
+        }
+        defer {
+            var i: usize = 0;
+            while (i < argc) : (i += 1) args[i].free(self.ctx.runtime);
+        }
         const view_value = try self.stack.pop();
         defer view_value.free(self.ctx.runtime);
+        if (argc < 2) return self.throwUnsupported(bytecode.emitter.known.dataview_set);
         const view = try self.expectObject(view_value, bytecode.emitter.known.dataview_set);
-        const index = try toIndexUsize(self.ctx.runtime, index_value);
-        const byte = written_value.asInt32() orelse 0;
-        try self.setDataViewByte(view, index, @intCast(@as(u8, @truncate(@as(u32, @intCast(@max(byte, 0)))))));
+        const index = try toIndexUsize(self.ctx.runtime, args[0]);
+        const little_endian = argc >= 3 and isTruthy(args[2]);
+        const width = dataViewKindWidth(kind);
+        try self.checkDataViewBounds(view, index, width, bytecode.emitter.known.dataview_set);
+        const absolute = @as(usize, @intCast(try self.getIntProperty(view, "byteOffset", bytecode.emitter.known.dataview_set))) + index;
+        var bytes: [8]u8 = undefined;
+        const endian: std.builtin.Endian = if (little_endian) .little else .big;
+        switch (kind) {
+            1, 2 => bytes[0] = @truncate(valueToUint32(args[1])),
+            3, 4 => std.mem.writeInt(u16, bytes[0..2], @truncate(valueToUint32(args[1])), endian),
+            5 => std.mem.writeInt(u32, bytes[0..4], @bitCast(valueToInt32(args[1])), endian),
+            6 => std.mem.writeInt(u32, bytes[0..4], valueToUint32(args[1]), endian),
+            7 => std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(numberValue(args[1]) orelse 0))), endian),
+            8 => std.mem.writeInt(u64, bytes[0..8], @bitCast(numberValue(args[1]) orelse 0), endian),
+            9, 10 => std.mem.writeInt(u64, bytes[0..8], try valueToBigInt64Bits(self.ctx.runtime, args[1]), endian),
+            else => return self.throwUnsupported(bytecode.emitter.known.dataview_set),
+        }
+        var i: usize = 0;
+        const buffer = try self.dataViewBuffer(view, bytecode.emitter.known.dataview_set);
+        while (i < width) : (i += 1) buffer.byte_storage[absolute + i] = bytes[i];
         try self.stack.push(core.Value.undefinedValue());
     }
 
-    fn dataViewByte(self: *Vm, view: *core.Object, index: usize) !u8 {
-        var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "__byte_{d}", .{index});
-        const key = try self.ctx.runtime.internAtom(name);
-        defer self.ctx.runtime.atoms.free(key);
-        const value = view.getProperty(key);
-        defer value.free(self.ctx.runtime);
-        return @intCast(value.asInt32() orelse 0);
+    fn checkDataViewBounds(self: *Vm, view: *core.Object, index: usize, width: usize, op: u8) !void {
+        const byte_length = try self.getIntProperty(view, "byteLength", op);
+        if (byte_length < 0) return error.RangeError;
+        const length: usize = @intCast(byte_length);
+        if (index > length or width > length - index) return error.RangeError;
     }
 
-    fn setDataViewByte(self: *Vm, view: *core.Object, index: usize, byte: u8) !void {
-        var name_buf: [32]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "__byte_{d}", .{index});
-        const key = try self.ctx.runtime.internAtom(name);
-        defer self.ctx.runtime.atoms.free(key);
-        try view.defineOwnProperty(self.ctx.runtime, key, core.Descriptor.data(core.Value.int32(byte), true, true, true));
+    fn dataViewBuffer(self: *Vm, view: *core.Object, op: u8) !*core.Object {
+        const value = try self.getNamedProperty(view, "buffer");
+        defer value.free(self.ctx.runtime);
+        const buffer = try self.expectObject(value, op);
+        if (buffer.class_id != core.class.ids.array_buffer) return self.throwUnsupported(op);
+        return buffer;
     }
 
     fn newCollection(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -1446,19 +1630,28 @@ pub const Vm = struct {
             try self.pushNumber(out);
             return;
         }
-        if (value.asShortBigInt()) |big_int| {
-            const out = switch (op) {
-                224 => -big_int,
-                225 => big_int,
+        if (value.isBigInt()) {
+            var out = try cloneBigIntValue(self.ctx.runtime, value);
+            defer out.deinit();
+            switch (op) {
+                224 => out.negative = !out.negative and !out.isZero(),
+                225 => {},
+                bytecode.emitter.known.bit_not => {
+                    var next = try out.bitNot(self.ctx.runtime.memory.allocator);
+                    defer next.deinit();
+                    try self.pushBigIntValue(next);
+                    return;
+                },
                 else => return self.throwUnsupported(op),
-            };
-            try self.stack.push(core.Value.shortBigInt(out));
+            }
+            try self.pushBigIntValue(out);
             return;
         }
         const n = value.asInt32() orelse return self.throwUnsupported(op);
         const out = switch (op) {
             224 => -n,
             225 => n,
+            bytecode.emitter.known.bit_not => ~n,
             226, 228 => n - 1,
             227, 229 => n + 1,
             else => unreachable,
@@ -1719,25 +1912,30 @@ pub const Vm = struct {
         defer bits_value.free(self.ctx.runtime);
         const bits_number = try toIntegerOrInfinity(self.ctx.runtime, bits_value);
         if (std.math.isNan(bits_number) or bits_number == 0) {
-            try self.stack.push(core.Value.shortBigInt(0));
+            try self.pushBigIntI128(0);
             return;
         }
         if (!std.math.isFinite(bits_number)) return error.RangeError;
         const truncated = @trunc(bits_number);
         if (truncated < 0) return error.RangeError;
-        const bits: u6 = @intCast(@min(@as(u64, 31), @as(u64, @intFromFloat(truncated))));
+        const bits: usize = @intFromFloat(truncated);
         if (bits == 0) {
-            try self.stack.push(core.Value.shortBigInt(0));
+            try self.pushBigIntI128(0);
             return;
         }
-        const input = bigint_value.asShortBigInt() orelse return self.throwUnsupported(if (unsigned) bytecode.emitter.known.bigint_as_uint_n else bytecode.emitter.known.bigint_as_int_n);
-        const modulus: i64 = @as(i64, 1) << bits;
-        var reduced = @mod(@as(i64, input), modulus);
-        if (!unsigned) {
-            const sign_bit: i64 = @as(i64, 1) << (bits - 1);
-            if (reduced >= sign_bit) reduced -= modulus;
+        var input = try toBigIntValue(self.ctx.runtime, bigint_value, if (unsigned) bytecode.emitter.known.bigint_as_uint_n else bytecode.emitter.known.bigint_as_int_n);
+        defer input.deinit();
+        var reduced = try input.modPowerOfTwo(self.ctx.runtime.memory.allocator, bits);
+        defer reduced.deinit();
+        if (!unsigned and reduced.testBit(bits - 1)) {
+            var modulus = try bignum.pow2(self.ctx.runtime.memory.allocator, bits);
+            defer modulus.deinit();
+            var signed = try bignum.subAlloc(self.ctx.runtime.memory.allocator, reduced, modulus);
+            defer signed.deinit();
+            try self.pushBigIntValue(signed);
+            return;
         }
-        try self.stack.push(core.Value.shortBigInt(@intCast(reduced)));
+        try self.pushBigIntValue(reduced);
     }
 
     fn stringCharAt(self: *Vm) !void {
@@ -1746,10 +1944,10 @@ pub const Vm = struct {
         const string_value = try self.stack.pop();
         defer string_value.free(self.ctx.runtime);
         const index = index_value.asInt32() orelse return self.throwUnsupported(bytecode.emitter.known.string_char_at);
-        if (index < 0 or !string_value.isString()) return self.throwUnsupported(bytecode.emitter.known.string_char_at);
+        if (index < 0) return self.throwUnsupported(bytecode.emitter.known.string_char_at);
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(self.ctx.runtime.memory.allocator);
-        try appendRawString(self.ctx.runtime, &bytes, string_value);
+        try self.appendStringReceiverBytes(&bytes, string_value);
         const char_index: usize = @intCast(index);
         const char = if (char_index < bytes.items.len) bytes.items[char_index .. char_index + 1] else "";
         const str = try core.string.String.createUtf8(self.ctx.runtime, char);
@@ -1798,10 +1996,9 @@ pub const Vm = struct {
 
         const target = try self.stack.pop();
         defer target.free(self.ctx.runtime);
-        if (!target.isString()) return self.throwUnsupported(bytecode.emitter.known.string_method);
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(self.ctx.runtime.memory.allocator);
-        try appendRawString(self.ctx.runtime, &bytes, target);
+        try self.appendStringReceiverBytes(&bytes, target);
 
         switch (id) {
             1 => try self.pushSubstring(bytes.items, args[0..argc]),
@@ -1818,6 +2015,30 @@ pub const Vm = struct {
             },
             else => return self.throwUnsupported(bytecode.emitter.known.string_method),
         }
+    }
+
+    fn appendStringReceiverBytes(self: *Vm, buffer: *std.ArrayList(u8), target: core.Value) !void {
+        if (target.isString()) {
+            try appendRawString(self.ctx.runtime, buffer, target);
+            return;
+        }
+        if (target.isObject()) {
+            const object = try self.expectObject(target, bytecode.emitter.known.string_method);
+            if (object.class_id == core.class.ids.string) {
+                if (object.string_data) |data| {
+                    try appendValueString(self.ctx.runtime, buffer, data);
+                } else {
+                    const data = try self.getNamedProperty(object, "__zjs_string_data");
+                    defer data.free(self.ctx.runtime);
+                    try appendValueString(self.ctx.runtime, buffer, data);
+                }
+                return;
+            }
+            try appendValueString(self.ctx.runtime, buffer, target);
+            return;
+        }
+        if (target.isNull() or target.isUndefined()) return self.throwUnsupported(bytecode.emitter.known.string_method);
+        try appendValueString(self.ctx.runtime, buffer, target);
     }
 
     fn pushSubstring(self: *Vm, bytes: []const u8, args: []const core.Value) !void {
@@ -1875,6 +2096,20 @@ pub const Vm = struct {
     fn pushString(self: *Vm, bytes: []const u8) !void {
         const str = try core.string.String.createUtf8(self.ctx.runtime, bytes);
         const out = str.value();
+        defer out.free(self.ctx.runtime);
+        try self.stack.push(out);
+    }
+
+    fn pushBigIntI128(self: *Vm, value: i128) !void {
+        const big = try core.bigint.BigInt.create(self.ctx.runtime, value);
+        const out = big.valueRef();
+        defer out.free(self.ctx.runtime);
+        try self.stack.push(out);
+    }
+
+    fn pushBigIntValue(self: *Vm, value: bignum.BigInt) !void {
+        const big = try core.bigint.BigInt.createFromBigInt(self.ctx.runtime, value);
+        const out = big.valueRef();
         defer out.free(self.ctx.runtime);
         try self.stack.push(out);
     }
@@ -2191,6 +2426,12 @@ fn printValue(rt: *core.Runtime, writer: *std.Io.Writer, value: core.Value) anye
         } else {
             try writer.print("{d}", .{float_value});
         }
+    } else if (value.isBigInt()) {
+        var big = try cloneBigIntValue(rt, value);
+        defer big.deinit();
+        const text = try big.formatBase10Alloc(rt.memory.allocator);
+        defer rt.memory.allocator.free(text);
+        try writer.print("{s}", .{text});
     } else if (value.asBool()) |bool_value| {
         try writer.print("{s}", .{if (bool_value) "true" else "false"});
     } else if (value.isUndefined()) {
@@ -2220,6 +2461,96 @@ fn numberValue(value: core.Value) ?f64 {
     if (value.asInt32()) |v| return @floatFromInt(v);
     if (value.asFloat64()) |v| return v;
     return null;
+}
+
+fn valueToInt32(value: core.Value) i32 {
+    return @bitCast(valueToUint32(value));
+}
+
+fn valueToUint32(value: core.Value) u32 {
+    const number = if (numberValue(value)) |n|
+        n
+    else if (value.asBool()) |bool_value|
+        if (bool_value) @as(f64, 1) else @as(f64, 0)
+    else
+        @as(f64, 0);
+    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
+    const two32 = 4294967296.0;
+    var modulo = @mod(@trunc(number), two32);
+    if (modulo < 0) modulo += two32;
+    return @intFromFloat(modulo);
+}
+
+fn dataViewKindWidth(kind: u32) usize {
+    return switch (kind) {
+        1, 2 => 1,
+        3, 4 => 2,
+        5, 6, 7 => 4,
+        8, 9, 10 => 8,
+        else => 0,
+    };
+}
+
+fn toBigIntValue(rt: *core.Runtime, value: core.Value, op: u8) !bignum.BigInt {
+    if (value.isBigInt()) return cloneBigIntValue(rt, value);
+    if (value.asInt32()) |int_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, int_value);
+    if (value.asFloat64()) |float_value| {
+        if (!std.math.isFinite(float_value) or @trunc(float_value) != float_value) return error.TypeError;
+        return bignum.BigInt.fromIntAlloc(rt.memory.allocator, @intFromFloat(float_value));
+    }
+    if (value.asBool()) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
+
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(rt.memory.allocator);
+    if (value.isString() or value.isObject()) {
+        try appendValueString(rt, &buffer, value);
+        const trimmed = std.mem.trim(u8, buffer.items, " \t\r\n");
+        if (trimmed.len == 0) return error.TypeError;
+        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch error.TypeError;
+    }
+    _ = op;
+    return error.TypeError;
+}
+
+fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
+    if (value.isBigInt() and value.refHeader() != null) {
+        const header = value.refHeader().?;
+        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
+        return big.value.cloneWithAllocator(rt.memory.allocator);
+    }
+    return error.TypeError;
+}
+
+fn valueToBigInt64Bits(rt: *core.Runtime, value: core.Value) !u64 {
+    var big = try toBigIntValue(rt, value, bytecode.emitter.known.dataview_set);
+    defer big.deinit();
+    var low: u64 = 0;
+    if (big.limbs.len >= 1) low |= big.limbs[0];
+    if (big.limbs.len >= 2) low |= @as(u64, big.limbs[1]) << 32;
+    return if (big.negative) 0 -% low else low;
+}
+
+fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.BigInt, direction: enum { left, right }) !bignum.BigInt {
+    var shift_value = try rhs.cloneWithAllocator(allocator);
+    defer shift_value.deinit();
+    const negative_shift = shift_value.negative;
+    shift_value.negative = false;
+    const amount = shift_value.toUsize() orelse return error.RangeError;
+    return switch (direction) {
+        .left => if (negative_shift) lhs.shr(allocator, amount) else lhs.shl(allocator, amount),
+        .right => if (negative_shift) lhs.shl(allocator, amount) else lhs.shr(allocator, amount),
+    };
+}
+
+fn cloneBigIntValueForCompare(value: core.Value) !bignum.BigInt {
+    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(std.heap.page_allocator, big_int);
+    if (value.isBigInt() and value.refHeader() != null) {
+        const header = value.refHeader().?;
+        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
+        return big.value.cloneWithAllocator(std.heap.page_allocator);
+    }
+    return error.TypeError;
 }
 
 fn isFunctionObject(value: core.Value) bool {
@@ -2460,7 +2791,7 @@ fn appendJsonValue(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     } else if (value.isNull()) {
         try buffer.appendSlice(rt.memory.allocator, "null");
     } else if (value.asInt32()) |int_value| {
-        var int_buf: [32]u8 = undefined;
+        var int_buf: [64]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
         try buffer.appendSlice(rt.memory.allocator, printed);
     } else if (value.asBool()) |bool_value| {
@@ -2560,9 +2891,11 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
             const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
-    } else if (value.asShortBigInt()) |big_int| {
-        var int_buf: [32]u8 = undefined;
-        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{big_int});
+    } else if (value.isBigInt()) {
+        var big = try cloneBigIntValue(rt, value);
+        defer big.deinit();
+        const printed = try big.formatBase10Alloc(rt.memory.allocator);
+        defer rt.memory.allocator.free(printed);
         try buffer.appendSlice(rt.memory.allocator, printed);
     } else if (value.asBool()) |bool_value| {
         try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
@@ -2590,7 +2923,17 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
     } else if (value.isObject()) {
         const header = value.refHeader() orelse return;
         const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.class_id == core.class.ids.array_buffer) {
+        if (object_value.class_id == core.class.ids.string) {
+            if (object_value.string_data) |data| {
+                try appendValueString(rt, buffer, data);
+            } else {
+                const data_key = try rt.internAtom("__zjs_string_data");
+                defer rt.atoms.free(data_key);
+                const data = object_value.getProperty(data_key);
+                defer data.free(rt);
+                try appendValueString(rt, buffer, data);
+            }
+        } else if (object_value.class_id == core.class.ids.array_buffer) {
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
@@ -2630,7 +2973,8 @@ fn toIndexUsize(rt: *core.Runtime, value: core.Value) !usize {
     if (std.math.isNan(number)) return 0;
     if (!std.math.isFinite(number)) return error.RangeError;
     const truncated = @trunc(number);
-    if (truncated <= 0) return 0;
+    if (truncated < 0) return error.RangeError;
+    if (truncated == 0) return 0;
     return @intFromFloat(truncated);
 }
 
@@ -2653,6 +2997,13 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
 }
 
 fn valuesEqual(a: core.Value, b: core.Value) bool {
+    if (a.isBigInt() and b.isBigInt()) {
+        var lhs = cloneBigIntValueForCompare(a) catch return false;
+        defer lhs.deinit();
+        var rhs = cloneBigIntValueForCompare(b) catch return false;
+        defer rhs.deinit();
+        return lhs.compare(rhs) == .eq;
+    }
     if (a.asInt32()) |ai| {
         if (b.asInt32()) |bi| return ai == bi;
     }

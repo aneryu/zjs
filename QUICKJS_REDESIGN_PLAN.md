@@ -28,9 +28,8 @@ Completeness means the selected QuickJS core engine scope has no intentional sem
 
 - Phases 1-9 are implemented and validated through the focused Zig, smoke, compare, and test262 gates recorded in `docs/quickjs-redesign/TRACKING.md`.
 - Phase 8 tooling is complete: `zjs`, smoke, compare, and `run-test262` build and execute through the rebuilt engine path.
-- Current local validation passes `zig build test --summary all` with 112/112 tests, `zig build smoke --summary all` with 45/45 scripts, functional compare with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
-- Phase 9 runtime semantic hardening replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution. BigInt/DataView/String-wrapper coercion remain tracked follow-up runtime hardening work.
-- `AGENTS.md` still references the historical `quickjs-zig-plan.md`; the active architecture and progress sources are this document plus `docs/quickjs-redesign/TRACKING.md` and the phase/matrix documents.
+- Current local validation passes `zig build test --summary all` with 132/132 tests, `zig build smoke --summary all` with 45/45 scripts, functional compare with 45/45 scripts, and the local `run-test262` gate with `Result: 0/48205 errors, passed 42200` in about 15 seconds.
+- Phase 9 runtime semantic hardening replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution. It also completed the BigInt/DataView/String-wrapper coercion follow-up with GC-backed multi-limb BigInt payloads, object-owned DataView/String wrapper storage, and targeted test262 coverage.
 
 ## Design Principles
 
@@ -426,8 +425,8 @@ Builtins and libraries:
   effects.
 - Start with host-visible output: `print(...)` and `console.log(...)` must not
   depend on parser/emitter-recognized output opcodes.
-- Keep BigInt/DataView/String-wrapper coercion gaps tracked as follow-up runtime
-  hardening work unless the active Phase 9 document promotes them to blockers.
+- Keep BigInt/DataView/String-wrapper coercion hardening recorded as completed
+  Phase 9 follow-up work with targeted regression evidence.
 
 ## Phase Exit Criteria
 

@@ -178,20 +178,24 @@ pub const Emitter = struct {
         try self.emitKnownU32(known.new_typed_array, element_size);
     }
 
-    pub fn emitNewDataView(self: *Emitter) !void {
-        try self.emitKnown(known.new_dataview);
+    pub fn emitNewDataView(self: *Emitter, argc: u32) !void {
+        try self.emitKnownU32(known.new_dataview, argc);
     }
 
     pub fn emitArrayBufferSlice(self: *Emitter) !void {
         try self.emitKnown(known.arraybuffer_slice);
     }
 
-    pub fn emitDataViewGet(self: *Emitter, kind: u32) !void {
-        try self.emitKnownU32(known.dataview_get, kind);
+    pub fn emitDataViewGet(self: *Emitter, kind: u32, argc: u32) !void {
+        try self.emitKnownU32(known.dataview_get, (kind << 16) | (argc & 0xffff));
     }
 
-    pub fn emitDataViewSet(self: *Emitter) !void {
-        try self.emitKnown(known.dataview_set);
+    pub fn emitDataViewSet(self: *Emitter, kind: u32, argc: u32) !void {
+        try self.emitKnownU32(known.dataview_set, (kind << 16) | (argc & 0xffff));
+    }
+
+    pub fn emitNewStringObject(self: *Emitter, argc: u32) !void {
+        try self.emitKnownU32(known.new_string_object, argc);
     }
 
     pub fn emitNewCollection(self: *Emitter, kind: u32) !void {
@@ -299,6 +303,7 @@ pub const known = struct {
     pub const new_collection: u8 = 184;
     pub const collection_method: u8 = 185;
     pub const uri_call: u8 = 186;
+    pub const new_string_object: u8 = 153;
     pub const promise_static: u8 = 189;
     pub const new_regexp: u8 = 190;
     pub const regexp_method: u8 = 191;
@@ -324,6 +329,7 @@ pub const known = struct {
     pub const assert_same_value: u8 = 158;
     pub const bigint_as_int_n: u8 = 155;
     pub const bigint_as_uint_n: u8 = 154;
+    pub const bit_not: u8 = 151;
     pub const optional_get_prop: u8 = 207;
     pub const value_to_number: u8 = 208;
     pub const value_to_boolean: u8 = 209;
@@ -357,6 +363,13 @@ pub const known = struct {
     pub const mod: u8 = 242;
     pub const add: u8 = 243;
     pub const sub: u8 = 244;
+    pub const shl: u8 = 245;
+    pub const sar: u8 = 246;
+    pub const shr: u8 = 247;
+    pub const bit_and: u8 = 248;
+    pub const bit_xor: u8 = 249;
+    pub const bit_or: u8 = 250;
+    pub const pow: u8 = 251;
 };
 
 const std = @import("std");

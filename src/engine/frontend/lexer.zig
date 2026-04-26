@@ -41,6 +41,17 @@ pub const Lexer = struct {
             self.bump();
             return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
         }
+        if (c == '*' and self.index + 1 < self.source.len and self.source[self.index + 1] == '*') {
+            self.bump();
+            self.bump();
+            return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
+        }
+        if ((c == '<' or c == '>') and self.index + 1 < self.source.len and self.source[self.index + 1] == c) {
+            self.bump();
+            self.bump();
+            if (c == '>' and self.index < self.source.len and self.source[self.index] == '>') self.bump();
+            return self.emit(.punctuator, self.source[start.offset..self.index], start, null);
+        }
 
         self.bump();
         return self.emit(.punctuator, self.source[start.offset..self.index], start, null);

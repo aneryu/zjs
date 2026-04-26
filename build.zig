@@ -218,4 +218,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exec_tests.step);
     test_step.dependOn(&run_builtins_tests.step);
     test_step.dependOn(&run_tools_tests.step);
+    test_step.dependOn(&run_test262_runner_tests.step);
 }

@@ -11,6 +11,7 @@ progress, phase-level details, validation evidence, and handoff state.
 | `TRACKING.md` | Current phase board, validation log, decision log, risk log, and handoff notes. |
 | `ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fixes, regression evidence, and reusable lessons. |
 | `errors/README.md` | Storage rules for long-form per-error records. |
+| `archive/README.md` | Storage rules for superseded historical records that are no longer active status sources. |
 | `phases/01-bootstrap-source-baseline.md` | Bootstrap source tree, build wiring, source baseline, and status metadata. |
 | `phases/02-core-runtime-foundations.md` | Value model, runtime, context, atoms, strings, classes, shapes, refcount and GC foundations. |
 | `phases/03-object-property-semantics.md` | Ordinary object model, descriptors, prototypes, property operations, and array core semantics. |

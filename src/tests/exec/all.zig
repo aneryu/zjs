@@ -133,7 +133,7 @@ test "Engine eval executes console.log with many arguments" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 
-    var output_buffer: [128]u8 = undefined;
+    var output_buffer: [1024]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput("console.log(1,2,3,4,5,6,7,8,9,10);", &stream);
     defer result.free(js.runtime);
@@ -145,7 +145,7 @@ test "Engine eval routes host output through global function calls" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 
-    var output_buffer: [128]u8 = undefined;
+    var output_buffer: [512]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\print(1);
@@ -528,6 +528,55 @@ test "Engine eval executes String constructor conversion smoke subset" {
     try std.testing.expectEqualStrings("H\nHel\nHELLO\nstring\n1,2\nnull\nundefined\nnull\nHello\n", stream.buffered());
 }
 
+test "Engine eval executes String wrapper coercion regression subset" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const boxed = new String(123);
+        \\print(typeof boxed);
+        \\print(boxed.toString());
+        \\print(boxed.substring(1, 3));
+        \\print(new String("abc").includes("b"));
+        \\print(new String().toString());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("object\n123\n23\ntrue\n\n", stream.buffered());
+}
+
+test "Engine eval executes BigInt asN coercion regression subset" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(BigInt.asIntN(4, "15"));
+        \\print(BigInt.asUintN(4, true));
+        \\print(BigInt.asIntN("4", 7));
+        \\print(123456789012345678901234567890n);
+        \\print(BigInt.asUintN(80, 1208925819614629174706175n));
+        \\print(BigInt.asIntN(80, 1208925819614629174706175n));
+        \\print(12345678901234567890123456789012345678901234567890n);
+        \\print(BigInt.asUintN(256, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffn));
+        \\print(123456789012345678901234567890n / 97n);
+        \\print(123456789012345678901234567890n % 97n);
+        \\print(2n ** 20n);
+        \\print(1n << 130n);
+        \\print(-1n >> 100n);
+        \\print(0xffffffffffffffffffffn & 0xffn);
+        \\print(~0n);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("-1\n1\n7\n123456789012345678901234567890\n1208925819614629174706175\n-1\n12345678901234567890123456789012345678901234567890\n115792089237316195423570985008687907853269984665640564039457584007913129639935\n1272750402189130710322005854\n52\n1048576\n1361129467683753853853498429727072845824\n-1\n255\n-1\n", stream.buffered());
+}
+
 test "Engine eval executes typeof standard globals and new Object smoke subset" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
@@ -770,13 +819,40 @@ test "Engine eval executes typed array smoke subset" {
         \\dv.setUint16(0, 1);
         \\dv.setInt32(0, 1);
         \\dv.setUint32(0, 1);
+        \\dv.setUint32(0, 4294967295);
+        \\console.log(dv.getUint32(0));
+        \\dv.setUint32(0, -1);
+        \\console.log(dv.getUint32(0));
         \\dv.setFloat32(0, 1.0);
         \\dv.setFloat64(0, 1.0);
+        \\const dv2 = new DataView(ab, 1, 2);
+        \\console.log(dv2.byteOffset);
+        \\console.log(dv2.byteLength);
+        \\dv2.setInt16(0, 4660, true);
+        \\console.log(dv2.getUint8(0));
+        \\console.log(dv2.getUint8(1));
+        \\console.log(dv2.getInt16(0, true));
+        \\const dv4 = new DataView(ab);
+        \\console.log(dv4.getUint8(1));
+        \\console.log(dv4.getUint8(2));
+        \\const sliced = ab.slice(1, 3);
+        \\const sdv = new DataView(sliced);
+        \\console.log(sliced.byteLength);
+        \\console.log(sdv.getUint8(0));
+        \\console.log(sdv.getUint8(1));
+        \\const big = new DataView(new ArrayBuffer(8));
+        \\big.setBigInt64(0, -1n);
+        \\console.log(big.getBigInt64(0));
+        \\big.setBigUint64(0, 18446744073709551615n);
+        \\console.log(big.getBigUint64(0));
+        \\const dv3 = new DataView(ab, undefined, undefined);
+        \\console.log(dv3.byteOffset);
+        \\console.log(dv3.byteLength);
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("16\n[object ArrayBuffer]\n16\n16\n0\n16\n8\n8\n4\n4\n4\n2\n[object ArrayBuffer]\n16\n0\n0\n0\n0\n0\n0\n0\n0\n0\n", stream.buffered());
+    try std.testing.expectEqualStrings("16\n[object ArrayBuffer]\n16\n16\n0\n16\n8\n8\n4\n4\n4\n2\n[object ArrayBuffer]\n16\n0\n0\n0\n0\n0\n0\n0\n0\n0\n4294967295\n4294967295\n1\n2\n52\n18\n4660\n52\n18\n2\n52\n18\n-1\n18446744073709551615\n0\n16\n", stream.buffered());
 }
 
 test "Engine eval executes Map Set smoke subset" {

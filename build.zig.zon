@@ -6,9 +6,11 @@
     .dependencies = .{},
     .paths = .{
         "AGENTS.md",
+        "QUICKJS_REDESIGN_PLAN.md",
         "build.zig",
         "build.zig.zon",
-        "quickjs-zig-plan.md",
+        "docs/quickjs-redesign",
+        "quickjs",
         "src",
         "tests",
         "tools",

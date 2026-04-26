@@ -1365,9 +1365,12 @@ const SimpleParser = struct {
     array_first_vars_len: usize = 0,
     closure_var_names: [16][]const u8 = undefined,
     closure_vars_len: usize = 0,
+    string_var_names: [16][]const u8 = undefined,
+    string_vars_len: usize = 0,
     last_expression_is_regexp: bool = false,
     last_expression_is_date: bool = false,
     last_expression_is_closure: bool = false,
+    last_expression_is_string_object: bool = false,
     postfix_receiver_is_regexp: bool = false,
     postfix_receiver_is_date: bool = false,
     postfix_receiver_is_string: bool = false,
@@ -1417,6 +1420,7 @@ const SimpleParser = struct {
             if (self.last_expression_is_regexp) self.rememberRegExpVar(name_lexeme);
             if (self.last_expression_is_date) self.rememberDateVar(name_lexeme);
             if (self.last_expression_is_closure) self.rememberClosureVar(name_lexeme);
+            if (self.last_expression_is_string_object) self.rememberStringVar(name_lexeme);
             if (literal_int) |value| self.rememberIntVar(name_lexeme, value);
             if (literal_array_first) |value| self.rememberArrayFirstVar(name_lexeme, value);
             try self.emit.emitDefineVar(name);
@@ -1520,9 +1524,13 @@ const SimpleParser = struct {
                 try self.advance();
                 if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
                     try self.emit.emitGetVar(name);
-                    if (isDataViewSetMethod(self.rt.atoms.name(property) orelse "")) {
-                        _ = try self.parseIgnoredArgumentList();
-                        try self.emit.emitDataViewSet();
+                    const property_name = self.rt.atoms.name(property) orelse "";
+                    if (self.isStringVar(name_lexeme) and stringMethodId(property_name) != null) {
+                        const argc = try self.parseIgnoredArgumentList();
+                        try self.emit.emitStringMethod(stringMethodId(property_name).?, argc);
+                    } else if (dataViewSetKind(property_name)) |kind| {
+                        const argc = try self.parseIgnoredArgumentList();
+                        try self.emit.emitDataViewSet(kind, argc);
                     } else if (collectionMethodId(self.rt.atoms.name(property) orelse "")) |method| {
                         const argc = try self.parseIgnoredArgumentList();
                         _ = argc;
@@ -1660,6 +1668,7 @@ const SimpleParser = struct {
         self.last_expression_is_regexp = false;
         self.last_expression_is_date = false;
         self.last_expression_is_closure = false;
+        self.last_expression_is_string_object = false;
         try self.parsePrimary();
         try self.parsePostfix();
         while (true) {
@@ -1685,7 +1694,7 @@ const SimpleParser = struct {
                 self.rt.atoms.free(rhs_name);
                 continue;
             }
-            try self.parseExpression(precedence + 1);
+            try self.parseExpression(if (op == bytecode.emitter.known.pow) precedence else precedence + 1);
             try self.emit.emitKnown(op);
         }
     }
@@ -1747,13 +1756,8 @@ const SimpleParser = struct {
             } else if (isDataViewGetMethod(self.current.lexeme)) {
                 const kind = dataViewGetKind(self.current.lexeme);
                 try self.advance();
-                try self.expectPunctuator("(");
-                try self.parseExpression(0);
-                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    try self.skipRemainingArguments();
-                }
-                try self.expectPunctuator(")");
-                try self.emit.emitDataViewGet(kind);
+                const argc = try self.parseIgnoredArgumentList();
+                try self.emit.emitDataViewGet(kind, argc);
             } else if (collectionMethodId(self.current.lexeme)) |method| {
                 const property = try self.internCurrentPropertyName();
                 try self.advance();
@@ -1885,6 +1889,7 @@ const SimpleParser = struct {
         self.last_expression_is_regexp = false;
         self.last_expression_is_date = false;
         self.last_expression_is_closure = false;
+        self.last_expression_is_string_object = false;
         self.postfix_receiver_is_regexp = false;
         self.postfix_receiver_is_date = false;
         self.postfix_receiver_is_string = false;
@@ -2001,6 +2006,7 @@ const SimpleParser = struct {
                     try self.emit.emitGetVar(name);
                     self.postfix_receiver_is_regexp = self.isRegExpVar(name_lexeme);
                     self.postfix_receiver_is_date = self.isDateVar(name_lexeme);
+                    self.postfix_receiver_is_string = self.isStringVar(name_lexeme);
                     self.rt.atoms.free(name);
                     return;
                 }
@@ -2045,6 +2051,10 @@ const SimpleParser = struct {
                     }
                     try self.parsePrimary();
                     try self.emit.emitKnown(224);
+                } else if (std.mem.eql(u8, self.current.lexeme, "~")) {
+                    try self.advance();
+                    try self.parsePrimary();
+                    try self.emit.emitKnown(bytecode.emitter.known.bit_not);
                 } else {
                     return error.UnsupportedSimpleExpression;
                 }
@@ -2185,15 +2195,12 @@ const SimpleParser = struct {
 
     fn emitBigIntLiteral(self: *SimpleParser, bytes: []const u8) !void {
         const digits = if (std.mem.endsWith(u8, bytes, "n")) bytes[0 .. bytes.len - 1] else bytes;
-        const parsed = if (std.mem.startsWith(u8, digits, "0x") or std.mem.startsWith(u8, digits, "0X"))
-            std.fmt.parseInt(i64, digits[2..], 16) catch return error.UnsupportedSimpleExpression
-        else
-            std.fmt.parseInt(i64, digits, 10) catch return error.UnsupportedSimpleExpression;
-        if (parsed >= std.math.minInt(i64) and parsed <= std.math.maxInt(i64)) {
-            _ = try self.emit.emitPushConst(@import("../core/value.zig").Value.shortBigInt(parsed));
-            return;
-        }
-        return error.UnsupportedSimpleExpression;
+        var parsed = @import("../libs/bignum.zig").parseAutoAlloc(self.rt.memory.allocator, digits) catch return error.UnsupportedSimpleExpression;
+        defer parsed.deinit();
+        const big = try @import("../core/bigint.zig").BigInt.createFromBigInt(self.rt, parsed);
+        const value = big.valueRef();
+        _ = try self.emit.emitPushConst(value);
+        value.free(self.rt);
     }
 
     fn parseArrayLiteral(self: *SimpleParser) !void {
@@ -2997,13 +3004,8 @@ const SimpleParser = struct {
         }
         if (std.mem.eql(u8, self.current.lexeme, "DataView")) {
             try self.advance();
-            try self.expectPunctuator("(");
-            try self.parseExpression(0);
-            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
-                try self.skipRemainingArguments();
-            }
-            try self.expectPunctuator(")");
-            try self.emit.emitNewDataView();
+            const argc = try self.parseIgnoredArgumentList();
+            try self.emit.emitNewDataView(argc);
             return;
         }
         if (collectionConstructorId(self.current.lexeme)) |kind| {
@@ -3034,7 +3036,10 @@ const SimpleParser = struct {
             return;
         }
         try self.advance();
-        try self.parsePrimitiveConversion(bytecode.emitter.known.value_to_string);
+        const argc = try self.parseIgnoredArgumentList();
+        try self.emit.emitNewStringObject(argc);
+        self.last_expression_is_string_object = true;
+        self.postfix_receiver_is_string = true;
     }
 
     fn rememberRegExpVar(self: *SimpleParser, name: []const u8) void {
@@ -3061,6 +3066,20 @@ const SimpleParser = struct {
         var i: usize = 0;
         while (i < self.date_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.date_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn rememberStringVar(self: *SimpleParser, name: []const u8) void {
+        if (self.string_vars_len >= self.string_var_names.len or self.isStringVar(name)) return;
+        self.string_var_names[self.string_vars_len] = name;
+        self.string_vars_len += 1;
+    }
+
+    fn isStringVar(self: *const SimpleParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.string_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.string_var_names[i], name)) return true;
         }
         return false;
     }
@@ -3747,20 +3766,31 @@ fn isDataViewGetMethod(name: []const u8) bool {
 }
 
 fn dataViewGetKind(name: []const u8) u32 {
-    if (std.mem.eql(u8, name, "getBigInt64")) return 1;
-    if (std.mem.eql(u8, name, "getBigUint64")) return 2;
+    if (std.mem.eql(u8, name, "getInt8")) return 1;
+    if (std.mem.eql(u8, name, "getUint8")) return 2;
+    if (std.mem.eql(u8, name, "getInt16")) return 3;
+    if (std.mem.eql(u8, name, "getUint16")) return 4;
+    if (std.mem.eql(u8, name, "getInt32")) return 5;
+    if (std.mem.eql(u8, name, "getUint32")) return 6;
+    if (std.mem.eql(u8, name, "getFloat32")) return 7;
+    if (std.mem.eql(u8, name, "getFloat64")) return 8;
+    if (std.mem.eql(u8, name, "getBigInt64")) return 9;
+    if (std.mem.eql(u8, name, "getBigUint64")) return 10;
     return 0;
 }
 
-fn isDataViewSetMethod(name: []const u8) bool {
-    return std.mem.eql(u8, name, "setInt8") or
-        std.mem.eql(u8, name, "setUint8") or
-        std.mem.eql(u8, name, "setInt16") or
-        std.mem.eql(u8, name, "setUint16") or
-        std.mem.eql(u8, name, "setInt32") or
-        std.mem.eql(u8, name, "setUint32") or
-        std.mem.eql(u8, name, "setFloat32") or
-        std.mem.eql(u8, name, "setFloat64");
+fn dataViewSetKind(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "setInt8")) return 1;
+    if (std.mem.eql(u8, name, "setUint8")) return 2;
+    if (std.mem.eql(u8, name, "setInt16")) return 3;
+    if (std.mem.eql(u8, name, "setUint16")) return 4;
+    if (std.mem.eql(u8, name, "setInt32")) return 5;
+    if (std.mem.eql(u8, name, "setUint32")) return 6;
+    if (std.mem.eql(u8, name, "setFloat32")) return 7;
+    if (std.mem.eql(u8, name, "setFloat64")) return 8;
+    if (std.mem.eql(u8, name, "setBigInt64")) return 9;
+    if (std.mem.eql(u8, name, "setBigUint64")) return 10;
+    return null;
 }
 
 fn collectionConstructorId(name: []const u8) ?u32 {
@@ -3872,8 +3902,15 @@ fn binaryOpcode(lexeme: []const u8) ?u8 {
     if (std.mem.eql(u8, lexeme, "*")) return bytecode.emitter.known.mul;
     if (std.mem.eql(u8, lexeme, "/")) return bytecode.emitter.known.div;
     if (std.mem.eql(u8, lexeme, "%")) return bytecode.emitter.known.mod;
+    if (std.mem.eql(u8, lexeme, "**")) return bytecode.emitter.known.pow;
     if (std.mem.eql(u8, lexeme, "+")) return bytecode.emitter.known.add;
     if (std.mem.eql(u8, lexeme, "-")) return bytecode.emitter.known.sub;
+    if (std.mem.eql(u8, lexeme, "<<")) return bytecode.emitter.known.shl;
+    if (std.mem.eql(u8, lexeme, ">>")) return bytecode.emitter.known.sar;
+    if (std.mem.eql(u8, lexeme, ">>>")) return bytecode.emitter.known.shr;
+    if (std.mem.eql(u8, lexeme, "&")) return bytecode.emitter.known.bit_and;
+    if (std.mem.eql(u8, lexeme, "^")) return bytecode.emitter.known.bit_xor;
+    if (std.mem.eql(u8, lexeme, "|")) return bytecode.emitter.known.bit_or;
     return null;
 }
 
@@ -3892,9 +3929,18 @@ fn binaryPrecedence(op: u8) u8 {
         bytecode.emitter.known.div,
         bytecode.emitter.known.mod,
         => 2,
+        bytecode.emitter.known.pow,
+        => 3,
         bytecode.emitter.known.add,
         bytecode.emitter.known.sub,
+        bytecode.emitter.known.shl,
+        bytecode.emitter.known.sar,
+        bytecode.emitter.known.shr,
         => 1,
+        bytecode.emitter.known.bit_and,
+        bytecode.emitter.known.bit_xor,
+        bytecode.emitter.known.bit_or,
+        => 0,
         bytecode.emitter.known.eq,
         bytecode.emitter.known.strict_eq,
         bytecode.emitter.known.strict_neq,

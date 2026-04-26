@@ -30,17 +30,17 @@ matrices, and subsystem status match the completed tooling work.
 - Preserve output sink plumbing through `Engine.evalWithOutput*` and `zjs`.
 - Cover direct calls, multi-argument output, expression arguments, and indirect
   function calls.
+- Complete BigInt, DataView, and String-wrapper coercion hardening that remained
+  after the host-visible output cleanup.
 - Move host-visible output tracking out of the Phase 8 runner matrix and into a
   Phase 9 runtime hardening matrix.
-- Mark Phase 8 CLI tooling status as validated after the recorded 110/110
-  aggregate gate and 45/45 smoke gate.
+- Mark Phase 8 CLI tooling status as validated after the recorded aggregate,
+  smoke, compare, and test262 gates.
 
 ## Out Of Scope
 
 - Full native function ABI parity.
 - Full ECMAScript global environment record semantics.
-- BigInt, DataView, and String-wrapper coercion gaps. These remain follow-up
-  runtime hardening backlog, not Phase 9 exit blockers.
 
 ## Exit Checklist
 
@@ -50,6 +50,8 @@ matrices, and subsystem status match the completed tooling work.
 - [x] `console.log(...)` uses normal global/property lookup and generic call
   bytecode.
 - [x] Direct and indirect output calls preserve the existing smoke golden output.
+- [x] BigInt/DataView/String-wrapper coercion follow-up work is completed with
+  focused regression coverage.
 - [x] `zig build test --summary all` passes.
 - [x] `zig build smoke --summary all` passes 45/45 scripts.
 - [x] `zig build run-test262 --summary all` passes.
@@ -60,9 +62,12 @@ matrices, and subsystem status match the completed tooling work.
 
 ## Closing Evidence
 
-- `zig build test --summary all`: 112/112 tests passed.
+- `zig build test --summary all`: 132/132 tests passed after aggregate runner self-test wiring.
 - `zig build smoke --summary all`: 45/45 scripts passed.
 - `zig build run-test262 --summary all`: ReleaseFast runner build passed.
+- BigInt/DataView/String targeted test262 slices passed.
+- Reviewed DataView numeric/BigInt setter and ArrayBuffer slice regressions were fixed and covered by focused exec tests.
+- BigInt bitwise and shift language expression slices passed.
 - `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 200`: `0/165 errors`.
 - `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 500`: `0/499 errors`.
 - `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test 0 100000`: `0/48205 errors, passed 42200`.

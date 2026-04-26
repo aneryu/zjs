@@ -5,6 +5,7 @@ pub const list = @import("list.zig");
 pub const gc = @import("gc.zig");
 pub const atom = @import("atom.zig");
 pub const string = @import("string.zig");
+pub const bigint = @import("bigint.zig");
 pub const class = @import("class.zig");
 pub const shape = @import("shape.zig");
 pub const function = @import("function.zig");
