@@ -201,8 +201,14 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_tools_tests = b.addRunArtifact(tools_tests);
+    const test262_runner_tests = b.addTest(.{
+        .root_module = test262_runner_mod,
+    });
+    const run_test262_runner_tests = b.addRunArtifact(test262_runner_tests);
+
     const test_tools_step = b.step("test-tools", "Run CLI and validation tooling tests");
     test_tools_step.dependOn(&run_tools_tests.step);
+    test_tools_step.dependOn(&run_test262_runner_tests.step);
 
     const test_step = b.step("test", "Run available Zig tests");
     test_step.dependOn(&run_quickjs_port_tests.step);

@@ -64,6 +64,10 @@ updated alongside implementation, tests, and phase documents.
 
 | Date | Phase | Command | Exit | Result | Evidence type |
 |---|---|---|---|---|---|
+| 2026-04-26 | 8 | `zig build test-tools --summary all` | 0 | Tool gate now includes direct `src/tools/test262_runner.zig` tests; aggregate plus runner tests passed, 26/26 tests | regression |
+| 2026-04-26 | 8 | `empty=$(mktemp); ./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -e "$empty" -d quickjs/test262/test 0 100000; rm -f "$empty"` | 0 | Empty known-error baseline passed, `Result: 0/48205 errors, passed 42200` | test262 |
+| 2026-04-26 | 8 | `./zig-out/bin/run-test262 -t 8 -u -c quickjs/test262.conf -d quickjs/test262/test 0 100000` | 1 | Stale `quickjs/test262_errors.txt` entries were detected as fixed (`fixed 60`) and `-u` rewrote the baseline to empty | test262 |
+| 2026-04-26 | 8 | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test 0 100000` | 0 | Cleaned baseline passed with no known/fixed count, `Result: 0/48205 errors, passed 42200` | test262 |
 | 2026-04-24 | 1 | `zig build test-quickjs-port --summary all` | 1 | Baseline failed before implementation because `src/tests/quickjs_port.zig` did not exist | reproduction |
 | 2026-04-24 | 1 | `zig build test-quickjs-port --summary all` | 0 | Bootstrap source/status tests passed, 4/4 tests | regression |
 | 2026-04-24 | 2 | `zig build test-core --summary all` | 1 | First Phase 2 compile failed on duplicate QuickJS tag enum value and primitive-shadowing names | reproduction |

@@ -11,8 +11,8 @@ small semantic drift can hide engine bugs.
 | Config file `-c` | `run-test262.c`, `test262.conf` | `src/cli/run_test262.zig`, `src/tools/test262_runner.zig` | Load config relative paths, includes, excludes, features, harness roots | Config text fixture and JSON directory prep command | validated |
 | Direct directory `-d` | `run-test262.c` | runner config/enumeration | Select tests from directory without double-prefixing config dir | Targeted directory command | validated |
 | Direct file `-f` | `run-test262.c` | runner selection | Select one or more exact test files | `./zig-out/bin/run-test262 -f tests/zig-smoke/arith.js` | validated |
-| Known errors `-e` | `run-test262.c` | known-error loader | Load expected failures, classify new/changed/fixed/known | Known-error fixture | validated |
-| Error update `-u` | `run-test262.c` | known-error writer | Update known-error file with current results when requested | Update fixture in temp dir | validated |
+| Known errors `-e` | `run-test262.c` | known-error loader | Load expected failures relative to the errorfile directory, preserving `path:line: message` parsing, and classify new/changed/fixed/known | Known-error fixture plus `quickjs/test262_errors.txt` normalization fixture | validated |
+| Error update `-u` | `run-test262.c` | known-error writer | Update known-error file with current results when requested, removing selected fixed entries while preserving unselected known entries | Update fixture in temp dir plus stale baseline cleanup | validated |
 | Verbose `-v` | `run-test262.c` | CLI output | Print per-test progress and failures per QuickJS behavior | JSON slice prints failing file paths and stderr summaries | validated |
 | Very verbose `-vv` | `run-test262.c` | CLI output | Print command/detail-level diagnostics | Snapshot or structured output test | validated |
 | Timeout `-T` | `run-test262.c` | worker execution | Report tests slower than threshold; do not change failure classification | Timeout fixture | validated |

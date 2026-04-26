@@ -668,7 +668,7 @@ pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
     defer loaded.deinit(allocator);
 
     var tests = NameList.init(allocator);
-    errdefer tests.deinit();
+    defer tests.deinit();
     var selected = NameList.init(allocator);
     errdefer selected.deinit();
 
@@ -1082,10 +1082,10 @@ fn loadKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: ?[]const
         else => return err,
     };
     defer allocator.free(bytes);
-    return parseKnownErrorsText(allocator, bytes);
+    return parseKnownErrorsText(allocator, dirname(path), bytes);
 }
 
-fn parseKnownErrorsText(allocator: std.mem.Allocator, text: []const u8) !NameList {
+fn parseKnownErrorsText(allocator: std.mem.Allocator, base_dir: []const u8, text: []const u8) !NameList {
     var known = NameList.init(allocator);
     errdefer known.deinit();
 
@@ -1093,14 +1093,14 @@ fn parseKnownErrorsText(allocator: std.mem.Allocator, text: []const u8) !NameLis
     while (lines.next()) |line| {
         const entry = stripComment(std.mem.trim(u8, line, " \t\r"));
         if (entry.len == 0) continue;
-        try known.append(knownErrorPath(entry));
+        try known.appendOwned(try normalizeKnownErrorPath(allocator, base_dir, knownErrorPath(entry)));
     }
     known.sortAndDedupe();
     return known;
 }
 
 fn writeKnownErrors(allocator: std.mem.Allocator, io: std.Io, errorfile: []const u8, failures: NameList) !void {
-    const rendered = try renderKnownErrorsText(allocator, failures);
+    const rendered = try renderKnownErrorsText(allocator, failures, dirname(errorfile));
     defer allocator.free(rendered);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = errorfile, .data = rendered });
 }
@@ -1117,7 +1117,7 @@ fn mergeKnownErrorsForUpdate(allocator: std.mem.Allocator, known_failures: NameL
     return merged;
 }
 
-fn renderKnownErrorsText(allocator: std.mem.Allocator, failures: NameList) ![]u8 {
+fn renderKnownErrorsText(allocator: std.mem.Allocator, failures: NameList, base_dir: []const u8) ![]u8 {
     var stable = NameList.init(allocator);
     defer stable.deinit();
     for (failures.items) |test_path| try stable.append(test_path);
@@ -1126,7 +1126,7 @@ fn renderKnownErrorsText(allocator: std.mem.Allocator, failures: NameList) ![]u8
     var buffer = std.ArrayList(u8).empty;
     errdefer buffer.deinit(allocator);
     for (stable.items) |test_path| {
-        try buffer.appendSlice(allocator, test_path);
+        try buffer.appendSlice(allocator, pathRelativeToBase(base_dir, test_path));
         try buffer.append(allocator, '\n');
     }
     return buffer.toOwnedSlice(allocator);
@@ -1149,6 +1149,23 @@ fn printFailure(io: std.Io, test_path: []const u8, stderr: []const u8) !void {
 fn knownErrorPath(line: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, line, ':')) |colon| return std.mem.trim(u8, line[0..colon], " \t");
     return line;
+}
+
+fn normalizeKnownErrorPath(allocator: std.mem.Allocator, base_dir: []const u8, path: []const u8) ![]const u8 {
+    if (base_dir.len == 0 or std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    if (std.mem.eql(u8, path, base_dir)) return allocator.dupe(u8, path);
+    if (std.mem.startsWith(u8, path, base_dir) and path.len > base_dir.len and path[base_dir.len] == '/') {
+        return allocator.dupe(u8, path);
+    }
+    return std.fs.path.join(allocator, &.{ base_dir, path });
+}
+
+fn pathRelativeToBase(base_dir: []const u8, path: []const u8) []const u8 {
+    if (base_dir.len == 0) return path;
+    if (std.mem.startsWith(u8, path, base_dir) and path.len > base_dir.len and path[base_dir.len] == '/') {
+        return path[base_dir.len + 1 ..];
+    }
+    return path;
 }
 
 test "test262 args parse QuickJS-shaped config and root" {
@@ -1203,7 +1220,7 @@ test "test262 config text parses paths features and excludes relative to config"
 }
 
 test "known error text parsing ignores comments and dedupes entries" {
-    var known = try parseKnownErrorsText(std.testing.allocator,
+    var known = try parseKnownErrorsText(std.testing.allocator, "",
         \\# keep only test paths
         \\test/a.js
         \\test/b.js ; trailing comment
@@ -1217,7 +1234,7 @@ test "known error text parsing ignores comments and dedupes entries" {
 }
 
 test "known error text parsing keeps only path segment before line marker" {
-    var known = try parseKnownErrorsText(std.testing.allocator,
+    var known = try parseKnownErrorsText(std.testing.allocator, "",
         \\test/a.js:14: SyntaxError
         \\test/b.js:7
         \\test/c.js
@@ -1230,6 +1247,18 @@ test "known error text parsing keeps only path segment before line marker" {
     try std.testing.expectEqualStrings("test/c.js", known.items[2]);
 }
 
+test "known error text parsing resolves entries relative to errorfile directory" {
+    var known = try parseKnownErrorsText(std.testing.allocator, "quickjs",
+        \\test262/test/a.js:14: SyntaxError
+        \\quickjs/test262/test/b.js:7: TypeError
+    );
+    defer known.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), known.items.len);
+    try std.testing.expectEqualStrings("quickjs/test262/test/a.js", known.items[0]);
+    try std.testing.expectEqualStrings("quickjs/test262/test/b.js", known.items[1]);
+}
+
 test "known error renderer emits sorted unique newline-separated entries" {
     var failures = NameList.init(std.testing.allocator);
     defer failures.deinit();
@@ -1237,33 +1266,81 @@ test "known error renderer emits sorted unique newline-separated entries" {
     try failures.append("test/a.js");
     try failures.append("test/z.js");
 
-    const text = try renderKnownErrorsText(std.testing.allocator, failures);
+    const text = try renderKnownErrorsText(std.testing.allocator, failures, "");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("test/a.js\ntest/z.js\n", text);
+}
+
+test "known error renderer writes paths relative to errorfile directory" {
+    var failures = NameList.init(std.testing.allocator);
+    defer failures.deinit();
+    try failures.append("quickjs/test262/test/z.js");
+    try failures.append("quickjs/test262/test/a.js");
+
+    const text = try renderKnownErrorsText(std.testing.allocator, failures, "quickjs");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("test262/test/a.js\ntest262/test/z.js\n", text);
 }
 
 test "known error update preserves unselected existing failures" {
     var known = NameList.init(std.testing.allocator);
     defer known.deinit();
-    try known.append("test/a.js");
-    try known.append("test/b.js");
-    try known.append("test/c.js");
+    try known.append("quickjs/test262/test/a.js");
+    try known.append("quickjs/test262/test/b.js");
+    try known.append("quickjs/test262/test/c.js");
 
     var selected = NameList.init(std.testing.allocator);
     defer selected.deinit();
-    try selected.append("test/a.js");
-    try selected.append("test/b.js");
+    try selected.append("quickjs/test262/test/a.js");
+    try selected.append("quickjs/test262/test/b.js");
 
     var current = NameList.init(std.testing.allocator);
     defer current.deinit();
-    try current.append("test/b.js");
+    try current.append("quickjs/test262/test/b.js");
 
     var merged = try mergeKnownErrorsForUpdate(std.testing.allocator, known, selected, current);
     defer merged.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), merged.items.len);
-    try std.testing.expectEqualStrings("test/b.js", merged.items[0]);
-    try std.testing.expectEqualStrings("test/c.js", merged.items[1]);
+    try std.testing.expectEqualStrings("quickjs/test262/test/b.js", merged.items[0]);
+    try std.testing.expectEqualStrings("quickjs/test262/test/c.js", merged.items[1]);
+}
+
+test "selected known failure that now passes is counted as fixed" {
+    var known = NameList.init(std.testing.allocator);
+    defer known.deinit();
+    try known.append("tests/zig-smoke/arith.js");
+    known.sortAndDedupe();
+
+    var skipped = NameList.init(std.testing.allocator);
+    defer skipped.deinit();
+
+    var summary = ExecutionSummary{ .selection = .{} };
+    var current = NameList.init(std.testing.allocator);
+    defer current.deinit();
+
+    try runWorkerStride(
+        std.testing.allocator,
+        std.testing.io,
+        "zig-out/bin/zjs",
+        null,
+        "",
+        &.{"tests/zig-smoke/arith.js"},
+        known,
+        skipped,
+        0,
+        1,
+        0,
+        null,
+        false,
+        &summary,
+        &current,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), summary.passed);
+    try std.testing.expectEqual(@as(usize, 0), summary.failed);
+    try std.testing.expectEqual(@as(usize, 1), summary.fixed);
+    try std.testing.expectEqual(@as(usize, 0), current.items.len);
 }
 
 test "test262 metadata parses includes in order plus features flags and negative data" {
