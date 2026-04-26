@@ -129,6 +129,45 @@ test "Engine eval executes simple variable assignment and print" {
     try std.testing.expectEqualStrings("12\n", stream.buffered());
 }
 
+test "Engine eval executes object property assignment through quick parser" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput("const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3\n", stream.buffered());
+}
+
+test "Engine eval executes parenthesized literal postfix through quick parser" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput("const obj = { x: 1 }; print(({ y: obj.x + 2 }).y); print(([3, 4])[1]);", &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3\n4\n", stream.buffered());
+}
+
+test "Engine eval executes compound assignment and update statements through quick parser" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput("let x = 10; x += 5; x -= 3; x *= 2; x /= 4; x %= 5; x++; x--; print(x);", &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n", stream.buffered());
+}
+
 test "Engine eval executes console.log with many arguments" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();

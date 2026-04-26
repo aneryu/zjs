@@ -4,6 +4,40 @@ const engine = @import("quickjs_zig_engine");
 const core = engine.core;
 const frontend = engine.frontend;
 
+fn countOpcode(code: []const u8, opcode: u8) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < code.len) {
+        const op = code[i];
+        if (op == opcode) count += 1;
+        if (op == engine.bytecode.emitter.known.new_object and i + 5 <= code.len) {
+            const prop_count = std.mem.readInt(u32, code[i + 1 ..][0..4], .little);
+            i += 5 + @as(usize, @intCast(prop_count)) * 5;
+            continue;
+        }
+        i += switch (op) {
+            engine.bytecode.emitter.known.source_loc => 9,
+            engine.bytecode.emitter.known.push_i32,
+            engine.bytecode.emitter.known.push_const,
+            engine.bytecode.emitter.known.get_var,
+            engine.bytecode.emitter.known.define_var,
+            engine.bytecode.emitter.known.new_array,
+            engine.bytecode.emitter.known.get_index,
+            engine.bytecode.emitter.known.array_map_mul,
+            engine.bytecode.emitter.known.call,
+            engine.bytecode.emitter.known.get_prop,
+            engine.bytecode.emitter.known.optional_get_prop,
+            engine.bytecode.emitter.known.set_prop,
+            engine.bytecode.emitter.known.array_method,
+            engine.bytecode.emitter.known.math_call,
+            engine.bytecode.emitter.known.string_method,
+            => 5,
+            else => 1,
+        };
+    }
+    return count;
+}
+
 test "lexer tokenizes keywords private names literals templates and regexp" {
     var lex = frontend.lexer.Lexer.init("class C { #x = 0b1010n; s = 'a\\n'; t = `hi`; r = /a[b]/gi; }");
 
@@ -95,7 +129,7 @@ test "script parse mode emits bytecode metadata without AST execution" {
     defer parsed.deinit();
 
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.token_metadata_scanner, parsed.parse_path);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(!parsed.function.flags.is_strict);
     try std.testing.expect(parsed.hasFeature(.statement));
     try std.testing.expect(parsed.hasFeature(.expression));
@@ -111,8 +145,8 @@ test "print calls emit global lookup property lookup and generic call bytecode" 
     var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
     defer parsed.deinit();
 
-    try std.testing.expect(parsed.usedTransitionalCompiler());
-    try std.testing.expectEqual(frontend.parser.ParsePath.transitional_fixture_compiler, parsed.parse_path);
+    try std.testing.expect(!parsed.usedTransitionalCompiler());
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
 
     var get_var_count: usize = 0;
     var get_prop_count: usize = 0;
@@ -145,6 +179,8 @@ test "simple variable assignments emit var bytecode" {
     var parsed = try frontend.parser.parse(rt, "let value = 5; value = value + 7; print(value);", .{ .mode = .script, .filename = "vars.js" });
     defer parsed.deinit();
 
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
     var get_var_count: usize = 0;
     var define_var_count: usize = 0;
     for (parsed.function.code) |op| {
@@ -153,6 +189,118 @@ test "simple variable assignments emit var bytecode" {
     }
     try std.testing.expectEqual(@as(usize, 3), get_var_count);
     try std.testing.expectEqual(@as(usize, 2), define_var_count);
+}
+
+test "quick parser emits compound assignment and update statements" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = 1; x += 2; x++; print(x);", .{ .mode = .script, .filename = "quick-compound-update.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const add_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.add);
+    const define_var_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.define_var);
+    try std.testing.expect(add_count >= 2);
+    try std.testing.expectEqual(@as(usize, 3), define_var_count);
+}
+
+test "quick parser emits arithmetic compound assignment operators" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = 10; x -= 3; x *= 2; x /= 7; x %= 2; print(x);", .{ .mode = .script, .filename = "quick-compound-arithmetic.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.sub));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.mul));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.div));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.mod));
+}
+
+test "quick parser does not claim update expression values" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = 1; print(x++);", .{ .mode = .script, .filename = "quick-update-expression-fallback.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.parse_path != frontend.parser.ParsePath.quickjs_parser);
+}
+
+test "quick parser emits basic array and object literals" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; const obj = { a: arr[0], b: 2 }; print(obj.a + obj.b);", .{ .mode = .script, .filename = "quick-literals.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const new_array_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_array);
+    const new_object_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_object);
+    const get_index_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_index);
+    try std.testing.expect(new_array_count >= 1);
+    try std.testing.expect(new_object_count >= 1);
+    try std.testing.expect(get_index_count >= 1);
+}
+
+test "quick parser emits object property assignment" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", .{ .mode = .script, .filename = "quick-property-assignment.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const get_prop_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_prop);
+    const set_prop_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.set_prop);
+    try std.testing.expect(get_prop_count >= 2);
+    try std.testing.expectEqual(@as(usize, 1), set_prop_count);
+}
+
+test "quick parser emits optional property access for object and nullish bases" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const obj = { a: { b: 42 } }; print(obj?.a?.b); print(obj?.x?.y); print(undefined?.a);", .{ .mode = .script, .filename = "quick-optional-property.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const optional_get_prop_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.optional_get_prop);
+    try std.testing.expectEqual(@as(usize, 5), optional_get_prop_count);
+}
+
+test "quick parser preserves parenthesized postfix bases" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; print((obj).x); print(({ y: obj.x + 2 }).y); print(([3, 4])[1]); print(({ n: null })?.n);", .{ .mode = .script, .filename = "quick-parenthesized-postfix.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const get_prop_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_prop);
+    const optional_get_prop_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.optional_get_prop);
+    const get_index_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_index);
+    try std.testing.expect(get_prop_count >= 3);
+    try std.testing.expectEqual(@as(usize, 1), optional_get_prop_count);
+    try std.testing.expectEqual(@as(usize, 1), get_index_count);
+}
+
+test "quick parser keeps legacy builtin domains on transitional path" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "print(JSON.stringify({ a: 1 }));", .{ .mode = .script, .filename = "quick-legacy-domain-fallback.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.transitional_fixture_compiler, parsed.parse_path);
+    try std.testing.expect(parsed.usedTransitionalCompiler());
 }
 
 test "template interpolation emits string concatenation" {
@@ -176,14 +324,9 @@ test "simple arrays emit array helper bytecode" {
     var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", .{ .mode = .script, .filename = "array.js" });
     defer parsed.deinit();
 
-    var new_array_count: usize = 0;
-    var get_index_count: usize = 0;
-    var map_count: usize = 0;
-    for (parsed.function.code) |op| {
-        if (op == engine.bytecode.emitter.known.new_array) new_array_count += 1;
-        if (op == engine.bytecode.emitter.known.get_index) get_index_count += 1;
-        if (op == engine.bytecode.emitter.known.array_map_mul) map_count += 1;
-    }
+    const new_array_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_array);
+    const get_index_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_index);
+    const map_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.array_map_mul);
     try std.testing.expectEqual(@as(usize, 1), new_array_count);
     try std.testing.expectEqual(@as(usize, 1), get_index_count);
     try std.testing.expectEqual(@as(usize, 1), map_count);

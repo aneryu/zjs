@@ -25,7 +25,7 @@ larger than Phase 9 hardening.
 | Track | Status | Required next action |
 |---|---|---|
 | Status calibration | in_progress | Keep `status.zig` states aligned with actual maturity and prevent `semantic_complete` on known-gap subsystems. |
-| Parser-first architecture | in_progress | `SimpleParser` now sits behind an explicit transitional compiler boundary; next introduce token-driven parser/lowering slices. |
+| Parser-first architecture | in_progress | First `quickjs_parser` slice now handles basic declarations, identifier/object-property/compound assignments, statement-only identifier updates, expressions, literals, parenthesized property/index/optional access, and generic host-output calls; next migrate metadata/source recognizers and broader statements/functions. |
 | VM/domain extraction | queued | Move builtin/domain semantics out of the VM once parser output is less fixture-shaped. |
 | Builtins and support libs | queued | Replace placeholder constructor/prototype/library domains with real shared object/property behavior. |
 | GC cycle removal | queued | Implement or explicitly scope QuickJS-style cycle removal and weak collection integration. |
@@ -35,13 +35,47 @@ larger than Phase 9 hardening.
 
 - Treat `SimpleParser` as transitional compatibility infrastructure, not the
   target parser.
-- `frontend.parser.Result.parse_path` records whether a parse used the token
-  metadata scanner, transitional fixture compiler, or syntax-error guard.
+- `frontend.parser.Result.parse_path` records whether a parse used the
+  `quickjs_parser`, token metadata scanner, transitional fixture compiler, or
+  syntax-error guard.
 - New syntax work should add source-aligned parse/lower behavior before adding
   VM shortcuts or source-string recognizers.
 - Existing fixtures may continue to pass through `SimpleParser` until the
   replacement path covers them, but new repair work must record which path owns
   the behavior.
+- Do not add new source-string recognizers, test262 metadata recognizers, or VM
+  domain shortcut opcodes as semantic coverage. If a temporary exception is
+  unavoidable, record it as transitional debt in this document, `TRACKING.md`,
+  and `ERRORS_AND_LEARNINGS.md`.
+- The current `quickjs_parser` slice is intentionally conservative: domains
+  still backed by legacy VM/builtin shortcuts fall back to `SimpleParser` until
+  their semantics move to shared builtin/property/call paths.
+- Quick parser postfix parsing is split by call/property/optional/index handlers
+  so future syntax slices can extend the path without adding new source-string
+  recognizers.
+
+## Audit Findings
+
+The 2026-04-26 parser/VM shortcut audit is recorded as
+`EAL-20260426-003` in `ERRORS_AND_LEARNINGS.md`. Current high-priority shortcut
+classes are:
+
+- Parser entrypoint pre-scanners that inspect test262 metadata or source prose
+  such as `negative:`, `phase: parse`, `phase: runtime`, `sec-*`, and expected
+  error names before normal parsing.
+- `SimpleParser` lowering for narrow smoke/test262 shapes across assertions,
+  JSON, Math, Date, URI, Promise, RegExp, arrays, closures, named constructors,
+  and selected control flow.
+- Fixture-shaped emitter/VM opcodes such as `throw_test262_error`,
+  `assert_same_value`, `for_in_concat`, `array_map_mul`, `new_named_object`, and
+  `instanceof_named`.
+- VM-owned domain shortcuts such as `parseFlatJsonObject`, private
+  `__zjs_*` properties used as semantic markers, native-method string synthesis,
+  and public execution paths that can return `UnsupportedOpcode`.
+
+Repair order: replace parser metadata/source recognizers first, then move
+domain semantics out of VM shortcut handlers as the parser emits general bytecode
+for those constructs.
 
 ## Acceptance Gates
 

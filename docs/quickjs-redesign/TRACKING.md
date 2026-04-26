@@ -14,7 +14,7 @@ updated alongside implementation, tests, and phase documents.
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
 | Current engine state | Phase 8 tooling is complete and Phase 9 runtime semantic hardening passed the local baseline. Architecture repair is now active because those gates prove fixture/baseline compatibility, not blanket QuickJS semantic completeness; frontend, exec, builtins, libs, and GC still have recorded transitional or placeholder paths. |
 | Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
-| Current validation state | Architecture repair gates pass: `zig build test --summary all` 133/133, `zig build test-frontend --summary all` 21/21, `zig build smoke --summary all` 45/45, JSON target slice 21/21, BigInt target slice 77/77, and `git diff --check`; prior full local test262 remains recorded at `Result: 0/48205 errors, passed 42200`. |
+| Current validation state | Architecture repair gates pass after the compound-assignment/update `quickjs_parser` slice: `zig build test --summary all` 145/145, `zig build test-frontend --summary all` 29/29, `zig build test-exec --summary all` 43/43, `zig build smoke --summary all` 45/45, language expressions target slice 101/101, and `git diff --check`; prior full local test262 remains recorded at `Result: 0/48205 errors, passed 42200`. |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -46,7 +46,7 @@ updated alongside implementation, tests, and phase documents.
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
 | WQ-009 | completed | 8 | CLI and validation tooling | Full local test262 gate executes in 15.00s with zero selected failures; known-error classification/update, metadata parsing/includes/filtering, raw hashbang handling, compare path defaults, in-process test execution, worker-local harness caching, and QuickJS-style namelist/selection/worker-stride execution are wired | host-visible output (`print`/`console.log`) transferred to WQ-010 |
 | WQ-010 | completed | 9 | Runtime semantic hardening | Replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution; BigInt/DataView/String wrapper coercion follow-up implemented with focused regression coverage | none |
-| WQ-011 | in_progress | AR | Architecture repair | Calibrated `status.zig` maturity states, recorded parser-first repair plan, started allocator/OOM hardening, and isolated `SimpleParser` behind an explicit transitional boundary; next action is adding the first token-driven parser/lowering slice | none |
+| WQ-011 | in_progress | AR | Architecture repair | First `quickjs_parser` slice now lowers basic declarations, identifier/object-property/compound assignments, statement-only identifier updates, expressions, literals, parenthesized property/index/optional access, and generic host-output calls without `SimpleParser`; next action is migrating parser metadata/source recognizers and broader statement/function domains into the same path | none |
 
 ## Subsystem Coverage Matrix
 
@@ -56,7 +56,7 @@ updated alongside implementation, tests, and phase documents.
 | Core runtime invariants | 2 | `matrices/core-runtime-invariants.md` | fixture_validated | Focused core fixtures pass; GC cycle removal remains a recorded architecture repair gap |
 | Object and property semantics | 3 | `matrices/object-property-matrix.md` | fixture_validated | Focused object/property fixtures pass |
 | Opcode metadata | 4 | `matrices/opcode-execution-matrix.md` | fixture_validated | Focused bytecode metadata fixtures pass |
-| Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | baseline_validated | Local baseline passes, but `SimpleParser` remains transitional and parser-first repair is active |
+| Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | baseline_validated | First `quickjs_parser` slice, including compound assignment/update statements and parenthesized optional/index/property lowering, passes frontend/exec/smoke gates; `SimpleParser` remains transitional for unmigrated domains |
 | Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | baseline_validated | Local baseline passes, but VM still owns broad semantic domains and has unsupported fallback paths |
 | Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | fixture_validated | Focused fixtures pass; several builtin/library domains remain scaffold or narrow helper implementations |
 | CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | baseline_validated | Tooling and local test262 baseline pass |
@@ -66,6 +66,24 @@ updated alongside implementation, tests, and phase documents.
 
 | Date | Phase | Command | Exit | Result | Evidence type |
 |---|---|---|---|---|---|
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after compound assignment and statement-only update lowering moved into `quickjs_parser`, 29/29 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after compound assignment and update statements executed through `quickjs_parser`, 43/43 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after compound-assignment/update parser migration, 145/145 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after compound-assignment/update parser migration, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 100` | 0 | Language expressions target slice passed after compound-assignment/update parser migration, 101/101 tests | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after compound-assignment/update parser migration and documentation update | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after parenthesized postfix and legacy-domain fallback guards in `quickjs_parser`, 26/26 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after parenthesized literal postfix execution through `quickjs_parser`, 42/42 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after parenthesized postfix parser migration, 141/141 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after parenthesized postfix parser migration, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 100` | 0 | Language expressions target slice passed after parenthesized postfix parser migration, 101/101 tests | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after parenthesized postfix parser migration and documentation update | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after object-property assignment and nullish optional access moved into `quickjs_parser`, 24/24 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after object-property assignment and optional access exercised through parser and VM, 41/41 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after object-property assignment and optional-access `quickjs_parser` slice, 138/138 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after object-property assignment and optional-access `quickjs_parser` slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 100` | 0 | Language expressions target slice passed after object-property assignment and optional-access parser migration, 101/101 tests | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after object-property assignment and optional-access parser migration plus documentation update | hygiene |
 | 2026-04-26 | microbench | `zig build test --summary all` | 0 | Aggregate gate passed after microbench unsupported-case repairs, 134/134 tests | regression |
 | 2026-04-26 | microbench | `zig build smoke --summary all` | 0 | Smoke gate passed after microbench unsupported-case repairs, 45/45 scripts | regression |
 | 2026-04-26 | microbench | `zig build microbench --summary all` | 0 | VM-executed QuickJS microbench migration passed with 58/58 compatible cases, 0 unsupported, 0 skipped | compare |

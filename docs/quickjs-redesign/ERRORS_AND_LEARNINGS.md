@@ -74,6 +74,7 @@ create a learning record.
 |---|---|---|---|---|---|---|---|---|
 | EAL-20260424-001 | validated | low | docs | docs_tracking_gap | Redesign plan lacked a durable error and learning workflow. | `#eal-20260424-001-error-and-learning-workflow-missing` | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | README, TRACKING, test262 parity |
 | EAL-20260424-002 | validated | high | 8-9 | quickjs_parity_gap | Real smoke runner initially failed 45/45 scripts because `zjs` did not yet produce smoke-visible output such as `print(...)`. | `#eal-20260424-002-smoke-runner-wired-before-output-semantics` | `zig build smoke --summary all` | Phase 8 smoke runner, Phase 9 runtime hardening |
+| EAL-20260426-003 | parked | high | AR | parser_gap, emitter_gap, opcode_gap, docs_tracking_gap | Parser and VM can pass selected gates through source-pattern recognizers, test262 metadata guards, and fixture-shaped opcodes instead of general QuickJS semantics. | `#eal-20260426-003-parser-and-vm-fixture-shortcuts` | Pending parser-first replacement slices | Frontend coverage, opcode execution, architecture repair |
 
 ## Detailed Records
 
@@ -152,12 +153,62 @@ QJS=/home/aneryu/zjs/quickjs/build/qjs QJS_ZIG=/home/aneryu/zjs/zig-out/bin/zjs 
 Current result: smoke passes 45/45 scripts, functional compare passes 45/45
 scripts, and the full local test262 gate reports `0/48205 errors`.
 
+### EAL-20260426-003: Parser And VM Fixture Shortcuts
+
+Status: parked
+Severity: high
+Phase: AR
+Classification: parser_gap, emitter_gap, opcode_gap, docs_tracking_gap
+
+Summary: A read-only audit found that selected smoke/test262 gates can pass while
+`frontend/parser.zig`, `bytecode/emitter.zig`, and `exec/vm.zig` still contain
+fixture-shaped shortcuts. This is not just missing feature coverage; some paths
+recognize test metadata, source comments, or narrow source shapes and then emit
+purpose-built bytecode or VM behavior.
+
+Observed shortcut classes:
+
+- `frontend.parser.Result.parse_path` exposes a
+  `transitional_fixture_compiler`, and the parse entrypoint tries several
+  `compile*Program` helpers before falling back to token metadata scanning.
+- Parser helpers inspect test262 metadata and source text such as `negative:`,
+  `phase: parse`, `phase: runtime`, `sec-*`, `type: Test262Error`, and fixture
+  prose to synthesize syntax or runtime outcomes.
+- `SimpleParser` lowers a narrow set of smoke/test262 statement and expression
+  shapes for assertions, JSON, Math, Date, URI, Promise, RegExp, arrays,
+  closures, named constructors, and selected control flow instead of using a
+  complete source-aligned parser/lowering pipeline.
+- The emitter and VM include fixture-shaped opcodes and handlers such as
+  `throw_test262_error`, `assert_same_value`, `for_in_concat`,
+  `array_map_mul`, `new_named_object`, and `instanceof_named`.
+- VM helpers still include narrow domain shortcuts such as `parseFlatJsonObject`,
+  `__zjs_constructor`, `__zjs_string_data`, native-method string synthesis, and
+  public execution paths that can return `UnsupportedOpcode`.
+
+Root cause: The broad validation loop advanced before the parser-first semantic
+architecture was complete. Passing local gates was treated as compatibility
+evidence even though parts of the frontend and VM were still shaped around known
+fixtures and selected test262 metadata.
+
+Required repair direction: Replace source-string recognizers with
+token-driven/parser-driven early errors and lowering. Move builtin/domain
+semantics out of VM shortcut opcodes into shared object, property, call, and
+builtin implementations. Keep any remaining transitional path explicit through
+`parse_path`, matrix status, and architecture-repair tracking until removed.
+
+Validation to close: Add focused parser/emitter/VM regression slices for each
+removed shortcut class, run `zig build test --summary all`, `zig build smoke
+--summary all`, `git diff --check`, targeted test262 slices for touched syntax
+or builtin domains, and the full local test262 gate before claiming semantic
+completion.
+
 ## Learning Log
 
 | ID | Source | Lesson | Applies to | Enforcement |
 |---|---|---|---|---|
 | LRN-001 | prior zjs validation work | Start from a reproducing validation command, then repair from its output. | bugfixes, parity work, test262 work | README update rules and error workflow |
 | LRN-002 | prior interrupted runs | Interrupted or partial sweeps are not final validation evidence. | smoke, compare, test262 | validation log and `interrupted_validation` classification |
+| LRN-003 | EAL-20260426-003 | Broad green gates are not semantic-completion proof when parser or VM paths recognize source text, test metadata, or fixture-only shapes. | parser, emitter, VM, test262 validation | Architecture repair guardrails and `parse_path` tracking |
 | LRN-003 | prior run-test262 work | Runner behavior must be checked against `quickjs/run-test262.c` and `quickjs/test262.conf` before changing engine semantics for excluded files. | Phase 8 and test262 triage | test262 parity matrix |
 | LRN-004 | prior parity work | Requests for faithful QuickJS rewrite require source-aligned behavior, not small optimizations presented as parity. | all implementation phases | source mapping and matrix exit criteria |
 | LRN-005 | prior runner performance work | Shared harness caches can add lock contention; prefer worker-local state unless evidence proves sharing is safe. | Phase 8 worker execution | test262 runner parity matrix |
