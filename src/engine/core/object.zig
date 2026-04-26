@@ -36,6 +36,7 @@ pub const Object = struct {
     prototype: ?*Object = null,
     extensible: bool = true,
     is_array: bool = false,
+    is_global: bool = false,
     array_storage_mode: ArrayStorageMode = .dense,
     length: u32 = 0,
     length_writable: bool = true,
@@ -43,6 +44,7 @@ pub const Object = struct {
     exotic: ?ExoticMethods = null,
     byte_storage: []u8 = &.{},
     string_data: ?Value = null,
+    function_source: ?Value = null,
 
     pub fn create(rt: *Runtime, class_id: class.ClassId, prototype: ?*Object) !*Object {
         const self = try rt.memory.create(Object);
@@ -78,6 +80,7 @@ pub const Object = struct {
         if (self.properties.len != 0) rt.memory.free(property.Entry, self.properties);
         if (self.byte_storage.len != 0) rt.memory.free(u8, self.byte_storage);
         if (self.string_data) |stored| stored.free(rt);
+        if (self.function_source) |stored| stored.free(rt);
         rt.shapes.release(self.shape_ref);
         rt.memory.destroy(Object, self);
     }

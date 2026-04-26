@@ -12,5 +12,9 @@ pub const eval = @import("eval.zig");
 pub const module = @import("module.zig");
 pub const promise = @import("promise.zig");
 pub const jobs = @import("jobs.zig");
+pub const value_ops = @import("value_ops.zig");
+pub const globals = @import("globals.zig");
+pub const closure = @import("closure.zig");
+pub const test262_helpers = @import("test262_helpers.zig");
 
 pub const Vm = vm.Vm;

@@ -92,7 +92,170 @@ test "property ops use shared object semantics" {
     try engine.exec.property_ops.setProperty(rt, obj, key, core.Value.int32(10));
     const value = engine.exec.property_ops.getProperty(obj, key);
     try std.testing.expectEqual(@as(?i32, 10), value.asInt32());
+
+    const direct_value = try engine.exec.property_ops.getPropertyValue(rt, obj.value(), key);
+    defer direct_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 10), direct_value.asInt32());
+
+    const key_string_obj = try core.string.String.createUtf8(rt, "x");
+    const key_string = key_string_obj.value();
+    defer key_string.free(rt);
+    const in_result = try engine.exec.property_ops.propertyIn(rt, obj.value(), key_string);
+    try std.testing.expectEqual(true, in_result.asBool().?);
+
+    const optional_result = try engine.exec.property_ops.optionalGetPropertyValue(rt, core.Value.nullValue(), key);
+    try std.testing.expect(optional_result.isUndefined());
+
     try std.testing.expect(engine.exec.property_ops.deleteProperty(rt, obj, key));
+}
+
+test "value ops own primitive VM semantics" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const sum = try engine.exec.value_ops.binary(rt, engine.bytecode.emitter.known.add, core.Value.int32(2), core.Value.int32(3));
+    defer sum.free(rt);
+    try std.testing.expectEqual(@as(?i32, 5), sum.asInt32());
+
+    const suffix_obj = try core.string.String.createUtf8(rt, "px");
+    const suffix = suffix_obj.value();
+    defer suffix.free(rt);
+    const joined = try engine.exec.value_ops.binary(rt, engine.bytecode.emitter.known.add, core.Value.int32(2), suffix);
+    defer joined.free(rt);
+
+    var joined_text = std.ArrayList(u8).empty;
+    defer joined_text.deinit(rt.memory.allocator);
+    try engine.exec.value_ops.appendRawString(rt, &joined_text, joined);
+    try std.testing.expectEqualStrings("2px", joined_text.items);
+
+    const one_obj = try core.string.String.createUtf8(rt, "1");
+    const one_string = one_obj.value();
+    defer one_string.free(rt);
+    try std.testing.expectEqual(true, engine.exec.value_ops.looseEqual(core.Value.int32(1), one_string).asBool().?);
+    try std.testing.expectEqual(false, engine.exec.value_ops.toBooleanValue(core.Value.int32(0)).asBool().?);
+}
+
+test "closure helper stores closure state outside the VM" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const closure_value = try engine.exec.closure.create(rt, 2, 0, 0, 0);
+    defer closure_value.free(rt);
+    const first = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
+    defer first.free(rt);
+    const second = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
+    defer second.free(rt);
+
+    try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
+}
+
+test "test262 helpers own SameValue assertions" {
+    const same_nan = try engine.exec.test262_helpers.assertSameValue(core.Value.float64(std.math.nan(f64)), core.Value.float64(std.math.nan(f64)));
+    try std.testing.expect(same_nan.isUndefined());
+    try std.testing.expectError(error.Test262Error, engine.exec.test262_helpers.assertSameValue(core.Value.int32(1), core.Value.int32(2)));
+}
+
+test "call subsystem installs and invokes host globals" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    defer global.value().free(rt);
+    try engine.exec.call.installHostGlobals(rt, global);
+
+    const print_key = try rt.internAtom("print");
+    defer rt.atoms.free(print_key);
+    const print = global.getProperty(print_key);
+    defer print.free(rt);
+
+    var output_buffer: [64]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const args = [_]core.Value{ core.Value.int32(1), core.Value.boolean(true) };
+    const result = try engine.exec.call.callValue(ctx, &stream, print, &args);
+    defer result.free(rt);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1 true\n", stream.buffered());
+
+    const assert_key = try rt.internAtom("assert");
+    defer rt.atoms.free(assert_key);
+    const same_value_key = try rt.internAtom("sameValue");
+    defer rt.atoms.free(same_value_key);
+    const assert_object_value = global.getProperty(assert_key);
+    defer assert_object_value.free(rt);
+    const assert_object_header = assert_object_value.refHeader().?;
+    const assert_object: *core.Object = @fieldParentPtr("header", assert_object_header);
+    const same_value = assert_object.getProperty(same_value_key);
+    defer same_value.free(rt);
+
+    const same_args = [_]core.Value{ core.Value.float64(std.math.nan(f64)), core.Value.float64(std.math.nan(f64)) };
+    const same_result = try engine.exec.call.callValue(ctx, null, same_value, &same_args);
+    defer same_result.free(rt);
+    try std.testing.expect(same_result.isUndefined());
+    const mismatch_args = [_]core.Value{ core.Value.int32(1), core.Value.int32(2) };
+    try std.testing.expectError(error.Test262Error, engine.exec.call.callValue(ctx, null, same_value, &mismatch_args));
+
+    const test262_key = try rt.internAtom("Test262Error");
+    defer rt.atoms.free(test262_key);
+    const test262_ctor = global.getProperty(test262_key);
+    defer test262_ctor.free(rt);
+    try std.testing.expectError(error.Test262Error, engine.exec.call.callValue(ctx, null, test262_ctor, &.{}));
+}
+
+test "Engine eval executes test262 helpers through generic call paths" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval("assert.sameValue(1 + 1, 2, 'sum');");
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectError(error.Test262Error, js.eval("assert.sameValue(1, 2);"));
+    try std.testing.expectError(error.Test262Error, js.eval("throw new Test262Error('boom');"));
+}
+
+test "vm call handler accepts allocator-backed argument lists" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("wide-call");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    var emit = engine.bytecode.emitter.Emitter.init(&function);
+
+    const print_key = try rt.internAtom("print");
+    defer rt.atoms.free(print_key);
+    try emit.emitGetVar(print_key);
+
+    var arg: i32 = 1;
+    while (arg <= 40) : (arg += 1) try emit.emitPushInt32(arg);
+    try emit.emitCall(40);
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    var vm_instance = engine.exec.Vm.initWithOutput(ctx, &stream);
+    defer vm_instance.deinit();
+    const result = try vm_instance.run(&function);
+    defer result.free(rt);
+
+    var expected = std.ArrayList(u8).empty;
+    defer expected.deinit(std.testing.allocator);
+    var expected_arg: i32 = 1;
+    while (expected_arg <= 40) : (expected_arg += 1) {
+        if (expected_arg != 1) try expected.append(std.testing.allocator, ' ');
+        var int_buf: [16]u8 = undefined;
+        const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{expected_arg});
+        try expected.appendSlice(std.testing.allocator, printed);
+    }
+    try expected.append(std.testing.allocator, '\n');
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings(expected.items, stream.buffered());
 }
 
 var job_counter: usize = 0;
@@ -305,9 +468,54 @@ test "Engine eval executes Math smoke subset" {
     try std.testing.expectEqualStrings("5\n3\n1.4142135623730951\n2\n1\nnumber\ntrue\ntrue\n-Infinity\ntrue\nfalse\nfunction\nNaN\nNaN\n", stream.buffered());
 }
 
+test "Engine eval executes allocator-backed wide Math min max calls" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [96]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(Math.min(9, 8, 7, 6, 5, 4));
+        \\print(Math.max(4, 5, 6, 7, 8, 9));
+        \\print(Math.abs());
+        \\print(Math.abs(undefined));
+        \\print(Math.abs(null));
+        \\print(Math.abs(true));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("4\n9\nNaN\nNaN\n0\n1\n", stream.buffered());
+}
+
 test "Engine eval executes Date smoke fixture subset" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
+
+    var quick_output_buffer: [512]u8 = undefined;
+    var quick_stream = std.Io.Writer.fixed(&quick_output_buffer);
+    const quick_result = try js.evalWithOutput(
+        \\print(typeof Date());
+        \\print(typeof new Date());
+        \\print(Date.UTC(2024, 0, 1));
+        \\print(Date.parse("2024-01-01T00:00:00Z"));
+        \\const epoch = new Date(0);
+        \\print(epoch.getTime());
+        \\print(epoch.toISOString());
+        \\print(epoch.getUTCFullYear());
+        \\const local = new Date(2024, 0, 2, 3, 4, 5, 6);
+        \\print(local.getFullYear());
+        \\print(local.getMonth());
+        \\print(local.getDate());
+        \\print(local.getHours());
+        \\print(local.getMinutes());
+        \\print(local.getSeconds());
+        \\print(local.getMilliseconds());
+    , &quick_stream);
+    defer quick_result.free(js.runtime);
+
+    try std.testing.expect(quick_result.isUndefined());
+    try std.testing.expectEqualStrings("string\nobject\n1704067200000\n1704067200000\n0\n1970-01-01T00:00:00.000Z\n1970\n2024\n0\n2\n3\n4\n5\n6\n", quick_stream.buffered());
 
     var output_buffer: [1024]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -328,6 +536,25 @@ test "Engine eval executes Date smoke fixture subset" {
     try std.testing.expect(result.isUndefined());
     try std.testing.expect(std.mem.startsWith(u8, stream.buffered(), "string\nobject\n1704067200000\n"));
     try std.testing.expect(std.mem.endsWith(u8, stream.buffered(), "number\ntrue\n1704067200000\n1704112496789\n"));
+}
+
+test "Engine eval executes RegExp smoke fixture subset" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const r = new RegExp("a", "g");
+        \\print(typeof r);
+        \\print(r.toString());
+        \\print(r.test("a"));
+        \\print(r.exec("a"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("object\n/a/g\ntrue\nnull\n", stream.buffered());
 }
 
 test "Engine eval executes typeof smoke subset" {
@@ -775,6 +1002,32 @@ test "Engine eval executes async object smoke subset" {
     try std.testing.expectEqualStrings("object\nobject\n", stream.buffered());
 }
 
+test "Engine eval executes Promise smoke fixture subset through quick parser" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const p = new Promise((resolve, reject) => {
+        \\    resolve(1);
+        \\});
+        \\print(typeof p);
+        \\print(Promise.resolve(1));
+        \\print(Promise.all([1, 2]));
+        \\print(Promise.race([Promise.resolve(3), 4]));
+        \\print(Promise.reject(1));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("object\n[object Promise]\n[object Promise]\n[object Promise]\n[object Promise]\n", stream.buffered());
+    try std.testing.expect(js.context.hasException());
+    const reason = js.takeException();
+    defer reason.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 1), reason.asInt32());
+}
+
 test "Engine eval executes named instanceof smoke subset" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
@@ -798,6 +1051,23 @@ test "Engine eval executes named instanceof smoke subset" {
 test "Engine eval executes Number parse smoke subset" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
+
+    var quick_output_buffer: [256]u8 = undefined;
+    var quick_stream = std.Io.Writer.fixed(&quick_output_buffer);
+    const quick_result = try js.evalWithOutput(
+        \\print(parseInt("0x10"));
+        \\print(parseInt("0x10", 10));
+        \\print(parseInt("11", "2"));
+        \\print(parseInt("11", true));
+        \\print(parseFloat("1.5x"));
+        \\print(Number.parseInt("42"));
+        \\print(Number.parseFloat("3.14"));
+        \\print(Number.POSITIVE_INFINITY);
+    , &quick_stream);
+    defer quick_result.free(js.runtime);
+
+    try std.testing.expect(quick_result.isUndefined());
+    try std.testing.expectEqualStrings("16\n0\n3\nNaN\n1.5\n42\n3.14\nInfinity\n", quick_stream.buffered());
 
     var output_buffer: [512]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -979,9 +1249,59 @@ test "Engine eval executes Map Set smoke subset" {
     try std.testing.expectEqualStrings("value\ntrue\n1\ntrue\n1\nobject\nfunction set() {\n    [native code]\n}\nfunction get() {\n    [native code]\n}\nfunction has() {\n    [native code]\n}\nfunction delete() {\n    [native code]\n}\nobject\nfunction add() {\n    [native code]\n}\nfunction has() {\n    [native code]\n}\nfunction delete() {\n    [native code]\n}\n", stream.buffered());
 }
 
+test "Engine eval executes collection smoke fixture subset through quick parser" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [1024]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const map = new Map();
+        \\map.set("key", "value");
+        \\print(map.get("key"));
+        \\print(map.has("key"));
+        \\print(map.size);
+        \\print(map.delete("key"));
+        \\const set = new Set();
+        \\set.add(1);
+        \\print(set.has(1));
+        \\print(set.size);
+        \\print(set.delete(1));
+        \\const weakMap = new WeakMap();
+        \\const weakKey = {};
+        \\weakMap.set(weakKey, "weak");
+        \\print(weakMap.get(weakKey));
+        \\print(weakMap.has(weakKey));
+        \\print(weakMap.delete(weakKey));
+        \\const weakSet = new WeakSet();
+        \\const weakSetKey = {};
+        \\weakSet.add(weakSetKey);
+        \\print(weakSet.has(weakSetKey));
+        \\print(weakSet.delete(weakSetKey));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("value\ntrue\n1\ntrue\ntrue\n1\ntrue\nweak\ntrue\ntrue\ntrue\ntrue\n", stream.buffered());
+}
+
 test "Engine eval executes URI smoke subset" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
+
+    var quick_output_buffer: [256]u8 = undefined;
+    var quick_stream = std.Io.Writer.fixed(&quick_output_buffer);
+    const quick_result = try js.evalWithOutput(
+        \\console.log(encodeURI("a b?x=1&y=2#z"));
+        \\console.log(encodeURIComponent("a b?x=1&y=2#z"));
+        \\console.log(decodeURI("a%20b?x=1&y=2#z"));
+        \\console.log(decodeURI("%3F"));
+        \\console.log(decodeURIComponent("a%20b%3Fx%3D1%26y%3D2%23z"));
+    , &quick_stream);
+    defer quick_result.free(js.runtime);
+
+    try std.testing.expect(quick_result.isUndefined());
+    try std.testing.expectEqualStrings("a%20b?x=1&y=2#z\na%20b%3Fx%3D1%26y%3D2%23z\na b?x=1&y=2#z\n%3F\na b?x=1&y=2#z\n", quick_stream.buffered());
 
     var output_buffer: [512]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -1025,4 +1345,32 @@ test "unsupported opcode sets context exception" {
     const ex = ctx.takeException();
     defer ex.free(rt);
     try std.testing.expectEqual(@as(?i32, 100), ex.asInt32());
+}
+
+test "VM domain helper failures surface as TypeError not UnsupportedOpcode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("domain-errors");
+    defer rt.atoms.free(name);
+    const prop = try rt.internAtom("x");
+    defer rt.atoms.free(prop);
+
+    var get_prop_function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer get_prop_function.deinit(rt);
+    var get_prop_emit = engine.bytecode.emitter.Emitter.init(&get_prop_function);
+    try get_prop_emit.emitPushInt32(1);
+    try get_prop_emit.emitGetProp(prop);
+    try std.testing.expectError(error.TypeError, runFunction(rt, ctx, &get_prop_function));
+    try std.testing.expect(!ctx.hasException());
+
+    var array_method_function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer array_method_function.deinit(rt);
+    var array_method_emit = engine.bytecode.emitter.Emitter.init(&array_method_function);
+    try array_method_emit.emitNewArray(0);
+    try array_method_emit.emitArrayMethod(99);
+    try std.testing.expectError(error.TypeError, runFunction(rt, ctx, &array_method_function));
+    try std.testing.expect(!ctx.hasException());
 }

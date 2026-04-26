@@ -1,70 +1,55 @@
 const core = @import("../core/root.zig");
 const bignum = @import("../libs/bignum.zig");
-const regexp_lib = @import("../libs/regexp.zig");
 const std = @import("std");
 
-pub fn matches(program: regexp_lib.Program, input: []const u8) bool {
-    return program.exec(input) != null;
-}
+/// QuickJS source map: global URI encode/decode functions in quickjs.c. This
+/// is the current narrow URI subset used by transitional `uri_call` bytecode.
+pub fn call(rt: *core.Runtime, mode: u32, input: core.Value) !core.Value {
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendValueString(rt, &bytes, input);
 
-/// QuickJS source map: narrow RegExp constructor payload used by transitional
-/// `new_regexp` bytecode.
-pub fn construct(rt: *core.Runtime, pattern: core.Value, flags: core.Value) !core.Value {
-    const object = try core.Object.create(rt, core.class.ids.regexp, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try defineValueProperty(rt, object, "__regexp_source", pattern);
-    try defineValueProperty(rt, object, "__regexp_flags", flags);
-    return object.value();
-}
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(rt.memory.allocator);
+    switch (mode) {
+        1 => try encodeBytes(rt, &out, bytes.items, false),
+        2 => try encodeBytes(rt, &out, bytes.items, true),
+        3 => try decodeBytes(rt, &out, bytes.items, false),
+        4 => try decodeBytes(rt, &out, bytes.items, true),
+        else => return error.UnsupportedUriCall,
+    }
 
-/// QuickJS source map: selected RegExp.prototype methods currently covered by
-/// smoke and parser lowering. Matching is still owned by libs/regexp.zig.
-pub fn methodCall(rt: *core.Runtime, object_value: core.Value, method: u32, arg: ?core.Value) !core.Value {
-    _ = arg;
-    const object = try expectRegExpObject(object_value);
-    return switch (method) {
-        1 => try toString(rt, object),
-        2 => core.Value.boolean(true),
-        3 => core.Value.nullValue(),
-        else => error.UnsupportedRegExpCall,
-    };
-}
-
-fn toString(rt: *core.Runtime, object: *core.Object) !core.Value {
-    const source = try getNamedProperty(rt, object, "__regexp_source");
-    defer source.free(rt);
-    const flags = try getNamedProperty(rt, object, "__regexp_flags");
-    defer flags.free(rt);
-
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try buffer.append(rt.memory.allocator, '/');
-    try appendValueString(rt, &buffer, source);
-    try buffer.append(rt.memory.allocator, '/');
-    try appendValueString(rt, &buffer, flags);
-
-    const str = try core.string.String.createUtf8(rt, buffer.items);
+    const str = try core.string.String.createUtf8(rt, out.items);
     return str.value();
 }
 
-fn expectRegExpObject(value: core.Value) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (object.class_id != core.class.ids.regexp) return error.TypeError;
-    return object;
+fn encodeBytes(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
+    for (bytes) |ch| {
+        if (isUnescaped(ch) or (!component and isReserved(ch))) {
+            try out.append(rt.memory.allocator, ch);
+        } else {
+            var encoded: [3]u8 = undefined;
+            _ = try std.fmt.bufPrint(&encoded, "%{X:0>2}", .{ch});
+            try out.appendSlice(rt.memory.allocator, &encoded);
+        }
+    }
 }
 
-fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
-}
-
-fn getNamedProperty(rt: *core.Runtime, object: *core.Object, name: []const u8) !core.Value {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    return object.getProperty(key);
+fn decodeBytes(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
+    var index: usize = 0;
+    while (index < bytes.len) : (index += 1) {
+        if (bytes[index] != '%' or index + 2 >= bytes.len or !std.ascii.isHex(bytes[index + 1]) or !std.ascii.isHex(bytes[index + 2])) {
+            try out.append(rt.memory.allocator, bytes[index]);
+            continue;
+        }
+        const decoded: u8 = @intCast((hexValue(bytes[index + 1]) << 4) | hexValue(bytes[index + 2]));
+        if (!component and isReserved(decoded)) {
+            try out.appendSlice(rt.memory.allocator, bytes[index .. index + 3]);
+        } else {
+            try out.append(rt.memory.allocator, decoded);
+        }
+        index += 2;
+    }
 }
 
 fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) anyerror!void {
@@ -104,7 +89,7 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
         const header = value.refHeader() orelse return;
         const object_value: *core.Object = @fieldParentPtr("header", header);
         if (object_value.class_id == core.class.ids.string) {
-            const data = object_value.string_data orelse return error.UnsupportedRegExpCall;
+            const data = object_value.string_data orelse return error.UnsupportedUriCall;
             try appendValueString(rt, buffer, data);
         } else if (object_value.class_id == core.class.ids.array_buffer) {
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
@@ -161,4 +146,18 @@ fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
 
 fn isNegativeZero(value: f64) bool {
     return value == 0 and std.math.isNegativeInf(1.0 / value);
+}
+
+fn isUnescaped(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '!' or ch == '~' or ch == '*' or ch == '\'' or ch == '(' or ch == ')';
+}
+
+fn isReserved(ch: u8) bool {
+    return ch == ';' or ch == ',' or ch == '/' or ch == '?' or ch == ':' or ch == '@' or ch == '&' or ch == '=' or ch == '+' or ch == '$' or ch == '#';
+}
+
+fn hexValue(ch: u8) u8 {
+    if (ch >= '0' and ch <= '9') return @intCast(ch - '0');
+    if (ch >= 'a' and ch <= 'f') return @intCast(ch - 'a' + 10);
+    return @intCast(ch - 'A' + 10);
 }

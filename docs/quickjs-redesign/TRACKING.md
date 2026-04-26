@@ -1,6 +1,6 @@
 # QuickJS Redesign Tracking
 
-Last updated: 2026-04-26
+Last updated: 2026-04-27
 
 This file is the working ledger for the full QuickJS Zig redesign. It should be
 updated alongside implementation, tests, and phase documents.
@@ -9,12 +9,12 @@ updated alongside implementation, tests, and phase documents.
 
 | Field | Value |
 |---|---|
-| Active phase | Architecture Repair: Parser-First Semantic Completion |
-| Overall status | architecture_repair_active |
+| Active phase | Post-AR Semantic Completion Queue |
+| Overall status | architecture_repair_completed_followups_queued |
 | QuickJS semantic baseline | `64e64ebb1dd61505c256285a699c65c42941c5ed` |
-| Current engine state | Phase 8 tooling is complete and Phase 9 runtime semantic hardening passed the local baseline. Architecture repair is now active because those gates prove fixture/baseline compatibility, not blanket QuickJS semantic completeness; frontend, exec, builtins, libs, and GC still have recorded transitional or placeholder paths. |
+| Current engine state | Phase 8 tooling is complete, Phase 9 runtime semantic hardening passed the local baseline, and Architecture Repair has closed the misleading parser/VM shortcut and marker paths. These gates prove fixture/baseline compatibility, not blanket QuickJS semantic completeness; frontend, exec, builtins, libs, and GC still have recorded narrow helper or follow-up semantic-completion work. |
 | Current build state | `build.zig` includes `qjs`, `run-test262`, `smoke`, `test-quickjs-port`, `test-core`, `test-bytecode`, `test-frontend`, `test-exec`, `test-builtins`, `test-tools`, and aggregate `test` |
-| Current validation state | Architecture repair gates pass after the compound-assignment/update `quickjs_parser` slice: `zig build test --summary all` 145/145, `zig build test-frontend --summary all` 29/29, `zig build test-exec --summary all` 43/43, `zig build smoke --summary all` 45/45, language expressions target slice 101/101, and `git diff --check`; prior full local test262 remains recorded at `Result: 0/48205 errors, passed 42200`. |
+| Current validation state | Architecture repair closure gates pass after parser dead-path marker removal, status calibration, native-function cleanup, VM helper error cleanup, and standard-global marker cleanup: `zig build qjs --summary all`, `zig build test-frontend --summary all` 37/37, `zig build test-quickjs-port --summary all` 5/5, `zig build test-core --summary all` 32/32, `zig build test-builtins --summary all` 4/4, `zig build test-exec --summary all` 54/54, `zig build test --summary all` 164/164, `zig build smoke --summary all` 45/45, `git diff --check`, targeted expressions 0/401, statements 0/401, built-ins/global 0/29, Math 0/327, Promise 0/401, WeakMap 0/141, WeakSet 0/85, and full local test262 `Result: 0/48205 errors, passed 42200`. |
 | Current learning state | Error and learning workflow initialized in `ERRORS_AND_LEARNINGS.md` |
 
 ## Phase Board
@@ -30,7 +30,7 @@ updated alongside implementation, tests, and phase documents.
 | 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
 | 8 CLI Tooling And Validation | completed | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Host-visible output transferred to Phase 9 runtime hardening |
 | 9 Runtime Semantic Hardening | completed | `phases/09-runtime-semantic-hardening.md` | `matrices/runtime-semantic-hardening.md` | BigInt/DataView/String wrapper coercion follow-up completed |
-| AR Architecture Repair | in_progress | `ARCHITECTURE_REPAIR_PLAN.md` | source-aligned matrices | Parser-first semantic-completion boundary and status calibration |
+| AR Architecture Repair | completed | `ARCHITECTURE_REPAIR_PLAN.md` | source-aligned matrices | Follow-up semantic-completion queues own remaining builtins/libs/GC/capacity work |
 
 ## Work Queue
 
@@ -46,19 +46,23 @@ updated alongside implementation, tests, and phase documents.
 | WQ-008 | completed | 7 | Builtins and support libraries | Validated representative support libs and builtin domains | none |
 | WQ-009 | completed | 8 | CLI and validation tooling | Full local test262 gate executes in 15.00s with zero selected failures; known-error classification/update, metadata parsing/includes/filtering, raw hashbang handling, compare path defaults, in-process test execution, worker-local harness caching, and QuickJS-style namelist/selection/worker-stride execution are wired | host-visible output (`print`/`console.log`) transferred to WQ-010 |
 | WQ-010 | completed | 9 | Runtime semantic hardening | Replaced host-visible output opcodes with normal global lookup, property access, callable values, and generic call execution; BigInt/DataView/String wrapper coercion follow-up implemented with focused regression coverage | none |
-| WQ-011 | in_progress | AR | Architecture repair | First `quickjs_parser` slice now lowers basic declarations, identifier/object-property/compound assignments, statement-only identifier updates, expressions, literals, parenthesized property/index/optional access, and generic host-output calls without `SimpleParser`; next action is migrating parser metadata/source recognizers and broader statement/function domains into the same path | none |
+| WQ-011 | completed | AR | Architecture repair | `frontend/parser.zig` now has a single successful `quickjs_parser` path: the former `SimpleParser` compatibility lowerer was merged into `QuickParser`, test262 metadata/source-pattern pre-compilers were removed from parse dispatch, unsupported syntax reports through `syntax_error_guard`, and the legacy token-scanner/transitional-compiler `ParsePath` markers have been removed. Test262 helper opcodes, the remaining shortcut-audit opcodes, private constructor/String marker properties, value-level `Math`/`globalThis` marker constants, native-method string synthesis, and public VM helper `UnsupportedOpcode` fallbacks have been removed. | none |
+| WQ-012 | queued | follow-up | Builtin prototype and descriptor completion | Replace narrow builtin constructor/prototype/helper domains with shared object/property/call semantics and descriptor coverage, starting with Array/Object/String/Function/Promise/Collection. | none |
+| WQ-013 | queued | follow-up | Support library completion | Broaden RegExp, Unicode, BigInt/bignum, and dtoa support beyond current focused fixtures where local QuickJS/test262 coverage requires it. | none |
+| WQ-014 | queued | follow-up | GC cycle and weak collection semantics | Implement or explicitly scope QuickJS-style cycle removal and weak collection integration. | none |
+| WQ-015 | queued | follow-up | Capacity and OOM hardening | Replace hidden fixed limits and infallible allocation assumptions with allocator-backed, fallible paths. | none |
 
 ## Subsystem Coverage Matrix
 
 | Subsystem | Phase | Matrix | Status | Latest validation |
 |---|---|---|---|---|
-| Source baseline and status table | 1 | none | semantic_complete | `zig build test-quickjs-port --summary all` passed, 4/4 tests before architecture repair |
+| Source baseline and status table | 1 | none | semantic_complete | `zig build test-quickjs-port --summary all` passed, 5/5 tests after status path calibration |
 | Core runtime invariants | 2 | `matrices/core-runtime-invariants.md` | fixture_validated | Focused core fixtures pass; GC cycle removal remains a recorded architecture repair gap |
 | Object and property semantics | 3 | `matrices/object-property-matrix.md` | fixture_validated | Focused object/property fixtures pass |
 | Opcode metadata | 4 | `matrices/opcode-execution-matrix.md` | fixture_validated | Focused bytecode metadata fixtures pass |
-| Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | baseline_validated | First `quickjs_parser` slice, including compound assignment/update statements and parenthesized optional/index/property lowering, passes frontend/exec/smoke gates; `SimpleParser` remains transitional for unmigrated domains |
-| Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | baseline_validated | Local baseline passes, but VM still owns broad semantic domains and has unsupported fallback paths |
-| Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | fixture_validated | Focused fixtures pass; several builtin/library domains remain scaffold or narrow helper implementations |
+| Frontend and bytecode emitter | 5 | `matrices/frontend-coverage-matrix.md` | baseline_validated | `quickjs_parser` is now the only successful parser path and covers the former compatibility lowerer domains, declarations, assignments, updates, expressions, literals, module import/export metadata, eval feature tracking, parenthesized optional/index/property lowering, generic calls, supported builtin helper lowering, generic named construction, named `instanceof`, simple `for-in`, callback-backed Array map lowering, and ordinary `Math`/`globalThis` global/property lowering; legacy token-scanner/transitional-compiler parse path markers no longer exist |
+| Bytecode execution | 6 | `matrices/opcode-execution-matrix.md` | baseline_validated | Host callable setup/dispatch/output formatting, standard global object setup, and output-bound Array `forEachPrint` moved to `exec/call.zig`; VM call arguments are allocator-backed; value/equality/conversion/BigInt helpers moved to `exec/value_ops.zig`; property/in/instanceof/global-property helpers moved to `exec/property_ops.zig`; generic constructor helpers moved to `exec/construct.zig`; closure fixture state moved to `exec/closure.zig`; `assert.sameValue` and `Test262Error` now execute through generic call plus host callables instead of VM test262 opcodes; simple `for-in`, Array map, named construction, and named `instanceof` now use generic `for_in_next`, closure/`array_method`, `new_function`/`construct`, and `instanceof_value` paths; transitional JSON/Math/URI/Number parse/Date/RegExp/Promise/Collection/Buffer/String/Object/Array opcode handlers delegate to builtins modules; helper-level unsupported failures surface as `TypeError`, with `UnsupportedOpcode` reserved for unknown/malformed bytecode |
+| Builtins and support libraries | 7 | `matrices/builtins-support-matrix.md` | fixture_validated | JSON stringify/parse behavior moved from VM helpers into `builtins/json.zig`, supported Math helper behavior moved into `builtins/math.zig`, supported URI global helper behavior moved into `builtins/uri.zig`, supported parseInt/parseFloat behavior moved into `builtins/number.zig`, supported Date behavior moved into `builtins/date.zig`, supported RegExp constructor/instance behavior moved into `builtins/regexp.zig`, supported Promise constructor/static behavior moved into `builtins/promise.zig`, supported Collection constructor/prototype-method behavior moved into `builtins/collection.zig`, supported ArrayBuffer/TypedArray/DataView behavior moved into `builtins/buffer.zig`, supported String constructor/fromCharCode/charAt/method behavior moved into `builtins/string.zig`, supported Object literal/Object.is/entries behavior moved into `builtins/object.zig`, supported Array construction/join/map/prototype-method behavior moved into `builtins/array.zig`, function object display/native method properties moved into `builtins/function.zig`, and standard Math/JSON/native constructor globals are installed as ordinary global object properties; several other builtin/library domains remain scaffold or narrow helper implementations |
 | CLI and validation tooling | 8 | `matrices/test262-runner-parity.md` | baseline_validated | Tooling and local test262 baseline pass |
 | Runtime semantic hardening | 9 | `matrices/runtime-semantic-hardening.md` | baseline_validated | Phase 9 repairs passed aggregate, smoke, targeted, and full local test262 gates |
 
@@ -66,6 +70,195 @@ updated alongside implementation, tests, and phase documents.
 
 | Date | Phase | Command | Exit | Result | Evidence type |
 |---|---|---|---|---|---|
+| 2026-04-27 | architecture-repair | `zig build qjs --summary all` | 0 | `zjs` build target passed for AR closure | regression |
+| 2026-04-27 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after removing dead token-scanner/transitional-compiler `ParsePath` markers, 37/37 tests | regression |
+| 2026-04-27 | architecture-repair | `zig build test-quickjs-port --summary all` | 0 | Status/source gate passed after adding extracted exec helper paths to `status.zig`, 5/5 tests | regression |
+| 2026-04-27 | architecture-repair | `zig build test-core --summary all` | 0 | Core gate passed for AR closure, 32/32 tests | regression |
+| 2026-04-27 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed for AR closure, 4/4 tests | regression |
+| 2026-04-27 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed for AR closure, 54/54 tests | regression |
+| 2026-04-27 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed for AR closure, 164/164 tests | regression |
+| 2026-04-27 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed for AR closure, 45/45 scripts | regression |
+| 2026-04-27 | architecture-repair | `git diff --check` | 0 | Whitespace check passed for AR closure | hygiene |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 400` | 0 | Expressions target slice passed for AR closure, 0/401 errors | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/statements 0 400` | 0 | Statements target slice passed for AR closure, 0/401 errors with 375 passed and 26 skipped by feature | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/global 0 400` | 0 | Global object target slice passed for AR closure, 0/29 errors | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Math 0 400` | 0 | Math target slice passed for AR closure, 0/327 errors | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise 0 400` | 0 | Promise target slice passed for AR closure, 0/401 errors with 364 passed and 37 skipped by feature | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/WeakMap 0 400` | 0 | WeakMap target slice passed for AR closure, 0/141 errors | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/WeakSet 0 400` | 0 | WeakSet target slice passed for AR closure, 0/85 errors | targeted-test262 |
+| 2026-04-27 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test 0 100000` | 0 | Full local test262 gate passed for AR closure: prepared 48205/53168 tests, 4963 excluded, 6005 skipped by feature, `Result: 0/48205 errors, passed 42200` | test262 |
+| 2026-04-26 | architecture-repair | `zig build qjs --summary all` | 0 | `zjs` build target passed after replacing value-level `Math`/`globalThis` marker constants with ordinary global lookup/property access | regression |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after `Math` and `globalThis` lowering stopped emitting private marker constants, 37/37 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after standard global/native function object cleanup, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after standard global object setup and `globalThis` ownership fix, 54/54 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after standard-global marker cleanup, 164/164 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after standard-global marker cleanup, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/zjs tests/zig-smoke/number.js` | 0 | Direct Number/global smoke passed with `globalThis.globalThis === globalThis` and `globalThis.Math === Math` after marker removal | smoke |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/global 0 400` | 0 | Global object target slice passed after standard-global marker cleanup, 0/29 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Math 0 400` | 0 | Math target slice passed after `Math` stopped using a parser-emitted marker constant, 0/327 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise 0 400` | 0 | Promise target slice remained green after standard global/native function object cleanup, 0/401 errors with 364 passed and 37 skipped by feature | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/WeakMap 0 400` | 0 | WeakMap target slice remained green after standard global/native function object cleanup, 0/141 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/WeakSet 0 400` | 0 | WeakSet target slice remained green after standard global/native function object cleanup, 0/85 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after standard-global marker cleanup documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-core --summary all` | 0 | Core gate passed after adding object-owned function source payload support, 32/32 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Promise/Collection method display moved from synthesized strings to function objects, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after VM helper unsupported failures were mapped to `TypeError` and native/source function display paths were added, 54/54 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after native-function and VM helper error cleanup, 164/164 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after native-function and VM helper error cleanup, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise 0 400` | 0 | Promise target slice passed after Promise method display moved to function object properties, 0/401 errors with 364 passed and 37 skipped by feature | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/WeakMap 0 400` | 0 | WeakMap target slice passed after collection native method properties moved to function objects, 0/141 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/WeakSet 0 400` | 0 | WeakSet target slice passed after collection native method properties moved to function objects, 0/85 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after replacing simple `for-in`, Array map multiplication, named construction, and named `instanceof` fixture opcodes with generic lowering, 37/37 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after replacing remaining shortcut-audit VM opcodes with `for_in_next`, closure/`array_method`, `new_function`/`construct`, and `instanceof_value`, 53/53 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after removing private constructor/String marker properties and using object-owned String wrapper data, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after remaining fixture opcode and marker cleanup, 163/163 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after remaining fixture opcode and marker cleanup, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/zjs tests/zig-smoke/instanceof.js && ./zig-out/bin/zjs tests/zig-smoke/objects.js && ./zig-out/bin/zjs tests/zig-smoke/array_map.js && ./zig-out/bin/zjs tests/zig-smoke/string_constructor.js` | 0 | Direct smoke coverage for generic `instanceof`, object/for-in, callback-backed Array map, and String wrapper construction passed | smoke |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 400` | 0 | Language expressions slice passed after remaining fixture opcode cleanup, 0/401 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/statements 0 400` | 0 | Language statements slice passed after remaining fixture opcode cleanup, 0/401 errors with 375 passed and 26 skipped by feature | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions/instanceof 0 200` | 0 | `instanceof` expression slice passed after generic constructor-prototype path, 0/43 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Array/prototype/map 0 300` | 0 | Array `map` slice passed after callback-backed lowering, 0/216 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/String 0 2000` | 0 | String slice passed after removing private String marker property, 0/1223 errors with 1221 passed and 2 skipped by feature | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/statements/class 0 300` | 0 | Class statement slice passed after generic named construction support, 0/301 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions/new 0 300` | 0 | `new` expression slice passed after generic construct path, 0/59 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/statements/for-in 0 300` | 0 | `for-in` statement slice passed after replacing simple concat opcode with loop bytecode, 0/115 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after remaining fixture opcode and marker cleanup documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after VM value/property/closure/test262/output helper extraction, 52/52 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after VM semantic-helper extraction slice, 161/161 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend parser-first gate passed after removing `SimpleParser`, metadata/source pre-compilers, and token-scanner success path, 37/37 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after parser single-path migration, 52/52 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after parser single-path migration, 162/162 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after parser single-path migration, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 400` | 0 | Parser-related expressions slice passed, 0/401 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/statements 0 400` | 0 | Parser-related statements slice passed, 0/401 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/comments 0 300` | 0 | Comments parser slice passed, 0/52 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/line-terminators 0 300` | 0 | Line terminators parser slice passed, 0/41 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after parser single-path migration | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after replacing `assert_same_value` and `throw_test262_error` opcode emission with generic call bytecode, 37/37 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after moving `assert.sameValue` and `Test262Error` to host callables, 53/53 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after removing test262 helper opcodes from VM dispatch, 163/163 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after removing test262 helper opcodes from VM dispatch, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 400` | 0 | Expressions slice passed after test262 helper opcode removal, 0/401 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/statements 0 400` | 0 | Statements slice passed after test262 helper opcode removal, 0/401 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/encodeURI 0 120` | 0 | encodeURI slice passed after test262 helper opcode removal, 0/31 errors | targeted-test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after test262 helper opcode removal and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after VM semantic-helper extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `zig build run-test262 --summary all` | 0 | test262 runner build passed after VM semantic-helper extraction slice | regression |
+| 2026-04-26 | architecture-repair | `zig build qjs --summary all` | 0 | `zjs` build target passed after VM semantic-helper extraction slice | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions 0 400` | 0 | Language expressions target slice passed after VM semantic-helper extraction, 0/401 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/BigInt 0 300` | 0 | BigInt target slice passed after VM value/BigInt helper extraction, 0/77 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after VM semantic-helper extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate remained green after Array builtin extraction, 36/36 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Array construction/join/map/prototype-method helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after Array construction/join/map/prototype-method helper opcodes delegated to `builtins/array.zig` except output-bound `forEachPrint`, 49/49 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Array builtin extraction slice, 158/158 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Array builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/zjs tests/zig-smoke/array_methods.js && ./zig-out/bin/zjs tests/zig-smoke/array_map.js` | 0 | Direct Array smoke scripts passed after Array builtin extraction | regression |
+| 2026-04-26 | architecture-repair | `Array.prototype join/indexOf/includes/lastIndexOf/at/slice/splice test262 slices` | 0 | Array target slices passed after Array builtin extraction, 0/617 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Array builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate remained green after Object builtin extraction, 36/36 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Object literal/Object.is/entries helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after Object literal/constructor marker/is/keys/values/entries helper opcodes delegated to `builtins/object.zig`, 49/49 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Object builtin extraction slice, 158/158 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Object builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `Object.is/Object.keys/Object.values/Object.entries test262 slices` | 0 | Object target slices passed after Object builtin extraction, 0/121 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Object builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate remained green after String builtin extraction, 36/36 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after String constructor/fromCharCode/charAt/method helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `new_string_object` / `string_from_char_code` / `string_char_at` / `string_method` delegated to `builtins/string.zig`, 49/49 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after String builtin extraction slice, 158/158 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after String builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/String 0 2000` | 0 | String target slice passed after String builtin extraction, 0/1223 errors, 1221 passed and 2 skipped by feature | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after String builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after ArrayBuffer/TypedArray/DataView helper coverage was added to `builtins/buffer.zig`, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `new_array_buffer` / `new_typed_array` / `new_dataview` / `arraybuffer_slice` / `dataview_get` / `dataview_set` delegated to `builtins/buffer.zig`, 49/49 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Buffer/DataView builtin extraction slice, 158/158 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Buffer/DataView builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/DataView 0 5000` | 0 | DataView target slice passed after Buffer/DataView builtin extraction, 0/561 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Buffer/DataView builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported Collection constructor/prototype-method lowering moved from legacy domain fallback to `quickjs_parser`, 36/36 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Collection constructor/prototype-method helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `new_collection` / `collection_method` delegated to `builtins/collection.zig`, 49/49 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Collection parser/builtin extraction slice, 158/158 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Collection parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `Map prototype set/get/has/delete/clear test262 slices` | 0 | Map prototype method target slices passed after Collection extraction, 0/58 errors | test262 |
+| 2026-04-26 | architecture-repair | `Set prototype add/has/delete/clear test262 slices` | 0 | Set prototype method target slices passed after Collection extraction, 0/90 errors | test262 |
+| 2026-04-26 | architecture-repair | `WeakMap prototype set/get/has/delete test262 slices` | 0 | WeakMap prototype method target slices passed after Collection extraction, 0/75 errors | test262 |
+| 2026-04-26 | architecture-repair | `WeakSet prototype add/has/delete test262 slices` | 0 | WeakSet prototype method target slices passed after Collection extraction, 0/62 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Collection parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported Promise constructor/static lowering moved from legacy domain fallback to `quickjs_parser`, 35/35 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Promise constructor/static helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `new_promise` / `promise_static` delegated to `builtins/promise.zig`, 48/48 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Promise parser/builtin extraction slice, 156/156 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Promise parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise/resolve 0 500` | 0 | Promise.resolve target slice passed after Promise extraction, 0/30 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise/reject 0 500` | 0 | Promise.reject target slice passed after Promise extraction, 0/15 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise/race 0 500` | 0 | Promise.race target slice passed after Promise extraction, 0/94 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Promise/all 0 500` | 0 | Promise.all target slice passed after Promise extraction, 0/98 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Promise parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported RegExp constructor and instance method lowering moved from legacy domain fallback to `quickjs_parser`, 34/34 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after RegExp constructor and instance method helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `new_regexp` / `regexp_method` delegated to `builtins/regexp.zig`, 47/47 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after RegExp parser/builtin extraction slice, 154/154 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after RegExp parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/RegExp/prototype/toString 0 200` | 0 | RegExp.prototype.toString target slice passed after RegExp extraction, 0/9 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/RegExp/prototype/test 0 300` | 0 | RegExp.prototype.test target slice passed after RegExp extraction, 0/45 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/RegExp/prototype/exec 0 500` | 0 | RegExp.prototype.exec target slice passed after RegExp extraction, 0/79 errors, 77 passed and 2 skipped by feature | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after RegExp parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported Date call/static/constructor/method lowering moved from legacy domain fallback to `quickjs_parser`, 33/33 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Date helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `date_call` / `date_static` / `new_date` / `date_method` delegated to `builtins/date.zig`, 46/46 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Date parser/builtin extraction slice, 152/152 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Date parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/UTC 0 500` | 0 | Date.UTC target slice passed after Date extraction, 0/17 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/parse 0 500` | 0 | Date.parse target slice passed after Date extraction, 0/8 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/now 0 200` | 0 | Date.now target slice passed after Date extraction, 0/6 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/prototype/getTime 0 200` | 0 | Date.prototype.getTime target slice passed after Date extraction, 0/8 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/prototype/valueOf 0 200` | 0 | Date.prototype.valueOf target slice passed after Date extraction, 0/6 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/prototype/toISOString 0 200` | 0 | Date.prototype.toISOString target slice passed after Date extraction, 0/17 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Date/prototype/toJSON 0 200` | 0 | Date.prototype.toJSON target slice passed after Date extraction, 0/13 errors | test262 |
+| 2026-04-26 | architecture-repair | `Date/prototype/getUTCFullYear,getUTCMonth,getUTCDate,getUTCHours,getUTCMinutes,getUTCSeconds,getUTCMilliseconds,getUTCDay test262 slices` | 0 | Date UTC getter target slices passed after Date extraction, 0/64 errors | test262 |
+| 2026-04-26 | architecture-repair | `Date/prototype/getFullYear,getMonth,getDate,getHours,getMinutes,getSeconds,getMilliseconds test262 slices` | 0 | Date local getter target slices passed after Date extraction, 0/56 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Date parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported Number parse helpers moved from legacy domain fallback to `quickjs_parser`, 32/32 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Number parse helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `parse_int` / `parse_float` delegated to `builtins/number.zig`, 46/46 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Number parse parser/builtin extraction slice, 151/151 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Number parse parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/parseInt 0 500` | 0 | Global parseInt target slice passed after Number parse extraction, 0/55 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/parseFloat 0 500` | 0 | Global parseFloat target slice passed after Number parse extraction, 0/54 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Number/parseInt 0 100` | 0 | Number.parseInt target slice passed after Number parse extraction, 0/1 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Number/parseFloat 0 100` | 0 | Number.parseFloat target slice passed after Number parse extraction, 0/1 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Number parse parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported URI global calls moved from legacy domain fallback to `quickjs_parser`, 31/31 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after URI helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `uri_call` delegated to `builtins/uri.zig`, 46/46 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after URI parser/builtin extraction slice, 150/150 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after URI parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/encodeURI 0 400` | 0 | URI encodeURI target slice passed after URI parser/builtin extraction, 0/31 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/encodeURIComponent 0 400` | 0 | URI encodeURIComponent target slice passed after URI parser/builtin extraction, 0/31 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/decodeURI 0 400` | 0 | URI decodeURI target slice passed after URI parser/builtin extraction, 0/55 errors | test262 |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/decodeURIComponent 0 400` | 0 | URI decodeURIComponent target slice passed after URI parser/builtin extraction, 0/56 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after URI parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after supported `Math.<fn>` calls moved from legacy domain fallback to `quickjs_parser`, 30/30 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after `math_call` delegated to `builtins/math.zig` with allocator-backed Math arguments, 46/46 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after Math helper coverage was added, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after Math parser/builtin extraction slice, 149/149 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after Math parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Math 0 400` | 0 | Math target slice passed after Math parser/builtin extraction, 0/327 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after Math parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after JSON stringify/parse moved from legacy domain fallback to `quickjs_parser`, 29/29 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after JSON opcode handlers delegated to `builtins/json.zig`, 45/45 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test-builtins --summary all` | 0 | Builtins gate passed after JSON helper expansion, 4/4 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after JSON parser/builtin extraction slice, 147/147 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after JSON parser/builtin extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/JSON 0 200` | 0 | JSON target slice passed after JSON parser/builtin extraction, 0/165 errors | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after JSON parser/builtin extraction slice and documentation updates | hygiene |
+| 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after host callable setup/dispatch/output formatting moved into `exec/call.zig` and VM call arguments became allocator-backed, 45/45 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after first VM/domain extraction slice, 147/147 tests | regression |
+| 2026-04-26 | architecture-repair | `zig build smoke --summary all` | 0 | Smoke gate passed after first VM/domain extraction slice, 45/45 scripts | regression |
+| 2026-04-26 | architecture-repair | `./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/language/expressions/call 0 200` | 0 | Call-expression target slice passed after first VM/domain extraction slice, 0/92 errors, 86 passed and 6 skipped by feature | test262 |
+| 2026-04-26 | architecture-repair | `git diff --check` | 0 | Whitespace check passed after first VM/domain extraction slice and documentation updates | hygiene |
 | 2026-04-26 | architecture-repair | `zig build test-frontend --summary all` | 0 | Frontend gate passed after compound assignment and statement-only update lowering moved into `quickjs_parser`, 29/29 tests | regression |
 | 2026-04-26 | architecture-repair | `zig build test-exec --summary all` | 0 | Exec gate passed after compound assignment and update statements executed through `quickjs_parser`, 43/43 tests | regression |
 | 2026-04-26 | architecture-repair | `zig build test --summary all` | 0 | Aggregate gate passed after compound-assignment/update parser migration, 145/145 tests | regression |
@@ -414,7 +607,7 @@ archived under `docs/quickjs-redesign/archive/`.
 
 | Field | Value |
 |---|---|
-| Next recommended action | Continue post-Phase 9 semantic hardening for assert-heavy builtin parity gaps and any new divergences found by targeted test262 triage. |
+| Next recommended action | Start WQ-012 builtin prototype/descriptor completion, using the completed AR boundary as the guardrail: no parser metadata/source recognizers, no fixture opcodes, no private marker properties, and no helper `Unsupported*` leakage past VM/domain boundaries. |
 | Must not touch | Do not restore deleted `src/engine/vm/` or old AST interpreter paths. |
 | Must update during work | Active phase checklist, work queue status, validation log, affected matrix rows, and error records for reusable failures. |
 | Validation discipline | Record exact commands and exit status; keep interrupted sweeps separate from final evidence. |

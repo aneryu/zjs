@@ -74,7 +74,7 @@ create a learning record.
 |---|---|---|---|---|---|---|---|---|
 | EAL-20260424-001 | validated | low | docs | docs_tracking_gap | Redesign plan lacked a durable error and learning workflow. | `#eal-20260424-001-error-and-learning-workflow-missing` | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | README, TRACKING, test262 parity |
 | EAL-20260424-002 | validated | high | 8-9 | quickjs_parity_gap | Real smoke runner initially failed 45/45 scripts because `zjs` did not yet produce smoke-visible output such as `print(...)`. | `#eal-20260424-002-smoke-runner-wired-before-output-semantics` | `zig build smoke --summary all` | Phase 8 smoke runner, Phase 9 runtime hardening |
-| EAL-20260426-003 | parked | high | AR | parser_gap, emitter_gap, opcode_gap, docs_tracking_gap | Parser and VM can pass selected gates through source-pattern recognizers, test262 metadata guards, and fixture-shaped opcodes instead of general QuickJS semantics. | `#eal-20260426-003-parser-and-vm-fixture-shortcuts` | Pending parser-first replacement slices | Frontend coverage, opcode execution, architecture repair |
+| EAL-20260426-003 | in_progress | high | AR | parser_gap, emitter_gap, opcode_gap, docs_tracking_gap | Parser dispatch is single-path, audited fixture opcodes were removed, native-method string synthesis is gone, and VM helper unsupported failures now surface as JS errors; narrow parser/builtin scaffolds still block semantic-complete claims. | `#eal-20260426-003-parser-and-vm-fixture-shortcuts` | `zig build test-frontend --summary all`; targeted parser/test262 slices | Frontend coverage, opcode execution, architecture repair |
 
 ## Detailed Records
 
@@ -155,35 +155,175 @@ scripts, and the full local test262 gate reports `0/48205 errors`.
 
 ### EAL-20260426-003: Parser And VM Fixture Shortcuts
 
-Status: parked
+Status: in_progress
 Severity: high
 Phase: AR
 Classification: parser_gap, emitter_gap, opcode_gap, docs_tracking_gap
 
 Summary: A read-only audit found that selected smoke/test262 gates can pass while
-`frontend/parser.zig`, `bytecode/emitter.zig`, and `exec/vm.zig` still contain
+`frontend/parser.zig`, `bytecode/emitter.zig`, and `exec/vm.zig` contain
 fixture-shaped shortcuts. This is not just missing feature coverage; some paths
 recognize test metadata, source comments, or narrow source shapes and then emit
-purpose-built bytecode or VM behavior.
+purpose-built bytecode or VM behavior. Several audited opcode and marker
+classes have since been removed. Remaining narrow lowering shapes and broader
+builtin/prototype gaps are follow-up semantic-completion work rather than open
+architecture-repair shortcuts.
 
-Observed shortcut classes:
+Observed shortcut classes and current status:
 
-- `frontend.parser.Result.parse_path` exposes a
-  `transitional_fixture_compiler`, and the parse entrypoint tries several
-  `compile*Program` helpers before falling back to token metadata scanning.
-- Parser helpers inspect test262 metadata and source text such as `negative:`,
-  `phase: parse`, `phase: runtime`, `sec-*`, `type: Test262Error`, and fixture
-  prose to synthesize syntax or runtime outcomes.
-- `SimpleParser` lowers a narrow set of smoke/test262 statement and expression
-  shapes for assertions, JSON, Math, Date, URI, Promise, RegExp, arrays,
-  closures, named constructors, and selected control flow instead of using a
-  complete source-aligned parser/lowering pipeline.
-- The emitter and VM include fixture-shaped opcodes and handlers such as
-  `throw_test262_error`, `assert_same_value`, `for_in_concat`,
-  `array_map_mul`, `new_named_object`, and `instanceof_named`.
-- VM helpers still include narrow domain shortcuts such as `parseFlatJsonObject`,
-  `__zjs_constructor`, `__zjs_string_data`, native-method string synthesis, and
-  public execution paths that can return `UnsupportedOpcode`.
+- Parser dispatch used to expose a transitional compiler path, several
+  `compile*Program` helpers, and a token metadata scanner. The parser-first
+  slices removed those successful dispatch paths by merging the former
+  compatibility lowerer into `QuickParser`; unsupported syntax now reports
+  through `syntax_error_guard`, and the dead parser path enum markers have been
+  removed.
+- Parser helpers used to inspect test262 metadata and source text such as
+  `negative:`, `phase: parse`, `phase: runtime`, `sec-*`, `type:
+  Test262Error`, and fixture prose to synthesize syntax or runtime outcomes.
+  Those source-pattern pre-compilers are no longer called by parse dispatch.
+- The emitter and VM used to include fixture-shaped opcodes and handlers for
+  simple `for-in` concatenation, Array map multiplication, named construction,
+  and named `instanceof`. The 2026-04-26 remaining-opcode cleanup removed those
+  opcodes and now lowers through generic loop, closure/callback, constructor,
+  and `instanceof` bytecode.
+- VM helpers used to include private marker shortcuts for constructor and
+  String wrapper state. The same cleanup removed those private markers. The
+  follow-up native-function cleanup replaced function-looking string synthesis
+  with function objects and changed VM helper unsupported failures to JS
+  `TypeError`; unknown or malformed bytecode still uses `UnsupportedOpcode`.
+- The parser also emitted value-level marker constants for `Math` and
+  `globalThis`. The 2026-04-26 standard-global cleanup replaced those markers
+  with ordinary global/property bytecode and current standard global object
+  setup in `exec/call.zig`; `globalThis` identity is handled without creating a
+  refcount self-cycle on the global object.
+
+Repair progress: The first VM/domain extraction slice moved host global
+callable setup, host-call dispatch, and output formatting from `exec/vm.zig`
+into `exec/call.zig`; the focused exec gate now covers direct host callable
+installation and invocation. The same slice replaced the VM `call` handler's
+fixed 32-argument buffer with allocator-backed storage and added a 40-argument
+call regression.
+
+Parser dispatch repair progress: the former `SimpleParser` compatibility
+lowerer was merged into `QuickParser`, parse entry no longer calls
+metadata/source-pattern pre-compilers, and successful parses no longer use the
+token metadata scanner or transitional fixture compiler. Frontend, aggregate,
+smoke, and targeted expressions/statements/comments/line-terminators test262
+slices passed after the migration.
+
+Test262 helper opcode repair progress: `assert.sameValue(...)` now lowers to
+ordinary global lookup, property lookup, and generic call bytecode, and `throw
+new Test262Error(...)` now lowers to a generic call to the installed
+`Test262Error` host callable. The former `assert_same_value` and
+`throw_test262_error` VM dispatch opcodes and emitter helpers have been removed.
+
+Native-function/error cleanup progress: Promise `then`/`catch`, collection
+prototype-like method properties, and nested closure function display now use
+function objects instead of synthesized strings. VM helper-level `Unsupported*`
+errors now surface as `TypeError`; `UnsupportedOpcode` remains reserved for
+unknown or malformed bytecode.
+
+Standard-global cleanup progress: `Math` and `globalThis` no longer lower to
+private marker constants. `frontend/parser.zig` emits ordinary global/property
+access, `exec/call.zig` installs the current Math/JSON/native-constructor
+globals, and `exec/property_ops.zig` returns retained global-object values for
+`globalThis.globalThis` so VM property-result cleanup cannot destroy the global
+root.
+
+Remaining fixture opcode repair progress: the simple `for-in` concatenation,
+Array map multiplication, named construction, and named `instanceof` opcode
+families have been removed from emitter and VM dispatch. Supported source shapes
+now use `object_keys` plus `for_in_next`, callback-backed `new_closure` plus
+`array_method`, generic `new_function`/`construct`, and generic
+`instanceof_value`; private constructor/String marker properties were removed in
+favor of ordinary prototype links and object-owned String wrapper payloads.
+
+JSON repair progress: `JSON.stringify` and `JSON.parse` lowering now runs
+through `quickjs_parser`, and the narrow stringify/parse implementation moved
+from `exec/vm.zig` into `builtins/json.zig`.
+
+Math repair progress: supported `Math.<fn>` call lowering now runs through
+`quickjs_parser`, `Math` is no longer blocked by the quick parser's legacy
+domain-identifier fallback for those calls, and the narrow `math_call`
+implementation moved from `exec/vm.zig` into `builtins/math.zig`.
+
+URI repair progress: supported `encodeURI`, `encodeURIComponent`, `decodeURI`,
+and `decodeURIComponent` calls now lower through `quickjs_parser`, the URI
+global names are no longer blocked by the quick parser's legacy
+domain-identifier fallback for those direct calls, and the narrow `uri_call`
+implementation moved from `exec/vm.zig` into `builtins/uri.zig`.
+
+Number parse repair progress: supported global `parseInt`/`parseFloat` and
+`Number.parseInt`/`Number.parseFloat` calls now lower through `quickjs_parser`.
+The VM `parse_int`/`parse_float` handlers now only collect operands and delegate
+to `builtins/number.zig`, which owns supported string conversion, radix
+ToInt32, prefix consumption, `Infinity`, `NaN`, and negative-zero behavior.
+
+Date repair progress: supported `Date()` / `Date.UTC` / `Date.parse` /
+`Date.now`, `new Date(...)`, and selected Date method calls now lower through
+`quickjs_parser`. The VM Date opcode handlers now only collect operands and
+delegate to `builtins/date.zig`, which owns the current narrow Date payload,
+UTC math, supported parse strings, ISO/JSON formatting, and getter behavior.
+
+RegExp repair progress: supported `new RegExp(pattern, flags)` and selected
+RegExp instance method calls now lower through `quickjs_parser`. The VM
+`new_regexp` / `regexp_method` handlers now only collect operands and delegate
+to `builtins/regexp.zig`, which owns the current narrow RegExp object payload,
+`toString`, `test`, and `exec` behavior. Nonstandard static `RegExp.test` /
+`RegExp.exec` remain on the existing transitional TypeError path.
+
+Promise repair progress: supported `new Promise(...)` and
+`Promise.resolve` / `Promise.all` / `Promise.race` / `Promise.reject` calls now
+lower through `quickjs_parser`. The VM `new_promise` / `promise_static`
+handlers now only collect operands and delegate to `builtins/promise.zig`, which
+owns the current narrow Promise object creation and static helper behavior while
+preserving the existing unhandled-rejection exception-slot path.
+
+Collection repair progress: supported `Map` / `Set` / `WeakMap` / `WeakSet`
+construction and selected `set/get/has/delete/clear/add` prototype method calls
+now lower through `quickjs_parser`. The VM `new_collection` /
+`collection_method` handlers now only collect operands and delegate to
+`builtins/collection.zig`, which owns the current narrow single-entry storage
+behavior while full iterable constructors, iteration order, descriptors, and
+weak-collection GC integration remain explicit future debt.
+
+Buffer/DataView repair progress: supported `ArrayBuffer` construction/slicing,
+narrow TypedArray shape creation, and `DataView` construction/get/set behavior
+now live in `builtins/buffer.zig`. The VM buffer opcodes now only collect stack
+operands and delegate to the builtin module while full TypedArray elements,
+detachment, SharedArrayBuffer, and complete prototype descriptors remain future
+debt.
+
+String repair progress: supported `new String(...)`, `String.fromCharCode`,
+`charAt`, and selected String prototype method behavior now live in
+`builtins/string.zig`. The VM string opcodes now only collect stack operands and
+delegate to the builtin module while full constructor/prototype descriptors,
+Unicode-sensitive methods, and broader string integration remain future debt.
+
+Object repair progress: supported object literal construction, Object.is
+SameValue behavior, and Object.keys/values/entries array construction now live
+in `builtins/object.zig`. The VM object helper opcodes now only decode operands
+and delegate to the builtin module while full Object constructor/prototype
+descriptors and ordinary property operation extraction remain future debt.
+
+Array repair progress: supported array construction, `join`, callback-backed
+`map`, and selected Array prototype method behavior now live in
+`builtins/array.zig`. The VM `new_array`, `array_join`, and most `array_method`
+handling now only collect operands and delegate to the builtin module, while
+parser-side Array lowering, species, iteration, descriptors, sparse-array
+completeness, and broader prototype semantics remain future debt.
+Output-bound `forEachPrint` remains a transitional output adapter, now owned by
+`exec/call.zig`.
+
+VM semantic-helper extraction progress: value arithmetic/comparison/equality,
+truthiness/type conversion, BigInt coercion/asN, property get/set/optional/index
+access, `in`/`instanceof`, closure fixture state, test262 throw/assert helpers,
+and output-bound Array `forEachPrint` now live outside `exec/vm.zig` in
+`exec/value_ops.zig`, `exec/property_ops.zig`, `exec/closure.zig`,
+`exec/test262_helpers.zig`, and `exec/call.zig`. VM dispatch now decodes
+operands, manages stack/frame/global-slot glue, and maps helper errors for those
+paths; narrow source-shape lowering and incomplete builtin/prototype domains
+remain explicit transitional debt.
 
 Root cause: The broad validation loop advanced before the parser-first semantic
 architecture was complete. Passing local gates was treated as compatibility
@@ -193,14 +333,15 @@ fixtures and selected test262 metadata.
 Required repair direction: Replace source-string recognizers with
 token-driven/parser-driven early errors and lowering. Move builtin/domain
 semantics out of VM shortcut opcodes into shared object, property, call, and
-builtin implementations. Keep any remaining transitional path explicit through
-`parse_path`, matrix status, and architecture-repair tracking until removed.
+builtin implementations. After AR closure, remaining narrow semantic work must
+be explicit in follow-up queues and matrix status, not represented as alternate
+successful parser paths.
 
-Validation to close: Add focused parser/emitter/VM regression slices for each
-removed shortcut class, run `zig build test --summary all`, `zig build smoke
---summary all`, `git diff --check`, targeted test262 slices for touched syntax
-or builtin domains, and the full local test262 gate before claiming semantic
-completion.
+Validation to close: Focused parser/emitter/VM regression slices exist for the
+removed shortcut classes, and the AR closure gate requires `zig build test
+--summary all`, `zig build smoke --summary all`, `git diff --check`, targeted
+test262 slices for touched syntax or builtin domains, and the full local
+test262 gate before claiming semantic completion beyond the AR boundary.
 
 ## Learning Log
 

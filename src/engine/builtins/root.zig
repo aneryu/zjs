@@ -11,6 +11,7 @@ pub const bigint = @import("bigint.zig");
 pub const math = @import("math.zig");
 pub const date = @import("date.zig");
 pub const json = @import("json.zig");
+pub const uri = @import("uri.zig");
 pub const regexp = @import("regexp.zig");
 pub const error_ = @import("error.zig");
 pub const promise = @import("promise.zig");

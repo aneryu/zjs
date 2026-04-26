@@ -5,9 +5,16 @@ reviewed in small, source-aligned slices. This matrix forbids a standalone AST
 execution path; every executable syntax feature must emit bytecode metadata.
 
 Architecture repair note: historical `validated` rows below mean the Phase 5
-fixtures and local baseline evidence passed. They do not mean the current
-`SimpleParser` path is semantically complete. Parser-first repair is tracked in
-`../ARCHITECTURE_REPAIR_PLAN.md`.
+fixtures and local baseline evidence passed. Parser-first repair is tracked in
+`../ARCHITECTURE_REPAIR_PLAN.md`. As of 2026-04-27, `quickjs_parser` is the
+only successful parser path; the former `SimpleParser`, token metadata scanner,
+test262 metadata/source-pattern pre-compilers, and dead transitional parse-path
+markers have been removed from parse dispatch. The known shortcut-audit opcodes
+for simple `for-in`, Array map
+multiplication, named construction, named `instanceof`, and test262 helpers have
+been removed, and `Math`/`globalThis` no longer lower through private marker
+constants; remaining narrow source-shape lowering is tracked as parser/emitter
+follow-up semantic-completion debt, not as separate parser paths.
 
 ## Lexer Matrix
 

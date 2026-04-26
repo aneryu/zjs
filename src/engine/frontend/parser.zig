@@ -30,8 +30,6 @@ pub const Feature = enum {
 
 pub const ParsePath = enum {
     quickjs_parser,
-    token_metadata_scanner,
-    transitional_fixture_compiler,
     syntax_error_guard,
 };
 
@@ -39,7 +37,7 @@ pub const Result = struct {
     runtime: *Runtime,
     function: bytecode.Bytecode,
     mode: Mode,
-    parse_path: ParsePath = .token_metadata_scanner,
+    parse_path: ParsePath = .quickjs_parser,
     features: std.EnumSet(Feature) = .initEmpty(),
     syntax_error: ?source_pos.SyntaxError = null,
     direct_eval: bool = false,
@@ -52,10 +50,6 @@ pub const Result = struct {
     pub fn hasFeature(self: Result, feature: Feature) bool {
         return self.features.contains(feature);
     }
-
-    pub fn usedTransitionalCompiler(self: Result) bool {
-        return self.parse_path == .transitional_fixture_compiler;
-    }
 };
 
 pub const Options = struct {
@@ -65,9 +59,8 @@ pub const Options = struct {
 
 /// QuickJS source map: JS_EvalObject() selects script/module/eval parse mode,
 /// then js_parse_program() and js_parse_function_decl2() feed bytecode emission.
-/// Phase 5 fixtures also map syntax domains to js_parse_statement_or_decl(),
-/// js_parse_assign_expr(), js_parse_class(), js_parse_import(),
-/// js_parse_export(), js_parse_destructuring_element(), and next_token().
+/// Successful inputs route through QuickParser only; unsupported syntax reports
+/// through the syntax-error guard instead of metadata/source recognizers.
 pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     const filename_atom = try rt.internAtom(options.filename);
     defer rt.atoms.free(filename_atom);
@@ -84,30 +77,6 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     };
     errdefer result.deinit();
 
-    var emit = bytecode.emitter.Emitter.init(&result.function);
-    try emit.emitSourceLoc(0, 1);
-
-    const global_scope = try result.function.addScope(null);
-    if (compileAssertionProgram(rt, &emit, global_scope, source)) {
-        result.parse_path = .transitional_fixture_compiler;
-        try emit.emitReturnUndefined();
-        return result;
-    }
-    if (compileLineTerminatorProgram(rt, &emit, global_scope, source)) {
-        result.parse_path = .transitional_fixture_compiler;
-        try emit.emitReturnUndefined();
-        return result;
-    }
-    if (compileAnnexBHtmlCommentProgram(rt, &emit, global_scope, source, options.mode)) {
-        result.parse_path = .transitional_fixture_compiler;
-        try emit.emitReturnUndefined();
-        return result;
-    }
-    if (compileUnicodeIdentifierAcceptanceProgram(source)) {
-        result.parse_path = .transitional_fixture_compiler;
-        try emit.emitReturnUndefined();
-        return result;
-    }
     if (try compileQuickProgram(rt, filename_atom, source, options)) |quick| {
         result.function.deinit(rt);
         result.function = quick.function;
@@ -115,157 +84,32 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
         result.parse_path = .quickjs_parser;
         return result;
     }
-    if (arrowEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (asyncEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (classEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (callEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (functionEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (statementEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (expressionEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (moduleEarlySyntaxError(source, options.mode)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (assignmentEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (identifierEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (literalEarlySyntaxError(source)) |message| {
-        try setSyntaxError(&result, rt, filename_atom, source, message);
-        return result;
-    }
-    if (moduleRuntimeError(source)) |error_name| {
-        result.parse_path = .transitional_fixture_compiler;
-        if (std.mem.eql(u8, error_name, "TypeError")) {
-            try emit.emitThrowTypeError();
-        } else if (std.mem.eql(u8, error_name, "SyntaxError")) {
-            try emit.emitThrowSyntaxError();
-        } else if (std.mem.eql(u8, error_name, "ReferenceError")) {
-            try emit.emitThrowReferenceError();
-        } else if (std.mem.eql(u8, error_name, "RangeError")) {
-            try emit.emitThrowRangeError();
-        } else {
-            try emit.emitThrowTest262Error();
-        }
-        try emit.emitReturnUndefined();
-        return result;
-    }
-    if (evalRuntimeSyntaxError(source)) {
-        result.parse_path = .transitional_fixture_compiler;
-        try emit.emitThrowSyntaxError();
-        try emit.emitReturnUndefined();
-        return result;
-    }
-    if (compileStatementReferenceErrorProgram(rt, &emit, global_scope, source)) {
-        result.parse_path = .transitional_fixture_compiler;
-        try emit.emitReturnUndefined();
-        return result;
-    }
-    if (isSimpleStatementCandidate(source)) {
-        var simple_function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
-        simple_function.flags.is_strict = options.mode == .module;
-        var simple_emit = bytecode.emitter.Emitter.init(&simple_function);
-        try simple_emit.emitSourceLoc(0, 1);
-        const simple_scope = try simple_function.addScope(null);
-        const transitional = TransitionalCompiler.init(rt, &simple_emit, simple_scope);
-        if (transitional.compileSimpleProgram(source, .{})) {
-            try simple_emit.emitReturnUndefined();
-            result.function.deinit(rt);
-            result.function = simple_function;
-            result.parse_path = .transitional_fixture_compiler;
-            return result;
-        } else {
-            simple_function.deinit(rt);
-        }
-    }
+    try setFallbackSyntaxError(&result, rt, filename_atom, source);
+    return result;
+}
 
+fn setFallbackSyntaxError(result: *Result, rt: *Runtime, filename_atom: atom.Atom, source: []const u8) !void {
     var lex = lexer.Lexer.init(source);
-    var previous: ?token.Token = null;
     var brace_balance: i32 = 0;
     var paren_balance: i32 = 0;
-
+    var bracket_balance: i32 = 0;
     while (true) {
         const tok = lex.next() catch |err| {
             result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, lex.position, @errorName(err));
             result.parse_path = .syntax_error_guard;
-            return result;
+            return;
         };
         if (tok.kind == .eof) break;
-        if (tok.kind == .identifier or tok.kind == .private_identifier) {
-            const name = try rt.internAtom(tok.lexeme);
-            defer rt.atoms.free(name);
-            _ = try global_scope.addBinding(name, .var_, false);
-            if (std.mem.eql(u8, tok.lexeme, "true")) try emit.emitKnown(bytecode.emitter.known.push_true);
-            if (std.mem.eql(u8, tok.lexeme, "false")) try emit.emitKnown(bytecode.emitter.known.push_false);
-            if (std.mem.eql(u8, tok.lexeme, "undefined")) try emit.emitKnown(bytecode.emitter.known.undefined_value);
-            if (std.mem.eql(u8, tok.lexeme, "null")) try emit.emitKnown(bytecode.emitter.known.null_value);
-        }
-        if (tok.kind == .numeric) {
-            result.features.insert(.expression);
-            try emit.emitPushInt32(parseSmallInt(tok.lexeme) orelse 0);
-        }
-        if (tok.kind == .string or tok.kind == .template_no_substitution or tok.kind == .regexp) {
-            result.features.insert(.expression);
-            const str = try @import("../core/string.zig").String.createUtf8(rt, literalBody(tok.lexeme));
-            const value = str.value();
-            _ = try emit.emitPushConst(value);
-            value.free(rt);
-        }
-        if (tok.kind == .private_identifier) result.features.insert(.private_name);
-        if (tok.kind == .punctuator) {
-            if (std.mem.eql(u8, tok.lexeme, "{")) brace_balance += 1;
-            if (std.mem.eql(u8, tok.lexeme, "}")) brace_balance -= 1;
-            if (std.mem.eql(u8, tok.lexeme, "(")) {
-                paren_balance += 1;
-            }
-            if (std.mem.eql(u8, tok.lexeme, ")")) {
-                paren_balance -= 1;
-            }
-            if (std.mem.eql(u8, tok.lexeme, "...")) result.features.insert(.spread_rest);
-            if (std.mem.eql(u8, tok.lexeme, "[") or std.mem.eql(u8, tok.lexeme, "{")) result.features.insert(.destructuring);
-        }
-        if (tok.kind == .keyword) try handleKeyword(rt, &result, &emit, global_scope, tok, previous);
-        previous = tok;
+        if (tok.kind != .punctuator) continue;
+        if (std.mem.eql(u8, tok.lexeme, "{")) brace_balance += 1;
+        if (std.mem.eql(u8, tok.lexeme, "}")) brace_balance -= 1;
+        if (std.mem.eql(u8, tok.lexeme, "(")) paren_balance += 1;
+        if (std.mem.eql(u8, tok.lexeme, ")")) paren_balance -= 1;
+        if (std.mem.eql(u8, tok.lexeme, "[")) bracket_balance += 1;
+        if (std.mem.eql(u8, tok.lexeme, "]")) bracket_balance -= 1;
     }
-
-    if (brace_balance != 0 or paren_balance != 0) {
-        result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, lex.position, "Unexpected end of input");
-        result.parse_path = .syntax_error_guard;
-        return result;
-    }
-    try emit.emitReturnUndefined();
-    return result;
-}
-
-fn setSyntaxError(result: *Result, rt: *Runtime, filename_atom: atom.Atom, source: []const u8, message: []const u8) !void {
-    var early_lex = lexer.Lexer.init(source);
-    _ = early_lex.next() catch {};
-    result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, early_lex.position, message);
+    const message = if (brace_balance != 0 or paren_balance != 0 or bracket_balance != 0) "Unexpected end of input" else "SyntaxError";
+    result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, lex.position, message);
     result.parse_path = .syntax_error_guard;
 }
 
@@ -274,8 +118,8 @@ const QuickCompileResult = struct {
     features: std.EnumSet(Feature),
 };
 
-// Conservative token-driven parser/lowerer. Unsupported syntax must return
-// UnsupportedQuickParser so the transitional paths can keep owning legacy domains.
+// Conservative token-driven parser/lowerer. Unsupported syntax stays inside
+// this path and is reported as a parser diagnostic by parse().
 fn compileQuickProgram(rt: *Runtime, filename_atom: atom.Atom, source: []const u8, options: Options) !?QuickCompileResult {
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
     errdefer function.deinit(rt);
@@ -285,10 +129,7 @@ fn compileQuickProgram(rt: *Runtime, filename_atom: atom.Atom, source: []const u
     try emit.emitSourceLoc(0, 1);
     const global_scope = try function.addScope(null);
 
-    var parser = QuickParser.init(rt, &emit, global_scope, source) catch {
-        function.deinit(rt);
-        return null;
-    };
+    var parser = try QuickParser.init(rt, &emit, global_scope, source, options.mode);
     parser.parseProgram() catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
@@ -300,602 +141,6 @@ fn compileQuickProgram(rt: *Runtime, filename_atom: atom.Atom, source: []const u
     return .{ .function = function, .features = parser.features };
 }
 
-const QuickParser = struct {
-    rt: *Runtime,
-    emit: *bytecode.emitter.Emitter,
-    scope_record: *bytecode.scope.ScopeRecord,
-    lex: lexer.Lexer,
-    current: token.Token,
-    features: std.EnumSet(Feature) = .initEmpty(),
-    postfix_allows_property: bool = false,
-    postfix_allows_nullish_optional: bool = false,
-
-    fn init(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8) !QuickParser {
-        var lex = lexer.Lexer.init(source);
-        const first = try lex.next();
-        return .{
-            .rt = rt,
-            .emit = emit,
-            .scope_record = scope_record,
-            .lex = lex,
-            .current = first,
-        };
-    }
-
-    fn parseProgram(self: *QuickParser) anyerror!void {
-        while (self.current.kind != .eof) {
-            try self.parseStatementOrDecl();
-        }
-    }
-
-    fn parseStatementOrDecl(self: *QuickParser) anyerror!void {
-        if (self.current.isKeyword(.var_) or self.current.isKeyword(.let) or self.current.isKeyword(.@"const")) {
-            try self.parseVariableDeclaration();
-            return;
-        }
-        if (try self.parseSimpleAssignmentStatement()) return;
-        if (try self.parseSimpleUpdateStatement()) return;
-        if (try self.parseSimpleCompoundAssignmentStatement()) return;
-        if (try self.parseSimplePropertyAssignmentStatement()) return;
-        try self.parseExpression(0);
-        try self.consumeSemicolonOrEof();
-    }
-
-    fn parseVariableDeclaration(self: *QuickParser) !void {
-        self.features.insert(.statement);
-        try self.advance();
-        while (true) {
-            const name = try self.expectIdentifier();
-            if (self.consumePunctuator("=")) {
-                try self.parseExpression(0);
-            } else {
-                try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
-            }
-            try self.emit.emitDefineVar(name);
-            self.rt.atoms.free(name);
-
-            if (!self.consumePunctuator(",")) break;
-        }
-        try self.consumeSemicolonOrEof();
-    }
-
-    fn parseSimpleAssignmentStatement(self: *QuickParser) !bool {
-        if (self.current.kind != .identifier) return false;
-        if (isLiteralIdentifier(self.current.lexeme)) return false;
-        const saved_current = self.current;
-        const saved_lex = self.lex;
-        const name = try self.internCurrentIdentifier();
-        try self.advance();
-        if (!self.consumePunctuator("=")) {
-            self.rt.atoms.free(name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        }
-        try self.parseExpression(0);
-        try self.emit.emitDefineVar(name);
-        self.rt.atoms.free(name);
-        try self.consumeSemicolonOrEof();
-        self.features.insert(.statement);
-        return true;
-    }
-
-    fn parseSimpleUpdateStatement(self: *QuickParser) !bool {
-        if (self.current.kind != .identifier) return false;
-        if (isLiteralIdentifier(self.current.lexeme) or isLegacyDomainIdentifier(self.current.lexeme)) return false;
-        const saved_current = self.current;
-        const saved_lex = self.lex;
-
-        const name = try self.internCurrentIdentifier();
-        try self.advance();
-        const op = if (self.consumePunctuator("+")) blk: {
-            if (!self.consumePunctuator("+")) {
-                self.rt.atoms.free(name);
-                self.current = saved_current;
-                self.lex = saved_lex;
-                return false;
-            }
-            break :blk bytecode.emitter.known.add;
-        } else if (self.consumePunctuator("-")) blk: {
-            if (!self.consumePunctuator("-")) {
-                self.rt.atoms.free(name);
-                self.current = saved_current;
-                self.lex = saved_lex;
-                return false;
-            }
-            break :blk bytecode.emitter.known.sub;
-        } else {
-            self.rt.atoms.free(name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        };
-        defer self.rt.atoms.free(name);
-
-        try self.emit.emitGetVar(name);
-        try self.emit.emitPushInt32(1);
-        try self.emit.emitKnown(op);
-        try self.emit.emitDefineVar(name);
-        try self.consumeSemicolonOrEof();
-        self.features.insert(.statement);
-        self.features.insert(.expression);
-        return true;
-    }
-
-    fn parseSimpleCompoundAssignmentStatement(self: *QuickParser) !bool {
-        if (self.current.kind != .identifier) return false;
-        if (isLiteralIdentifier(self.current.lexeme) or isLegacyDomainIdentifier(self.current.lexeme)) return false;
-        const saved_current = self.current;
-        const saved_lex = self.lex;
-
-        const name = try self.internCurrentIdentifier();
-        try self.advance();
-        if (self.current.kind != .punctuator) {
-            self.rt.atoms.free(name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        }
-        const op = compoundAssignmentOpcode(self.current.lexeme) orelse {
-            self.rt.atoms.free(name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        };
-        try self.advance();
-        if (!self.consumePunctuator("=")) {
-            self.rt.atoms.free(name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        }
-        defer self.rt.atoms.free(name);
-
-        try self.emit.emitGetVar(name);
-        try self.parseExpression(0);
-        try self.emit.emitKnown(op);
-        try self.emit.emitDefineVar(name);
-        try self.consumeSemicolonOrEof();
-        self.features.insert(.statement);
-        self.features.insert(.expression);
-        return true;
-    }
-
-    fn parseSimplePropertyAssignmentStatement(self: *QuickParser) !bool {
-        if (self.current.kind != .identifier) return false;
-        if (isLiteralIdentifier(self.current.lexeme) or isLegacyDomainIdentifier(self.current.lexeme)) return false;
-        const saved_current = self.current;
-        const saved_lex = self.lex;
-
-        const object_name = try self.internCurrentIdentifier();
-        try self.advance();
-        if (!self.consumePunctuator(".")) {
-            self.rt.atoms.free(object_name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        }
-
-        const property = self.internCurrentPropertyName() catch {
-            self.rt.atoms.free(object_name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        };
-        try self.advance();
-        if (!self.consumePunctuator("=")) {
-            self.rt.atoms.free(property);
-            self.rt.atoms.free(object_name);
-            self.current = saved_current;
-            self.lex = saved_lex;
-            return false;
-        }
-        defer self.rt.atoms.free(property);
-        defer self.rt.atoms.free(object_name);
-
-        try self.emit.emitGetVar(object_name);
-        try self.parseExpression(0);
-        try self.emit.emitSetProp(property);
-        try self.consumeSemicolonOrEof();
-        self.features.insert(.statement);
-        self.features.insert(.expression);
-        return true;
-    }
-
-    fn parseExpression(self: *QuickParser, min_precedence: u8) anyerror!void {
-        try self.parseUnary();
-        try self.parsePostfix();
-        while (true) {
-            const op = binaryOpcodeForToken(self.current) orelse break;
-            const precedence = binaryPrecedence(op);
-            if (precedence < min_precedence) break;
-            try self.advance();
-            if (op == bytecode.emitter.known.instanceof_object) {
-                try self.parseInstanceofRhs();
-                self.setPostfixState(false, false);
-                continue;
-            }
-            try self.parseExpression(if (op == bytecode.emitter.known.pow) precedence else precedence + 1);
-            try self.emit.emitKnown(op);
-            self.setPostfixState(false, false);
-        }
-    }
-
-    fn parseUnary(self: *QuickParser) anyerror!void {
-        if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "typeof")) {
-            try self.advance();
-            try self.parseUnary();
-            try self.parsePostfix();
-            try self.emit.emitKnown(bytecode.emitter.known.typeof_value);
-            self.setPostfixState(false, false);
-            return;
-        }
-        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "-")) {
-            try self.advance();
-            if (self.current.kind == .numeric and std.mem.eql(u8, self.current.lexeme, "0")) {
-                try self.emitFloatLiteral(-0.0);
-                try self.advance();
-                self.setPostfixState(false, false);
-                return;
-            }
-            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "Infinity")) {
-                try self.emitFloatLiteral(-std.math.inf(f64));
-                try self.advance();
-                self.setPostfixState(false, false);
-                return;
-            }
-            try self.parseUnary();
-            try self.emit.emitKnown(224);
-            self.setPostfixState(false, false);
-            return;
-        }
-        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "~")) {
-            try self.advance();
-            try self.parseUnary();
-            try self.emit.emitKnown(bytecode.emitter.known.bit_not);
-            self.setPostfixState(false, false);
-            return;
-        }
-        try self.parsePrimary();
-    }
-
-    fn parsePostfix(self: *QuickParser) anyerror!void {
-        while (true) {
-            if (try self.parseCallPostfix()) continue;
-            if (try self.parsePropertyPostfix()) continue;
-            if (try self.parseOptionalPropertyPostfix()) continue;
-            if (try self.parseIndexPostfix()) continue;
-            break;
-        }
-    }
-
-    fn parseCallPostfix(self: *QuickParser) !bool {
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "(")) return false;
-        try self.parseGenericCallOnStack();
-        self.setPostfixState(true, false);
-        return true;
-    }
-
-    fn parsePropertyPostfix(self: *QuickParser) !bool {
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, ".")) return false;
-        if (!self.postfix_allows_property) return error.UnsupportedQuickParser;
-
-        try self.advance();
-        const property = try self.internCurrentPropertyName();
-        defer self.rt.atoms.free(property);
-        const property_name = self.rt.atoms.name(property) orelse "";
-        if (isLegacyDomainProperty(property_name)) return error.UnsupportedQuickParser;
-
-        try self.advance();
-        if (std.mem.eql(u8, property_name, "length")) {
-            try self.emit.emitKnown(bytecode.emitter.known.value_length);
-        } else {
-            try self.emit.emitGetProp(property);
-        }
-        self.setPostfixState(true, false);
-        return true;
-    }
-
-    fn parseOptionalPropertyPostfix(self: *QuickParser) !bool {
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "?")) return false;
-        if (!self.postfix_allows_property and !self.postfix_allows_nullish_optional) return error.UnsupportedQuickParser;
-
-        const optional_chain_from_object = self.postfix_allows_property;
-        try self.advance();
-        try self.expectPunctuator(".");
-        const property = try self.internCurrentPropertyName();
-        defer self.rt.atoms.free(property);
-        try self.advance();
-        try self.emit.emitOptionalGetProp(property);
-        self.setPostfixState(optional_chain_from_object, !optional_chain_from_object);
-        return true;
-    }
-
-    fn parseIndexPostfix(self: *QuickParser) !bool {
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "[")) return false;
-        if (!self.postfix_allows_property) return error.UnsupportedQuickParser;
-
-        try self.advance();
-        if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
-        const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
-        if (index < 0) return error.UnsupportedQuickParser;
-        try self.advance();
-        try self.expectPunctuator("]");
-        try self.emit.emitGetIndex(@intCast(index));
-        self.setPostfixState(true, false);
-        return true;
-    }
-
-    fn parsePrimary(self: *QuickParser) anyerror!void {
-        self.features.insert(.expression);
-        switch (self.current.kind) {
-            .numeric => {
-                try self.emitNumberLiteral(self.current.lexeme);
-                try self.advance();
-                self.setPostfixState(false, false);
-            },
-            .bigint => {
-                try self.emitBigIntLiteral(self.current.lexeme);
-                try self.advance();
-                self.setPostfixState(false, false);
-            },
-            .string => {
-                try self.emitString(literalBody(self.current.lexeme));
-                try self.advance();
-                self.setPostfixState(false, false);
-            },
-            .template_no_substitution => {
-                const body = literalBody(self.current.lexeme);
-                if (std.mem.indexOf(u8, body, "${") != null) return error.UnsupportedQuickParser;
-                try self.emitString(body);
-                try self.advance();
-                self.setPostfixState(false, false);
-            },
-            .identifier => try self.parseIdentifierPrimary(),
-            .punctuator => {
-                if (self.consumePunctuator("(")) {
-                    try self.parseExpression(0);
-                    try self.expectPunctuator(")");
-                    return;
-                }
-                if (std.mem.eql(u8, self.current.lexeme, "[")) {
-                    try self.parseArrayLiteral();
-                    return;
-                }
-                if (std.mem.eql(u8, self.current.lexeme, "{")) {
-                    try self.parseObjectLiteral();
-                    return;
-                }
-                return error.UnsupportedQuickParser;
-            },
-            else => return error.UnsupportedQuickParser,
-        }
-    }
-
-    fn parseIdentifierPrimary(self: *QuickParser) !void {
-        if (std.mem.eql(u8, self.current.lexeme, "true")) {
-            try self.emit.emitKnown(bytecode.emitter.known.push_true);
-            try self.advance();
-            self.setPostfixState(false, false);
-            return;
-        }
-        if (std.mem.eql(u8, self.current.lexeme, "false")) {
-            try self.emit.emitKnown(bytecode.emitter.known.push_false);
-            try self.advance();
-            self.setPostfixState(false, false);
-            return;
-        }
-        if (std.mem.eql(u8, self.current.lexeme, "undefined")) {
-            try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
-            try self.advance();
-            self.setPostfixState(false, true);
-            return;
-        }
-        if (std.mem.eql(u8, self.current.lexeme, "null")) {
-            try self.emit.emitKnown(bytecode.emitter.known.null_value);
-            try self.advance();
-            self.setPostfixState(false, true);
-            return;
-        }
-        if (std.mem.eql(u8, self.current.lexeme, "NaN")) {
-            try self.emitFloatLiteral(std.math.nan(f64));
-            try self.advance();
-            self.setPostfixState(false, false);
-            return;
-        }
-        if (std.mem.eql(u8, self.current.lexeme, "Infinity")) {
-            try self.emitFloatLiteral(std.math.inf(f64));
-            try self.advance();
-            self.setPostfixState(false, false);
-            return;
-        }
-        if (isLegacyDomainIdentifier(self.current.lexeme)) return error.UnsupportedQuickParser;
-        const name = try self.internCurrentIdentifier();
-        try self.advance();
-        try self.emit.emitGetVar(name);
-        self.rt.atoms.free(name);
-        self.setPostfixState(true, false);
-    }
-
-    fn parseArrayLiteral(self: *QuickParser) !void {
-        self.features.insert(.destructuring);
-        try self.expectPunctuator("[");
-        var count: u32 = 0;
-        if (self.consumePunctuator("]")) {
-            try self.emit.emitNewArray(0);
-            self.setPostfixState(true, false);
-            return;
-        }
-        while (true) {
-            if (self.current.kind == .punctuator and (std.mem.eql(u8, self.current.lexeme, ",") or std.mem.eql(u8, self.current.lexeme, "]"))) {
-                try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
-            } else {
-                try self.parseExpression(0);
-            }
-            count += 1;
-            if (self.consumePunctuator(",")) {
-                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) break;
-                continue;
-            }
-            break;
-        }
-        try self.expectPunctuator("]");
-        try self.emit.emitNewArray(count);
-        self.setPostfixState(true, false);
-    }
-
-    fn parseObjectLiteral(self: *QuickParser) !void {
-        self.features.insert(.destructuring);
-        try self.expectPunctuator("{");
-        var names: [32]atom.Atom = undefined;
-        var count: usize = 0;
-        if (self.consumePunctuator("}")) {
-            try self.emit.emitNewObject(0);
-            self.setPostfixState(true, false);
-            return;
-        }
-        errdefer for (names[0..count]) |name| self.rt.atoms.free(name);
-        while (true) {
-            if (self.current.kind != .identifier and self.current.kind != .string) return error.UnsupportedQuickParser;
-            const name = if (self.current.kind == .string)
-                try self.rt.internAtom(literalBody(self.current.lexeme))
-            else
-                try self.internCurrentIdentifier();
-            try self.advance();
-            try self.expectPunctuator(":");
-            try self.parseExpression(0);
-            if (count == names.len) return error.UnsupportedQuickParser;
-            names[count] = name;
-            count += 1;
-            if (self.consumePunctuator(",")) {
-                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
-                continue;
-            }
-            break;
-        }
-        try self.expectPunctuator("}");
-        try self.emit.emitNewObjectProps(names[0..count]);
-        for (names[0..count]) |name| self.rt.atoms.free(name);
-        self.setPostfixState(true, false);
-    }
-
-    fn setPostfixState(self: *QuickParser, allows_property: bool, allows_nullish_optional: bool) void {
-        self.postfix_allows_property = allows_property;
-        self.postfix_allows_nullish_optional = allows_nullish_optional;
-    }
-
-    fn parseGenericCallOnStack(self: *QuickParser) !void {
-        try self.expectPunctuator("(");
-        var argc: u32 = 0;
-        if (!self.consumePunctuator(")")) {
-            while (true) {
-                try self.parseExpression(0);
-                argc += 1;
-                if (self.consumePunctuator(",")) continue;
-                try self.expectPunctuator(")");
-                break;
-            }
-        }
-        try self.emit.emitCall(argc);
-    }
-
-    fn parseInstanceofRhs(self: *QuickParser) !void {
-        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
-        if (std.mem.eql(u8, self.current.lexeme, "Object")) {
-            try self.advance();
-            try self.emit.emitKnown(bytecode.emitter.known.instanceof_object);
-            return;
-        }
-        if (std.mem.eql(u8, self.current.lexeme, "Array")) {
-            try self.advance();
-            try self.emit.emitKnown(bytecode.emitter.known.instanceof_array);
-            return;
-        }
-        const rhs_name = try self.internCurrentIdentifier();
-        try self.advance();
-        try self.emit.emitInstanceofNamed(rhs_name);
-        self.rt.atoms.free(rhs_name);
-    }
-
-    fn expectIdentifier(self: *QuickParser) !atom.Atom {
-        const name = try self.internCurrentIdentifier();
-        try self.advance();
-        _ = try self.scope_record.addBinding(name, .var_, false);
-        return name;
-    }
-
-    fn internCurrentIdentifier(self: *QuickParser) !atom.Atom {
-        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
-        return self.rt.internAtom(self.current.lexeme);
-    }
-
-    fn internCurrentPropertyName(self: *QuickParser) !atom.Atom {
-        if (self.current.kind != .identifier and self.current.kind != .keyword) return error.UnsupportedQuickParser;
-        return self.rt.internAtom(self.current.lexeme);
-    }
-
-    fn expectPunctuator(self: *QuickParser, expected: []const u8) !void {
-        if (!self.consumePunctuator(expected)) return error.UnsupportedQuickParser;
-    }
-
-    fn consumePunctuator(self: *QuickParser, expected: []const u8) bool {
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, expected)) return false;
-        self.advance() catch return false;
-        return true;
-    }
-
-    fn consumeSemicolonOrEof(self: *QuickParser) !void {
-        if (self.consumePunctuator(";")) return;
-        if (self.current.kind == .eof) return;
-        return error.UnsupportedQuickParser;
-    }
-
-    fn advance(self: *QuickParser) !void {
-        self.current = self.lex.next() catch return error.UnsupportedQuickParser;
-    }
-
-    fn emitNumberLiteral(self: *QuickParser, bytes: []const u8) !void {
-        if (std.mem.startsWith(u8, bytes, "0x") or std.mem.startsWith(u8, bytes, "0X")) {
-            const parsed = std.fmt.parseInt(i32, bytes[2..], 16) catch return error.UnsupportedQuickParser;
-            try self.emit.emitPushInt32(parsed);
-            return;
-        }
-        if (std.mem.indexOf(u8, bytes, ".") != null) {
-            const parsed = std.fmt.parseFloat(f64, bytes) catch return error.UnsupportedQuickParser;
-            try self.emitFloatLiteral(parsed);
-            return;
-        }
-        if (parseSmallInt(bytes)) |small| {
-            try self.emit.emitPushInt32(small);
-        } else {
-            const parsed = std.fmt.parseFloat(f64, bytes) catch return error.UnsupportedQuickParser;
-            try self.emitFloatLiteral(parsed);
-        }
-    }
-
-    fn emitFloatLiteral(self: *QuickParser, value: f64) !void {
-        const boxed = Value.float64(value);
-        _ = try self.emit.emitPushConst(boxed);
-    }
-
-    fn emitBigIntLiteral(self: *QuickParser, bytes: []const u8) !void {
-        const digits = if (std.mem.endsWith(u8, bytes, "n")) bytes[0 .. bytes.len - 1] else bytes;
-        var parsed = @import("../libs/bignum.zig").parseAutoAlloc(self.rt.memory.allocator, digits) catch return error.UnsupportedQuickParser;
-        defer parsed.deinit();
-        const big = try @import("../core/bigint.zig").BigInt.createFromBigInt(self.rt, parsed);
-        const value = big.valueRef();
-        _ = try self.emit.emitPushConst(value);
-        value.free(self.rt);
-    }
-
-    fn emitString(self: *QuickParser, bytes: []const u8) !void {
-        const str = try @import("../core/string.zig").String.createUtf8(self.rt, bytes);
-        const value = str.value();
-        _ = try self.emit.emitPushConst(value);
-        value.free(self.rt);
-    }
-};
-
 fn isLiteralIdentifier(name: []const u8) bool {
     return std.mem.eql(u8, name, "true") or
         std.mem.eql(u8, name, "false") or
@@ -905,1161 +150,37 @@ fn isLiteralIdentifier(name: []const u8) bool {
         std.mem.eql(u8, name, "Infinity");
 }
 
-fn isLegacyDomainIdentifier(name: []const u8) bool {
-    return std.mem.eql(u8, name, "JSON") or
-        std.mem.eql(u8, name, "Math") or
-        std.mem.eql(u8, name, "String") or
-        std.mem.eql(u8, name, "Number") or
-        std.mem.eql(u8, name, "Boolean") or
-        std.mem.eql(u8, name, "BigInt") or
-        std.mem.eql(u8, name, "Date") or
-        std.mem.eql(u8, name, "Promise") or
-        std.mem.eql(u8, name, "RegExp") or
-        std.mem.eql(u8, name, "Object") or
-        std.mem.eql(u8, name, "ArrayBuffer") or
-        std.mem.eql(u8, name, "DataView") or
-        std.mem.eql(u8, name, "Map") or
-        std.mem.eql(u8, name, "Set") or
-        std.mem.eql(u8, name, "WeakMap") or
-        std.mem.eql(u8, name, "WeakSet") or
-        std.mem.eql(u8, name, "Symbol") or
-        std.mem.eql(u8, name, "globalThis") or
-        std.mem.eql(u8, name, "eval") or
-        std.mem.eql(u8, name, "parseInt") or
-        std.mem.eql(u8, name, "parseFloat") or
-        uriCallMode(name) != null;
-}
-
-fn isLegacyDomainProperty(name: []const u8) bool {
-    return std.mem.eql(u8, name, "charAt") or
-        std.mem.eql(u8, name, "join") or
-        std.mem.eql(u8, name, "slice") or
-        stringMethodId(name) != null or
-        arrayMethodId(name) != null or
-        isDataViewGetMethod(name) or
-        dataViewSetKind(name) != null or
-        collectionMethodId(name) != null or
-        regexpMethodId(name) != null or
-        dateMethodId(name) != null;
-}
-
-const TransitionalCompileOptions = struct {
-    reference_error_mode: bool = false,
-};
-
-const TransitionalCompiler = struct {
-    rt: *Runtime,
-    emit: *bytecode.emitter.Emitter,
-    scope_record: *bytecode.scope.ScopeRecord,
-
-    fn init(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord) TransitionalCompiler {
-        return .{ .rt = rt, .emit = emit, .scope_record = scope_record };
-    }
-
-    fn compileSimpleProgram(self: TransitionalCompiler, source: []const u8, options: TransitionalCompileOptions) bool {
-        var simple = SimpleParser.init(self.rt, self.emit, self.scope_record, source);
-        simple.reference_error_mode = options.reference_error_mode;
-        simple.parseProgram() catch return false;
-        return true;
-    }
-};
-
-fn isSimpleStatementCandidate(source: []const u8) bool {
-    const blocked = [_][]const u8{};
-    for (blocked) |needle| {
-        if (std.mem.indexOf(u8, source, needle) != null) return false;
-    }
-    return std.mem.indexOf(u8, source, "print") != null or
-        std.mem.indexOf(u8, source, "console") != null or
-        std.mem.indexOf(u8, source, ".log") != null;
-}
-
-fn moduleRuntimeError(source: []const u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "flags: [") == null or std.mem.indexOf(u8, source, "module") == null) return null;
-    const is_resolution = std.mem.indexOf(u8, source, "phase: resolution") != null;
-    const is_runtime = std.mem.indexOf(u8, source, "phase: runtime") != null;
-    if (!is_resolution and !is_runtime) return null;
-    if (std.mem.indexOf(u8, source, "type: SyntaxError") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "type: TypeError") != null) return "TypeError";
-    if (std.mem.indexOf(u8, source, "type: ReferenceError") != null) return "ReferenceError";
-    if (std.mem.indexOf(u8, source, "type: RangeError") != null) return "RangeError";
-    if (std.mem.indexOf(u8, source, "type: Test262Error") != null) return "Test262Error";
-    return null;
-}
-
-fn evalRuntimeSyntaxError(source: []const u8) bool {
-    if (std.mem.indexOf(u8, source, "negative:") == null or
-        std.mem.indexOf(u8, source, "phase: runtime") == null or
-        std.mem.indexOf(u8, source, "type: SyntaxError") == null)
-    {
-        return false;
-    }
-    if (std.mem.indexOf(u8, source, "sec-performeval") != null) return true;
-    if (std.mem.indexOf(u8, source, "sec-evaldeclarationinstantiation") != null) return true;
-    if (std.mem.indexOf(u8, source, "sec-globaldeclarationinstantiation") != null) return true;
-    return false;
-}
-
-fn compileStatementReferenceErrorProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8) bool {
-    if (std.mem.indexOf(u8, source, "negative:") == null or
-        std.mem.indexOf(u8, source, "phase: runtime") == null or
-        std.mem.indexOf(u8, source, "type: ReferenceError") == null)
-    {
-        return false;
-    }
-    const supported = if (std.mem.indexOf(u8, source, "Temporal Dead Zone") != null)
-        std.mem.indexOf(u8, source, "x; const x = 1;") != null or
-            std.mem.indexOf(u8, source, "const x = x + 1;") != null or
-            std.mem.indexOf(u8, source, "x; let x = 1;") != null or
-            std.mem.indexOf(u8, source, "x; let x;") != null or
-            std.mem.indexOf(u8, source, "let x = x + 1;") != null
-    else
-        std.mem.indexOf(u8, source, "sec-switch-statement-runtime-semantics-evaluation") != null;
-    if (!supported) return false;
-    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(
-        executableSource(source),
-        .{ .reference_error_mode = true },
-    );
-}
-
-fn compileAssertionProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8) bool {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, code, "assert.sameValue") == null and
-        std.mem.indexOf(u8, code, "assert.throws") == null)
-    {
-        return false;
-    }
-    if (!supportedAssertionProgram(source, code)) return false;
-    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(code, .{});
-}
-
-fn supportedAssertionProgram(source: []const u8, code: []const u8) bool {
-    return std.mem.indexOf(u8, code, "Math.log") != null or
-        (std.mem.indexOf(u8, source, "String.prototype.indexOf") != null and std.mem.indexOf(u8, code, ".indexOf(") != null) or
-        (std.mem.indexOf(u8, source, "type coercion for bits parameter") != null and
-            (std.mem.indexOf(u8, code, "BigInt.asIntN(") != null or std.mem.indexOf(u8, code, "BigInt.asUintN(") != null)) or
-        (std.mem.indexOf(u8, source, "ToIndex conversions on byteOffset") != null and
-            (std.mem.indexOf(u8, code, "getBigInt64(") != null or std.mem.indexOf(u8, code, "getBigUint64(") != null));
-}
-
-fn compileLineTerminatorProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8) bool {
-    if (std.mem.indexOf(u8, source, "negative:") == null or
-        std.mem.indexOf(u8, source, "phase: runtime") == null or
-        std.mem.indexOf(u8, source, "type: Test262Error") == null or
-        std.mem.indexOf(u8, source, "sec-line-terminators") == null)
-    {
-        return false;
-    }
-    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(executableSource(source), .{});
-}
-
-fn compileAnnexBHtmlCommentProgram(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8, mode: Mode) bool {
-    if (mode == .module) return false;
-    if (std.mem.indexOf(u8, source, "negative:") == null or
-        std.mem.indexOf(u8, source, "phase: runtime") == null or
-        std.mem.indexOf(u8, source, "sec-html-like-comments") == null or
-        (std.mem.indexOf(u8, source, "<!--") == null and std.mem.indexOf(u8, source, "-->") == null))
-    {
-        return false;
-    }
-    if (std.mem.indexOf(u8, source, "throw new EvalError") == null and
-        std.mem.indexOf(u8, source, "throw new Test262Error") == null)
-    {
-        return false;
-    }
-    const code = if (std.mem.indexOf(u8, source, "flags: [raw]") != null) source else executableSource(source);
-    return TransitionalCompiler.init(rt, emit, scope_record).compileSimpleProgram(code, .{});
-}
-
-fn compileUnicodeIdentifierAcceptanceProgram(source: []const u8) bool {
-    if (std.mem.indexOf(u8, source, "Generated by https://github.com/mathiasbynens/caniunicode") == null) return false;
-    if (std.mem.indexOf(u8, source, "negative:") != null) return false;
-    if (std.mem.indexOf(u8, source, "ID_Start") == null and
-        std.mem.indexOf(u8, source, "ID_Continue") == null and
-        std.mem.indexOf(u8, source, "PrivateIdentifier") == null)
-    {
-        return false;
-    }
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, code, "assert.") != null) return false;
-    return validateUnicodeIdentifierAcceptanceSource(code);
-}
-
-fn validateUnicodeIdentifierAcceptanceSource(code: []const u8) bool {
-    var lex = lexer.Lexer.init(code);
-    var current = lex.next() catch return false;
-    while (current.kind != .eof) {
-        if (current.isKeyword(.var_)) {
-            current = lex.next() catch return false;
-            if (current.kind != .identifier) return false;
-            current = lex.next() catch return false;
-            if (!isPunctuatorToken(current, ";")) return false;
-            current = lex.next() catch return false;
-            continue;
-        }
-        if (current.isKeyword(.class)) {
-            if (!validateUnicodePrivateFieldClass(&lex, &current)) return false;
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
-fn validateUnicodePrivateFieldClass(lex: *lexer.Lexer, current: *token.Token) bool {
-    current.* = lex.next() catch return false;
-    if (current.kind != .identifier) return false;
-    current.* = lex.next() catch return false;
-    if (!isPunctuatorToken(current.*, "{")) return false;
-    current.* = lex.next() catch return false;
-    while (current.kind == .private_identifier) {
-        current.* = lex.next() catch return false;
-        if (!isPunctuatorToken(current.*, ";")) return false;
-        current.* = lex.next() catch return false;
-    }
-    if (!isPunctuatorToken(current.*, "}")) return false;
-    current.* = lex.next() catch return false;
-    if (isPunctuatorToken(current.*, ";")) current.* = lex.next() catch return false;
-    return true;
-}
-
-fn isPunctuatorToken(tok: token.Token, expected: []const u8) bool {
-    return tok.kind == .punctuator and std.mem.eql(u8, tok.lexeme, expected);
-}
-
-fn arrowEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, code, "=>") == null) return null;
-    if (std.mem.indexOf(u8, source, "negative:") != null and
-        std.mem.indexOf(u8, source, "phase: parse") != null)
-    {
-        return "SyntaxError";
-    }
-    if (arrowHasNonSimpleUseStrict(code)) return "SyntaxError";
-    if (arrowHasInvalidRestParameter(code)) return "SyntaxError";
-    if (arrowHasDuplicateNonSimpleParameter(code)) return "SyntaxError";
-    if (arrowHasReservedObjectBinding(code)) return "SyntaxError";
-    if (arrowHasEscapedReservedBinding(code)) return "SyntaxError";
-    return null;
-}
-
-fn assignmentEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (assignmentHasInvalidTargetType(source, code)) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "=>") != null) return null;
-    if (assignmentHasInvalidRest(code)) return "SyntaxError";
-    if (assignmentHasInvalidOptionalTarget(source, code)) return "SyntaxError";
-    if (assignmentHasStrictEvalBinding(source, code)) return "SyntaxError";
-    if (assignmentHasReservedObjectBinding(code)) return "SyntaxError";
-    return null;
-}
-
-fn assignmentHasInvalidTargetType(full_source: []const u8, code: []const u8) bool {
-    if (std.mem.indexOf(u8, full_source, "negative:") == null) return false;
-    if (std.mem.indexOf(u8, full_source, "phase: parse") == null) return false;
-    if (std.mem.indexOf(u8, full_source, "src/assignment-target-type/") != null) return true;
-    if (std.mem.indexOf(u8, code, "=") == null) return false;
-    return std.mem.indexOf(u8, full_source, "AssignmentTargetType") != null or
-        std.mem.indexOf(u8, full_source, "LeftHandSideExpression is neither") != null or
-        std.mem.indexOf(u8, full_source, "not a reference") != null or
-        std.mem.indexOf(u8, full_source, "not-simple-assignment-target") != null;
-}
-
-fn asyncEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, code, "async") == null and std.mem.indexOf(u8, code, "\\u0061sync") == null) return null;
-    if (std.mem.indexOf(u8, code, "=>") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "async function") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "async-functions") != null or
-        std.mem.indexOf(u8, source, "async-iteration") != null or
-        std.mem.indexOf(u8, source, "AsyncArrowFunction") != null or
-        std.mem.indexOf(u8, source, "Async Arrow Function") != null or
-        std.mem.indexOf(u8, source, "FormalParameters contains await") != null)
-    {
-        return "SyntaxError";
-    }
-    return null;
-}
-
-fn classEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, code, "class") == null) return null;
-    return "SyntaxError";
-}
-
-fn callEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, code, "(1,,2)") != null or
-        std.mem.indexOf(u8, source, "ArgumentList,,") != null)
-    {
-        return "SyntaxError";
-    }
-    return null;
-}
-
-fn functionEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, code, "function") == null and std.mem.indexOf(u8, source, "function-forms") == null) return null;
-    if (std.mem.indexOf(u8, source, "RestParameter does not support an initializer") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "BindingRestElement") != null and
-        (std.mem.indexOf(u8, source, "rest-not-final") != null or std.mem.indexOf(u8, source, "rest-init") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "Trailing comma in the parameters list") != null and std.mem.indexOf(u8, code, "...") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Rest parameter cannot be followed by another named parameter") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Duplicate parameter") != null or
-        std.mem.indexOf(u8, source, "dflt-params-duplicates") != null or
-        std.mem.indexOf(u8, source, "param-duplicated") != null or
-        (std.mem.indexOf(u8, source, "identical parameters") != null and std.mem.indexOf(u8, source, "strict") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "use strict") != null and
-        (std.mem.indexOf(u8, source, "non-simple") != null or
-            std.mem.indexOf(u8, source, "destructuring-param-strict-body") != null or
-            std.mem.indexOf(u8, source, "rest-param-strict-body") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "use-strict-directive") != null and
-        std.mem.indexOf(u8, code, "var static") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "with statement in strict mode") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "super") != null and
-        (std.mem.indexOf(u8, source, "early-body-super") != null or
-            std.mem.indexOf(u8, source, "early-params-super") != null or
-            std.mem.indexOf(u8, source, "Contains SuperProperty") != null or
-            std.mem.indexOf(u8, source, "Contains SuperCall") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "eval") != null and
-        (std.mem.indexOf(u8, source, "onlyStrict") != null or std.mem.indexOf(u8, source, "strict-body") != null or std.mem.indexOf(u8, source, "strict code") != null))
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "arguments") != null and
-        (std.mem.indexOf(u8, source, "onlyStrict") != null or std.mem.indexOf(u8, source, "strict-body") != null or std.mem.indexOf(u8, source, "strict code") != null))
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "yield") != null and
-        (std.mem.indexOf(u8, source, "features: [generators") != null or
-            std.mem.indexOf(u8, code, "function *") != null or
-            std.mem.indexOf(u8, code, "function*") != null))
-    {
-        return "SyntaxError";
-    }
-    return null;
-}
-
-fn statementEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, source, "automatic semicolon insertion") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Use Strict Directive") != null and
-        std.mem.indexOf(u8, source, "Strict Mode") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "StrictMode - a Use Strict Directive") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Global code may not contain SuperCall") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Global code may not contain SuperProperty") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "export` declaration may not appear within a ScriptBody") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "ReturnStatement may not be used directly within global code") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "continue") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "do") != null and std.mem.indexOf(u8, code, "while") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "for") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "(debugger)") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "ExpressionStatement can not start with the function keyword") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "function declarations in statement position") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Function declaration not allowed in statement position") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "IsLabelledFunction") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "multiple names in one function declaration") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "property names in function definition is not allowed") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "The FunctionBody must be SourceElements") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "function name of a FunctionDeclaration") != null and std.mem.indexOf(u8, source, "strict mode") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "FunctionBody with an inner function") != null and std.mem.indexOf(u8, code, "eval =") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "break without") != null or
-        std.mem.indexOf(u8, source, "using \"break Identifier\"") != null or
-        std.mem.indexOf(u8, source, "Appearing of \"break\"") != null or
-        std.mem.indexOf(u8, source, "Identifier must be label in the label set") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "ContainsUndefinedContinueTarget") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "continue without") != null or
-        std.mem.indexOf(u8, source, "using \"continue Identifier\"") != null or
-        std.mem.indexOf(u8, source, "Appearing of continue") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "AllPrivateNamesValid") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "sec-block-static-semantics-early-errors") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "LexicallyDeclaredNames of") != null and
-        std.mem.indexOf(u8, source, "VarDeclaredNames") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Block can't be inside of expression") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "block '{ StatementListopt };' is not allowed") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "const declarations without initialiser") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Rest element") != null and std.mem.indexOf(u8, source, "`const` statement") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "const declarations with initialisers in statement positions") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Lexical declaration") != null and
-        std.mem.indexOf(u8, source, "not allowed in statement position") != null)
-        return "SyntaxError";
-    if ((std.mem.indexOf(u8, source, "let declarations with initialisers in statement positions") != null or
-        std.mem.indexOf(u8, source, "let declarations without initialisers in statement positions") != null) and
-        std.mem.indexOf(u8, code, " let") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "lookahead restriction for `let [`") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "`let await` does not permit ASI") != null or
-        std.mem.indexOf(u8, source, "`let yield` does not permit ASI") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "A labelled function declaration is never permitted") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Generator declaration not allowed in statement position") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "const declarations mixed") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "const-declaring-let") != null or std.mem.indexOf(u8, code, "const\nlet") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Redeclaration error") != null and std.mem.indexOf(u8, code, "const f") != null and std.mem.indexOf(u8, code, "var f") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "WithStatement in strict mode") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "using WithStatement in strict mode") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "using with statement") != null and std.mem.indexOf(u8, source, "Strict Mode") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "utilizes WithStatement") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "IterationStatement") != null and
-        (std.mem.indexOf(u8, source, "not allowed") != null or
-            std.mem.indexOf(u8, source, "is not allowed") != null or
-            std.mem.indexOf(u8, source, "ExpressionNoIn") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "/for-in/") != null or std.mem.indexOf(u8, source, "/for-of/") != null or std.mem.indexOf(u8, source, "/statements/for/") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "try{};catch") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "BoundNames of CatchParameter") != null or
-        std.mem.indexOf(u8, source, "Redeclaration of CatchParameter") != null or
-        std.mem.indexOf(u8, source, "catch-parameter-boundnames-restriction") != null or
-        std.mem.indexOf(u8, source, "empty CatchParameter") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Rest element") != null and
-        (std.mem.indexOf(u8, source, "not final") != null or
-            std.mem.indexOf(u8, source, "rest-not-final") != null or
-            std.mem.indexOf(u8, source, "may not be followed") != null or
-            std.mem.indexOf(u8, source, "rest-init") != null))
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "There can be only one DefaultClause") != null or
-        std.mem.indexOf(u8, source, "Syntax constructions of switch statement") != null or
-        std.mem.indexOf(u8, source, "sec-switch-statement-static-semantics-early-errors") != null or
-        std.mem.indexOf(u8, source, "LexicallyDeclaredNames of CaseBlock contains any") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "VariableDeclaration") != null and
-        std.mem.indexOf(u8, source, "Identifier is arguments") != null and
-        std.mem.indexOf(u8, source, "onlyStrict") != null)
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "flags: [onlyStrict]") != null and
-        (std.mem.indexOf(u8, code, "var eval") != null or
-            std.mem.indexOf(u8, code, ", eval") != null or
-            std.mem.indexOf(u8, code, "var arguments") != null))
-        return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "arguments as local var identifier") != null and
-        std.mem.indexOf(u8, source, "onlyStrict") != null)
-        return "SyntaxError";
-    return null;
-}
-
-fn expressionEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (objectMethodEarlySyntaxError(source, code)) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "this =") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Strict Mode - SyntaxError is throw") != null and
-        (std.mem.indexOf(u8, code, "arguments++") != null or
-            std.mem.indexOf(u8, code, "eval++") != null or
-            std.mem.indexOf(u8, code, "--arguments") != null or
-            std.mem.indexOf(u8, code, "--eval") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "Line Terminator") != null and std.mem.indexOf(u8, source, "between LeftHandSideExpression") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Token following DOT must be a valid identifier-name") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, code, "import.meta") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "duplicate __proto__") != null or
-        (std.mem.indexOf(u8, source, "duplicate entries for \"__proto__\"") != null and std.mem.indexOf(u8, code, "__proto__") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "contextual keyword must not contain Unicode escape") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "CoverInitializedName") != null or std.mem.indexOf(u8, source, "cover-initialized-name") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "invalid property name") != null and std.mem.indexOf(u8, source, "property-accessors") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "PrivateIdentifier") != null and std.mem.indexOf(u8, code, "#") != null) return "SyntaxError";
-    if ((std.mem.indexOf(u8, source, "new.target") != null or
-        std.mem.indexOf(u8, source, "`new` keyword must not contain Unicode escape sequences") != null or
-        std.mem.indexOf(u8, code, "new.") != null or
-        std.mem.indexOf(u8, code, "\\u006eew") != null or
-        std.mem.indexOf(u8, code, "n\\u0065w") != null) and
-        (std.mem.indexOf(u8, code, "\\u") != null or std.mem.indexOf(u8, source, "NewTarget") != null or std.mem.indexOf(u8, source, "Unicode escape sequences") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, code, "`") != null and
-        (std.mem.indexOf(u8, source, "Invalid unicode escape sequence") != null or
-            std.mem.indexOf(u8, source, "Invalid hexadecimal escape sequence") != null or
-            std.mem.indexOf(u8, source, "Invalid octal escape sequence") != null or
-            std.mem.indexOf(u8, source, "Hexidecimal") != null or
-            std.mem.indexOf(u8, source, "hexidecimal") != null or
-            std.mem.indexOf(u8, source, "Hex4Digits") != null or
-            std.mem.indexOf(u8, source, "invalid-legacy-octal-escape-sequence") != null or
-            std.mem.indexOf(u8, source, "Octal escape sequences") != null))
-    {
-        return "SyntaxError";
-    }
-    if ((std.mem.indexOf(u8, code, "++") != null or std.mem.indexOf(u8, code, "--") != null) and
-        (std.mem.indexOf(u8, source, "UpdateExpression") != null or
-            std.mem.indexOf(u8, source, "AssignmentTargetType") != null or
-            std.mem.indexOf(u8, source, "onlyStrict") != null))
-    {
-        if (std.mem.indexOf(u8, code, "eval") != null or
-            std.mem.indexOf(u8, code, "arguments") != null or
-            std.mem.indexOf(u8, code, "this") != null or
-            std.mem.indexOf(u8, code, "new.target") != null)
-        {
-            return "SyntaxError";
-        }
-    }
-    if ((std.mem.indexOf(u8, code, "||=") != null or std.mem.indexOf(u8, code, "&&=") != null or std.mem.indexOf(u8, code, "??=") != null) and
-        std.mem.indexOf(u8, source, "onlyStrict") != null and
-        (std.mem.indexOf(u8, code, "eval") != null or std.mem.indexOf(u8, code, "arguments") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "coalesce-expression") != null and
-        (std.mem.indexOf(u8, source, "Cannot immediately contain") != null or
-            (std.mem.indexOf(u8, code, "??") != null and
-                (std.mem.indexOf(u8, code, "&&") != null or std.mem.indexOf(u8, code, "||") != null))))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "features: [exponentiation]") != null and
-        std.mem.indexOf(u8, source, "UnaryExpression") != null and
-        std.mem.indexOf(u8, code, "**") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "dynamic-import") != null and
-        (std.mem.indexOf(u8, source, "/syntax/invalid/") != null or
-            std.mem.indexOf(u8, source, "It's a SyntaxError if '()' is omitted") != null or
-            std.mem.indexOf(u8, source, "ImportCall") != null or
-            (std.mem.indexOf(u8, source, "onlyStrict") != null and std.mem.indexOf(u8, code, "yield") != null)))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "The expression's LogicalORExpression sub-expression cannot include the `in`") != null or
-        std.mem.indexOf(u8, source, "The second AssignmentExpression cannot include the `in`") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "onlyStrict") != null) {
-        if (std.mem.indexOf(u8, source, "Compound Assignment") != null and
-            (std.mem.indexOf(u8, code, "eval ") != null or std.mem.indexOf(u8, code, "arguments ") != null))
-        {
-            return "SyntaxError";
-        }
-        if (std.mem.indexOf(u8, source, "sec-delete-operator-static-semantics-early-errors") != null and
-            std.mem.indexOf(u8, code, "delete ") != null)
-        {
-            return "SyntaxError";
-        }
-    }
-    return null;
-}
-
-fn objectMethodEarlySyntaxError(source: []const u8, code: []const u8) bool {
-    if (std.mem.indexOf(u8, code, "{") == null) return false;
-    const is_object_method = std.mem.indexOf(u8, source, "MethodDefinition") != null or
-        std.mem.indexOf(u8, source, "method-definition") != null or
-        std.mem.indexOf(u8, source, "method contains") != null or
-        std.mem.indexOf(u8, source, "generator method") != null or
-        std.mem.indexOf(u8, source, "PropertySetParameterList") != null or
-        std.mem.indexOf(u8, source, "PropertyAssignment") != null or
-        std.mem.indexOf(u8, source, "getter") != null or
-        std.mem.indexOf(u8, source, "setter") != null or
-        std.mem.indexOf(u8, code, "({") != null or
-        std.mem.indexOf(u8, code, "var obj = {") != null or
-        std.mem.indexOf(u8, code, "var o = {") != null or
-        std.mem.indexOf(u8, code, "void {") != null;
-    if (!is_object_method) return false;
-    if (std.mem.indexOf(u8, source, "PropertySetParameterList") != null and
-        (std.mem.indexOf(u8, source, "eval") != null or std.mem.indexOf(u8, source, "arguments") != null))
-    {
-        return true;
-    }
-    if (std.mem.indexOf(u8, source, "Rest element") != null) return true;
-    if (std.mem.indexOf(u8, source, "BindingRestElement") != null) return true;
-    if (std.mem.indexOf(u8, source, "RestParameter") != null) return true;
-    if (std.mem.indexOf(u8, source, "ContainsUseStrict") != null) return true;
-    if (std.mem.indexOf(u8, source, "UseStrict directive") != null) return true;
-    if (std.mem.indexOf(u8, source, "reserved word") != null and std.mem.indexOf(u8, source, "strict") != null) return true;
-    if (std.mem.indexOf(u8, source, "non-simple") != null and std.mem.indexOf(u8, source, "use strict") != null) return true;
-    if (std.mem.indexOf(u8, source, "HasDirectSuper") != null) return true;
-    if (std.mem.indexOf(u8, source, "Contains SuperCall") != null) return true;
-    if (std.mem.indexOf(u8, source, "contains SuperCall") != null) return true;
-    if (std.mem.indexOf(u8, source, "FormalParameters contains SuperCall") != null) return true;
-    if (std.mem.indexOf(u8, source, "super()") != null and std.mem.indexOf(u8, source, "Syntax Error") != null) return true;
-    if (std.mem.indexOf(u8, source, "PrivateBoundNames") != null) return true;
-    if (std.mem.indexOf(u8, source, "private name") != null) return true;
-    if (std.mem.indexOf(u8, source, "Duplicate") != null or std.mem.indexOf(u8, source, "duplicate") != null) return true;
-    if (std.mem.indexOf(u8, source, "yield") != null and
-        (std.mem.indexOf(u8, source, "generator") != null or
-            std.mem.indexOf(u8, source, "method") != null or
-            std.mem.indexOf(u8, source, "features: [generators") != null))
-    {
-        return true;
-    }
-    if (std.mem.indexOf(u8, source, "async") != null and std.mem.indexOf(u8, source, "LineTerminator") != null) return true;
-    if (std.mem.indexOf(u8, source, "getter") != null and std.mem.indexOf(u8, source, "param") != null) return true;
-    if (std.mem.indexOf(u8, source, "Get accessor method may not have a formal parameter") != null) return true;
-    if (std.mem.indexOf(u8, source, "setter") != null and
-        (std.mem.indexOf(u8, source, "eval") != null or std.mem.indexOf(u8, source, "arguments") != null or std.mem.indexOf(u8, source, "use strict") != null))
-    {
-        return true;
-    }
-    if (std.mem.indexOf(u8, source, "redecl") != null) return true;
-    if (std.mem.indexOf(u8, source, "lexical declaration") != null and std.mem.indexOf(u8, source, "shadows parameter name") != null) return true;
-    if (std.mem.indexOf(u8, source, "BoundNames") != null and std.mem.indexOf(u8, source, "LexicallyDeclaredNames") != null) return true;
-    return false;
-}
-
-fn identifierEarlySyntaxError(source: []const u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, source, "Identifier : IdentifierName but not ReservedWord") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "reserved words used as Identifier") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "reserved word and cannot be used as a label identifier") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Hashbang comments should not be allowed to have encoded characters") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Hashbang comments should not interpret multi-line comments") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "not recognized as ID_Start") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "not recognized as ID_Continue") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "invalid first character of private name") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "zero width joiner is not a valid identifier start") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "zero width non-joiner is not a valid identifier start") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "yield") != null and std.mem.indexOf(u8, source, "onlyStrict") != null) return "SyntaxError";
-    return null;
-}
-
-fn literalEarlySyntaxError(source: []const u8) ?[]const u8 {
-    const code = executableSource(source);
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    if (std.mem.indexOf(u8, source, "flags: [onlyStrict]") != null and
-        std.mem.indexOf(u8, source, "`${'\\07'}`") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "Punctuator cannot be expressed as a Unicode escape sequence") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "White space cannot be expressed as a Unicode escape sequence") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "Line Terminator cannot be expressed as a Unicode escape sequence") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "An HTMLCloseComment must be preceded by a LineTerminator") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "The true is reserved word") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "The false is reserved word") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "The null is resrved word") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "GetValue(V) mast fail") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "not closed single-quote") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "not closed double-quote") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "ReservedWord") != null and std.mem.indexOf(u8, source, "UnicodeEscapeSequence") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "with-unicode") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "BigInt") != null and std.mem.indexOf(u8, code, "n") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "BigIntLiteral") != null) return "SyntaxError";
-    if (std.mem.indexOf(u8, source, "NumericLiteral") != null and
-        (std.mem.indexOf(u8, source, "invalid") != null or
-            std.mem.indexOf(u8, source, "separator") != null or
-            std.mem.indexOf(u8, source, "Octal") != null or
-            std.mem.indexOf(u8, source, "IdentifierStart") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "BinaryIntegerLiteral") != null or
-        std.mem.indexOf(u8, source, "OctalIntegerLiteral") != null or
-        std.mem.indexOf(u8, source, "HexIntegerLiteral") != null or
-        std.mem.indexOf(u8, source, "DecimalIntegerLiteral") != null or
-        std.mem.indexOf(u8, source, "Numeric Separators") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "octal extension") != null or
-        std.mem.indexOf(u8, source, "octal literal") != null or
-        std.mem.indexOf(u8, source, "forbidden in strict mode") != null or
-        std.mem.indexOf(u8, source, "numeric literal") != null or
-        std.mem.indexOf(u8, source, "7.8.3") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "RegularExpression") != null and
-        (std.mem.indexOf(u8, source, "invalid") != null or std.mem.indexOf(u8, source, "Invalid") != null or std.mem.indexOf(u8, source, "Syntax Error") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "regular expression") != null or
-        std.mem.indexOf(u8, source, "Regular expression") != null or
-        std.mem.indexOf(u8, source, "RegExp") != null or
-        std.mem.indexOf(u8, source, "sec-patterns") != null or
-        std.mem.indexOf(u8, code, "/") != null)
-    {
-        return "SyntaxError";
-    }
-    if ((std.mem.indexOf(u8, source, "StringLiteral") != null or std.mem.indexOf(u8, source, "string-literals") != null) and
-        (std.mem.indexOf(u8, source, "Invalid") != null or
-            std.mem.indexOf(u8, source, "invalid") != null or
-            std.mem.indexOf(u8, source, "Hex4Digits") != null or
-            std.mem.indexOf(u8, source, "Octal escape") != null or
-            std.mem.indexOf(u8, source, "legacy octal") != null))
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "EscapeCharacter") != null or
-        std.mem.indexOf(u8, source, "NonEscapeSequence") != null or
-        std.mem.indexOf(u8, source, "DecimalDigits") != null or
-        std.mem.indexOf(u8, source, "7.8.4") != null)
-    {
-        return "SyntaxError";
-    }
-    if (std.mem.indexOf(u8, source, "LegacyOctalEscapeSequence") != null or
-        std.mem.indexOf(u8, source, "legacy-octal") != null or
-        std.mem.indexOf(u8, source, "legacy-non-octal") != null)
-    {
-        return "SyntaxError";
-    }
-    return null;
-}
-
-fn moduleEarlySyntaxError(source: []const u8, mode: Mode) ?[]const u8 {
-    if (mode != .module and std.mem.indexOf(u8, source, "flags: [module]") == null) return null;
-    if (std.mem.indexOf(u8, source, "negative:") == null) return null;
-    if (std.mem.indexOf(u8, source, "phase: parse") == null) return null;
-    return "SyntaxError";
-}
-
-fn executableSource(source: []const u8) []const u8 {
-    if (std.mem.lastIndexOf(u8, source, "---*/")) |end| return source[end + 5 ..];
-    return source;
-}
-
-fn arrowHasNonSimpleUseStrict(source: []const u8) bool {
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, source, search_from, "=>")) |arrow| {
-        const params_start = arrowParameterStart(source, arrow) orelse return false;
-        const params = std.mem.trim(u8, source[params_start..arrow], " \t\r\n");
-        const body_end = std.mem.indexOfPos(u8, source, arrow, "};") orelse source.len;
-        const body = source[arrow..body_end];
-        if ((std.mem.indexOf(u8, body, "\"use strict\"") != null or std.mem.indexOf(u8, body, "'use strict'") != null) and
-            (std.mem.indexOf(u8, params, "[") != null or
-                std.mem.indexOf(u8, params, "{") != null or
-                std.mem.indexOf(u8, params, "=") != null or
-                std.mem.indexOf(u8, params, "...") != null))
-        {
-            return true;
-        }
-        search_from = arrow + 2;
-    }
-    return false;
-}
-
-fn arrowHasInvalidRestParameter(source: []const u8) bool {
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, source, search_from, "=>")) |arrow| {
-        const params_start = arrowParameterStart(source, arrow) orelse return false;
-        const params = source[params_start..arrow];
-        if (std.mem.indexOf(u8, params, "...x =") != null or
-            std.mem.indexOf(u8, params, "...[ x ] =") != null or
-            std.mem.indexOf(u8, params, "[...[") != null and std.mem.indexOf(u8, params, "],") != null or
-            std.mem.indexOf(u8, params, "[...{") != null and std.mem.indexOf(u8, params, "} =") != null or
-            std.mem.indexOf(u8, params, "[...{") != null and std.mem.indexOf(u8, params, "},") != null or
-            std.mem.indexOf(u8, params, "[...x,") != null or
-            std.mem.indexOf(u8, params, "...a,") != null)
-        {
-            return true;
-        }
-        search_from = arrow + 2;
-    }
-    return false;
-}
-
-fn assignmentHasInvalidRest(source: []const u8) bool {
-    return std.mem.indexOf(u8, source, "[...x,") != null or
-        std.mem.indexOf(u8, source, "[...x =") != null or
-        std.mem.indexOf(u8, source, "[...[(x") != null or
-        std.mem.indexOf(u8, source, "[...{ get") != null or
-        std.mem.indexOf(u8, source, "{...rest,") != null or
-        std.mem.indexOf(u8, source, "[[(x, y)]]") != null or
-        std.mem.indexOf(u8, source, "[{ get x()") != null or
-        std.mem.indexOf(u8, source, "{ x: [(x, y)]") != null or
-        std.mem.indexOf(u8, source, "{ x: { get x()") != null;
-}
-
-fn assignmentHasInvalidOptionalTarget(full_source: []const u8, code: []const u8) bool {
-    if (std.mem.indexOf(u8, full_source, "negative:") == null) return false;
-    if (std.mem.indexOf(u8, full_source, "optional-chaining") == null) return false;
-    return std.mem.indexOf(u8, code, "?.") != null;
-}
-
-fn assignmentHasStrictEvalBinding(full_source: []const u8, code: []const u8) bool {
-    const is_parse_negative = std.mem.indexOf(u8, full_source, "negative:") != null and std.mem.indexOf(u8, full_source, "phase: parse") != null;
-    const is_generated_early_error_fixture = std.mem.indexOf(u8, full_source, "flags: [generated, onlyStrict]") != null;
-    if (!is_parse_negative and !is_generated_early_error_fixture) return false;
-    if (std.mem.indexOf(u8, full_source, "onlyStrict") == null) return false;
-    return std.mem.indexOf(u8, code, "{ eval }") != null or
-        std.mem.indexOf(u8, code, "{ eval =") != null or
-        std.mem.indexOf(u8, code, "{ arguments }") != null or
-        std.mem.indexOf(u8, code, "{ arguments =") != null or
-        std.mem.indexOf(u8, code, "[arguments]") != null or
-        std.mem.indexOf(u8, code, "eval =") != null or
-        std.mem.indexOf(u8, code, "arguments =") != null or
-        std.mem.indexOf(u8, code, "(eval) =") != null or
-        std.mem.indexOf(u8, code, "(arguments) =") != null or
-        std.mem.indexOf(u8, code, "= yield") != null or
-        std.mem.indexOf(u8, code, "[ x = yield ]") != null or
-        std.mem.indexOf(u8, code, "[ x[yield] ]") != null or
-        std.mem.indexOf(u8, code, "{ yield }") != null or
-        std.mem.indexOf(u8, code, "x[yield]") != null;
-}
-
-fn assignmentHasReservedObjectBinding(source: []const u8) bool {
-    var index: usize = 0;
-    while (std.mem.indexOfPos(u8, source, index, "{")) |open| {
-        const close = matchingBrace(source, open) orelse {
-            index = open + 1;
-            continue;
-        };
-        const next = nextNonSpace(source, close + 1);
-        if (next == '=' and objectPatternHasReservedShorthand(source[open + 1 .. close], isYieldContextBefore(source, open))) return true;
-        index = open + 1;
-    }
-    return false;
-}
-
-fn isYieldContextBefore(source: []const u8, index: usize) bool {
-    const prefix = source[0..index];
-    const function_pos = std.mem.lastIndexOf(u8, prefix, "function*") orelse return false;
-    return std.mem.lastIndexOf(u8, prefix[function_pos..], "}") == null;
-}
-
-fn matchingBrace(source: []const u8, open: usize) ?usize {
-    var depth: usize = 0;
-    var index = open;
-    while (index < source.len) : (index += 1) {
-        if (source[index] == '{') depth += 1;
-        if (source[index] == '}') {
-            depth -= 1;
-            if (depth == 0) return index;
-        }
-    }
-    return null;
-}
-
-fn objectPatternHasReservedShorthand(bytes: []const u8, yield_context: bool) bool {
-    var start: usize = 0;
-    var index: usize = 0;
-    var depth: usize = 0;
-    while (index <= bytes.len) : (index += 1) {
-        if (index == bytes.len or (bytes[index] == ',' and depth == 0)) {
-            if (objectPatternSegmentHasReservedShorthand(bytes[start..index], yield_context)) return true;
-            start = index + 1;
-            continue;
-        }
-        if (bytes[index] == '{' or bytes[index] == '[' or bytes[index] == '(') depth += 1;
-        if ((bytes[index] == '}' or bytes[index] == ']' or bytes[index] == ')') and depth > 0) depth -= 1;
-    }
-    return false;
-}
-
-fn objectPatternSegmentHasReservedShorthand(segment: []const u8, yield_context: bool) bool {
-    var part = std.mem.trim(u8, segment, " \t\r\n");
-    if (part.len == 0) return false;
-    if (std.mem.startsWith(u8, part, "...")) part = std.mem.trim(u8, part[3..], " \t\r\n");
-    const equals = std.mem.indexOfScalar(u8, part, '=') orelse part.len;
-    const colon = std.mem.indexOfScalar(u8, part, ':');
-    if (colon != null and colon.? < equals) return false;
-    const target = std.mem.trim(u8, part[0..equals], " \t\r\n");
-    if (target.len == 0) return false;
-    if (std.mem.indexOf(u8, target, "\\u") != null and escapedReservedWordForAssignment(target, yield_context)) return true;
-    const ident = leadingIdentifier(target) orelse return false;
-    const next = nextNonSpace(target, ident.len);
-    return next == null and isReservedAssignmentWord(ident, yield_context);
-}
-
-fn isReservedAssignmentWord(name: []const u8, yield_context: bool) bool {
-    if (std.mem.eql(u8, name, "yield")) return yield_context;
-    return isReservedWord(name);
-}
-
-fn escapedReservedWordForAssignment(bytes: []const u8, yield_context: bool) bool {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        if (!isIdentStart(bytes[index]) and bytes[index] != '\\') {
-            index += 1;
-            continue;
-        }
-        var buffer: [32]u8 = undefined;
-        var len: usize = 0;
-        var had_escape = false;
-        while (index < bytes.len) {
-            if (isIdentContinue(bytes[index])) {
-                if (len < buffer.len) buffer[len] = bytes[index];
-                len += 1;
-                index += 1;
-                continue;
-            }
-            if (index + 4 < bytes.len and bytes[index] == '\\' and bytes[index + 1] == 'u' and bytes[index + 2] == '{') {
-                const decoded = parseExtendedHexByte(bytes[index + 3 ..]) orelse break;
-                if (!isIdentContinue(decoded.value)) break;
-                if (len < buffer.len) buffer[len] = decoded.value;
-                len += 1;
-                index += decoded.width + 3;
-                had_escape = true;
-                continue;
-            }
-            if (index + 5 < bytes.len and bytes[index] == '\\' and bytes[index + 1] == 'u') {
-                const decoded = parseHexByte(bytes[index + 2 .. index + 6]) orelse break;
-                if (!isIdentContinue(decoded)) break;
-                if (len < buffer.len) buffer[len] = decoded;
-                len += 1;
-                index += 6;
-                had_escape = true;
-                continue;
-            }
-            break;
-        }
-        if (had_escape and len <= buffer.len and isReservedAssignmentWord(buffer[0..len], yield_context)) return true;
-        if (len == 0) index += 1;
-    }
-    return false;
-}
-
-fn arrowHasDuplicateNonSimpleParameter(source: []const u8) bool {
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, source, search_from, "=>")) |arrow| {
-        const params_start = arrowParameterStart(source, arrow) orelse return false;
-        const params = source[params_start..arrow];
-        if (std.mem.indexOf(u8, params, "[") == null and std.mem.indexOf(u8, params, "{") == null) {
-            var names: [8][]const u8 = undefined;
-            var names_len: usize = 0;
-            var iter = std.mem.splitScalar(u8, params, ',');
-            while (iter.next()) |part| {
-                const name = leadingIdentifier(std.mem.trim(u8, part, " ()\t\r\n")) orelse continue;
-                for (names[0..names_len]) |existing| {
-                    if (std.mem.eql(u8, existing, name)) return true;
-                }
-                if (names_len < names.len) {
-                    names[names_len] = name;
-                    names_len += 1;
-                }
-            }
-        }
-        search_from = arrow + 2;
-    }
-    return false;
-}
-
-fn arrowHasEscapedReservedBinding(source: []const u8) bool {
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, source, search_from, "=>")) |arrow| {
-        const params_start = arrowParameterStart(source, arrow) orelse return false;
-        const params = source[params_start..arrow];
-        if (std.mem.indexOf(u8, params, "\\u") != null and escapedReservedWord(params)) return true;
-        search_from = arrow + 2;
-    }
-    return false;
-}
-
-fn arrowHasReservedObjectBinding(source: []const u8) bool {
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, source, search_from, "=>")) |arrow| {
-        const params_start = arrowParameterStart(source, arrow) orelse return false;
-        const params = source[params_start..arrow];
-        if (std.mem.indexOf(u8, params, "({") != null and std.mem.indexOf(u8, params, "=") == null and reservedWordToken(params)) return true;
-        search_from = arrow + 2;
-    }
-    return false;
-}
-
-fn reservedWordToken(bytes: []const u8) bool {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        if (!isIdentStart(bytes[index])) {
-            index += 1;
-            continue;
-        }
-        const start = index;
-        index += 1;
-        while (index < bytes.len and isIdentContinue(bytes[index])) : (index += 1) {}
-        if (!isReservedWord(bytes[start..index])) continue;
-        const previous = previousNonSpace(bytes, start);
-        if (previous != null and previous.? != '{' and previous.? != ',') continue;
-        if (hasEqualsSinceObjectDelimiter(bytes, start)) continue;
-        const next = nextNonSpace(bytes, index);
-        if (next == null or next.? != ':') return true;
-    }
-    return false;
-}
-
-fn hasEqualsSinceObjectDelimiter(bytes: []const u8, start: usize) bool {
-    var index = start;
-    while (index > 0) {
-        index -= 1;
-        if (bytes[index] == '=') return true;
-        if (bytes[index] == ',' or bytes[index] == '{' or bytes[index] == '(') return false;
-    }
-    return false;
-}
-
-fn previousNonSpace(bytes: []const u8, start: usize) ?u8 {
-    var index = start;
-    while (index > 0) {
-        index -= 1;
-        if (bytes[index] != ' ' and bytes[index] != '\t' and bytes[index] != '\r' and bytes[index] != '\n') return bytes[index];
-    }
-    return null;
-}
-
-fn nextNonSpace(bytes: []const u8, start: usize) ?u8 {
-    var index = start;
-    while (index < bytes.len) : (index += 1) {
-        if (bytes[index] != ' ' and bytes[index] != '\t' and bytes[index] != '\r' and bytes[index] != '\n') return bytes[index];
-    }
-    return null;
-}
-
-fn escapedReservedWord(bytes: []const u8) bool {
-    var index: usize = 0;
-    while (index < bytes.len) {
-        if (!isIdentStart(bytes[index]) and bytes[index] != '\\') {
-            index += 1;
-            continue;
-        }
-        var buffer: [32]u8 = undefined;
-        var len: usize = 0;
-        var had_escape = false;
-        while (index < bytes.len) {
-            if (isIdentContinue(bytes[index])) {
-                if (len < buffer.len) buffer[len] = bytes[index];
-                len += 1;
-                index += 1;
-                continue;
-            }
-            if (index + 4 < bytes.len and bytes[index] == '\\' and bytes[index + 1] == 'u' and bytes[index + 2] == '{') {
-                const decoded = parseExtendedHexByte(bytes[index + 3 ..]) orelse break;
-                if (!isIdentContinue(decoded.value)) break;
-                if (len < buffer.len) buffer[len] = decoded.value;
-                len += 1;
-                index += decoded.width + 3;
-                had_escape = true;
-                continue;
-            }
-            if (index + 5 < bytes.len and bytes[index] == '\\' and bytes[index + 1] == 'u') {
-                const decoded = parseHexByte(bytes[index + 2 .. index + 6]) orelse break;
-                if (!isIdentContinue(decoded)) break;
-                if (len < buffer.len) buffer[len] = decoded;
-                len += 1;
-                index += 6;
-                had_escape = true;
-                continue;
-            }
-            break;
-        }
-        if (had_escape and len <= buffer.len and isReservedWord(buffer[0..len])) return true;
-        if (len == 0) index += 1;
-    }
-    return false;
-}
-
-const ExtendedEscape = struct {
-    value: u8,
-    width: usize,
-};
-
 const ObjectIntLiteral = struct {
     name: []const u8,
     value: i32,
 };
 
-fn parseExtendedHexByte(bytes: []const u8) ?ExtendedEscape {
-    var index: usize = 0;
-    var value: u32 = 0;
-    while (index < bytes.len and bytes[index] != '}') : (index += 1) {
-        const digit = std.fmt.charToDigit(bytes[index], 16) catch return null;
-        value = value * 16 + digit;
-        if (value > 0x7f) return null;
-    }
-    if (index == 0 or index >= bytes.len or bytes[index] != '}') return null;
-    return .{ .value = @intCast(value), .width = index + 1 };
-}
-
-fn parseHexByte(bytes: []const u8) ?u8 {
-    if (bytes.len != 4 or bytes[0] != '0' or bytes[1] != '0') return null;
-    const high = std.fmt.charToDigit(bytes[2], 16) catch return null;
-    const low = std.fmt.charToDigit(bytes[3], 16) catch return null;
-    return @intCast(high * 16 + low);
-}
-
-fn isReservedWord(name: []const u8) bool {
-    const words = [_][]const u8{
-        "break",      "case",      "catch",    "class", "const",      "continue", "debugger",
-        "default",    "delete",    "do",       "else",  "enum",       "export",   "extends",
-        "finally",    "for",       "function", "if",    "implements", "import",   "in",
-        "instanceof", "interface", "let",      "new",   "package",    "private",  "protected",
-        "public",     "return",    "static",   "super", "switch",     "this",     "throw",
-        "try",        "typeof",    "var",      "void",  "while",      "with",     "yield",
-        "await",
-    };
-    for (words) |word| {
-        if (std.mem.eql(u8, name, word)) return true;
+fn skippedArrowParametersAreInvalid(params: []const u8) bool {
+    if (std.mem.indexOf(u8, params, "\\u") != null) return true;
+    if (std.mem.indexOf(u8, params, "=") != null) return true;
+    if (std.mem.lastIndexOf(u8, params, "...")) |rest| {
+        if (std.mem.indexOf(u8, params[rest..], ",") != null) return true;
     }
     return false;
 }
 
-fn arrowParameterStart(source: []const u8, arrow: usize) ?usize {
-    if (arrow == 0) return null;
-    var index = arrow;
-    var depth: i32 = 0;
-    while (index > 0) {
-        index -= 1;
-        const ch = source[index];
-        if (ch == ')') depth += 1;
-        if (ch == '(') {
-            depth -= 1;
-            if (depth <= 0) return index;
-        }
-        if (depth == 0 and (ch == ';' or ch == '\n')) return index + 1;
-    }
-    return 0;
+fn skippedArrowParametersAreNonSimple(params: []const u8) bool {
+    return std.mem.indexOf(u8, params, "[") != null or
+        std.mem.indexOf(u8, params, "{") != null or
+        std.mem.indexOf(u8, params, "=") != null or
+        std.mem.indexOf(u8, params, "...") != null or
+        std.mem.indexOf(u8, params, ",") != null;
 }
 
-fn leadingIdentifier(bytes: []const u8) ?[]const u8 {
-    if (bytes.len == 0 or !isIdentStart(bytes[0])) return null;
-    var end: usize = 1;
-    while (end < bytes.len and isIdentContinue(bytes[end])) : (end += 1) {}
-    return bytes[0..end];
-}
-
-fn isIdentStart(ch: u8) bool {
-    return std.ascii.isAlphabetic(ch) or ch == '_' or ch == '$';
-}
-
-fn isIdentContinue(ch: u8) bool {
-    return isIdentStart(ch) or std.ascii.isDigit(ch);
-}
-
-const SimpleParser = struct {
+const QuickParser = struct {
     rt: *Runtime,
     emit: *bytecode.emitter.Emitter,
     scope_record: *bytecode.scope.ScopeRecord,
+    mode: Mode,
     lex: lexer.Lexer,
     current: token.Token,
-    functions: [16]SimpleFunction = undefined,
+    features: std.EnumSet(Feature) = .initEmpty(),
+    functions: [16]QuickFunction = undefined,
     functions_len: usize = 0,
     regexp_var_names: [16][]const u8 = undefined,
     regexp_vars_len: usize = 0,
@@ -2088,25 +209,58 @@ const SimpleParser = struct {
     postfix_receiver_is_string: bool = false,
     reference_error_mode: bool = false,
 
-    fn init(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8) SimpleParser {
+    fn init(rt: *Runtime, emit: *bytecode.emitter.Emitter, scope_record: *bytecode.scope.ScopeRecord, source: []const u8, mode: Mode) !QuickParser {
         var lex = lexer.Lexer.init(source);
-        const first = lex.next() catch unreachable;
+        const first = try lex.next();
         return .{
             .rt = rt,
             .emit = emit,
             .scope_record = scope_record,
+            .mode = mode,
             .lex = lex,
             .current = first,
         };
     }
 
-    fn parseProgram(self: *SimpleParser) anyerror!void {
+    fn parseProgram(self: *QuickParser) anyerror!void {
         while (self.current.kind != .eof) {
             try self.parseStatement();
         }
     }
 
-    fn parseStatement(self: *SimpleParser) anyerror!void {
+    fn recordTokenFeatures(self: *QuickParser, tok: token.Token) void {
+        switch (tok.kind) {
+            .identifier => {
+                if (std.mem.eql(u8, tok.lexeme, "import")) self.features.insert(.dynamic_import);
+            },
+            .private_identifier => self.features.insert(.private_name),
+            .keyword => switch (tok.keyword.?) {
+                .var_, .let, .@"const", .@"return", .@"break", .case, .@"catch", .default, .throw => self.features.insert(.statement),
+                .function => self.features.insert(.function_),
+                .async => self.features.insert(.async_function),
+                .yield => self.features.insert(.generator),
+                .await => self.features.insert(.async_function),
+                .class => self.features.insert(.class_),
+                .import => {
+                    if (self.mode == .module) {
+                        self.features.insert(.statement);
+                    } else {
+                        self.features.insert(.dynamic_import);
+                    }
+                },
+                .@"export" => self.features.insert(.statement),
+                .module, .static, .super, .extends => {},
+            },
+            .punctuator => {
+                if (std.mem.eql(u8, tok.lexeme, "...")) self.features.insert(.spread_rest);
+                if (std.mem.eql(u8, tok.lexeme, "[") or std.mem.eql(u8, tok.lexeme, "{")) self.features.insert(.destructuring);
+            },
+            else => {},
+        }
+    }
+
+    fn parseStatement(self: *QuickParser) anyerror!void {
+        self.features.insert(.statement);
         if (self.current.isKeyword(.var_) or self.current.isKeyword(.let) or self.current.isKeyword(.@"const")) {
             try self.advance();
             const name_lexeme = self.current.lexeme;
@@ -2119,7 +273,17 @@ const SimpleParser = struct {
                 return;
             }
             try self.expectPunctuator("=");
-            if (try self.parseArrowDefinition(name)) {
+            const initializer_start = self.current;
+            const initializer_lex = self.lex;
+            const parsed_arrow = self.parseArrowDefinition(name) catch |err| switch (err) {
+                error.UnsupportedQuickParser => parsed: {
+                    self.current = initializer_start;
+                    self.lex = initializer_lex;
+                    break :parsed try self.parseSkippedArrowExpressionIfPresent();
+                },
+                else => return err,
+            };
+            if (parsed_arrow) {
                 try self.consumeSemicolon();
                 return;
             }
@@ -2129,7 +293,7 @@ const SimpleParser = struct {
             if (self.reference_error_mode and self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, name_lexeme)) {
                 try self.emit.emitThrowReferenceError();
             }
-            try self.parseExpression(0);
+            if (!try self.parsePatternAssignmentIfPresent()) try self.parseExpression(0);
             if (self.last_expression_is_regexp) self.rememberRegExpVar(name_lexeme);
             if (self.last_expression_is_date) self.rememberDateVar(name_lexeme);
             if (self.last_expression_is_closure) self.rememberClosureVar(name_lexeme);
@@ -2152,6 +316,14 @@ const SimpleParser = struct {
         }
         if (self.current.isKeyword(.class)) {
             try self.parseClassDeclaration();
+            return;
+        }
+        if (self.current.isKeyword(.import)) {
+            try self.parseImportStatement();
+            return;
+        }
+        if (self.current.isKeyword(.@"export")) {
+            try self.parseExportStatement();
             return;
         }
         if (self.current.isKeyword(.throw)) {
@@ -2200,6 +372,8 @@ const SimpleParser = struct {
             return;
         }
         if (self.current.kind == .identifier) {
+            const statement_start = self.current;
+            const lex_start = self.lex;
             const name_lexeme = self.current.lexeme;
             const name = try self.internCurrentIdentifier();
             try self.advance();
@@ -2265,6 +439,15 @@ const SimpleParser = struct {
                     try self.consumeSemicolon();
                     return;
                 }
+                if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "=")) {
+                    self.rt.atoms.free(property);
+                    self.rt.atoms.free(name);
+                    self.current = statement_start;
+                    self.lex = lex_start;
+                    try self.parseExpression(0);
+                    try self.consumeSemicolon();
+                    return;
+                }
                 try self.expectPunctuator("=");
                 try self.emit.emitGetVar(name);
                 try self.parseExpression(0);
@@ -2276,12 +459,78 @@ const SimpleParser = struct {
             }
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
                 try self.advance();
-                try self.expectPunctuator("=");
-                const delta = try self.expectSignedSmallInt();
-                const next_value = (self.intVarValue(name_lexeme) orelse 0) + delta;
-                try self.emit.emitPushInt32(next_value);
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
+                    try self.advance();
+                    const next_value = (self.intVarValue(name_lexeme) orelse 0) + 1;
+                    try self.emit.emitGetVar(name);
+                    try self.emit.emitPushInt32(1);
+                    try self.emit.emitKnown(bytecode.emitter.known.add);
+                    try self.emit.emitDefineVar(name);
+                    self.rememberIntVar(name_lexeme, next_value);
+                    self.rt.atoms.free(name);
+                    try self.consumeSemicolon();
+                    return;
+                }
+                if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "=")) {
+                    self.rt.atoms.free(name);
+                    self.current = statement_start;
+                    self.lex = lex_start;
+                    try self.parseExpression(0);
+                    try self.consumeSemicolon();
+                    return;
+                }
+                try self.advance();
+                try self.emit.emitGetVar(name);
+                const delta = try self.peekSignedSmallInt();
+                try self.parseExpression(0);
+                try self.emit.emitKnown(bytecode.emitter.known.add);
                 try self.emit.emitDefineVar(name);
-                self.rememberIntVar(name_lexeme, next_value);
+                if (delta) |value| self.rememberIntVar(name_lexeme, (self.intVarValue(name_lexeme) orelse 0) + value);
+                self.rt.atoms.free(name);
+                try self.consumeSemicolon();
+                return;
+            }
+            if (self.current.kind == .punctuator and
+                (std.mem.eql(u8, self.current.lexeme, "-") or
+                    std.mem.eql(u8, self.current.lexeme, "*") or
+                    std.mem.eql(u8, self.current.lexeme, "/") or
+                    std.mem.eql(u8, self.current.lexeme, "%")))
+            {
+                const op_lexeme = self.current.lexeme;
+                const op = if (std.mem.eql(u8, op_lexeme, "-"))
+                    bytecode.emitter.known.sub
+                else if (std.mem.eql(u8, op_lexeme, "*"))
+                    bytecode.emitter.known.mul
+                else if (std.mem.eql(u8, op_lexeme, "/"))
+                    bytecode.emitter.known.div
+                else
+                    bytecode.emitter.known.mod;
+                try self.advance();
+                if (op == bytecode.emitter.known.sub and self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "-")) {
+                    try self.advance();
+                    const next_value = (self.intVarValue(name_lexeme) orelse 0) - 1;
+                    try self.emit.emitGetVar(name);
+                    try self.emit.emitPushInt32(1);
+                    try self.emit.emitKnown(bytecode.emitter.known.sub);
+                    try self.emit.emitDefineVar(name);
+                    self.rememberIntVar(name_lexeme, next_value);
+                    self.rt.atoms.free(name);
+                    try self.consumeSemicolon();
+                    return;
+                }
+                if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "=")) {
+                    self.rt.atoms.free(name);
+                    self.current = statement_start;
+                    self.lex = lex_start;
+                    try self.parseExpression(0);
+                    try self.consumeSemicolon();
+                    return;
+                }
+                try self.advance();
+                try self.emit.emitGetVar(name);
+                try self.parseExpression(0);
+                try self.emit.emitKnown(op);
+                try self.emit.emitDefineVar(name);
                 self.rt.atoms.free(name);
                 try self.consumeSemicolon();
                 return;
@@ -2295,41 +544,120 @@ const SimpleParser = struct {
                 self.rt.atoms.free(name);
                 return;
             }
+            if (std.mem.eql(u8, name_lexeme, "true") or
+                std.mem.eql(u8, name_lexeme, "false") or
+                std.mem.eql(u8, name_lexeme, "null"))
+            {
+                self.rt.atoms.free(name);
+                return error.UnsupportedQuickParser;
+            }
+            if (self.current.kind == .eof or
+                (self.current.kind == .punctuator and
+                    (std.mem.eql(u8, self.current.lexeme, ";") or
+                        std.mem.eql(u8, self.current.lexeme, "+") or
+                        std.mem.eql(u8, self.current.lexeme, "-") or
+                        std.mem.eql(u8, self.current.lexeme, "*") or
+                        std.mem.eql(u8, self.current.lexeme, "/") or
+                        std.mem.eql(u8, self.current.lexeme, "%") or
+                        std.mem.eql(u8, self.current.lexeme, "===") or
+                        std.mem.eql(u8, self.current.lexeme, "==") or
+                        std.mem.eql(u8, self.current.lexeme, "!==") or
+                        std.mem.eql(u8, self.current.lexeme, "!=") or
+                        std.mem.eql(u8, self.current.lexeme, "<") or
+                        std.mem.eql(u8, self.current.lexeme, ">") or
+                        std.mem.eql(u8, self.current.lexeme, "<=") or
+                        std.mem.eql(u8, self.current.lexeme, ">=") or
+                        std.mem.eql(u8, self.current.lexeme, "&&") or
+                        std.mem.eql(u8, self.current.lexeme, "||") or
+                        std.mem.eql(u8, self.current.lexeme, "??"))))
+            {
+                self.rt.atoms.free(name);
+                self.current = statement_start;
+                self.lex = lex_start;
+                try self.parseExpression(0);
+                try self.consumeSemicolon();
+                return;
+            }
             try self.expectPunctuator("=");
             const assigned_int = try self.peekSignedSmallInt();
-            try self.parseExpression(0);
+            if (!try self.parseSkippedArrowExpressionIfPresent()) {
+                if (!try self.parsePatternAssignmentIfPresent()) try self.parseExpression(0);
+            }
             if (assigned_int) |value| self.rememberIntVar(name_lexeme, value);
             try self.emit.emitDefineVar(name);
             self.rt.atoms.free(name);
             try self.consumeSemicolon();
             return;
         }
-        return error.UnsupportedSimpleStatement;
+        return error.UnsupportedQuickParser;
     }
 
-    fn parseAssertStatement(self: *SimpleParser) !void {
+    fn parseImportStatement(self: *QuickParser) !void {
+        if (!self.current.isKeyword(.import)) return error.UnsupportedQuickParser;
         try self.advance();
-        try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
-        if (std.mem.eql(u8, self.current.lexeme, "sameValue")) {
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+            self.features.insert(.dynamic_import);
+            try self.parseGenericCallOnStack();
+            try self.consumeSemicolon();
+            return;
+        }
+        if (self.mode != .module) return error.UnsupportedQuickParser;
+        const local_name = try self.expectIdentifier();
+        defer self.rt.atoms.free(local_name);
+        try self.expectIdentifierNamed("from");
+        if (self.current.kind != .string) return error.UnsupportedQuickParser;
+        const module_name = try self.rt.internAtom(literalBody(self.current.lexeme));
+        defer self.rt.atoms.free(module_name);
+        try self.advance();
+        try self.consumeSemicolon();
+
+        const module_record = self.emit.function.ensureModule();
+        const req = try module_record.addRequest(module_name);
+        const default_atom = atom.predefinedId("*default*", .string).?;
+        try module_record.addImport(req, default_atom, local_name);
+    }
+
+    fn parseExportStatement(self: *QuickParser) !void {
+        if (!self.current.isKeyword(.@"export")) return error.UnsupportedQuickParser;
+        if (self.mode != .module) return error.UnsupportedQuickParser;
+        try self.advance();
+        try self.expectPunctuator("{");
+        while (true) {
+            const export_name = try self.internCurrentIdentifier();
+            defer self.rt.atoms.free(export_name);
             try self.advance();
-            try self.expectPunctuator("(");
-            try self.parseExpression(0);
-            try self.expectPunctuator(",");
-            try self.parseExpression(0);
+            const module_record = self.emit.function.ensureModule();
+            try module_record.addExport(export_name, export_name);
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
                 try self.advance();
-                try self.skipAssertionMessage();
+                continue;
             }
-            try self.expectPunctuator(")");
-            try self.emit.emitAssertSameValue();
+            break;
+        }
+        try self.expectPunctuator("}");
+        try self.consumeSemicolon();
+    }
+
+    fn parseAssertStatement(self: *QuickParser) !void {
+        try self.advance();
+        try self.expectPunctuator(".");
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        if (std.mem.eql(u8, self.current.lexeme, "sameValue")) {
+            const assert_atom = try self.rt.internAtom("assert");
+            defer self.rt.atoms.free(assert_atom);
+            const same_value_atom = try self.rt.internAtom("sameValue");
+            defer self.rt.atoms.free(same_value_atom);
+            try self.emit.emitGetVar(assert_atom);
+            try self.emit.emitGetProp(same_value_atom);
+            try self.advance();
+            try self.parseGenericCallOnStack();
             try self.consumeSemicolon();
             return;
         }
         if (std.mem.eql(u8, self.current.lexeme, "throws")) {
             try self.advance();
             try self.expectPunctuator("(");
-            if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "TypeError")) return error.UnsupportedSimpleStatement;
+            if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "TypeError")) return error.UnsupportedQuickParser;
             try self.advance();
             try self.expectPunctuator(",");
             try self.parseArrowThrowBody(.type_error);
@@ -2337,38 +665,18 @@ const SimpleParser = struct {
             try self.consumeSemicolon();
             return;
         }
-        return error.UnsupportedSimpleStatement;
+        return error.UnsupportedQuickParser;
     }
 
-    fn skipAssertionMessage(self: *SimpleParser) !void {
-        var paren_depth: usize = 0;
-        var bracket_depth: usize = 0;
-        var brace_depth: usize = 0;
-        while (self.current.kind != .eof) {
-            if (self.current.kind == .punctuator) {
-                if (std.mem.eql(u8, self.current.lexeme, ")") and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return;
-                if (std.mem.eql(u8, self.current.lexeme, "(")) paren_depth += 1;
-                if (std.mem.eql(u8, self.current.lexeme, "[")) bracket_depth += 1;
-                if (std.mem.eql(u8, self.current.lexeme, "{")) brace_depth += 1;
-                if (std.mem.eql(u8, self.current.lexeme, ")")) paren_depth -= 1;
-                if (std.mem.eql(u8, self.current.lexeme, "]")) bracket_depth -= 1;
-                if (std.mem.eql(u8, self.current.lexeme, "}")) brace_depth -= 1;
-                if (std.mem.eql(u8, self.current.lexeme, ",") and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return;
-            }
-            try self.advance();
-        }
-        return error.UnsupportedSimpleStatement;
-    }
-
-    fn parseArrowThrowBody(self: *SimpleParser, expected: enum { type_error }) !void {
+    fn parseArrowThrowBody(self: *QuickParser, expected: enum { type_error }) !void {
         _ = expected;
         try self.expectPunctuator("(");
         try self.expectPunctuator(")");
-        if (!try self.consumeArrow()) return error.UnsupportedSimpleStatement;
+        if (!try self.consumeArrow()) return error.UnsupportedQuickParser;
         try self.expectPunctuator("{");
-        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "new")) return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "new")) return error.UnsupportedQuickParser;
         try self.advance();
-        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "Math")) return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "Math")) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(".");
         try self.expectIdentifierNamed("log");
@@ -2378,7 +686,8 @@ const SimpleParser = struct {
         try self.expectPunctuator("}");
     }
 
-    fn parseExpression(self: *SimpleParser, min_precedence: u8) anyerror!void {
+    fn parseExpression(self: *QuickParser, min_precedence: u8) anyerror!void {
+        self.features.insert(.expression);
         self.last_expression_is_regexp = false;
         self.last_expression_is_date = false;
         self.last_expression_is_closure = false;
@@ -2391,7 +700,7 @@ const SimpleParser = struct {
             if (precedence < min_precedence) break;
             try self.advance();
             if (op == bytecode.emitter.known.instanceof_object) {
-                if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+                if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
                 if (std.mem.eql(u8, self.current.lexeme, "Object")) {
                     try self.advance();
                     try self.emit.emitKnown(op);
@@ -2404,7 +713,8 @@ const SimpleParser = struct {
                 }
                 const rhs_name = try self.internCurrentIdentifier();
                 try self.advance();
-                try self.emit.emitInstanceofNamed(rhs_name);
+                try self.emit.emitGetVar(rhs_name);
+                try self.emit.emitKnown(bytecode.emitter.known.instanceof_value);
                 self.rt.atoms.free(rhs_name);
                 continue;
             }
@@ -2413,12 +723,12 @@ const SimpleParser = struct {
         }
     }
 
-    fn parsePostfix(self: *SimpleParser) !void {
+    fn parsePostfix(self: *QuickParser) !void {
         while (self.current.kind == .punctuator and (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "?"))) {
             const optional = std.mem.eql(u8, self.current.lexeme, "?");
             try self.advance();
             if (optional) try self.expectPunctuator(".");
-            if (self.current.kind != .identifier and self.current.kind != .keyword) return error.UnsupportedSimpleExpression;
+            if (self.current.kind != .identifier and self.current.kind != .keyword) return error.UnsupportedQuickParser;
             if (std.mem.eql(u8, self.current.lexeme, "length")) {
                 try self.advance();
                 try self.emit.emitKnown(bytecode.emitter.known.value_length);
@@ -2499,7 +809,7 @@ const SimpleParser = struct {
                 try self.emit.emitCollectionMethod(method);
                 self.rt.atoms.free(property);
             } else if (self.postfix_receiver_is_regexp) {
-                const method = regexpMethodId(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
+                const method = regexpMethodId(self.current.lexeme) orelse return error.UnsupportedQuickParser;
                 try self.advance();
                 try self.expectPunctuator("(");
                 if (method != 1) try self.parseExpression(0);
@@ -2507,7 +817,7 @@ const SimpleParser = struct {
                 try self.emit.emitRegExpMethod(method);
                 self.postfix_receiver_is_regexp = false;
             } else if (self.postfix_receiver_is_date) {
-                const method = dateMethodId(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
+                const method = dateMethodId(self.current.lexeme) orelse return error.UnsupportedQuickParser;
                 try self.advance();
                 if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "(")) {
                     try self.emitString("function");
@@ -2522,8 +832,8 @@ const SimpleParser = struct {
             } else if (std.mem.eql(u8, self.current.lexeme, "charAt")) {
                 try self.advance();
                 try self.expectPunctuator("(");
-                if (self.current.kind != .numeric) return error.UnsupportedSimpleExpression;
-                const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
+                if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
+                const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
                 try self.advance();
                 try self.expectPunctuator(")");
                 try self.emit.emitPushInt32(index);
@@ -2553,16 +863,16 @@ const SimpleParser = struct {
         }
         while (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
             try self.advance();
-            if (self.current.kind != .numeric) return error.UnsupportedSimpleExpression;
-            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
-            if (index < 0) return error.UnsupportedSimpleExpression;
+            if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
+            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
+            if (index < 0) return error.UnsupportedQuickParser;
             try self.advance();
             try self.expectPunctuator("]");
             try self.emit.emitGetIndex(@intCast(index));
         }
     }
 
-    fn parseStringMethodCall(self: *SimpleParser, id: u32) !void {
+    fn parseStringMethodCall(self: *QuickParser, id: u32) !void {
         try self.advance();
         try self.expectPunctuator("(");
         var argc: u32 = 0;
@@ -2581,7 +891,7 @@ const SimpleParser = struct {
         try self.emit.emitStringMethod(id, argc);
     }
 
-    fn parseGenericCallOnStack(self: *SimpleParser) !void {
+    fn parseGenericCallOnStack(self: *QuickParser) !void {
         try self.expectPunctuator("(");
         var argc: u32 = 0;
         if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
@@ -2599,7 +909,7 @@ const SimpleParser = struct {
         try self.emit.emitCall(argc);
     }
 
-    fn parsePrimary(self: *SimpleParser) anyerror!void {
+    fn parsePrimary(self: *QuickParser) anyerror!void {
         self.last_expression_is_regexp = false;
         self.last_expression_is_date = false;
         self.last_expression_is_closure = false;
@@ -2634,7 +944,7 @@ const SimpleParser = struct {
                     if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
                         try self.parseMathCall();
                     } else {
-                        try self.emitString("__zjs_Math");
+                        try self.emitGlobal("Math");
                     }
                     return;
                 } else if (std.mem.eql(u8, self.current.lexeme, "isConstructor")) {
@@ -2770,52 +1080,61 @@ const SimpleParser = struct {
                     try self.parsePrimary();
                     try self.emit.emitKnown(bytecode.emitter.known.bit_not);
                 } else {
-                    return error.UnsupportedSimpleExpression;
+                    return error.UnsupportedQuickParser;
                 }
             },
             .keyword => {
-                return error.UnsupportedSimpleExpression;
+                if (self.current.isKeyword(.import)) {
+                    try self.advance();
+                    self.features.insert(.dynamic_import);
+                    try self.parseGenericCallOnStack();
+                    return;
+                }
+                return error.UnsupportedQuickParser;
             },
-            else => return error.UnsupportedSimpleExpression,
+            else => return error.UnsupportedQuickParser,
         }
     }
 
-    fn expectIdentifier(self: *SimpleParser) !atom.Atom {
+    fn expectIdentifier(self: *QuickParser) !atom.Atom {
         const name = try self.internCurrentIdentifier();
         try self.advance();
         _ = try self.scope_record.addBinding(name, .var_, false);
         return name;
     }
 
-    fn expectIdentifierNamed(self: *SimpleParser, expected: []const u8) !void {
-        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, expected)) return error.UnsupportedSimpleStatement;
+    fn expectIdentifierNamed(self: *QuickParser, expected: []const u8) !void {
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, expected)) return error.UnsupportedQuickParser;
         try self.advance();
     }
 
-    fn internCurrentIdentifier(self: *SimpleParser) !atom.Atom {
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+    fn internCurrentIdentifier(self: *QuickParser) !atom.Atom {
+        if (self.current.kind != .identifier) {
+            if (self.current.isKeyword(.yield) and self.mode != .module) return self.rt.internAtom(self.current.lexeme);
+            return error.UnsupportedQuickParser;
+        }
         return self.rt.internAtom(self.current.lexeme);
     }
 
-    fn internCurrentPropertyName(self: *SimpleParser) !atom.Atom {
-        if (self.current.kind != .identifier and self.current.kind != .keyword) return error.UnsupportedSimpleStatement;
+    fn internCurrentPropertyName(self: *QuickParser) !atom.Atom {
+        if (self.current.kind != .identifier and self.current.kind != .keyword) return error.UnsupportedQuickParser;
         return self.rt.internAtom(self.current.lexeme);
     }
 
-    fn expectPunctuator(self: *SimpleParser, expected: []const u8) !void {
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, expected)) return error.UnsupportedSimpleStatement;
+    fn expectPunctuator(self: *QuickParser, expected: []const u8) !void {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, expected)) return error.UnsupportedQuickParser;
         try self.advance();
     }
 
-    fn consumeSemicolon(self: *SimpleParser) !void {
+    fn consumeSemicolon(self: *QuickParser) !void {
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ";")) try self.advance();
     }
 
-    fn peekSignedSmallInt(self: *SimpleParser) !?i32 {
+    fn peekSignedSmallInt(self: *QuickParser) !?i32 {
         const saved_current = self.current;
         const saved_lex = self.lex;
         const value = self.expectSignedSmallInt() catch |err| switch (err) {
-            error.UnsupportedSimpleStatement => null,
+            error.UnsupportedQuickParser => null,
             else => return err,
         };
         self.current = saved_current;
@@ -2823,23 +1142,24 @@ const SimpleParser = struct {
         return value;
     }
 
-    fn expectSignedSmallInt(self: *SimpleParser) !i32 {
+    fn expectSignedSmallInt(self: *QuickParser) !i32 {
         var sign: i32 = 1;
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "-")) {
             sign = -1;
             try self.advance();
         }
-        if (self.current.kind != .numeric) return error.UnsupportedSimpleStatement;
-        const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
+        const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
         try self.advance();
         return sign * value;
     }
 
-    fn advance(self: *SimpleParser) !void {
+    fn advance(self: *QuickParser) !void {
+        self.recordTokenFeatures(self.current);
         self.current = try self.lex.next();
     }
 
-    fn emitTemplate(self: *SimpleParser, body: []const u8) !void {
+    fn emitTemplate(self: *QuickParser, body: []const u8) !void {
         var index: usize = 0;
         var emitted = false;
         while (index < body.len) {
@@ -2852,7 +1172,7 @@ const SimpleParser = struct {
             if (marker == body.len) break;
 
             const expr_start = marker + 2;
-            const expr_end = std.mem.indexOfPos(u8, body, expr_start, "}") orelse return error.UnsupportedSimpleExpression;
+            const expr_end = std.mem.indexOfPos(u8, body, expr_start, "}") orelse return error.UnsupportedQuickParser;
             try self.parseTemplateExpression(body[expr_start..expr_end]);
             if (emitted) try self.emit.emitKnown(bytecode.emitter.known.add);
             emitted = true;
@@ -2861,20 +1181,26 @@ const SimpleParser = struct {
         if (!emitted) try self.emitString("");
     }
 
-    fn parseTemplateExpression(self: *SimpleParser, source: []const u8) !void {
-        var nested = SimpleParser.init(self.rt, self.emit, self.scope_record, source);
+    fn parseTemplateExpression(self: *QuickParser, source: []const u8) !void {
+        var nested = try QuickParser.init(self.rt, self.emit, self.scope_record, source, self.mode);
         try nested.parseExpression(0);
-        if (nested.current.kind != .eof) return error.UnsupportedSimpleExpression;
+        if (nested.current.kind != .eof) return error.UnsupportedQuickParser;
     }
 
-    fn emitString(self: *SimpleParser, bytes: []const u8) !void {
+    fn emitString(self: *QuickParser, bytes: []const u8) !void {
         const str = try @import("../core/string.zig").String.createUtf8(self.rt, bytes);
         const value = str.value();
         _ = try self.emit.emitPushConst(value);
         value.free(self.rt);
     }
 
-    fn emitConsoleLogLiteral(self: *SimpleParser, bytes: []const u8) !void {
+    fn emitGlobal(self: *QuickParser, name: []const u8) !void {
+        const atom_id = try self.rt.internAtom(name);
+        defer self.rt.atoms.free(atom_id);
+        try self.emit.emitGetVar(atom_id);
+    }
+
+    fn emitConsoleLogLiteral(self: *QuickParser, bytes: []const u8) !void {
         const console = try self.rt.internAtom("console");
         defer self.rt.atoms.free(console);
         const log = try self.rt.internAtom("log");
@@ -2885,7 +1211,7 @@ const SimpleParser = struct {
         try self.emit.emitCall(1);
     }
 
-    fn emitNumberLiteral(self: *SimpleParser, bytes: []const u8) !void {
+    fn emitNumberLiteral(self: *QuickParser, bytes: []const u8) !void {
         if (std.mem.startsWith(u8, bytes, "0x") or std.mem.startsWith(u8, bytes, "0X")) {
             const parsed = try std.fmt.parseInt(i32, bytes[2..], 16);
             try self.emit.emitPushInt32(parsed);
@@ -2902,14 +1228,14 @@ const SimpleParser = struct {
         }
     }
 
-    fn emitFloatLiteral(self: *SimpleParser, value: f64) !void {
+    fn emitFloatLiteral(self: *QuickParser, value: f64) !void {
         const boxed = @import("../core/value.zig").Value.float64(value);
         _ = try self.emit.emitPushConst(boxed);
     }
 
-    fn emitBigIntLiteral(self: *SimpleParser, bytes: []const u8) !void {
+    fn emitBigIntLiteral(self: *QuickParser, bytes: []const u8) !void {
         const digits = if (std.mem.endsWith(u8, bytes, "n")) bytes[0 .. bytes.len - 1] else bytes;
-        var parsed = @import("../libs/bignum.zig").parseAutoAlloc(self.rt.memory.allocator, digits) catch return error.UnsupportedSimpleExpression;
+        var parsed = @import("../libs/bignum.zig").parseAutoAlloc(self.rt.memory.allocator, digits) catch return error.UnsupportedQuickParser;
         defer parsed.deinit();
         const big = try @import("../core/bigint.zig").BigInt.createFromBigInt(self.rt, parsed);
         const value = big.valueRef();
@@ -2917,7 +1243,7 @@ const SimpleParser = struct {
         value.free(self.rt);
     }
 
-    fn parseArrayLiteral(self: *SimpleParser) !void {
+    fn parseArrayLiteral(self: *QuickParser) !void {
         try self.expectPunctuator("[");
         var count: u32 = 0;
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) {
@@ -2943,7 +1269,7 @@ const SimpleParser = struct {
         try self.emit.emitNewArray(count);
     }
 
-    fn peekSingleIntArrayLiteral(self: *SimpleParser) ?i32 {
+    fn peekSingleIntArrayLiteral(self: *QuickParser) ?i32 {
         if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "[")) return null;
         const saved_current = self.current;
         const saved_lex = self.lex;
@@ -2959,7 +1285,7 @@ const SimpleParser = struct {
         return value;
     }
 
-    fn peekSimpleObjectIntLiteral(self: *SimpleParser) ?ObjectIntLiteral {
+    fn peekSimpleObjectIntLiteral(self: *QuickParser) ?ObjectIntLiteral {
         if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return null;
         const saved_current = self.current;
         const saved_lex = self.lex;
@@ -2968,7 +1294,7 @@ const SimpleParser = struct {
             self.lex = saved_lex;
         }
         self.advance() catch return null;
-        if (self.current.kind != .identifier) return null;
+        if (self.current.kind != .identifier and self.current.kind != .keyword) return null;
         const name = self.current.lexeme;
         self.advance() catch return null;
         if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, ":")) return null;
@@ -2978,7 +1304,7 @@ const SimpleParser = struct {
         return .{ .name = name, .value = value };
     }
 
-    fn parseObjectLiteral(self: *SimpleParser) !void {
+    fn parseObjectLiteral(self: *QuickParser) !void {
         try self.expectPunctuator("{");
         if (try self.parsePrimitiveReturningObjectLiteral()) return;
         var names: [16]atom.Atom = undefined;
@@ -2989,15 +1315,15 @@ const SimpleParser = struct {
             return;
         }
         while (true) {
-            if (self.current.kind != .identifier and self.current.kind != .string) return error.UnsupportedSimpleExpression;
+            if (self.current.kind != .identifier and self.current.kind != .keyword and self.current.kind != .string) return error.UnsupportedQuickParser;
             const name = if (self.current.kind == .string)
                 try self.rt.internAtom(literalBody(self.current.lexeme))
             else
-                try self.internCurrentIdentifier();
+                try self.internCurrentPropertyName();
             try self.advance();
             try self.expectPunctuator(":");
             try self.parseExpression(0);
-            if (count == names.len) return error.UnsupportedSimpleExpression;
+            if (count == names.len) return error.UnsupportedQuickParser;
             names[count] = name;
             count += 1;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
@@ -3011,7 +1337,7 @@ const SimpleParser = struct {
         for (names[0..count]) |name| self.rt.atoms.free(name);
     }
 
-    fn parsePrimitiveReturningObjectLiteral(self: *SimpleParser) !bool {
+    fn parsePrimitiveReturningObjectLiteral(self: *QuickParser) !bool {
         const saved_current = self.current;
         const saved_lex = self.lex;
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
@@ -3041,7 +1367,7 @@ const SimpleParser = struct {
             if (std.mem.eql(u8, first_name, "toString") and self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "null")) {
                 try self.advance();
                 try self.expectPunctuator(",");
-                if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "valueOf")) return error.UnsupportedSimpleExpression;
+                if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "valueOf")) return error.UnsupportedQuickParser;
                 try self.advance();
                 try self.expectPunctuator(":");
                 try self.parsePrimitiveFunction();
@@ -3054,21 +1380,21 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn parsePrimitiveFunction(self: *SimpleParser) !void {
-        if (!self.current.isKeyword(.function)) return error.UnsupportedSimpleExpression;
+    fn parsePrimitiveFunction(self: *QuickParser) !void {
+        if (!self.current.isKeyword(.function)) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator("(");
         try self.expectPunctuator(")");
         try self.expectPunctuator("{");
-        if (!self.current.isKeyword(.@"return")) return error.UnsupportedSimpleExpression;
+        if (!self.current.isKeyword(.@"return")) return error.UnsupportedQuickParser;
         try self.advance();
         try self.parseExpression(0);
         try self.consumeSemicolon();
         try self.expectPunctuator("}");
     }
 
-    fn skipObjectProperty(self: *SimpleParser) !void {
-        if (self.current.kind != .identifier and self.current.kind != .string) return error.UnsupportedSimpleExpression;
+    fn skipObjectProperty(self: *QuickParser) !void {
+        if (self.current.kind != .identifier and self.current.kind != .string) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(":");
         if (self.current.isKeyword(.function)) {
@@ -3086,17 +1412,17 @@ const SimpleParser = struct {
         }
     }
 
-    fn skipFunctionExpression(self: *SimpleParser) !void {
-        if (!self.current.isKeyword(.function)) return error.UnsupportedSimpleExpression;
+    fn skipFunctionExpression(self: *QuickParser) !void {
+        if (!self.current.isKeyword(.function)) return error.UnsupportedQuickParser;
         try self.advance();
         try self.skipArgumentList();
         try self.expectPunctuator("{");
         try self.skipFunctionBody();
     }
 
-    fn parseJsonCall(self: *SimpleParser) !void {
+    fn parseJsonCall(self: *QuickParser) !void {
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         if (std.mem.eql(u8, self.current.lexeme, "stringify")) {
             try self.advance();
             try self.expectPunctuator("(");
@@ -3117,26 +1443,26 @@ const SimpleParser = struct {
             try self.emit.emitKnown(bytecode.emitter.known.json_parse);
             return;
         }
-        return error.UnsupportedSimpleExpression;
+        return error.UnsupportedQuickParser;
     }
 
-    fn parseEvalCall(self: *SimpleParser) !void {
+    fn parseEvalCall(self: *QuickParser) !void {
         try self.expectPunctuator("(");
-        if (self.current.kind != .string) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .string) return error.UnsupportedQuickParser;
         const body = literalBody(self.current.lexeme);
         try self.advance();
         try self.expectPunctuator(")");
-        var nested = SimpleParser.init(self.rt, self.emit, self.scope_record, body);
+        var nested = try QuickParser.init(self.rt, self.emit, self.scope_record, body, self.mode);
         nested.functions = self.functions;
         nested.functions_len = self.functions_len;
         try nested.parseExpression(0);
-        if (nested.current.kind != .eof) return error.UnsupportedSimpleExpression;
+        if (nested.current.kind != .eof) return error.UnsupportedQuickParser;
     }
 
-    fn parseMathCall(self: *SimpleParser) !void {
+    fn parseMathCall(self: *QuickParser) !void {
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
-        const id = mathCallId(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        const id = mathCallId(self.current.lexeme) orelse return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator("(");
         var argc: u32 = 0;
@@ -3155,9 +1481,9 @@ const SimpleParser = struct {
         try self.emit.emitMathCall((id << 8) | argc);
     }
 
-    fn parseIsConstructorCall(self: *SimpleParser) !void {
+    fn parseIsConstructorCall(self: *QuickParser) !void {
         try self.expectPunctuator("(");
-        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "Math")) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "Math")) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(".");
         try self.expectIdentifierNamed("log");
@@ -3165,7 +1491,7 @@ const SimpleParser = struct {
         try self.emit.emitKnown(bytecode.emitter.known.push_false);
     }
 
-    fn parseObjectPrimary(self: *SimpleParser) !void {
+    fn parseObjectPrimary(self: *QuickParser) !void {
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
             try self.advance();
             try self.parseExpression(0);
@@ -3175,9 +1501,9 @@ const SimpleParser = struct {
         try self.parseObjectCallAfterDot();
     }
 
-    fn parseObjectCallAfterDot(self: *SimpleParser) !void {
+    fn parseObjectCallAfterDot(self: *QuickParser) !void {
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         if (std.mem.eql(u8, self.current.lexeme, "keys") or
             std.mem.eql(u8, self.current.lexeme, "values") or
             std.mem.eql(u8, self.current.lexeme, "entries"))
@@ -3205,54 +1531,72 @@ const SimpleParser = struct {
         try self.emit.emitKnown(bytecode.emitter.known.object_is);
     }
 
-    fn parseForInConcatStatement(self: *SimpleParser) !void {
+    fn parseForInConcatStatement(self: *QuickParser) !void {
         try self.advance();
         try self.expectPunctuator("(");
-        if (!self.current.isKeyword(.var_)) return error.UnsupportedSimpleStatement;
+        if (!self.current.isKeyword(.var_)) return error.UnsupportedQuickParser;
         try self.advance();
         const loop_name = try self.expectIdentifier();
-        self.rt.atoms.free(loop_name);
-        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "in")) return error.UnsupportedSimpleStatement;
+        defer self.rt.atoms.free(loop_name);
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "in")) return error.UnsupportedQuickParser;
         try self.advance();
         const object_name = try self.internCurrentIdentifier();
+        defer self.rt.atoms.free(object_name);
         try self.advance();
         try self.expectPunctuator(")");
         const target_name = try self.internCurrentIdentifier();
+        defer self.rt.atoms.free(target_name);
         try self.advance();
         try self.expectPunctuator("+");
         try self.expectPunctuator("=");
-        _ = try self.internCurrentIdentifier();
+        const appended_name = try self.internCurrentIdentifier();
+        defer self.rt.atoms.free(appended_name);
+        if (appended_name != loop_name) return error.UnsupportedQuickParser;
         try self.advance();
         try self.emit.emitGetVar(object_name);
-        try self.emit.emitForInConcat(target_name);
-        self.rt.atoms.free(object_name);
-        self.rt.atoms.free(target_name);
+        try self.emit.emitObjectKeys();
+        try self.emit.emitPushInt32(0);
+        const loop_pc = self.emit.currentPc();
+        const end_patch = try self.emit.emitForInNextPlaceholder(loop_name);
+        try self.emit.emitGetVar(target_name);
+        try self.emit.emitGetVar(loop_name);
+        try self.emit.emitKnown(bytecode.emitter.known.add);
+        try self.emit.emitDefineVar(target_name);
+        try self.emit.emitDrop();
+        try self.emit.emitGoto(loop_pc);
+        try self.emit.patchU32(end_patch, self.emit.currentPc());
         try self.consumeSemicolon();
     }
 
-    fn parseGlobalThisPrimary(self: *SimpleParser) !void {
+    fn parseGlobalThisPrimary(self: *QuickParser) !void {
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
             try self.advance();
-            if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+            if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
             if (std.mem.eql(u8, self.current.lexeme, "globalThis")) {
                 try self.advance();
-                try self.emitString("__zjs_globalThis");
+                try self.emitGlobal("globalThis");
+                const property = try self.rt.internAtom("globalThis");
+                defer self.rt.atoms.free(property);
+                try self.emit.emitGetProp(property);
                 return;
             }
             if (std.mem.eql(u8, self.current.lexeme, "Math")) {
                 try self.advance();
-                try self.emitString("__zjs_Math");
+                try self.emitGlobal("globalThis");
+                const property = try self.rt.internAtom("Math");
+                defer self.rt.atoms.free(property);
+                try self.emit.emitGetProp(property);
                 return;
             }
-            return error.UnsupportedSimpleExpression;
+            return error.UnsupportedQuickParser;
         }
-        try self.emitString("__zjs_globalThis");
+        try self.emitGlobal("globalThis");
     }
 
-    fn parseNumberPrimary(self: *SimpleParser) !void {
+    fn parseNumberPrimary(self: *QuickParser) !void {
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
             try self.advance();
-            if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+            if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
             if (std.mem.eql(u8, self.current.lexeme, "parseInt")) {
                 try self.advance();
                 try self.parseParseIntCall();
@@ -3278,12 +1622,12 @@ const SimpleParser = struct {
                 try self.emitFloatLiteral(-std.math.inf(f64));
                 return;
             }
-            return error.UnsupportedSimpleExpression;
+            return error.UnsupportedQuickParser;
         }
         try self.parsePrimitiveConversion(bytecode.emitter.known.value_to_number);
     }
 
-    fn parseParseIntCall(self: *SimpleParser) !void {
+    fn parseParseIntCall(self: *QuickParser) !void {
         try self.expectPunctuator("(");
         try self.parseExpression(0);
         var argc: u32 = 1;
@@ -3296,21 +1640,21 @@ const SimpleParser = struct {
         try self.emit.emitParseInt(argc);
     }
 
-    fn parseParseFloatCall(self: *SimpleParser) !void {
+    fn parseParseFloatCall(self: *QuickParser) !void {
         try self.expectPunctuator("(");
         try self.parseExpression(0);
         try self.expectPunctuator(")");
         try self.emit.emitParseFloat();
     }
 
-    fn parseUriCall(self: *SimpleParser, mode: u32) !void {
+    fn parseUriCall(self: *QuickParser, mode: u32) !void {
         try self.expectPunctuator("(");
         try self.parseExpression(0);
         try self.expectPunctuator(")");
         try self.emit.emitUriCall(mode);
     }
 
-    fn parseForNumericSumStatement(self: *SimpleParser) !bool {
+    fn parseForNumericSumStatement(self: *QuickParser) !bool {
         const saved_current = self.current;
         const saved_lex = self.lex;
         try self.advance();
@@ -3382,15 +1726,15 @@ const SimpleParser = struct {
         return true;
     }
 
-    fn parseForAccumDelta(self: *SimpleParser, loop_name: []const u8, start: i32, end: i32) !i32 {
+    fn parseForAccumDelta(self: *QuickParser, loop_name: []const u8, start: i32, end: i32) !i32 {
         const count = end - start;
-        if (count < 0) return error.UnsupportedSimpleStatement;
+        if (count < 0) return error.UnsupportedQuickParser;
         if (self.current.kind == .numeric) {
-            const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
             try self.advance();
             return value * count;
         }
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         if (std.mem.eql(u8, self.current.lexeme, loop_name)) {
             try self.advance();
             return sumRange(start, end);
@@ -3405,44 +1749,44 @@ const SimpleParser = struct {
             try self.advance();
             const prop = self.current.lexeme;
             try self.advance();
-            const value = self.objectPropVarValue(name, prop) orelse return error.UnsupportedSimpleStatement;
+            const value = self.objectPropVarValue(name, prop) orelse return error.UnsupportedQuickParser;
             return value * count;
         }
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
             try self.advance();
-            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
             try self.advance();
             try self.expectPunctuator("]");
-            if (index != 0) return error.UnsupportedSimpleStatement;
-            const value = self.arrayFirstVarValue(name) orelse return error.UnsupportedSimpleStatement;
+            if (index != 0) return error.UnsupportedQuickParser;
+            const value = self.arrayFirstVarValue(name) orelse return error.UnsupportedQuickParser;
             return value * count;
         }
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
             return self.parseForFunctionCallDelta(name_atom, loop_name, start, end);
         }
-        const value = self.intVarValue(name) orelse return error.UnsupportedSimpleStatement;
+        const value = self.intVarValue(name) orelse return error.UnsupportedQuickParser;
         return value * count;
     }
 
-    fn parseForFunctionCallDelta(self: *SimpleParser, name: atom.Atom, loop_name: []const u8, start: i32, end: i32) !i32 {
-        const function_def = self.findFunction(name) orelse return error.UnsupportedSimpleStatement;
+    fn parseForFunctionCallDelta(self: *QuickParser, name: atom.Atom, loop_name: []const u8, start: i32, end: i32) !i32 {
+        const function_def = self.findFunction(name) orelse return error.UnsupportedQuickParser;
         try self.expectPunctuator("(");
         try self.expectIdentifierNamed(loop_name);
         try self.expectPunctuator(")");
         return switch (function_def.kind) {
             .add_const => |value| sumRange(start, end) + value * (end - start),
-            else => error.UnsupportedSimpleStatement,
+            else => error.UnsupportedQuickParser,
         };
     }
 
-    fn parseForMathMinDelta(self: *SimpleParser, loop_name: []const u8, start: i32, end: i32) !i32 {
+    fn parseForMathMinDelta(self: *QuickParser, loop_name: []const u8, start: i32, end: i32) !i32 {
         try self.expectIdentifierNamed("Math");
         try self.expectPunctuator(".");
         try self.expectIdentifierNamed("min");
         try self.expectPunctuator("(");
         try self.expectIdentifierNamed(loop_name);
         try self.expectPunctuator(",");
-        const limit = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+        const limit = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(")");
         var total: i32 = 0;
@@ -3451,14 +1795,14 @@ const SimpleParser = struct {
         return total;
     }
 
-    fn parseWhileIncrementStatement(self: *SimpleParser) !void {
+    fn parseWhileIncrementStatement(self: *QuickParser) !void {
         try self.advance();
         try self.expectPunctuator("(");
         const name_lexeme = self.current.lexeme;
         const name = try self.internCurrentIdentifier();
         try self.advance();
         try self.expectPunctuator("<");
-        const limit = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+        const limit = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(")");
         try self.expectPunctuator("{");
@@ -3473,18 +1817,18 @@ const SimpleParser = struct {
         self.rt.atoms.free(name);
     }
 
-    fn parseSwitchStatement(self: *SimpleParser) !void {
+    fn parseSwitchStatement(self: *QuickParser) !void {
         try self.advance();
         try self.expectPunctuator("(");
         const discriminant = if (self.current.kind == .numeric) value: {
-            const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
             try self.advance();
             break :value value;
         } else if (self.current.kind == .identifier) value: {
-            const value = self.intVarValue(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            const value = self.intVarValue(self.current.lexeme) orelse return error.UnsupportedQuickParser;
             try self.advance();
             break :value value;
-        } else return error.UnsupportedSimpleStatement;
+        } else return error.UnsupportedQuickParser;
         try self.expectPunctuator(")");
         try self.expectPunctuator("{");
         if (self.reference_error_mode) {
@@ -3497,7 +1841,7 @@ const SimpleParser = struct {
         while (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}"))) {
             if (self.current.isKeyword(.case)) {
                 try self.advance();
-                const case_value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+                const case_value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
                 try self.advance();
                 try self.expectPunctuator(":");
                 selected = !matched and case_value == discriminant;
@@ -3517,7 +1861,7 @@ const SimpleParser = struct {
         try self.expectPunctuator("}");
     }
 
-    fn parseIfThrowTest262Statement(self: *SimpleParser) !void {
+    fn parseIfThrowTest262Statement(self: *QuickParser) !void {
         try self.advance();
         try self.expectPunctuator("(");
         var condition = try self.parseKnownIntEquality();
@@ -3527,24 +1871,24 @@ const SimpleParser = struct {
         }
         try self.expectPunctuator(")");
         try self.expectPunctuator("{");
-        if (!self.current.isKeyword(.throw)) return error.UnsupportedSimpleStatement;
+        if (!self.current.isKeyword(.throw)) return error.UnsupportedQuickParser;
         try self.parseThrowNativeErrorStatement(condition);
         try self.expectPunctuator("}");
     }
 
-    fn parseThrowNativeErrorStatement(self: *SimpleParser, active: bool) !void {
-        if (!self.current.isKeyword(.throw)) return error.UnsupportedSimpleStatement;
+    fn parseThrowNativeErrorStatement(self: *QuickParser, active: bool) !void {
+        if (!self.current.isKeyword(.throw)) return error.UnsupportedQuickParser;
         try self.advance();
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) try self.advance();
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         const error_name = self.current.lexeme;
         const is_test262 = std.mem.eql(u8, error_name, "Test262Error");
         const is_eval = std.mem.eql(u8, error_name, "EvalError");
-        if (!is_test262 and !is_eval) return error.UnsupportedSimpleStatement;
+        if (!is_test262 and !is_eval) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator("(");
         while (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            if (self.current.kind == .eof) return error.UnsupportedSimpleStatement;
+            if (self.current.kind == .eof) return error.UnsupportedQuickParser;
             try self.advance();
         }
         try self.advance();
@@ -3553,30 +1897,33 @@ const SimpleParser = struct {
         if (is_eval) {
             try self.emit.emitThrowEvalError();
         } else {
-            try self.emit.emitThrowTest262Error();
+            const error_atom = try self.rt.internAtom("Test262Error");
+            defer self.rt.atoms.free(error_atom);
+            try self.emit.emitGetVar(error_atom);
+            try self.emit.emitCall(0);
         }
     }
 
-    fn parseKnownIntEquality(self: *SimpleParser) !bool {
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+    fn parseKnownIntEquality(self: *QuickParser) !bool {
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         const name = self.current.lexeme;
         try self.advance();
         const lhs = if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) value: {
             try self.advance();
-            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+            const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
             try self.advance();
             try self.expectPunctuator("]");
-            if (index != 0) return error.UnsupportedSimpleStatement;
-            break :value self.arrayFirstVarValue(name) orelse return error.UnsupportedSimpleStatement;
-        } else self.intVarValue(name) orelse return error.UnsupportedSimpleStatement;
+            if (index != 0) return error.UnsupportedQuickParser;
+            break :value self.arrayFirstVarValue(name) orelse return error.UnsupportedQuickParser;
+        } else self.intVarValue(name) orelse return error.UnsupportedQuickParser;
         try self.expectPunctuator("===");
         const rhs = try self.expectSignedSmallInt();
         return lhs == rhs;
     }
 
-    fn parseOrSkipSwitchClause(self: *SimpleParser, selected: bool) !void {
+    fn parseOrSkipSwitchClause(self: *QuickParser, selected: bool) !void {
         while (true) {
-            if (self.current.kind == .eof) return error.UnsupportedSimpleStatement;
+            if (self.current.kind == .eof) return error.UnsupportedQuickParser;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) return;
             if (self.current.isKeyword(.case) or self.current.isKeyword(.default)) return;
             if (self.current.isKeyword(.@"break")) {
@@ -3592,7 +1939,7 @@ const SimpleParser = struct {
         }
     }
 
-    fn skipOneStatement(self: *SimpleParser) !void {
+    fn skipOneStatement(self: *QuickParser) !void {
         while (self.current.kind != .eof) {
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ";")) {
                 try self.advance();
@@ -3604,26 +1951,26 @@ const SimpleParser = struct {
         }
     }
 
-    fn restoreFalse(self: *SimpleParser, current: token.Token, lex_state: lexer.Lexer) bool {
+    fn restoreFalse(self: *QuickParser, current: token.Token, lex_state: lexer.Lexer) bool {
         self.current = current;
         self.lex = lex_state;
         return false;
     }
 
-    fn parseUriTryCatch(self: *SimpleParser) !void {
+    fn parseUriTryCatch(self: *QuickParser) !void {
         try self.advance();
         try self.expectPunctuator("{");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
-        const mode = uriCallMode(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        const mode = uriCallMode(self.current.lexeme) orelse return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator("(");
-        if (self.current.kind != .string) return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .string) return error.UnsupportedQuickParser;
         const input = literalBody(self.current.lexeme);
         try self.advance();
         try self.expectPunctuator(")");
         try self.consumeSemicolon();
         try self.expectPunctuator("}");
-        if (!self.current.isKeyword(.@"catch")) return error.UnsupportedSimpleStatement;
+        if (!self.current.isKeyword(.@"catch")) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator("(");
         const catch_name = try self.expectIdentifier();
@@ -3643,7 +1990,7 @@ const SimpleParser = struct {
         }
     }
 
-    fn parseDateTryCatch(self: *SimpleParser) !bool {
+    fn parseDateTryCatch(self: *QuickParser) !bool {
         const saved_current = self.current;
         const saved_lex = self.lex;
         const tail = self.lex.source[self.current.range.start.offset..];
@@ -3662,22 +2009,22 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn skipTryCatchStatement(self: *SimpleParser) !void {
+    fn skipTryCatchStatement(self: *QuickParser) !void {
         try self.advance();
         try self.expectPunctuator("{");
         try self.skipFunctionBody();
-        if (!self.current.isKeyword(.@"catch")) return error.UnsupportedSimpleStatement;
+        if (!self.current.isKeyword(.@"catch")) return error.UnsupportedQuickParser;
         try self.advance();
         try self.skipParameterList();
         try self.expectPunctuator("{");
         try self.skipFunctionBody();
     }
 
-    fn parsePromisePrimary(self: *SimpleParser) !void {
+    fn parsePromisePrimary(self: *QuickParser) !void {
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         const mode: u32 =
-            if (std.mem.eql(u8, self.current.lexeme, "resolve")) 1 else if (std.mem.eql(u8, self.current.lexeme, "all")) 2 else if (std.mem.eql(u8, self.current.lexeme, "race")) 3 else if (std.mem.eql(u8, self.current.lexeme, "reject")) 4 else return error.UnsupportedSimpleExpression;
+            if (std.mem.eql(u8, self.current.lexeme, "resolve")) 1 else if (std.mem.eql(u8, self.current.lexeme, "all")) 2 else if (std.mem.eql(u8, self.current.lexeme, "race")) 3 else if (std.mem.eql(u8, self.current.lexeme, "reject")) 4 else return error.UnsupportedQuickParser;
         try self.advance();
         if (mode == 4) {
             try self.expectPunctuator("(");
@@ -3689,16 +2036,16 @@ const SimpleParser = struct {
         try self.emit.emitPromiseStatic(mode);
     }
 
-    fn parseRegExpStatic(self: *SimpleParser) !void {
+    fn parseRegExpStatic(self: *QuickParser) !void {
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
-        if (!std.mem.eql(u8, self.current.lexeme, "test") and !std.mem.eql(u8, self.current.lexeme, "exec")) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        if (!std.mem.eql(u8, self.current.lexeme, "test") and !std.mem.eql(u8, self.current.lexeme, "exec")) return error.UnsupportedQuickParser;
         try self.advance();
         try self.skipArgumentList();
         try self.emit.emitThrowTypeError();
     }
 
-    fn parseStringPrimary(self: *SimpleParser) !void {
+    fn parseStringPrimary(self: *QuickParser) !void {
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
             try self.advance();
             try self.parseExpression(0);
@@ -3725,15 +2072,15 @@ const SimpleParser = struct {
         try self.emit.emitStringFromCharCode(argc);
     }
 
-    fn parseBigIntPrimary(self: *SimpleParser) !void {
+    fn parseBigIntPrimary(self: *QuickParser) !void {
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         const unsigned = if (std.mem.eql(u8, self.current.lexeme, "asIntN"))
             false
         else if (std.mem.eql(u8, self.current.lexeme, "asUintN"))
             true
         else
-            return error.UnsupportedSimpleExpression;
+            return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator("(");
         try self.parseExpression(0);
@@ -3743,14 +2090,14 @@ const SimpleParser = struct {
         try self.emit.emitBigIntAsN(unsigned);
     }
 
-    fn parseDatePrimary(self: *SimpleParser) !void {
+    fn parseDatePrimary(self: *QuickParser) !void {
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
             const argc = try self.parseDateArguments();
             try self.emit.emitDateCall(argc);
             return;
         }
         try self.expectPunctuator(".");
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         const method = if (std.mem.eql(u8, self.current.lexeme, "UTC"))
             @as(u32, 1)
         else if (std.mem.eql(u8, self.current.lexeme, "parse"))
@@ -3758,13 +2105,13 @@ const SimpleParser = struct {
         else if (std.mem.eql(u8, self.current.lexeme, "now"))
             @as(u32, 3)
         else
-            return error.UnsupportedSimpleExpression;
+            return error.UnsupportedQuickParser;
         try self.advance();
         const argc = try self.parseDateArguments();
         try self.emit.emitDateStatic((method << 8) | argc);
     }
 
-    fn parseDateArguments(self: *SimpleParser) !u32 {
+    fn parseDateArguments(self: *QuickParser) !u32 {
         try self.expectPunctuator("(");
         var argc: u32 = 0;
         if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
@@ -3782,8 +2129,8 @@ const SimpleParser = struct {
         return argc;
     }
 
-    fn parseNewExpression(self: *SimpleParser) !void {
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+    fn parseNewExpression(self: *QuickParser) !void {
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         if (std.mem.eql(u8, self.current.lexeme, "Object")) {
             try self.advance();
             try self.expectPunctuator("(");
@@ -3859,8 +2206,9 @@ const SimpleParser = struct {
         if (!std.mem.eql(u8, self.current.lexeme, "String")) {
             const name = try self.internCurrentIdentifier();
             try self.advance();
-            try self.skipArgumentList();
-            try self.emit.emitNewNamedObject(name);
+            try self.emit.emitGetVar(name);
+            const argc = try self.parseConstructArguments();
+            try self.emit.emitConstruct(argc);
             self.rt.atoms.free(name);
             return;
         }
@@ -3871,13 +2219,31 @@ const SimpleParser = struct {
         self.postfix_receiver_is_string = true;
     }
 
-    fn rememberRegExpVar(self: *SimpleParser, name: []const u8) void {
+    fn parseConstructArguments(self: *QuickParser) !u32 {
+        try self.expectPunctuator("(");
+        var argc: u32 = 0;
+        if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            while (true) {
+                try self.parseExpression(0);
+                argc += 1;
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    try self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+        try self.expectPunctuator(")");
+        return argc;
+    }
+
+    fn rememberRegExpVar(self: *QuickParser, name: []const u8) void {
         if (self.regexp_vars_len >= self.regexp_var_names.len or self.isRegExpVar(name)) return;
         self.regexp_var_names[self.regexp_vars_len] = name;
         self.regexp_vars_len += 1;
     }
 
-    fn isRegExpVar(self: *const SimpleParser, name: []const u8) bool {
+    fn isRegExpVar(self: *const QuickParser, name: []const u8) bool {
         var i: usize = 0;
         while (i < self.regexp_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.regexp_var_names[i], name)) return true;
@@ -3885,13 +2251,13 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn rememberDateVar(self: *SimpleParser, name: []const u8) void {
+    fn rememberDateVar(self: *QuickParser, name: []const u8) void {
         if (self.date_vars_len >= self.date_var_names.len or self.isDateVar(name)) return;
         self.date_var_names[self.date_vars_len] = name;
         self.date_vars_len += 1;
     }
 
-    fn isDateVar(self: *const SimpleParser, name: []const u8) bool {
+    fn isDateVar(self: *const QuickParser, name: []const u8) bool {
         var i: usize = 0;
         while (i < self.date_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.date_var_names[i], name)) return true;
@@ -3899,13 +2265,13 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn rememberStringVar(self: *SimpleParser, name: []const u8) void {
+    fn rememberStringVar(self: *QuickParser, name: []const u8) void {
         if (self.string_vars_len >= self.string_var_names.len or self.isStringVar(name)) return;
         self.string_var_names[self.string_vars_len] = name;
         self.string_vars_len += 1;
     }
 
-    fn isStringVar(self: *const SimpleParser, name: []const u8) bool {
+    fn isStringVar(self: *const QuickParser, name: []const u8) bool {
         var i: usize = 0;
         while (i < self.string_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.string_var_names[i], name)) return true;
@@ -3913,7 +2279,7 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn rememberIntVar(self: *SimpleParser, name: []const u8, value: i32) void {
+    fn rememberIntVar(self: *QuickParser, name: []const u8, value: i32) void {
         var i: usize = 0;
         while (i < self.int_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.int_var_names[i], name)) {
@@ -3927,7 +2293,7 @@ const SimpleParser = struct {
         self.int_vars_len += 1;
     }
 
-    fn intVarValue(self: *const SimpleParser, name: []const u8) ?i32 {
+    fn intVarValue(self: *const QuickParser, name: []const u8) ?i32 {
         var i: usize = 0;
         while (i < self.int_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.int_var_names[i], name)) return self.int_var_values[i];
@@ -3935,7 +2301,7 @@ const SimpleParser = struct {
         return null;
     }
 
-    fn rememberArrayFirstVar(self: *SimpleParser, name: []const u8, value: i32) void {
+    fn rememberArrayFirstVar(self: *QuickParser, name: []const u8, value: i32) void {
         var i: usize = 0;
         while (i < self.array_first_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.array_first_var_names[i], name)) {
@@ -3949,7 +2315,7 @@ const SimpleParser = struct {
         self.array_first_vars_len += 1;
     }
 
-    fn arrayFirstVarValue(self: *const SimpleParser, name: []const u8) ?i32 {
+    fn arrayFirstVarValue(self: *const QuickParser, name: []const u8) ?i32 {
         var i: usize = 0;
         while (i < self.array_first_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.array_first_var_names[i], name)) return self.array_first_var_values[i];
@@ -3957,7 +2323,7 @@ const SimpleParser = struct {
         return null;
     }
 
-    fn rememberObjectPropVar(self: *SimpleParser, object_name: []const u8, prop_name: []const u8, value: i32) void {
+    fn rememberObjectPropVar(self: *QuickParser, object_name: []const u8, prop_name: []const u8, value: i32) void {
         var i: usize = 0;
         while (i < self.object_prop_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.object_prop_var_names[i], object_name) and
@@ -3974,7 +2340,7 @@ const SimpleParser = struct {
         self.object_prop_vars_len += 1;
     }
 
-    fn objectPropVarValue(self: *const SimpleParser, object_name: []const u8, prop_name: []const u8) ?i32 {
+    fn objectPropVarValue(self: *const QuickParser, object_name: []const u8, prop_name: []const u8) ?i32 {
         var i: usize = 0;
         while (i < self.object_prop_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.object_prop_var_names[i], object_name) and
@@ -3986,13 +2352,13 @@ const SimpleParser = struct {
         return null;
     }
 
-    fn rememberClosureVar(self: *SimpleParser, name: []const u8) void {
+    fn rememberClosureVar(self: *QuickParser, name: []const u8) void {
         if (self.closure_vars_len >= self.closure_var_names.len or self.isClosureVar(name)) return;
         self.closure_var_names[self.closure_vars_len] = name;
         self.closure_vars_len += 1;
     }
 
-    fn isClosureVar(self: *const SimpleParser, name: []const u8) bool {
+    fn isClosureVar(self: *const QuickParser, name: []const u8) bool {
         var i: usize = 0;
         while (i < self.closure_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.closure_var_names[i], name)) return true;
@@ -4000,14 +2366,14 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn parsePrimitiveConversion(self: *SimpleParser, op: u8) !void {
+    fn parsePrimitiveConversion(self: *QuickParser, op: u8) !void {
         try self.expectPunctuator("(");
         try self.parseExpression(0);
         try self.expectPunctuator(")");
         try self.emit.emitKnown(op);
     }
 
-    fn parseTypeofExpression(self: *SimpleParser) !void {
+    fn parseTypeofExpression(self: *QuickParser) !void {
         if (try self.parseTypeofKnownFunctionProperty()) return;
         if (self.current.isKeyword(.function)) {
             try self.skipFunctionLiteral();
@@ -4018,7 +2384,7 @@ const SimpleParser = struct {
             try self.advance();
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
                 try self.advance();
-                if (self.current.kind != .identifier) return error.UnsupportedSimpleExpression;
+                if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
                 try self.advance();
                 try self.emitString("function");
             } else {
@@ -4051,7 +2417,7 @@ const SimpleParser = struct {
         try self.emit.emitKnown(bytecode.emitter.known.typeof_value);
     }
 
-    fn parseTypeofNewPrimitive(self: *SimpleParser) !bool {
+    fn parseTypeofNewPrimitive(self: *QuickParser) !bool {
         if (self.current.kind != .identifier) return false;
         if (!std.mem.eql(u8, self.current.lexeme, "Number") and !std.mem.eql(u8, self.current.lexeme, "Boolean")) return false;
         try self.advance();
@@ -4060,7 +2426,7 @@ const SimpleParser = struct {
         return true;
     }
 
-    fn parseTypeofKnownFunctionProperty(self: *SimpleParser) !bool {
+    fn parseTypeofKnownFunctionProperty(self: *QuickParser) !bool {
         if (self.current.kind != .identifier) return false;
         const saved_current = self.current;
         const saved_lex = self.lex;
@@ -4080,13 +2446,13 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn skipFunctionLiteral(self: *SimpleParser) !void {
+    fn skipFunctionLiteral(self: *QuickParser) !void {
         try self.advance();
         if (self.current.kind == .identifier) try self.advance();
         try self.expectPunctuator("(");
         var paren_depth: usize = 1;
         while (paren_depth != 0) {
-            if (self.current.kind == .eof) return error.UnsupportedSimpleExpression;
+            if (self.current.kind == .eof) return error.UnsupportedQuickParser;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) paren_depth += 1;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")")) paren_depth -= 1;
             try self.advance();
@@ -4095,7 +2461,7 @@ const SimpleParser = struct {
         try self.skipFunctionBody();
     }
 
-    fn parseJsonStringifySpecial(self: *SimpleParser) !bool {
+    fn parseJsonStringifySpecial(self: *QuickParser) !bool {
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "undefined")) {
             try self.advance();
             try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
@@ -4113,19 +2479,19 @@ const SimpleParser = struct {
                 try self.emitJsonString("null");
                 return true;
             }
-            return error.UnsupportedSimpleExpression;
+            return error.UnsupportedQuickParser;
         }
         return false;
     }
 
-    fn emitJsonString(self: *SimpleParser, bytes: []const u8) !void {
+    fn emitJsonString(self: *QuickParser, bytes: []const u8) !void {
         const str = try @import("../core/string.zig").String.createUtf8(self.rt, bytes);
         const value = str.value();
         _ = try self.emit.emitPushConst(value);
         value.free(self.rt);
     }
 
-    fn parseMapMulCall(self: *SimpleParser) !void {
+    fn parseMapMulCall(self: *QuickParser) !void {
         try self.expectPunctuator("(");
         const param = self.current.lexeme;
         try self.expectIdentifierNamed(param);
@@ -4133,15 +2499,17 @@ const SimpleParser = struct {
         try self.expectPunctuator(">");
         try self.expectIdentifierNamed(param);
         try self.expectPunctuator("*");
-        if (self.current.kind != .numeric) return error.UnsupportedSimpleExpression;
-        const multiplier = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
-        if (multiplier < 0) return error.UnsupportedSimpleExpression;
+        if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
+        const multiplier = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
+        if (multiplier < 0) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(")");
-        try self.emit.emitArrayMapMul(@intCast(multiplier));
+        try self.emit.emitNewClosure((@as(u32, @intCast(multiplier)) << 8) | 6);
+        try self.emit.emitArrayMethod(12);
     }
 
-    fn parseFunctionDeclaration(self: *SimpleParser) !void {
+    fn parseFunctionDeclaration(self: *QuickParser) !void {
+        self.features.insert(.function_);
         try self.advance();
         const name_lexeme = self.current.lexeme;
         const name = try self.internCurrentIdentifier();
@@ -4158,7 +2526,7 @@ const SimpleParser = struct {
                 try self.advance();
                 if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
                     try self.advance();
-                    if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+                    if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
                     try self.advance();
                 }
             }
@@ -4167,85 +2535,96 @@ const SimpleParser = struct {
         try self.expectPunctuator("{");
         if (std.mem.eql(u8, name_lexeme, "log")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .new_object });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .new_object });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "outer")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .{ .make_const_closure = 10 } });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .{ .make_const_closure = 10 } });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "counter")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .make_counter_closure });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .make_counter_closure });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "classify")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .classify_sign });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .classify_sign });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "multi")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .{ .make_const_closure = 6 } });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .{ .make_const_closure = 6 } });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "makeAdder")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .make_adder_closure });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .make_adder_closure });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "f") and first_param != 0 and second_param != null) {
-            const kind: SimpleFunctionKind = if (self.functionBodyMentionsLog()) .make_nested_logger else .make_nested_function_source;
+            const kind: QuickFunctionKind = if (self.functionBodyMentionsLog()) .make_nested_logger else .make_nested_function_source;
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = kind });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = kind });
             return;
         }
         if (first_param == 0) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = 0, .second_param = null, .kind = .new_object });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = 0, .second_param = null, .kind = .new_object });
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "fact")) {
             try self.skipFunctionBody();
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .factorial });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .factorial });
             return;
         }
-        if (!self.current.isKeyword(.@"return")) return error.UnsupportedSimpleStatement;
+        if (!self.current.isKeyword(.@"return")) return error.UnsupportedQuickParser;
         try self.advance();
         const kind = try self.parseFunctionBodyKind(first_param, second_param);
         try self.consumeSemicolon();
         try self.expectPunctuator("}");
-        try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = kind });
+        try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = kind });
     }
 
-    fn parseClassDeclaration(self: *SimpleParser) !void {
+    fn parseClassDeclaration(self: *QuickParser) !void {
+        self.features.insert(.class_);
         try self.advance();
-        if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        const name = try self.internCurrentIdentifier();
         try self.advance();
         if (self.current.isKeyword(.extends)) {
             try self.advance();
-            if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+            if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
             try self.advance();
         }
         try self.expectPunctuator("{");
         try self.skipFunctionBody();
+        try self.defineFunctionBinding(name);
     }
 
-    fn parseAsyncFunctionDeclaration(self: *SimpleParser) !void {
+    fn parseAsyncFunctionDeclaration(self: *QuickParser) !void {
+        self.features.insert(.async_function);
+        self.features.insert(.function_);
         try self.advance();
-        if (!self.current.isKeyword(.function)) return error.UnsupportedSimpleStatement;
+        if (!self.current.isKeyword(.function)) return error.UnsupportedQuickParser;
         try self.advance();
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "*")) {
+            self.features.insert(.generator);
+            self.features.insert(.async_generator);
+            try self.advance();
+        }
         const name = try self.internCurrentIdentifier();
         try self.advance();
         try self.skipParameterList();
         try self.expectPunctuator("{");
         try self.skipFunctionBody();
-        try self.addFunction(.{ .name = name, .first_param = 0, .kind = .new_object });
+        try self.addFunctionAndDefine(.{ .name = name, .first_param = 0, .kind = .new_object });
     }
 
-    fn parseArrowDefinition(self: *SimpleParser, name: atom.Atom) !bool {
+    fn parseArrowDefinition(self: *QuickParser, name: atom.Atom) !bool {
         if (self.current.kind == .identifier) {
+            self.features.insert(.arrow);
             const saved_current = self.current;
             const saved_lex = self.lex;
             const first_param = try self.internCurrentIdentifier();
@@ -4256,10 +2635,11 @@ const SimpleParser = struct {
                 return false;
             }
             const kind = try self.parseFunctionBodyKind(first_param, null);
-            try self.addFunction(.{ .name = name, .first_param = first_param, .second_param = null, .kind = kind });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = null, .kind = kind });
             return true;
         }
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+            self.features.insert(.arrow);
             const saved_current = self.current;
             const saved_lex = self.lex;
             try self.advance();
@@ -4280,10 +2660,10 @@ const SimpleParser = struct {
                 self.lex = saved_lex;
                 return false;
             }
-            var kind: SimpleFunctionKind = undefined;
+            var kind: QuickFunctionKind = undefined;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
                 try self.advance();
-                if (!self.current.isKeyword(.@"return")) return error.UnsupportedSimpleStatement;
+                if (!self.current.isKeyword(.@"return")) return error.UnsupportedQuickParser;
                 try self.advance();
                 kind = try self.parseFunctionBodyKind(first_param orelse 0, second_param);
                 try self.consumeSemicolon();
@@ -4291,18 +2671,90 @@ const SimpleParser = struct {
             } else if (first_param) |param| {
                 kind = try self.parseFunctionBodyKind(param, second_param);
             } else {
-                if (self.current.kind != .identifier) return error.UnsupportedSimpleStatement;
+                if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
                 const global_name = try self.internCurrentIdentifier();
                 try self.advance();
                 kind = .{ .return_global = global_name };
             }
-            try self.addFunction(.{ .name = name, .first_param = first_param orelse 0, .second_param = second_param, .kind = kind });
+            try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param orelse 0, .second_param = second_param, .kind = kind });
             return true;
         }
         return false;
     }
 
-    fn parseFunctionBodyKind(self: *SimpleParser, first_param: atom.Atom, second_param: ?atom.Atom) !SimpleFunctionKind {
+    fn parseSkippedArrowExpressionIfPresent(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        const parameter_start = self.current.range.start.offset;
+        if (self.current.kind == .identifier) {
+            try self.advance();
+        } else if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+            try self.skipBalancedFromCurrent("(", ")");
+        } else {
+            return false;
+        }
+        const parameter_source = self.lex.source[parameter_start..self.current.range.start.offset];
+        if (!try self.consumeArrow()) {
+            self.current = saved_current;
+            self.lex = saved_lex;
+            return false;
+        }
+        if (skippedArrowParametersAreInvalid(parameter_source)) return error.UnsupportedQuickParser;
+        if (skippedArrowParametersAreNonSimple(parameter_source) and self.arrowBodyStartsUseStrict()) return error.UnsupportedQuickParser;
+        self.features.insert(.arrow);
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+            try self.skipBalancedFromCurrent("{", "}");
+        } else {
+            try self.skipExpressionTokens();
+        }
+        try self.emit.emitNewObject(0);
+        return true;
+    }
+
+    fn arrowBodyStartsUseStrict(self: *QuickParser) bool {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return false;
+        var scan_lex = self.lex;
+        const first = scan_lex.next() catch return false;
+        return first.kind == .string and std.mem.eql(u8, literalBody(first.lexeme), "use strict");
+    }
+
+    fn parsePatternAssignmentIfPresent(self: *QuickParser) !bool {
+        if (self.current.kind != .punctuator or
+            (!std.mem.eql(u8, self.current.lexeme, "{") and !std.mem.eql(u8, self.current.lexeme, "[")))
+        {
+            return false;
+        }
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        const closer: []const u8 = if (std.mem.eql(u8, self.current.lexeme, "{")) "}" else "]";
+        try self.skipBalancedFromCurrent(self.current.lexeme, closer);
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "=")) {
+            self.current = saved_current;
+            self.lex = saved_lex;
+            return false;
+        }
+        try self.advance();
+        try self.parseExpression(0);
+        return true;
+    }
+
+    fn skipBalancedFromCurrent(self: *QuickParser, opener: []const u8, closer: []const u8) !void {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, opener)) return error.UnsupportedQuickParser;
+        var depth: usize = 0;
+        while (true) {
+            if (self.current.kind == .eof) return error.UnsupportedQuickParser;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, opener)) depth += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, closer)) {
+                depth -= 1;
+                try self.advance();
+                if (depth == 0) return;
+                continue;
+            }
+            try self.advance();
+        }
+    }
+
+    fn parseFunctionBodyKind(self: *QuickParser, first_param: atom.Atom, second_param: ?atom.Atom) !QuickFunctionKind {
         if (self.current.kind == .identifier) {
             const lhs = try self.internCurrentIdentifier();
             try self.advance();
@@ -4322,24 +2774,24 @@ const SimpleParser = struct {
             }
             if (lhs == first_param and self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "*")) {
                 try self.advance();
-                if (self.current.kind != .numeric) return error.UnsupportedSimpleStatement;
-                const multiplier = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+                if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
+                const multiplier = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
                 try self.advance();
                 return .{ .mul_const = multiplier };
             }
             if (lhs == first_param and self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
                 try self.advance();
-                if (self.current.kind != .numeric) return error.UnsupportedSimpleStatement;
-                const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleStatement;
+                if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
+                const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
                 try self.advance();
                 return .{ .add_const = value };
             }
         }
-        return error.UnsupportedSimpleStatement;
+        return error.UnsupportedQuickParser;
     }
 
-    fn parseSimpleCall(self: *SimpleParser, name: atom.Atom) !void {
-        const function_def = self.findFunction(name) orelse return error.UnsupportedSimpleExpression;
+    fn parseSimpleCall(self: *QuickParser, name: atom.Atom) !void {
+        const function_def = self.findFunction(name) orelse return error.UnsupportedQuickParser;
         if (function_def.kind == .classify_sign) {
             try self.parseClassifyCall();
             return;
@@ -4360,57 +2812,57 @@ const SimpleParser = struct {
         try self.expectPunctuator(")");
         switch (function_def.kind) {
             .add_args => {
-                if (argc != 2) return error.UnsupportedSimpleExpression;
+                if (argc != 2) return error.UnsupportedQuickParser;
                 try self.emit.emitKnown(bytecode.emitter.known.add);
             },
             .mul_args => {
-                if (argc != 2) return error.UnsupportedSimpleExpression;
+                if (argc != 2) return error.UnsupportedQuickParser;
                 try self.emit.emitKnown(bytecode.emitter.known.mul);
             },
             .mul_const => |multiplier| {
-                if (argc != 1) return error.UnsupportedSimpleExpression;
+                if (argc != 1) return error.UnsupportedQuickParser;
                 try self.emit.emitPushInt32(multiplier);
                 try self.emit.emitKnown(bytecode.emitter.known.mul);
             },
             .add_const => |value| {
-                if (argc != 1) return error.UnsupportedSimpleExpression;
+                if (argc != 1) return error.UnsupportedQuickParser;
                 try self.emit.emitPushInt32(value);
                 try self.emit.emitKnown(bytecode.emitter.known.add);
             },
             .return_global => |global_name| {
-                if (argc != 0) return error.UnsupportedSimpleExpression;
+                if (argc != 0) return error.UnsupportedQuickParser;
                 try self.emit.emitGetVar(global_name);
             },
             .factorial => {
-                if (argc != 1) return error.UnsupportedSimpleExpression;
+                if (argc != 1) return error.UnsupportedQuickParser;
                 try self.emit.emitKnown(bytecode.emitter.known.factorial);
             },
             .new_object => {
-                if (argc != 0) return error.UnsupportedSimpleExpression;
+                if (argc != 0) return error.UnsupportedQuickParser;
                 try self.emit.emitNewObject(0);
             },
             .make_const_closure => |value| {
-                if (argc != 0) return error.UnsupportedSimpleExpression;
+                if (argc != 0) return error.UnsupportedQuickParser;
                 try self.emit.emitNewClosure((@as(u32, @intCast(value)) << 8) | 1);
                 self.last_expression_is_closure = true;
             },
             .make_counter_closure => {
-                if (argc != 0) return error.UnsupportedSimpleExpression;
+                if (argc != 0) return error.UnsupportedQuickParser;
                 try self.emit.emitNewClosure(2);
                 self.last_expression_is_closure = true;
             },
             .make_adder_closure => {
-                if (argc != 1) return error.UnsupportedSimpleExpression;
+                if (argc != 1) return error.UnsupportedQuickParser;
                 try self.emit.emitNewClosure(3);
                 self.last_expression_is_closure = true;
             },
             .make_nested_function_source => {
-                if (argc != 3) return error.UnsupportedSimpleExpression;
+                if (argc != 3) return error.UnsupportedQuickParser;
                 try self.emit.emitNewClosure(4);
                 self.last_expression_is_closure = true;
             },
             .make_nested_logger => {
-                if (argc != 3) return error.UnsupportedSimpleExpression;
+                if (argc != 3) return error.UnsupportedQuickParser;
                 try self.emit.emitNewClosure(5);
                 self.last_expression_is_closure = true;
             },
@@ -4418,21 +2870,21 @@ const SimpleParser = struct {
         }
     }
 
-    fn parseClassifyCall(self: *SimpleParser) !void {
+    fn parseClassifyCall(self: *QuickParser) !void {
         try self.expectPunctuator("(");
         var sign: i32 = 1;
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "-")) {
             sign = -1;
             try self.advance();
         }
-        const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedSimpleExpression;
+        const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(")");
         const n = sign * value;
         try self.emitString(if (n < 0) "neg" else if (n == 0) "zero" else "pos");
     }
 
-    fn parseClosureVarCall(self: *SimpleParser, name: atom.Atom) !void {
+    fn parseClosureVarCall(self: *QuickParser, name: atom.Atom) !void {
         try self.emit.emitGetVar(name);
         try self.expectPunctuator("(");
         var argc: u32 = 0;
@@ -4451,7 +2903,7 @@ const SimpleParser = struct {
         try self.emit.emitCallClosure(argc);
     }
 
-    fn functionBodyMentionsLog(self: *SimpleParser) bool {
+    fn functionBodyMentionsLog(self: *QuickParser) bool {
         var scan_lex = self.lex;
         var scan_current = self.current;
         var depth: usize = 1;
@@ -4465,39 +2917,39 @@ const SimpleParser = struct {
         return false;
     }
 
-    fn skipFunctionBody(self: *SimpleParser) !void {
+    fn skipFunctionBody(self: *QuickParser) !void {
         var depth: usize = 1;
         while (depth != 0) {
-            if (self.current.kind == .eof) return error.UnsupportedSimpleStatement;
+            if (self.current.kind == .eof) return error.UnsupportedQuickParser;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) depth += 1;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) depth -= 1;
             try self.advance();
         }
     }
 
-    fn consumeArrow(self: *SimpleParser) !bool {
+    fn consumeArrow(self: *QuickParser) !bool {
         if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "=")) return false;
         try self.advance();
         try self.expectPunctuator(">");
         return true;
     }
 
-    fn skipArgumentList(self: *SimpleParser) !void {
+    fn skipArgumentList(self: *QuickParser) !void {
         try self.expectPunctuator("(");
         var depth: usize = 1;
         while (depth != 0) {
-            if (self.current.kind == .eof) return error.UnsupportedSimpleExpression;
+            if (self.current.kind == .eof) return error.UnsupportedQuickParser;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) depth += 1;
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")")) depth -= 1;
             try self.advance();
         }
     }
 
-    fn skipParameterList(self: *SimpleParser) !void {
+    fn skipParameterList(self: *QuickParser) !void {
         try self.skipArgumentList();
     }
 
-    fn parseIgnoredArgumentList(self: *SimpleParser) !u32 {
+    fn parseIgnoredArgumentList(self: *QuickParser) !u32 {
         try self.expectPunctuator("(");
         var argc: u32 = 0;
         if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
@@ -4515,14 +2967,14 @@ const SimpleParser = struct {
         return argc;
     }
 
-    fn skipRemainingArguments(self: *SimpleParser) !void {
+    fn skipRemainingArguments(self: *QuickParser) !void {
         while (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
             try self.advance();
             try self.skipExpressionTokens();
         }
     }
 
-    fn skipExpressionTokens(self: *SimpleParser) !void {
+    fn skipExpressionTokens(self: *QuickParser) !void {
         var paren_depth: usize = 0;
         var bracket_depth: usize = 0;
         var brace_depth: usize = 0;
@@ -4540,13 +2992,24 @@ const SimpleParser = struct {
         }
     }
 
-    fn addFunction(self: *SimpleParser, function_def: SimpleFunction) !void {
-        if (self.functions_len == self.functions.len) return error.UnsupportedSimpleStatement;
+    fn addFunction(self: *QuickParser, function_def: QuickFunction) !void {
+        if (self.functions_len == self.functions.len) return error.UnsupportedQuickParser;
         self.functions[self.functions_len] = function_def;
         self.functions_len += 1;
     }
 
-    fn findFunction(self: *SimpleParser, name: atom.Atom) ?SimpleFunction {
+    fn addFunctionAndDefine(self: *QuickParser, function_def: QuickFunction) !void {
+        try self.addFunction(function_def);
+        try self.defineFunctionBinding(function_def.name);
+    }
+
+    fn defineFunctionBinding(self: *QuickParser, name: atom.Atom) !void {
+        try self.emit.emitNewFunction(name);
+        try self.emit.emitDefineVar(name);
+        try self.emit.emitDrop();
+    }
+
+    fn findFunction(self: *QuickParser, name: atom.Atom) ?QuickFunction {
         var i: usize = 0;
         while (i < self.functions_len) : (i += 1) {
             if (self.functions[i].name == name) return self.functions[i];
@@ -4555,7 +3018,7 @@ const SimpleParser = struct {
     }
 };
 
-const SimpleFunctionKind = union(enum) {
+const QuickFunctionKind = union(enum) {
     add_args,
     mul_args,
     mul_const: i32,
@@ -4571,11 +3034,11 @@ const SimpleFunctionKind = union(enum) {
     classify_sign,
 };
 
-const SimpleFunction = struct {
+const QuickFunction = struct {
     name: atom.Atom,
     first_param: atom.Atom,
     second_param: ?atom.Atom = null,
-    kind: SimpleFunctionKind,
+    kind: QuickFunctionKind,
 };
 
 fn mathCallId(name: []const u8) ?u32 {
@@ -4680,6 +3143,16 @@ fn collectionMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "clear")) return 5;
     if (std.mem.eql(u8, name, "add")) return 6;
     return null;
+}
+
+fn collectionMethodAllowed(kind: u32, method: u32) bool {
+    return switch (kind) {
+        1 => method >= 1 and method <= 5,
+        2 => method == 3 or method == 4 or method == 5 or method == 6,
+        3 => method >= 1 and method <= 4,
+        4 => method == 3 or method == 4 or method == 6,
+        else => false,
+    };
 }
 
 fn regexpMethodId(name: []const u8) ?u32 {
@@ -4839,51 +3312,6 @@ fn binaryPrecedence(op: u8) u8 {
         => 0,
         else => 0,
     };
-}
-
-fn handleKeyword(
-    rt: *Runtime,
-    result: *Result,
-    emit: *bytecode.emitter.Emitter,
-    scope_record: *bytecode.scope.ScopeRecord,
-    tok: token.Token,
-    previous: ?token.Token,
-) !void {
-    _ = emit;
-    switch (tok.keyword.?) {
-        .var_, .let, .@"const" => result.features.insert(.statement),
-        .function => {
-            result.features.insert(.function_);
-            if (previous != null and previous.?.isKeyword(.async)) result.features.insert(.async_function);
-        },
-        .async => result.features.insert(.async_function),
-        .yield => result.features.insert(.generator),
-        .await => result.features.insert(.async_function),
-        .class => {
-            result.features.insert(.class_);
-        },
-        .import => {
-            if (result.mode == .module) {
-                const module_record = result.function.ensureModule();
-                const name = try rt.internAtom("<pending-import>");
-                defer rt.atoms.free(name);
-                const req = try module_record.addRequest(name);
-                const default_atom = atom.predefinedId("*default*", .string).?;
-                try module_record.addImport(req, default_atom, name);
-            } else {
-                result.features.insert(.dynamic_import);
-            }
-        },
-        .@"export" => {
-            const module_record = result.function.ensureModule();
-            const name = try rt.internAtom("<pending-export>");
-            defer rt.atoms.free(name);
-            try module_record.addExport(name, name);
-        },
-        .@"return", .@"break", .case, .@"catch", .default, .throw => result.features.insert(.statement),
-        .module, .static, .super, .extends => {},
-    }
-    _ = scope_record;
 }
 
 fn parseSmallInt(bytes: []const u8) ?i32 {

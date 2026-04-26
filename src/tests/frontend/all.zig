@@ -21,17 +21,30 @@ fn countOpcode(code: []const u8, opcode: u8) usize {
             engine.bytecode.emitter.known.push_const,
             engine.bytecode.emitter.known.get_var,
             engine.bytecode.emitter.known.define_var,
+            engine.bytecode.emitter.known.new_function,
+            engine.bytecode.emitter.known.construct,
             engine.bytecode.emitter.known.new_array,
             engine.bytecode.emitter.known.get_index,
-            engine.bytecode.emitter.known.array_map_mul,
             engine.bytecode.emitter.known.call,
             engine.bytecode.emitter.known.get_prop,
             engine.bytecode.emitter.known.optional_get_prop,
             engine.bytecode.emitter.known.set_prop,
             engine.bytecode.emitter.known.array_method,
             engine.bytecode.emitter.known.math_call,
+            engine.bytecode.emitter.known.uri_call,
+            engine.bytecode.emitter.known.promise_static,
+            engine.bytecode.emitter.known.new_collection,
+            engine.bytecode.emitter.known.collection_method,
+            engine.bytecode.emitter.known.new_closure,
+            engine.bytecode.emitter.known.parse_int,
+            engine.bytecode.emitter.known.date_call,
+            engine.bytecode.emitter.known.date_static,
+            engine.bytecode.emitter.known.date_method,
+            engine.bytecode.emitter.known.new_date,
+            engine.bytecode.emitter.known.regexp_method,
             engine.bytecode.emitter.known.string_method,
             => 5,
+            engine.bytecode.emitter.known.for_in_next => 9,
             else => 1,
         };
     }
@@ -145,7 +158,6 @@ test "print calls emit global lookup property lookup and generic call bytecode" 
     var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
     defer parsed.deinit();
 
-    try std.testing.expect(!parsed.usedTransitionalCompiler());
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
 
     var get_var_count: usize = 0;
@@ -292,15 +304,150 @@ test "quick parser preserves parenthesized postfix bases" {
     try std.testing.expectEqual(@as(usize, 1), get_index_count);
 }
 
-test "quick parser keeps legacy builtin domains on transitional path" {
+test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
-    var parsed = try frontend.parser.parse(rt, "print(JSON.stringify({ a: 1 }));", .{ .mode = .script, .filename = "quick-legacy-domain-fallback.js" });
+    var parsed = try frontend.parser.parse(rt, "const text = JSON.stringify({ a: 1 }); print(JSON.parse(text).a);", .{ .mode = .script, .filename = "quick-json-domain.js" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(frontend.parser.ParsePath.transitional_fixture_compiler, parsed.parse_path);
-    try std.testing.expect(parsed.usedTransitionalCompiler());
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.json_stringify));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.json_parse));
+}
+
+test "quick parser lowers Math calls to transitional Math bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "print(Math.abs(-5)); print(Math.pow(2, 3)); print(Math.min(1, 2, 3));", .{ .mode = .script, .filename = "quick-math-domain.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.emitter.known.math_call));
+}
+
+test "quick parser lowers URI calls to transitional URI bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "console.log(encodeURI(\"a b?x=1&y=2#z\")); print(decodeURIComponent(\"a%20b%3Fx%3D1\"));", .{ .mode = .script, .filename = "quick-uri-domain.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(parsed.function.code, engine.bytecode.emitter.known.uri_call));
+}
+
+test "quick parser lowers Number parse helpers to transitional number bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "print(parseInt(\"0x10\")); print(parseInt(\"0x10\", 10)); print(parseFloat(\"1.5x\")); print(Number.parseInt(\"42\")); print(Number.parseFloat(\"3.14\")); print(Number.NaN); print(Number.POSITIVE_INFINITY); print(Number.NEGATIVE_INFINITY);",
+        .{ .mode = .script, .filename = "quick-number-parse-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.emitter.known.parse_int));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(parsed.function.code, engine.bytecode.emitter.known.parse_float));
+}
+
+test "quick parser lowers supported Date helpers to transitional Date bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "print(Date()); print(Date.UTC(2024, 0, 1)); print(Date.parse(\"2024-01-01T00:00:00Z\")); print(Date.now()); const d = new Date(0); print(d.getTime()); print(d.toISOString());",
+        .{ .mode = .script, .filename = "quick-date-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.date_call));
+    try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.emitter.known.date_static));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_date));
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(parsed.function.code, engine.bytecode.emitter.known.date_method));
+}
+
+test "quick parser lowers supported RegExp helpers to transitional RegExp bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "const r = new RegExp(\"a\", \"g\"); print(r.toString()); print(r.test(\"a\")); print(r.exec(\"a\"));",
+        .{ .mode = .script, .filename = "quick-regexp-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_regexp));
+    try std.testing.expectEqual(@as(usize, 3), countOpcode(parsed.function.code, engine.bytecode.emitter.known.regexp_method));
+}
+
+test "quick parser lowers supported Promise helpers to transitional Promise bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        \\const p = new Promise((resolve, reject) => {
+        \\    resolve(1);
+        \\});
+        \\print(typeof p);
+        \\print(Promise.resolve(1));
+        \\print(Promise.all([1, 2]));
+        \\print(Promise.race([Promise.resolve(3), 4]));
+        \\print(Promise.reject(1));
+    ,
+        .{ .mode = .script, .filename = "quick-promise-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_promise));
+    try std.testing.expectEqual(@as(usize, 4), countOpcode(parsed.function.code, engine.bytecode.emitter.known.promise_static));
+}
+
+test "quick parser lowers supported collection helpers to transitional collection bytecode" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        \\const map = new Map();
+        \\map.set("key", 1);
+        \\print(map.get("key"));
+        \\print(map.has("key"));
+        \\print(map.delete("key"));
+        \\map.clear();
+        \\const set = new Set();
+        \\set.add(1);
+        \\print(set.has(1));
+        \\print(set.delete(1));
+        \\set.clear();
+        \\const weakMap = new WeakMap();
+        \\const key = {};
+        \\weakMap.set(key, 2);
+        \\print(weakMap.get(key));
+        \\print(weakMap.has(key));
+        \\print(weakMap.delete(key));
+        \\const weakSet = new WeakSet();
+        \\const weakKey = {};
+        \\weakSet.add(weakKey);
+        \\print(weakSet.has(weakKey));
+        \\print(weakSet.delete(weakKey));
+    ,
+        .{ .mode = .script, .filename = "quick-collection-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 4), countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_collection));
+    try std.testing.expectEqual(@as(usize, 16), countOpcode(parsed.function.code, engine.bytecode.emitter.known.collection_method));
 }
 
 test "template interpolation emits string concatenation" {
@@ -326,7 +473,7 @@ test "simple arrays emit array helper bytecode" {
 
     const new_array_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.new_array);
     const get_index_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_index);
-    const map_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.array_map_mul);
+    const map_count = countOpcode(parsed.function.code, engine.bytecode.emitter.known.array_method);
     try std.testing.expectEqual(@as(usize, 1), new_array_count);
     try std.testing.expectEqual(@as(usize, 1), get_index_count);
     try std.testing.expectEqual(@as(usize, 1), map_count);
@@ -352,16 +499,36 @@ test "simple functions and arrows emit inline helper bytecode" {
     try std.testing.expectEqual(@as(usize, 1), factorial_count);
 }
 
-test "unsupported simple candidate falls back to transitional scanner" {
+test "unsupported spread call reports syntax guard" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
     defer parsed.deinit();
 
+    try std.testing.expect(parsed.syntax_error != null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.syntax_error_guard, parsed.parse_path);
+}
+
+test "test262 frontmatter does not affect quick parser behavior" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        "/*---\n" ++
+        "negative:\n" ++
+        "  phase: runtime\n" ++
+        "  type: Test262Error\n" ++
+        "---*/\n" ++
+        "assert.sameValue(1 + 1, 2);";
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "metadata.js" });
+    defer parsed.deinit();
+
     try std.testing.expect(parsed.syntax_error == null);
-    try std.testing.expectEqual(frontend.parser.ParsePath.token_metadata_scanner, parsed.parse_path);
-    try std.testing.expect(!parsed.usedTransitionalCompiler());
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_var));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.get_prop));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.emitter.known.call));
 }
 
 test "arrow early errors reject non-simple strict and invalid rest parameters" {
