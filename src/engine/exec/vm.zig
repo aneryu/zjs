@@ -351,6 +351,10 @@ pub const Vm = struct {
                 const prototype = (try self.builtinPrototype("Array")) orelse return core.Value.undefinedValue();
                 return prototype.getProperty(atom_id);
             }
+            if (object.class_id == core.class.ids.c_function or object.class_id == core.class.ids.c_closure) {
+                const prototype = (try self.builtinPrototype("Function")) orelse return core.Value.undefinedValue();
+                return prototype.getProperty(atom_id);
+            }
             return core.Value.undefinedValue();
         }
         if (receiver.isString()) {
@@ -754,7 +758,12 @@ pub const Vm = struct {
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);
             },
-            7...20 => {
+            29 => {
+                const out = try closure_mod.create(self.ctx.runtime, kind, 0, 0, 0);
+                defer out.free(self.ctx.runtime);
+                try self.stack.push(out);
+            },
+            7...27 => {
                 const out = try closure_mod.create(self.ctx.runtime, kind, 0, 0, 0);
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);

@@ -115,7 +115,7 @@ pub fn installStandardGlobals(rt: *core.Runtime, global: *core.Object) !void {
             defer constructor_value.free(rt);
             try defineNativeMethods(rt, expectObject(constructor_value), spec.static_methods);
             if (std.mem.eql(u8, spec.name, "Symbol")) try installWellKnownSymbolProperties(rt, expectObject(constructor_value));
-            if (std.mem.eql(u8, spec.name, "Map")) try installMapSpecies(rt, expectObject(constructor_value));
+            if (std.mem.eql(u8, spec.name, "Map")) try installMapExtras(rt, global, expectObject(constructor_value));
         }
     }
 
@@ -136,6 +136,7 @@ const object_static = [_]Method{
     .{ .name = "defineProperty", .length = 3 },
     .{ .name = "getOwnPropertyDescriptor", .length = 2 },
     .{ .name = "getOwnPropertyNames", .length = 1 },
+    .{ .name = "getPrototypeOf", .length = 1 },
     .{ .name = "keys", .length = 1 },
     .{ .name = "values", .length = 1 },
     .{ .name = "entries", .length = 1 },
@@ -164,6 +165,8 @@ const array_prototype = [_]Method{
     .{ .name = "filter", .length = 1 },
     .{ .name = "reduce", .length = 1 },
     .{ .name = "forEach", .length = 1 },
+    .{ .name = "push", .length = 1 },
+    .{ .name = "pop", .length = 0 },
     .{ .name = "some", .length = 1 },
     .{ .name = "every", .length = 1 },
     .{ .name = "findIndex", .length = 1 },
@@ -265,6 +268,11 @@ const map_prototype = [_]Method{
     .{ .name = "delete", .length = 1 },
     .{ .name = "clear", .length = 0 },
     .{ .name = "keys", .length = 0 },
+    .{ .name = "values", .length = 0 },
+    .{ .name = "entries", .length = 0 },
+    .{ .name = "forEach", .length = 1 },
+    .{ .name = "getOrInsert", .length = 2 },
+    .{ .name = "getOrInsertComputed", .length = 2 },
 };
 
 const weak_map_prototype = [_]Method{
@@ -373,11 +381,18 @@ const atomics_methods = [_]Method{
 fn installWellKnownSymbolProperties(rt: *core.Runtime, symbol_ctor: *core.Object) !void {
     try defineWellKnownSymbol(rt, symbol_ctor, "species", "Symbol.species");
     try defineWellKnownSymbol(rt, symbol_ctor, "iterator", "Symbol.iterator");
+    try defineWellKnownSymbol(rt, symbol_ctor, "toStringTag", "Symbol.toStringTag");
 }
 
 fn defineWellKnownSymbol(rt: *core.Runtime, symbol_ctor: *core.Object, name: []const u8, symbol_name: []const u8) !void {
     const symbol_atom = core.atom.predefinedId(symbol_name, .symbol) orelse return error.UnsupportedBuiltinRegistry;
     try defineData(rt, symbol_ctor, name, core.Value.symbol(symbol_atom), Flags{ .writable = false, .enumerable = false, .configurable = false });
+}
+
+fn installMapExtras(rt: *core.Runtime, global: *core.Object, map_ctor: *core.Object) !void {
+    try installMapSpecies(rt, map_ctor);
+    try wireMapPrototypeGraph(rt, global, map_ctor);
+    try installMapPrototypeSymbols(rt, map_ctor);
 }
 
 fn installMapSpecies(rt: *core.Runtime, map_ctor: *core.Object) !void {
@@ -387,4 +402,44 @@ fn installMapSpecies(rt: *core.Runtime, map_ctor: *core.Object) !void {
     const getter_object = expectObject(getter);
     try function_builtin.defineNativeMethod(rt, getter_object, "call", 1);
     try defineAccessorAtom(rt, map_ctor, species_atom, getter, core.Value.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+}
+
+fn wireMapPrototypeGraph(rt: *core.Runtime, global: *core.Object, map_ctor: *core.Object) !void {
+    const map_proto_value = map_ctor.getProperty(core.atom.ids.prototype);
+    defer map_proto_value.free(rt);
+    const map_proto = expectObject(map_proto_value);
+    map_proto.weak_constructor = map_ctor;
+
+    const object_ctor_value = global.getProperty(core.atom.predefinedId("Object", .string).?);
+    defer object_ctor_value.free(rt);
+    const object_proto_value = expectObject(object_ctor_value).getProperty(core.atom.ids.prototype);
+    defer object_proto_value.free(rt);
+    try map_proto.setPrototype(expectObject(object_proto_value));
+
+    const function_ctor_value = global.getProperty(core.atom.predefinedId("Function", .string).?);
+    defer function_ctor_value.free(rt);
+    const function_proto_value = expectObject(function_ctor_value).getProperty(core.atom.ids.prototype);
+    defer function_proto_value.free(rt);
+    try map_ctor.setPrototype(expectObject(function_proto_value));
+}
+
+fn installMapPrototypeSymbols(rt: *core.Runtime, map_ctor: *core.Object) !void {
+    const map_proto_value = map_ctor.getProperty(core.atom.ids.prototype);
+    defer map_proto_value.free(rt);
+    const map_proto = expectObject(map_proto_value);
+
+    const size_getter = try function_builtin.nativeFunction(rt, "get size", 0);
+    defer size_getter.free(rt);
+    try defineAccessorAtom(rt, map_proto, core.atom.predefinedId("size", .string).?, size_getter, core.Value.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+
+    const entries_atom = try rt.internAtom("entries");
+    defer rt.atoms.free(entries_atom);
+    const entries_value = map_proto.getProperty(entries_atom);
+    defer entries_value.free(rt);
+    try defineDataAtom(rt, map_proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, entries_value, method_flags);
+
+    const tag = try core.string.String.createUtf8(rt, "Map");
+    const tag_value = tag.value();
+    defer tag_value.free(rt);
+    try defineDataAtom(rt, map_proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
 }

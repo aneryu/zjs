@@ -32,6 +32,7 @@ pub const ArrayStorageMode = enum {
 pub const CollectionEntry = struct {
     key: Value,
     value: Value,
+    active: bool = true,
 
     pub fn destroy(self: CollectionEntry, rt: *Runtime) void {
         self.key.free(rt);
@@ -66,6 +67,10 @@ pub const Object = struct {
     function_source: ?Value = null,
     collection_entries: []CollectionEntry = &.{},
     weak_collection_entries: []WeakCollectionEntry = &.{},
+    iterator_target: ?Value = null,
+    iterator_index: usize = 0,
+    iterator_kind: u8 = 0,
+    weak_constructor: ?*Object = null,
 
     pub fn create(rt: *Runtime, class_id: class.ClassId, prototype: ?*Object) !*Object {
         const self = try rt.memory.create(Object);
@@ -106,6 +111,7 @@ pub const Object = struct {
         if (self.collection_entries.len != 0) rt.memory.free(CollectionEntry, self.collection_entries);
         for (self.weak_collection_entries) |entry| entry.destroy(rt);
         if (self.weak_collection_entries.len != 0) rt.memory.free(WeakCollectionEntry, self.weak_collection_entries);
+        if (self.iterator_target) |stored| stored.free(rt);
         rt.shapes.release(self.shape_ref);
         rt.memory.destroy(Object, self);
     }
@@ -133,6 +139,9 @@ pub const Object = struct {
     }
 
     pub fn getOwnProperty(self: Object, atom_id: atom.Atom) ?descriptor.Descriptor {
+        if (atom_id == atom.ids.constructor) {
+            if (self.weak_constructor) |constructor| return descriptor.Descriptor.data(constructor.value().dup(), true, false, true);
+        }
         if (self.exotic) |methods| {
             if (methods.get_own_property) |hook| {
                 if (hook(@constCast(&self), atom_id)) |desc| return desc;
@@ -155,6 +164,9 @@ pub const Object = struct {
     }
 
     pub fn getProperty(self: Object, atom_id: atom.Atom) Value {
+        if (atom_id == atom.ids.constructor) {
+            if (self.weak_constructor) |constructor| return constructor.value().dup();
+        }
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
             return switch (entry.slot) {

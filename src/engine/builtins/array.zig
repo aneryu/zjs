@@ -93,6 +93,11 @@ pub fn methodCall(rt: *core.Runtime, receiver: core.Value, method: u32, args: []
             if (args.len != 4) return error.UnsupportedArrayCall;
             return splice(rt, receiver, args);
         },
+        13 => return push(rt, receiver, args),
+        14 => {
+            if (args.len != 0) return error.UnsupportedArrayCall;
+            return pop(rt, receiver);
+        },
         else => error.UnsupportedArrayCall,
     };
 }
@@ -239,6 +244,25 @@ fn splice(rt: *core.Runtime, array_value: core.Value, args: []const core.Value) 
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 1), core.Descriptor.data(insert_b, true, true, true));
     if (!tail.isUndefined()) try array.defineOwnProperty(rt, core.atom.atomFromUInt32(start + 2), core.Descriptor.data(tail, true, true, true));
     return removed.value();
+}
+
+fn push(rt: *core.Runtime, array_value: core.Value, args: []const core.Value) !core.Value {
+    const array = try expectArray(array_value);
+    for (args) |item| {
+        try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(item, true, true, true));
+    }
+    return core.Value.int32(@intCast(array.length));
+}
+
+fn pop(rt: *core.Runtime, array_value: core.Value) !core.Value {
+    const array = try expectArray(array_value);
+    if (array.length == 0) return core.Value.undefinedValue();
+    const index = array.length - 1;
+    const key = core.atom.atomFromUInt32(index);
+    const value = array.getProperty(key);
+    _ = array.deleteProperty(rt, key);
+    try array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.Value.int32(@intCast(index)), true, false, false));
+    return value;
 }
 
 fn expectObject(value: core.Value) !*core.Object {

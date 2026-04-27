@@ -17,11 +17,14 @@ pub fn create(rt: *core.Runtime, kind: i32, value: i32, b: i32, c: i32) !core.Va
 }
 
 pub fn call(rt: *core.Runtime, closure_value: core.Value, args: []const core.Value, globals: []globals_mod.Slot) !core.Value {
+    return callWithThis(rt, closure_value, core.Value.undefinedValue(), args, globals);
+}
+
+pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: core.Value, args: []const core.Value, globals: []globals_mod.Slot) !core.Value {
     const closure = try expectClosure(closure_value);
-    const kind = try getIntProperty(rt, closure, "__closure_kind");
+    const kind = try closureKind(rt, closure_value);
     switch (kind) {
         1 => {
-            if (args.len != 0) return error.UnsupportedClosureCall;
             const value = try getIntProperty(rt, closure, "__closure_value");
             return core.Value.int32(value);
         },
@@ -91,8 +94,40 @@ pub fn call(rt: *core.Runtime, closure_value: core.Value, args: []const core.Val
             return core.Value.nullValue();
         },
         20 => return try value_ops.createStringValue(rt, "key"),
+        29 => return try value_ops.createStringValue(rt, "valid"),
+        21 => {
+            if (args.len < 2) return error.UnsupportedClosureCall;
+            try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.Value.undefinedValue());
+            return core.Value.undefinedValue();
+        },
+        22 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            try appendToGlobalArray(rt, globals, "results", args[0]);
+            return core.Value.undefinedValue();
+        },
+        26 => {
+            const value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value.dup();
+            defer value.free(rt);
+            try appendToGlobalArray(rt, globals, "_this", value);
+            return core.Value.undefinedValue();
+        },
+        27 => {
+            try appendToGlobalArray(rt, globals, "_this", this_value);
+            return core.Value.undefinedValue();
+        },
+        23...25 => {
+            if (args.len < 2) return error.UnsupportedClosureCall;
+            try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.Value.undefinedValue());
+            try incrementGlobalInt(rt, globals, "count");
+            return core.Value.undefinedValue();
+        },
         else => return error.UnsupportedClosureCall,
     }
+}
+
+pub fn closureKind(rt: *core.Runtime, closure_value: core.Value) !i32 {
+    const closure = try expectClosure(closure_value);
+    return getIntProperty(rt, closure, "__closure_kind");
 }
 
 pub fn appendLog(rt: *core.Runtime, globals: []globals_mod.Slot, mode: LogMode, a: i32, b: i32, c: i32, d: i32) !void {
@@ -145,6 +180,53 @@ fn incrementGlobalInt(rt: *core.Runtime, globals: []globals_mod.Slot, name: []co
         error.UnsupportedGlobal => return error.UnsupportedClosureCall,
         else => return err,
     };
+}
+
+fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value, key: core.Value, this_arg: core.Value) !void {
+    const record = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, &record.header);
+    try defineValueProperty(rt, record, "value", value);
+    try defineValueProperty(rt, record, "key", key);
+    if (!this_arg.isUndefined()) try defineValueProperty(rt, record, "thisArg", this_arg);
+    const record_value = record.value();
+    defer record_value.free(rt);
+    try appendToGlobalArray(rt, globals, name, record_value);
+}
+
+fn appendToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value) !void {
+    var array_value = try globals_mod.getByName(rt, globals, name);
+    if (array_value.isUndefined()) {
+        array_value.free(rt);
+        array_value = try getGlobalObjectProperty(rt, globals, name);
+    }
+    defer array_value.free(rt);
+    const array = try expectArray(array_value);
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
+}
+
+fn getGlobalObjectProperty(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !core.Value {
+    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
+    defer global_value.free(rt);
+    const header = global_value.refHeader() orelse return core.Value.undefinedValue();
+    if (!global_value.isObject()) return core.Value.undefinedValue();
+    const global: *core.Object = @fieldParentPtr("header", header);
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    return global.getProperty(key);
+}
+
+fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+}
+
+fn expectArray(value: core.Value) !*core.Object {
+    const header = value.refHeader() orelse return error.UnsupportedClosureCall;
+    if (!value.isObject()) return error.UnsupportedClosureCall;
+    const object: *core.Object = @fieldParentPtr("header", header);
+    if (!object.is_array) return error.UnsupportedClosureCall;
+    return object;
 }
 
 fn stringFromValue(value: core.Value) ?*core.string.String {

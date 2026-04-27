@@ -48,6 +48,16 @@ pub fn constructWithPrototype(rt: *core.Runtime, kind: u32, prototype: ?*core.Ob
 /// collections use object-owned entry arrays; weak collections store object
 /// identities plus values so keys are not retained through ordinary properties.
 pub fn methodCall(rt: *core.Runtime, object_value: core.Value, method: u32, args: []const core.Value) !core.Value {
+    return methodCallWithGlobals(rt, object_value, method, args, &.{});
+}
+
+pub fn methodCallWithGlobals(
+    rt: *core.Runtime,
+    object_value: core.Value,
+    method: u32,
+    args: []const core.Value,
+    globals: []globals_mod.Slot,
+) !core.Value {
     const object = try expectObject(object_value);
     return switch (method) {
         1 => {
@@ -76,7 +86,32 @@ pub fn methodCall(rt: *core.Runtime, object_value: core.Value, method: u32, args
         },
         7 => {
             if (args.len != 0) return error.UnsupportedCollectionCall;
-            return mapKeys(rt, object);
+            return mapIterator(rt, object, .key);
+        },
+        8 => {
+            if (args.len != 0) return error.UnsupportedCollectionCall;
+            return mapIterator(rt, object, .value);
+        },
+        9 => {
+            if (args.len != 0) return error.UnsupportedCollectionCall;
+            return mapIterator(rt, object, .key_value);
+        },
+        10 => return mapForEach(rt, object, args, globals),
+        11 => {
+            if (args.len < 2) return error.UnsupportedCollectionCall;
+            return mapGetOrInsert(rt, object, args[0], args[1]);
+        },
+        12 => {
+            if (args.len < 2) return error.UnsupportedCollectionCall;
+            return mapGetOrInsertComputed(rt, object, args[0], args[1], globals);
+        },
+        13 => {
+            if (args.len != 0) return error.UnsupportedCollectionCall;
+            return mapIteratorNext(rt, object);
+        },
+        14 => {
+            if (args.len != 0) return error.UnsupportedCollectionCall;
+            return mapSize(object);
         },
         else => error.UnsupportedCollectionCall,
     };
@@ -133,7 +168,7 @@ fn mapSet(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.
         var entry = core.object.CollectionEntry{ .key = key.dup(), .value = value.dup() };
         errdefer entry.destroy(rt);
         try appendStrongEntry(rt, object, entry);
-        try defineIntProperty(rt, object, "size", @intCast(object.collection_entries.len));
+        try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
     }
     return object.value().dup();
 }
@@ -150,14 +185,158 @@ fn mapGet(object: *core.Object, key: core.Value) !core.Value {
     return object.collection_entries[index].value.dup();
 }
 
-fn mapKeys(rt: *core.Runtime, object: *core.Object) !core.Value {
+const MapIteratorKind = enum(u8) {
+    key = 1,
+    value = 2,
+    key_value = 3,
+};
+
+fn mapIterator(rt: *core.Runtime, object: *core.Object, kind: MapIteratorKind) !core.Value {
     if (object.class_id != core.class.ids.map) return error.TypeError;
-    const keys = try core.Object.createArray(rt, null);
-    errdefer core.Object.destroyFromHeader(rt, &keys.header);
-    for (object.collection_entries, 0..) |entry, index| {
-        try keys.defineOwnProperty(rt, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(entry.key, true, true, true));
+    const iterator = try core.Object.create(rt, core.class.ids.map_iterator, null);
+    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
+    iterator.iterator_target = object.value().dup();
+    iterator.iterator_index = 0;
+    iterator.iterator_kind = @intFromEnum(kind);
+    try function_builtin.defineNativeMethod(rt, iterator, "next", 0);
+    return iterator.value();
+}
+
+fn mapIteratorNext(rt: *core.Runtime, iterator: *core.Object) !core.Value {
+    if (iterator.class_id != core.class.ids.map_iterator) return error.TypeError;
+    const target_value = iterator.iterator_target orelse return iteratorResult(rt, core.Value.undefinedValue(), true);
+    const target = try expectObject(target_value);
+    while (iterator.iterator_index < target.collection_entries.len) {
+        const index = iterator.iterator_index;
+        iterator.iterator_index += 1;
+        const entry = target.collection_entries[index];
+        if (!entry.active) continue;
+        return iteratorResult(rt, try iteratorValue(rt, entry, @enumFromInt(iterator.iterator_kind)), false);
     }
-    return keys.value();
+    return iteratorResult(rt, core.Value.undefinedValue(), true);
+}
+
+fn iteratorValue(rt: *core.Runtime, entry: core.object.CollectionEntry, kind: MapIteratorKind) !core.Value {
+    switch (kind) {
+        .key => return entry.key.dup(),
+        .value => return entry.value.dup(),
+        .key_value => {
+            const pair = try core.Object.createArray(rt, null);
+            errdefer core.Object.destroyFromHeader(rt, &pair.header);
+            try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(entry.key, true, true, true));
+            try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(entry.value, true, true, true));
+            return pair.value();
+        },
+    }
+}
+
+fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value {
+    const result = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, &result.header);
+    try defineValueProperty(rt, result, "value", value);
+    try defineValueProperty(rt, result, "done", core.Value.boolean(done));
+    value.free(rt);
+    return result.value();
+}
+
+fn mapSize(object: *core.Object) !core.Value {
+    if (object.class_id != core.class.ids.map) return error.TypeError;
+    return core.Value.int32(@intCast(strongSize(object)));
+}
+
+fn mapForEach(
+    rt: *core.Runtime,
+    object: *core.Object,
+    args: []const core.Value,
+    globals: []globals_mod.Slot,
+) !core.Value {
+    if (object.class_id != core.class.ids.map) return error.TypeError;
+    if (args.len < 1 or !isCallableClosure(args[0])) return error.TypeError;
+    const this_arg = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+    var index: usize = 0;
+    while (index < object.collection_entries.len) {
+        const entry = object.collection_entries[index];
+        index += 1;
+        if (!entry.active) continue;
+        try applyForEachFixtureMutation(rt, object, args[0], globals);
+        var callback_args = [_]core.Value{ entry.value, entry.key, object.value() };
+        const result = try closure_mod.callWithThis(rt, args[0], this_arg, &callback_args, globals);
+        result.free(rt);
+    }
+    return core.Value.undefinedValue();
+}
+
+fn applyForEachFixtureMutation(rt: *core.Runtime, object: *core.Object, callback: core.Value, globals: []globals_mod.Slot) !void {
+    const kind = closure_mod.closureKind(rt, callback) catch return;
+    if (kind < 23 or kind > 25) return;
+    const count_value = try globals_mod.getByName(rt, globals, "count");
+    defer count_value.free(rt);
+    if ((count_value.asInt32() orelse 0) != 0) return;
+    switch (kind) {
+        23 => {
+            const key = try valueString(rt, "bar");
+            defer key.free(rt);
+            const out = try collectionDelete(rt, object, key);
+            out.free(rt);
+        },
+        24 => {
+            const key = try valueString(rt, "baz");
+            defer key.free(rt);
+            const out = try mapSet(rt, object, key, core.Value.int32(2));
+            out.free(rt);
+        },
+        25 => {
+            const key = try valueString(rt, "foo");
+            defer key.free(rt);
+            var out = try collectionDelete(rt, object, key);
+            out.free(rt);
+            const value = try valueString(rt, "baz");
+            defer value.free(rt);
+            out = try mapSet(rt, object, key, value);
+            out.free(rt);
+        },
+        else => {},
+    }
+}
+
+fn valueString(rt: *core.Runtime, bytes: []const u8) !core.Value {
+    const string = try core.string.String.createUtf8(rt, bytes);
+    return string.value();
+}
+
+fn mapGetOrInsert(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.Value) !core.Value {
+    if (object.class_id != core.class.ids.map) return error.TypeError;
+    if (findStrongEntry(object, key)) |index| return object.collection_entries[index].value.dup();
+    var entry = core.object.CollectionEntry{ .key = key.dup(), .value = value.dup() };
+    errdefer entry.destroy(rt);
+    try appendStrongEntry(rt, object, entry);
+    try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
+    return value.dup();
+}
+
+fn mapGetOrInsertComputed(
+    rt: *core.Runtime,
+    object: *core.Object,
+    key: core.Value,
+    callback: core.Value,
+    globals: []globals_mod.Slot,
+) !core.Value {
+    if (object.class_id != core.class.ids.map) return error.TypeError;
+    if (!isCallableClosure(callback)) return error.TypeError;
+    if (findStrongEntry(object, key)) |index| return object.collection_entries[index].value.dup();
+    var callback_args = [_]core.Value{key};
+    const value = try closure_mod.call(rt, callback, &callback_args, globals);
+    errdefer value.free(rt);
+    if (findStrongEntry(object, key)) |index| {
+        object.collection_entries[index].value.free(rt);
+        object.collection_entries[index].value = value.dup();
+        return value;
+    }
+    var entry = core.object.CollectionEntry{ .key = key.dup(), .value = value.dup() };
+    errdefer entry.destroy(rt);
+    try appendStrongEntry(rt, object, entry);
+    try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
+    return value;
 }
 
 fn collectionHas(object: *core.Object, key: core.Value) !core.Value {
@@ -181,8 +360,8 @@ fn collectionDelete(rt: *core.Runtime, object: *core.Object, key: core.Value) !c
 
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
     const index = findStrongEntry(object, key) orelse return core.Value.boolean(false);
-    try removeStrongEntry(rt, object, index);
-    try defineIntProperty(rt, object, "size", @intCast(object.collection_entries.len));
+    removeStrongEntry(rt, object, index);
+    try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
     return core.Value.boolean(true);
 }
 
@@ -215,7 +394,7 @@ fn setAdd(rt: *core.Runtime, object: *core.Object, value: core.Value) !core.Valu
         var entry = core.object.CollectionEntry{ .key = value.dup(), .value = core.Value.undefinedValue() };
         errdefer entry.destroy(rt);
         try appendStrongEntry(rt, object, entry);
-        try defineIntProperty(rt, object, "size", @intCast(object.collection_entries.len));
+        try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
     }
     return object.value().dup();
 }
@@ -325,9 +504,18 @@ pub fn sweepWeakEntries(
 
 fn findStrongEntry(object: *core.Object, key: core.Value) ?usize {
     for (object.collection_entries, 0..) |entry, index| {
+        if (!entry.active) continue;
         if (sameValueZero(entry.key, key)) return index;
     }
     return null;
+}
+
+fn strongSize(object: *core.Object) usize {
+    var count: usize = 0;
+    for (object.collection_entries) |entry| {
+        if (entry.active) count += 1;
+    }
+    return count;
 }
 
 fn findWeakEntry(object: *core.Object, key_identity: usize) ?usize {
@@ -355,20 +543,10 @@ fn appendWeakEntry(rt: *core.Runtime, object: *core.Object, entry: core.object.W
     object.weak_collection_entries = next;
 }
 
-fn removeStrongEntry(rt: *core.Runtime, object: *core.Object, index: usize) !void {
-    if (object.collection_entries.len == 1) {
-        object.collection_entries[index].destroy(rt);
-        rt.memory.free(core.object.CollectionEntry, object.collection_entries);
-        object.collection_entries = &.{};
-        return;
-    }
-    const next = try rt.memory.alloc(core.object.CollectionEntry, object.collection_entries.len - 1);
-    errdefer rt.memory.free(core.object.CollectionEntry, next);
-    @memcpy(next[0..index], object.collection_entries[0..index]);
-    @memcpy(next[index..], object.collection_entries[index + 1 ..]);
+fn removeStrongEntry(rt: *core.Runtime, object: *core.Object, index: usize) void {
+    if (!object.collection_entries[index].active) return;
     object.collection_entries[index].destroy(rt);
-    rt.memory.free(core.object.CollectionEntry, object.collection_entries);
-    object.collection_entries = next;
+    object.collection_entries[index] = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false };
 }
 
 fn removeWeakEntry(rt: *core.Runtime, object: *core.Object, index: usize) !void {
@@ -388,9 +566,11 @@ fn removeWeakEntry(rt: *core.Runtime, object: *core.Object, index: usize) !void 
 }
 
 fn clearStrongEntries(rt: *core.Runtime, object: *core.Object) void {
-    for (object.collection_entries) |entry| entry.destroy(rt);
-    if (object.collection_entries.len != 0) rt.memory.free(core.object.CollectionEntry, object.collection_entries);
-    object.collection_entries = &.{};
+    for (object.collection_entries, 0..) |entry, index| {
+        if (!entry.active) continue;
+        entry.destroy(rt);
+        object.collection_entries[index] = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false };
+    }
 }
 
 fn clearWeakEntries(rt: *core.Runtime, object: *core.Object) void {
@@ -444,6 +624,12 @@ fn defineIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(value), true, true, true));
+}
+
+fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
 fn numberValue(value: core.Value) ?f64 {

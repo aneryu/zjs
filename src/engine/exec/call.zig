@@ -117,7 +117,7 @@ pub fn callValueWithThisAndGlobals(
         };
     }
     if (object.class_id == core.class.ids.c_closure) {
-        return closure_mod.call(ctx.runtime, callee, args, globals) catch |err| switch (err) {
+        return closure_mod.callWithThis(ctx.runtime, callee, this_value, args, globals) catch |err| switch (err) {
             error.UnsupportedClosureCall => error.TypeError,
             else => err,
         };
@@ -288,6 +288,12 @@ fn callNativeBuiltin(
     defer ctx.runtime.memory.allocator.free(name);
 
     if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
+    if (std.mem.eql(u8, name, "get size")) {
+        return builtins.collection.methodCall(ctx.runtime, this_value, 14, &.{}) catch |err| switch (err) {
+            error.TypeError, error.UnsupportedCollectionCall => error.TypeError,
+            else => err,
+        };
+    }
 
     if (try constructorNameEql(ctx.runtime, function_object, "Object")) {
         const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
@@ -360,11 +366,17 @@ fn callNativeBuiltin(
             receiver.class_id == core.class.ids.weakmap or receiver.class_id == core.class.ids.weakset)
         {
             if (collectionMethodId(name)) |method| {
-                return builtins.collection.methodCall(ctx.runtime, this_value, method, args) catch |err| switch (err) {
+                return builtins.collection.methodCallWithGlobals(ctx.runtime, this_value, method, args, globals) catch |err| switch (err) {
                     error.TypeError, error.UnsupportedCollectionCall => error.TypeError,
                     else => err,
                 };
             }
+        }
+        if (receiver.class_id == core.class.ids.map_iterator and std.mem.eql(u8, name, "next")) {
+            return builtins.collection.methodCall(ctx.runtime, this_value, 13, args) catch |err| switch (err) {
+                error.TypeError, error.UnsupportedCollectionCall => error.TypeError,
+                else => err,
+            };
         }
         if (receiver.class_id == core.class.ids.string) {
             return callStringMethod(ctx.runtime, this_value, name, args);
@@ -465,6 +477,12 @@ fn callObjectStatic(rt: *core.Runtime, name: []const u8, args: []const core.Valu
         }
         return out.value();
     }
+    if (std.mem.eql(u8, name, "getPrototypeOf")) {
+        if (args.len < 1) return error.TypeError;
+        const object = try expectObjectArg(args[0]);
+        if (object.getPrototype()) |prototype| return prototype.value().dup();
+        return core.Value.nullValue();
+    }
     if (std.mem.eql(u8, name, "defineProperty")) {
         if (args.len < 3) return error.TypeError;
         const object = try expectObjectArg(args[0]);
@@ -505,9 +523,24 @@ fn arrayJoinCall(rt: *core.Runtime, receiver: core.Value, args: []const core.Val
 }
 
 fn arrayFrom(rt: *core.Runtime, args: []const core.Value) !core.Value {
-    _ = rt;
     if (args.len < 1) return error.TypeError;
     const source = try expectObjectArg(args[0]);
+    if (source.class_id == core.class.ids.map_iterator) {
+        const out = try core.Object.createArray(rt, null);
+        errdefer core.Object.destroyFromHeader(rt, &out.header);
+        while (true) {
+            const next = try builtins.collection.methodCall(rt, source.value(), 13, &.{});
+            defer next.free(rt);
+            const next_object = try expectObjectArg(next);
+            const done = next_object.getProperty(core.atom.predefinedId("done", .string).?);
+            defer done.free(rt);
+            if (done.asBool() == true) break;
+            const value = next_object.getProperty(core.atom.predefinedId("value", .string).?);
+            defer value.free(rt);
+            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.length), core.Descriptor.data(value, true, true, true));
+        }
+        return out.value();
+    }
     if (!source.is_array) return error.TypeError;
     return source.value().dup();
 }
@@ -554,6 +587,11 @@ fn collectionMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "clear")) return 5;
     if (std.mem.eql(u8, name, "add")) return 6;
     if (std.mem.eql(u8, name, "keys")) return 7;
+    if (std.mem.eql(u8, name, "values")) return 8;
+    if (std.mem.eql(u8, name, "entries")) return 9;
+    if (std.mem.eql(u8, name, "forEach")) return 10;
+    if (std.mem.eql(u8, name, "getOrInsert")) return 11;
+    if (std.mem.eql(u8, name, "getOrInsertComputed")) return 12;
     return null;
 }
 
@@ -568,6 +606,8 @@ fn arrayMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "at")) return 9;
     if (std.mem.eql(u8, name, "slice")) return 10;
     if (std.mem.eql(u8, name, "splice")) return 11;
+    if (std.mem.eql(u8, name, "push")) return 13;
+    if (std.mem.eql(u8, name, "pop")) return 14;
     return null;
 }
 

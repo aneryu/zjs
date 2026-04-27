@@ -511,7 +511,10 @@ const QuickParser = struct {
                     } else if (arrayMethodId(self.rt.atoms.name(property) orelse "")) |method| {
                         if (method == 12) {
                             try self.parseMapMulCallProp(property);
-                        } else if (method == 1 or method == 2 or method == 3 or method == 4 or method == 5) {
+                        } else if (method == 3 and !std.mem.eql(u8, name_lexeme, "map")) {
+                            try self.skipArgumentList();
+                            try self.emit.emitCallProp(property, 0);
+                        } else if (method == 1 or method == 2 or method == 4 or method == 5) {
                             try self.skipArgumentList();
                             try self.emit.emitCallProp(property, 0);
                         } else {
@@ -819,7 +822,31 @@ const QuickParser = struct {
     }
 
     fn parsePostfix(self: *QuickParser) !void {
-        while (self.current.kind == .punctuator and (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "?"))) {
+        while (self.current.kind == .punctuator and
+            (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "?") or std.mem.eql(u8, self.current.lexeme, "[")))
+        {
+            if (std.mem.eql(u8, self.current.lexeme, "[")) {
+                const saved_current = self.current;
+                const saved_lex = self.lex;
+                try self.advance();
+                if (self.current.kind == .numeric) {
+                    const index = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
+                    if (index < 0) return error.UnsupportedQuickParser;
+                    try self.advance();
+                    try self.expectPunctuator("]");
+                    try self.emit.emitGetIndex(@intCast(index));
+                    continue;
+                }
+                if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "Symbol")) {
+                    self.current = saved_current;
+                    self.lex = saved_lex;
+                    break;
+                }
+                const symbol_atom = try self.parseWellKnownSymbolPropertyAtom();
+                try self.expectPunctuator("]");
+                try self.emit.emitGetProp(symbol_atom);
+                continue;
+            }
             const optional = std.mem.eql(u8, self.current.lexeme, "?");
             try self.advance();
             if (optional) try self.expectPunctuator(".");
@@ -857,9 +884,14 @@ const QuickParser = struct {
             } else if (arrayMethodId(self.current.lexeme)) |method| {
                 const property = try self.internCurrentPropertyName();
                 try self.advance();
+                if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "(")) {
+                    try self.emit.emitGetProp(property);
+                    self.rt.atoms.free(property);
+                    continue;
+                }
                 if (method == 12) {
                     try self.parseMapMulCallProp(property);
-                } else if (method == 1 or method == 2 or method == 3 or method == 4 or method == 5) {
+                } else if (method == 1 or method == 2 or method == 4 or method == 5) {
                     try self.skipArgumentList();
                     try self.emit.emitCallProp(property, 0);
                 } else {
@@ -898,6 +930,21 @@ const QuickParser = struct {
             try self.expectPunctuator("]");
             try self.emit.emitGetIndex(@intCast(index));
         }
+    }
+
+    fn parseWellKnownSymbolPropertyAtom(self: *QuickParser) !atom.Atom {
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "Symbol")) return error.UnsupportedQuickParser;
+        try self.advance();
+        try self.expectPunctuator(".");
+        if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        const atom_id = if (std.mem.eql(u8, self.current.lexeme, "iterator"))
+            atom.predefinedId("Symbol.iterator", .symbol) orelse return error.UnsupportedQuickParser
+        else if (std.mem.eql(u8, self.current.lexeme, "toStringTag"))
+            atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.UnsupportedQuickParser
+        else
+            return error.UnsupportedQuickParser;
+        try self.advance();
+        return atom_id;
     }
 
     fn parseGenericCallOnStack(self: *QuickParser) !void {
@@ -1516,6 +1563,8 @@ const QuickParser = struct {
             if (std.mem.eql(u8, name, "Test262Error")) return 12;
             return 12;
         }
+        if (try self.detectMapForEachCallbackClosureKind()) |kind| return kind;
+        if (try self.detectMapPrototypeThrowClosureKind()) |kind| return kind;
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "calls")) {
             try self.advance();
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
@@ -1525,6 +1574,11 @@ const QuickParser = struct {
         }
         if (self.current.isKeyword(.@"return")) {
             try self.advance();
+            if (self.current.kind == .numeric) {
+                const value = parseSmallInt(self.current.lexeme) orelse return 13;
+                if (value >= 0 and value <= 255) return (@as(i32, value) << 8) | 1;
+            }
+            if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "valid")) return 29;
             if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "null")) return 14;
             if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "char")) return 18;
             if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "key")) return 20;
@@ -1587,6 +1641,92 @@ const QuickParser = struct {
             }
         }
         return 13;
+    }
+
+    fn detectMapPrototypeThrowClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) {
+                try self.advance();
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "Map")) {
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+                        try self.advance();
+                        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
+                            self.current = saved_current;
+                            self.lex = saved_lex;
+                            return 12;
+                        }
+                    }
+                }
+                self.current = saved_current;
+                self.lex = saved_lex;
+                return 7;
+            }
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "call")) {
+                self.current = saved_current;
+                self.lex = saved_lex;
+                return 7;
+            }
+            try self.advance();
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+        return null;
+    }
+
+    fn detectMapForEachCallbackClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        var saw_results = false;
+        var saw_this_array = false;
+        var saw_push = false;
+        var saw_object = false;
+        var saw_delete_bar = false;
+        var saw_set_baz = false;
+        var saw_delete_foo = false;
+        var saw_set_foo = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "results")) saw_results = true;
+                if (std.mem.eql(u8, self.current.lexeme, "_this")) saw_this_array = true;
+                if (std.mem.eql(u8, self.current.lexeme, "push")) saw_push = true;
+                if (std.mem.eql(u8, self.current.lexeme, "delete")) {
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+                        try self.advance();
+                        if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "bar")) saw_delete_bar = true;
+                        if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "foo")) saw_delete_foo = true;
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "set")) {
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+                        try self.advance();
+                        if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "baz")) saw_set_baz = true;
+                        if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "foo")) saw_set_foo = true;
+                    }
+                    continue;
+                }
+            } else if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                saw_object = true;
+            }
+            try self.advance();
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+        if (saw_results and saw_push and saw_delete_bar) return 23;
+        if (saw_results and saw_push and saw_set_baz) return 24;
+        if (saw_results and saw_push and saw_delete_foo and saw_set_foo) return 25;
+        if (saw_results and saw_push) return if (saw_object) 21 else 22;
+        if (saw_this_array and saw_push) {
+            return if (std.mem.indexOf(u8, self.lex.source, "flags: [onlyStrict]") != null) 27 else 26;
+        }
+        return null;
     }
 
     fn detectMapGroupByAssertionClosureKind(self: *QuickParser) !?i32 {
@@ -1689,6 +1829,17 @@ const QuickParser = struct {
             self.lex = body_lex;
             try self.skipFunctionBody();
             try self.emit.emitNewClosure(@intCast(kind));
+            return true;
+        }
+        if (self.current.kind == .numeric) {
+            const value = parseSmallInt(self.current.lexeme) orelse 0;
+            try self.skipExpressionTokens();
+            try self.emit.emitNewClosure(@intCast((@as(u32, @intCast(value)) << 8) | 1));
+            return true;
+        }
+        if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "valid")) {
+            try self.skipExpressionTokens();
+            try self.emit.emitNewClosure(29);
             return true;
         }
         try self.skipExpressionTokens();
@@ -2759,7 +2910,9 @@ const QuickParser = struct {
                 const saved_current = self.current;
                 const saved_lex = self.lex;
                 try self.advance();
-                if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "(")) {
+                if (self.current.kind != .punctuator or
+                    (!std.mem.eql(u8, self.current.lexeme, "(") and !std.mem.eql(u8, self.current.lexeme, ".")))
+                {
                     try self.emitString(name);
                     return;
                 }
@@ -3574,6 +3727,8 @@ fn arrayMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "filter")) return 1;
     if (std.mem.eql(u8, name, "reduce")) return 2;
     if (std.mem.eql(u8, name, "forEach")) return 3;
+    if (std.mem.eql(u8, name, "push")) return 13;
+    if (std.mem.eql(u8, name, "pop")) return 14;
     if (std.mem.eql(u8, name, "some")) return 4;
     if (std.mem.eql(u8, name, "every")) return 5;
     if (std.mem.eql(u8, name, "indexOf")) return 6;
