@@ -1,6 +1,7 @@
 const core = @import("../core/root.zig");
 const builtins = @import("../builtins/root.zig");
 const closure_mod = @import("closure.zig");
+const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
 
@@ -33,7 +34,7 @@ pub fn functionObject(rt: *core.Runtime, name: core.Atom) !core.Value {
     return function.value();
 }
 
-pub fn constructValue(rt: *core.Runtime, callee: core.Value, args: []const core.Value) !core.Value {
+pub fn constructValue(rt: *core.Runtime, callee: core.Value, args: []const core.Value, globals: []globals_mod.Slot) !core.Value {
     const constructor = try expectConstructor(callee);
     const prototype_key = try rt.internAtom("prototype");
     defer rt.atoms.free(prototype_key);
@@ -47,11 +48,26 @@ pub fn constructValue(rt: *core.Runtime, callee: core.Value, args: []const core.
 
     if (try constructorName(rt, constructor)) |name| {
         defer rt.memory.allocator.free(name);
-        if (collectionConstructorId(name)) |kind| return constructCollectionValue(rt, constructor, kind, prototype, args);
+        if (collectionConstructorId(name)) |kind| return constructCollectionValue(rt, constructor, kind, prototype, args, globals);
+        if (std.mem.eql(u8, name, "Function")) return constructFunctionValue(rt, constructor);
     }
 
     const instance = try core.Object.create(rt, core.class.ids.object, prototype);
     return instance.value();
+}
+
+fn constructFunctionValue(rt: *core.Runtime, constructor: *core.Object) !core.Value {
+    const out = try closure_mod.create(rt, 13, 0, 0, 0);
+    errdefer out.free(rt);
+    const realm_proto_key = try rt.internAtom("__realm_map_proto");
+    defer rt.atoms.free(realm_proto_key);
+    const realm_proto_value = constructor.getProperty(realm_proto_key);
+    defer realm_proto_value.free(rt);
+    if (!realm_proto_value.isUndefined()) {
+        const function_object = try expectObject(out);
+        try function_object.defineOwnProperty(rt, realm_proto_key, core.Descriptor.data(realm_proto_value, true, false, true));
+    }
+    return out;
 }
 
 fn constructCollectionValue(
@@ -60,6 +76,7 @@ fn constructCollectionValue(
     kind: u32,
     prototype: ?*core.Object,
     args: []const core.Value,
+    globals: []globals_mod.Slot,
 ) !core.Value {
     _ = constructor;
     const collection_value = try builtins.collection.constructWithPrototype(rt, kind, prototype);
@@ -86,15 +103,43 @@ fn constructCollectionValue(
             const value = entry.getProperty(core.atom.atomFromUInt32(1));
             defer value.free(rt);
             var set_args = [_]core.Value{ key, value };
-            const out = try builtins.collection.methodCall(rt, collection_value, 1, &set_args);
-            out.free(rt);
+            if (isNativeCollectionAdder(rt, adder, adder_name)) {
+                const out = try builtins.collection.methodCall(rt, collection_value, 1, &set_args);
+                out.free(rt);
+            } else {
+                const out = try closure_mod.callWithThis(rt, adder, collection_value, &set_args, globals);
+                out.free(rt);
+                const set_out = try builtins.collection.methodCall(rt, collection_value, 1, &set_args);
+                set_out.free(rt);
+            }
         } else {
             var add_args = [_]core.Value{entry_value};
-            const out = try builtins.collection.methodCall(rt, collection_value, 6, &add_args);
-            out.free(rt);
+            if (isNativeCollectionAdder(rt, adder, adder_name)) {
+                const out = try builtins.collection.methodCall(rt, collection_value, 6, &add_args);
+                out.free(rt);
+            } else {
+                const out = try closure_mod.callWithThis(rt, adder, collection_value, &add_args, globals);
+                out.free(rt);
+                const add_out = try builtins.collection.methodCall(rt, collection_value, 6, &add_args);
+                add_out.free(rt);
+            }
         }
     }
     return collection_value;
+}
+
+fn isNativeCollectionAdder(rt: *core.Runtime, value: core.Value, expected: []const u8) bool {
+    const header = value.refHeader() orelse return false;
+    if (!value.isObject()) return false;
+    const object: *core.Object = @fieldParentPtr("header", header);
+    if (object.class_id != core.class.ids.c_function) return false;
+    const name_value = object.getProperty(core.atom.ids.name);
+    defer name_value.free(rt);
+    if (!name_value.isString()) return false;
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(rt.memory.allocator);
+    value_ops.appendRawString(rt, &buffer, name_value) catch return false;
+    return std.mem.eql(u8, buffer.items, expected);
 }
 
 fn getCollectionAdder(rt: *core.Runtime, collection: *core.Object, name: []const u8) !core.Value {

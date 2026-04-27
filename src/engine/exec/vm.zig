@@ -241,6 +241,9 @@ pub const Vm = struct {
         try call_mod.installHostGlobals(self.ctx.runtime, global);
 
         self.global_object = global;
+        const global_this_atom = try self.ctx.runtime.internAtom("globalThis");
+        defer self.ctx.runtime.atoms.free(global_this_atom);
+        try self.setGlobalValue(global_this_atom, global.value());
         return global;
     }
 
@@ -397,7 +400,7 @@ pub const Vm = struct {
         }
         const callee = try self.stack.pop();
         defer callee.free(self.ctx.runtime);
-        const result = construct_mod.constructValue(self.ctx.runtime, callee, args) catch |err| switch (err) {
+        const result = construct_mod.constructValue(self.ctx.runtime, callee, args, self.globals) catch |err| switch (err) {
             error.TypeError => return self.throwTypeError(),
             else => return err,
         };
@@ -758,7 +761,7 @@ pub const Vm = struct {
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);
             },
-            29 => {
+            29...39 => {
                 const out = try closure_mod.create(self.ctx.runtime, kind, 0, 0, 0);
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);

@@ -332,6 +332,7 @@ const constructor_specs = [_]ConstructorSpec{
     .{ .name = "Set", .length = 0, .prototype_methods = &set_prototype },
     .{ .name = "WeakMap", .length = 0, .prototype_methods = &weak_map_prototype },
     .{ .name = "WeakSet", .length = 0, .prototype_methods = &weak_set_prototype },
+    .{ .name = "WeakRef", .length = 1, .prototype_methods = &primitive_prototype },
     .{ .name = "ArrayBuffer", .length = 1, .prototype_methods = &buffer_prototype },
     .{ .name = "TypedArray", .length = 1, .prototype_methods = &array_prototype },
     .{ .name = "DataView", .length = 1, .prototype_methods = &data_view_prototype },

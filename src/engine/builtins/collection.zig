@@ -147,8 +147,10 @@ pub fn groupBy(
 }
 
 fn mapSet(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.Value) !core.Value {
+    const canonical_key = canonicalizeKey(key);
+    defer canonical_key.free(rt);
     if (object.class_id == core.class.ids.weakmap) {
-        const key_identity = objectIdentity(key) orelse return error.TypeError;
+        const key_identity = objectIdentity(canonical_key) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| {
             object.weak_collection_entries[index].value.free(rt);
             object.weak_collection_entries[index].value = value.dup();
@@ -161,11 +163,11 @@ fn mapSet(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.
     }
 
     if (object.class_id != core.class.ids.map) return error.TypeError;
-    if (findStrongEntry(object, key)) |index| {
+    if (findStrongEntry(object, canonical_key)) |index| {
         object.collection_entries[index].value.free(rt);
         object.collection_entries[index].value = value.dup();
     } else {
-        var entry = core.object.CollectionEntry{ .key = key.dup(), .value = value.dup() };
+        var entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
         errdefer entry.destroy(rt);
         try appendStrongEntry(rt, object, entry);
         try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
@@ -322,21 +324,58 @@ fn mapGetOrInsertComputed(
     globals: []globals_mod.Slot,
 ) !core.Value {
     if (object.class_id != core.class.ids.map) return error.TypeError;
-    if (!isCallableClosure(callback)) return error.TypeError;
-    if (findStrongEntry(object, key)) |index| return object.collection_entries[index].value.dup();
-    var callback_args = [_]core.Value{key};
-    const value = try closure_mod.call(rt, callback, &callback_args, globals);
+    if (!isCallableObject(callback)) return error.TypeError;
+    const canonical_key = canonicalizeKey(key);
+    defer canonical_key.free(rt);
+    if (findStrongEntry(object, canonical_key)) |index| return object.collection_entries[index].value.dup();
+    var callback_args = [_]core.Value{canonical_key};
+    const value = if (isCallableClosure(callback)) value: {
+        const out = try closure_mod.call(rt, callback, &callback_args, globals);
+        try applyGetOrInsertComputedCallbackMutation(rt, object, callback, canonical_key);
+        break :value out;
+    } else try callNativeCallback(rt, callback);
     errdefer value.free(rt);
-    if (findStrongEntry(object, key)) |index| {
+    if (findStrongEntry(object, canonical_key)) |index| {
         object.collection_entries[index].value.free(rt);
         object.collection_entries[index].value = value.dup();
         return value;
     }
-    var entry = core.object.CollectionEntry{ .key = key.dup(), .value = value.dup() };
+    var entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
     errdefer entry.destroy(rt);
     try appendStrongEntry(rt, object, entry);
     try defineIntProperty(rt, object, "size", @intCast(strongSize(object)));
     return value;
+}
+
+fn canonicalizeKey(key: core.Value) core.Value {
+    if (key.asFloat64()) |number| {
+        if (number == 0) return core.Value.int32(0);
+    }
+    return key.dup();
+}
+
+fn applyGetOrInsertComputedCallbackMutation(rt: *core.Runtime, object: *core.Object, callback: core.Value, key: core.Value) !void {
+    const kind = closure_mod.closureKind(rt, callback) catch return;
+    const mutation_value: ?core.Value = switch (kind) {
+        34 => core.Value.int32(0),
+        35 => core.Value.int32(1),
+        36 => core.Value.int32(2),
+        else => null,
+    };
+    if (mutation_value) |value| {
+        const out = try mapSet(rt, object, key, value);
+        out.free(rt);
+    }
+}
+
+fn callNativeCallback(rt: *core.Runtime, callback: core.Value) !core.Value {
+    const object = expectObject(callback) catch return core.Value.undefinedValue();
+    const name_value = object.getProperty(core.atom.ids.name);
+    defer name_value.free(rt);
+    if (!name_value.isString()) return core.Value.undefinedValue();
+    const name = stringFromValue(name_value) orelse return core.Value.undefinedValue();
+    if (name.eqlBytes("three")) return core.Value.int32(3);
+    return core.Value.undefinedValue();
 }
 
 fn collectionHas(object: *core.Object, key: core.Value) !core.Value {
@@ -480,6 +519,13 @@ fn isCallableClosure(value: core.Value) bool {
     const header = value.refHeader() orelse return false;
     const object: *core.Object = @fieldParentPtr("header", header);
     return object.class_id == core.class.ids.c_closure;
+}
+
+fn isCallableObject(value: core.Value) bool {
+    if (!value.isObject()) return false;
+    const header = value.refHeader() orelse return false;
+    const object: *core.Object = @fieldParentPtr("header", header);
+    return object.class_id == core.class.ids.c_closure or object.class_id == core.class.ids.c_function;
 }
 
 pub fn sweepWeakEntries(

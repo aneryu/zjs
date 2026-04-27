@@ -22,6 +22,7 @@ pub fn installHostGlobals(rt: *core.Runtime, global: *core.Object) !void {
     try defineHostFunction(rt, global, "verifyConfigurable", .test262_verify_configurable);
     try defineHostFunction(rt, global, "isConstructor", .test262_is_constructor);
     try installStandardGlobals(rt, global);
+    try installTest262Namespace(rt, global);
 
     const console = try core.Object.create(rt, core.class.ids.object, null);
     errdefer console.value().free(rt);
@@ -98,6 +99,7 @@ pub fn callValueWithThisAndGlobals(
             @intFromEnum(HostFunction.test262_verify_not_enumerable) => .test262_verify_not_enumerable,
             @intFromEnum(HostFunction.test262_verify_configurable) => .test262_verify_configurable,
             @intFromEnum(HostFunction.test262_compare_array) => .test262_compare_array,
+            @intFromEnum(HostFunction.test262_create_realm) => .test262_create_realm,
             else => return error.TypeError,
         };
         return switch (kind) {
@@ -114,6 +116,7 @@ pub fn callValueWithThisAndGlobals(
             .test262_verify_not_enumerable => hostVerifyPropertyFlag(ctx.runtime, args, .not_enumerable),
             .test262_verify_configurable => hostVerifyPropertyFlag(ctx.runtime, args, .configurable),
             .test262_compare_array => hostCompareArray(ctx.runtime, args),
+            .test262_create_realm => hostCreateRealm(ctx.runtime),
         };
     }
     if (object.class_id == core.class.ids.c_closure) {
@@ -201,7 +204,16 @@ const HostFunction = enum(i32) {
     test262_verify_not_enumerable = 11,
     test262_verify_configurable = 12,
     test262_compare_array = 13,
+    test262_create_realm = 14,
 };
+
+fn installTest262Namespace(rt: *core.Runtime, global: *core.Object) !void {
+    const namespace = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer namespace.value().free(rt);
+    try defineHostFunction(rt, namespace, "createRealm", .test262_create_realm);
+    try defineObjectProperty(rt, global, "$262", namespace.value());
+    namespace.value().free(rt);
+}
 
 fn defineHostFunction(rt: *core.Runtime, target: *core.Object, name: []const u8, kind: HostFunction) !void {
     const function_object = try createHostFunction(rt, kind);
@@ -252,6 +264,7 @@ fn hostFunctionLength(kind: HostFunction) i32 {
         .test262_verify_not_enumerable => 2,
         .test262_verify_configurable => 2,
         .test262_compare_array => 2,
+        .test262_create_realm => 0,
     };
 }
 
@@ -288,6 +301,7 @@ fn callNativeBuiltin(
     defer ctx.runtime.memory.allocator.free(name);
 
     if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
+    if (std.mem.eql(u8, name, "construct")) return reflectConstruct(ctx.runtime, args, globals);
     if (std.mem.eql(u8, name, "get size")) {
         return builtins.collection.methodCall(ctx.runtime, this_value, 14, &.{}) catch |err| switch (err) {
             error.TypeError, error.UnsupportedCollectionCall => error.TypeError,
@@ -310,11 +324,13 @@ fn callNativeBuiltin(
     }
 
     if (thisObject(this_value)) |receiver| {
-        if (receiver.class_id == core.class.ids.c_function) {
+        if (receiver.class_id == core.class.ids.c_function or receiver.class_id == core.class.ids.c_closure) {
             if (std.mem.eql(u8, name, "call")) {
                 if (args.len < 1) return error.TypeError;
                 return callValueWithThisAndGlobals(ctx, output, globals, args[0], this_value, args[1..]);
             }
+            if (std.mem.eql(u8, name, "bind")) return this_value.dup();
+            if (receiver.class_id == core.class.ids.c_closure) return error.TypeError;
             if (try constructorNameEql(ctx.runtime, receiver, "Promise")) {
                 if (promiseStaticId(name)) |mode| {
                     const reason: ?core.Value = if (mode == 4 and args.len >= 1) args[0] else null;
@@ -408,6 +424,70 @@ fn callNativeBuiltin(
     }
 
     return error.TypeError;
+}
+
+fn hostCreateRealm(rt: *core.Runtime) !core.Value {
+    const realm = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer realm.value().free(rt);
+    const realm_global = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer realm_global.value().free(rt);
+    try builtins.registry.installStandardGlobals(rt, realm_global);
+    try tagRealmFunctionConstructor(rt, realm_global);
+    try defineObjectProperty(rt, realm, "global", realm_global.value());
+    realm_global.value().free(rt);
+    return realm.value();
+}
+
+fn tagRealmFunctionConstructor(rt: *core.Runtime, realm_global: *core.Object) !void {
+    const function_key = try rt.internAtom("Function");
+    defer rt.atoms.free(function_key);
+    const function_value = realm_global.getProperty(function_key);
+    defer function_value.free(rt);
+    const function_object = expectObjectArg(function_value) catch return;
+    const map_key = try rt.internAtom("Map");
+    defer rt.atoms.free(map_key);
+    const map_value = realm_global.getProperty(map_key);
+    defer map_value.free(rt);
+    const map_object = try expectObjectArg(map_value);
+    if (constructorPrototype(rt, map_object)) |map_proto| {
+        try defineObjectProperty(rt, function_object, "__realm_map_proto", map_proto.value());
+    }
+}
+
+fn reflectConstruct(rt: *core.Runtime, args: []const core.Value, globals: []globals_mod.Slot) !core.Value {
+    _ = globals;
+    if (args.len < 1) return error.TypeError;
+    const target = expectCallableObject(args[0]) orelse return error.TypeError;
+    const target_name = try nativeFunctionName(rt, target);
+    defer rt.memory.allocator.free(target_name);
+    if (!std.mem.eql(u8, target_name, "Map")) return error.TypeError;
+    const new_target = if (args.len >= 3) args[2] else args[0];
+    const prototype = try reflectConstructPrototype(rt, new_target, args[0]);
+    return builtins.collection.constructWithPrototype(rt, 1, prototype) catch |err| switch (err) {
+        error.UnsupportedCollectionCall => error.TypeError,
+        else => err,
+    };
+}
+
+fn reflectConstructPrototype(rt: *core.Runtime, new_target: core.Value, target: core.Value) !?*core.Object {
+    if (thisObject(new_target)) |new_target_object| {
+        const prototype_value = new_target_object.getProperty(core.atom.ids.prototype);
+        defer prototype_value.free(rt);
+        if (prototype_value.isObject()) {
+            const header = prototype_value.refHeader() orelse return null;
+            return @fieldParentPtr("header", header);
+        }
+        const realm_proto_key = try rt.internAtom("__realm_map_proto");
+        defer rt.atoms.free(realm_proto_key);
+        const realm_proto_value = new_target_object.getProperty(realm_proto_key);
+        defer realm_proto_value.free(rt);
+        if (realm_proto_value.isObject()) {
+            const header = realm_proto_value.refHeader() orelse return null;
+            return @fieldParentPtr("header", header);
+        }
+    }
+    const target_object = expectCallableObject(target) orelse return null;
+    return constructorPrototype(rt, target_object);
 }
 
 fn callArrayMethod(
@@ -960,6 +1040,7 @@ fn expectObjectArg(value: core.Value) !*core.Object {
 
 fn errorNameMatchesConstructor(err: anyerror, constructor_name: []const u8) bool {
     return (err == error.TypeError and std.mem.eql(u8, constructor_name, "TypeError")) or
+        (err == error.Test262Error and std.mem.eql(u8, constructor_name, "Error")) or
         (err == error.SyntaxError and std.mem.eql(u8, constructor_name, "SyntaxError")) or
         (err == error.RangeError and std.mem.eql(u8, constructor_name, "RangeError")) or
         (err == error.EvalError and std.mem.eql(u8, constructor_name, "EvalError")) or

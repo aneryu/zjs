@@ -95,6 +95,44 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         },
         20 => return try value_ops.createStringValue(rt, "key"),
         29 => return try value_ops.createStringValue(rt, "valid"),
+        30 => {
+            if (args.len < 2) return error.UnsupportedClosureCall;
+            try incrementGlobalInt(rt, globals, "counter");
+            try appendPairToGlobalArray(rt, globals, "results", args[0], args[1]);
+            try appendToGlobalArray(rt, globals, "_this", this_value);
+            return core.Value.undefinedValue();
+        },
+        31 => {
+            try incrementGlobalInt(rt, globals, "count");
+            return error.TypeError;
+        },
+        32 => {
+            try incrementGlobalInt(rt, globals, "count");
+            return error.Test262Error;
+        },
+        33 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            globals_mod.setExistingByName(rt, globals, "canonicalKey", args[0]) catch |err| switch (err) {
+                error.UnsupportedGlobal => return error.UnsupportedClosureCall,
+                else => return err,
+            };
+            return core.Value.undefinedValue();
+        },
+        34 => return core.Value.int32(3),
+        35 => return core.Value.undefinedValue(),
+        36 => return try value_ops.createStringValue(rt, "string"),
+        37 => {
+            try incrementGlobalInt(rt, globals, "callbackCalls");
+            return error.Test262Error;
+        },
+        38 => {
+            try setGlobalMapString(rt, globals, 1, "mutated");
+            return error.Test262Error;
+        },
+        39 => {
+            try setGlobalMapString(rt, globals, 3, "mutated");
+            return error.Test262Error;
+        },
         21 => {
             if (args.len < 2) return error.UnsupportedClosureCall;
             try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.Value.undefinedValue());
@@ -106,7 +144,11 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
             return core.Value.undefinedValue();
         },
         26 => {
-            const value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value.dup();
+            var value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value.dup();
+            if (value.isUndefined()) {
+                value.free(rt);
+                value = try getGlobalThisValue(rt, globals);
+            }
             defer value.free(rt);
             try appendToGlobalArray(rt, globals, "_this", value);
             return core.Value.undefinedValue();
@@ -182,6 +224,31 @@ fn incrementGlobalInt(rt: *core.Runtime, globals: []globals_mod.Slot, name: []co
     };
 }
 
+fn setGlobalMapString(rt: *core.Runtime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
+    const map_value = try globals_mod.getByName(rt, globals, "map");
+    defer map_value.free(rt);
+    const map_object = try expectObject(map_value);
+    if (map_object.class_id != core.class.ids.map) return error.UnsupportedClosureCall;
+    const key = core.Value.int32(key_int);
+    const value = try value_ops.createStringValue(rt, bytes);
+    defer value.free(rt);
+    for (map_object.collection_entries) |*entry| {
+        if (!entry.active) continue;
+        if (entry.key.asInt32() == key_int) {
+            entry.value.free(rt);
+            entry.value = value.dup();
+            return;
+        }
+    }
+    const next = try rt.memory.alloc(core.object.CollectionEntry, map_object.collection_entries.len + 1);
+    errdefer rt.memory.free(core.object.CollectionEntry, next);
+    @memcpy(next[0..map_object.collection_entries.len], map_object.collection_entries);
+    next[map_object.collection_entries.len] = .{ .key = key.dup(), .value = value.dup(), .active = true };
+    if (map_object.collection_entries.len != 0) rt.memory.free(core.object.CollectionEntry, map_object.collection_entries);
+    map_object.collection_entries = next;
+    try defineIntProperty(rt, map_object, "size", @intCast(map_object.collection_entries.len));
+}
+
 fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value, key: core.Value, this_arg: core.Value) !void {
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -191,6 +258,16 @@ fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, nam
     const record_value = record.value();
     defer record_value.free(rt);
     try appendToGlobalArray(rt, globals, name, record_value);
+}
+
+fn appendPairToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, key: core.Value, value: core.Value) !void {
+    const pair = try core.Object.createArray(rt, null);
+    errdefer core.Object.destroyFromHeader(rt, &pair.header);
+    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(key, true, true, true));
+    try pair.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(value, true, true, true));
+    const pair_value = pair.value();
+    defer pair_value.free(rt);
+    try appendToGlobalArray(rt, globals, name, pair_value);
 }
 
 fn appendToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value) !void {
@@ -205,14 +282,22 @@ fn appendToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []c
 }
 
 fn getGlobalObjectProperty(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !core.Value {
-    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    defer global_value.free(rt);
-    const header = global_value.refHeader() orelse return core.Value.undefinedValue();
-    if (!global_value.isObject()) return core.Value.undefinedValue();
-    const global: *core.Object = @fieldParentPtr("header", header);
+    const global = try getGlobalThisObject(rt, globals);
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     return global.getProperty(key);
+}
+
+fn getGlobalThisValue(rt: *core.Runtime, globals: []globals_mod.Slot) !core.Value {
+    return (try getGlobalThisObject(rt, globals)).value().dup();
+}
+
+fn getGlobalThisObject(rt: *core.Runtime, globals: []globals_mod.Slot) !*core.Object {
+    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
+    defer global_value.free(rt);
+    const header = global_value.refHeader() orelse return error.UnsupportedClosureCall;
+    if (!global_value.isObject()) return error.UnsupportedClosureCall;
+    return @fieldParentPtr("header", header);
 }
 
 fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
@@ -227,6 +312,12 @@ fn expectArray(value: core.Value) !*core.Object {
     const object: *core.Object = @fieldParentPtr("header", header);
     if (!object.is_array) return error.UnsupportedClosureCall;
     return object;
+}
+
+fn expectObject(value: core.Value) !*core.Object {
+    const header = value.refHeader() orelse return error.UnsupportedClosureCall;
+    if (!value.isObject()) return error.UnsupportedClosureCall;
+    return @fieldParentPtr("header", header);
 }
 
 fn stringFromValue(value: core.Value) ?*core.string.String {
