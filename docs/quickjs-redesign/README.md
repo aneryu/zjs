@@ -10,7 +10,7 @@ progress, phase-level details, validation evidence, and handoff state.
 |---|---|
 | `TRACKING.md` | Current phase board, validation log, decision log, risk log, and handoff notes. |
 | `ARCHITECTURE_REPAIR_PLAN.md` | Active architecture repair queue for status calibration and parser-first semantic completion. |
-| `ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fixes, regression evidence, and reusable lessons. |
+| `ERRORS_AND_LEARNINGS.md` | Active per-failure records (reproduction, root cause, fix, validation). The workflow, status/classification vocabulary, and reusable learning log live in `/GUIDE.md` Part B. |
 | `errors/README.md` | Storage rules for long-form per-error records. |
 | `archive/README.md` | Storage rules for superseded historical records that are no longer active status sources. |
 | `PHASES_HISTORY.md` | Consolidated history of completed Phases 1-9: scope, QuickJS source owners, key target files, exit contracts, and closing evidence. |

@@ -53,8 +53,13 @@ numbers in this file. Keep that information in
   queue and post-AR follow-up status.
 - `docs/quickjs-redesign/matrices/`: subsystem coverage matrices and validation
   status.
-- `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md`: reusable failure records and
-  lessons.
+- `GUIDE.md`: project engineering guide. Part A is the C → Zig 0.16 migration
+  spec (types, ownership, errors, C interop, style, safety). Part B is the
+  durable error workflow, status/classification vocabulary, and reusable
+  learning log.
+- `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md`: active per-failure records
+  (reproduction, root cause, fix, validation). Workflow and learning catalog
+  live in `GUIDE.md` Part B.
 
 ## Repository Layout
 

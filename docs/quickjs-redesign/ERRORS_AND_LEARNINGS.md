@@ -1,72 +1,22 @@
 # Errors And Learnings
 
-This file is the durable error ledger for the QuickJS Zig redesign. It records
-failures, root causes, fixes, regression tests, and reusable lessons. It is not a
-replacement for `TRACKING.md`: tracking keeps the current board, while this file
-keeps the knowledge needed to avoid repeating mistakes.
+This file is the **active error ledger** for the QuickJS Zig redesign. It
+records open and recently validated failures, with reproduction commands, root
+causes, fixes, and validation evidence.
 
-## When To Create A Record
+The durable error workflow, status/classification vocabulary, learning log
+(`LRN-*`), and reusable conclusions distilled from past records all live in
+`/GUIDE.md` (Part B). This file is not a replacement for `TRACKING.md`:
+tracking keeps the current board; this file keeps the per-failure detail.
 
-Create an error record when any of these happen:
+When in doubt about *how* to record a failure, read `GUIDE.md` Part B
+(workflow, status vocabulary, classification, anti-patterns). Use this file
+for the failure-specific reproduction, root cause, fix summary, and
+validation.
 
-- A validation command fails after implementation work has started.
-- `run-test262` reports a new, changed, or fixed result relative to a known-error baseline.
-- A crash, panic, stack overflow, allocator leak, OOM path bug, or use-after-free is observed.
-- Zig behavior differs from local QuickJS behavior for an in-scope feature.
-- A broad validation run is interrupted and could be mistaken for final evidence later.
-- A failure reveals a reusable implementation rule, source mapping rule, or test strategy.
-- A planned `out_of_scope` result needs explicit justification to avoid future rediscovery.
-
-Do not create a full record for a typo or local edit mistake that is fixed before
-running validation and has no reusable lesson. If the same mistake happens twice,
-create a learning record.
-
-## Record ID And Location
-
-- Record IDs use `EAL-YYYYMMDD-NNN`.
-- New detailed records should be created from `templates/error-record.md`.
-- Store detailed records under `docs/quickjs-redesign/errors/` if the entry is
-  longer than a few lines. Short entries may live only in the index table below.
-- Link every detailed record from the index table.
-
-## Status Vocabulary
-
-- `open`: failure exists and is not fully understood.
-- `investigating`: reproduction or QuickJS comparison is in progress.
-- `fixed`: code was changed, but final validation evidence is missing.
-- `validated`: fix has a regression test and validation evidence.
-- `parked`: intentionally deferred to a named phase or dependency.
-- `duplicate`: covered by another error record.
-- `out_of_scope`: not part of the selected QuickJS core scope.
-
-## Classification Vocabulary
-
-- `quickjs_parity_gap`: Zig behavior differs from local QuickJS behavior.
-- `zig_lifetime_bug`: ownership, refcount, use-after-free, or double-free bug.
-- `allocator_leak`: leak or allocator accounting mismatch.
-- `parser_gap`: lexer/parser accepts or rejects incorrectly.
-- `emitter_gap`: parser succeeds but bytecode or metadata is wrong.
-- `opcode_gap`: VM opcode handler is missing or semantically wrong.
-- `builtin_gap`: builtin behavior or descriptors differ from QuickJS.
-- `runner_bug`: `run-test262`, smoke, compare, or CLI tooling is wrong.
-- `test_baseline_issue`: config, exclude list, harness, known-error, or oracle issue.
-- `build_wiring`: build graph, module import, or stale path issue.
-- `docs_tracking_gap`: process failed to record status, evidence, or handoff.
-- `interrupted_validation`: command did not complete and must not be treated as proof.
-- `out_of_scope`: confirmed outside the selected implementation scope.
-
-## Error Workflow
-
-1. Capture the exact symptom and command.
-2. Classify the failure and assign severity.
-3. Compare against local QuickJS when behavior is semantic.
-4. Identify the QuickJS source owner and Zig owner.
-5. Fix the smallest responsible subsystem.
-6. Add or update focused regression tests before broad validation.
-7. Update the relevant phase checklist and matrix row.
-8. Add validation evidence to `TRACKING.md`.
-9. Close the record only after the regression and gate evidence are recorded.
-10. Promote reusable lessons into the learning log below.
+Detailed records longer than a few paragraphs may live under `errors/` and be
+linked from the index below. Use `templates/error-record.md` for new
+long-form entries.
 
 ## Error Index
 
@@ -542,19 +492,9 @@ custom-adder dispatch rather than adding more one-off parser recognizers.
 
 ## Learning Log
 
-| ID | Source | Lesson | Applies to | Enforcement |
-|---|---|---|---|---|
-| LRN-001 | prior zjs validation work | Start from a reproducing validation command, then repair from its output. | bugfixes, parity work, test262 work | README update rules and error workflow |
-| LRN-002 | prior interrupted runs | Interrupted or partial sweeps are not final validation evidence. | smoke, compare, test262 | validation log and `interrupted_validation` classification |
-| LRN-003 | EAL-20260426-003 | Broad green gates are not semantic-completion proof when parser or VM paths recognize source text, test metadata, or fixture-only shapes. | parser, emitter, VM, test262 validation | Architecture repair guardrails and `parse_path` tracking |
-| LRN-003 | prior run-test262 work | Runner behavior must be checked against `quickjs/run-test262.c` and `quickjs/test262.conf` before changing engine semantics for excluded files. | Phase 8 and test262 triage | test262 parity matrix |
-| LRN-004 | prior parity work | Requests for faithful QuickJS rewrite require source-aligned behavior, not small optimizations presented as parity. | all implementation phases | source mapping and matrix exit criteria |
-| LRN-005 | prior runner performance work | Shared harness caches can add lock contention; prefer worker-local state unless evidence proves sharing is safe. | Phase 8 worker execution | test262 runner parity matrix |
-| LRN-006 | prior broad-suite crashes | When a broad suite crashes, isolate the smallest file or subdirectory before editing semantics. | test262 triage, builtins, VM | error workflow reproduction step |
-| LRN-007 | EAL-20260427-004 | Partial stack-pop cleanup must be disarmed before later fallible dispatch; otherwise normal cleanup and error cleanup can release the same values. | VM calls, constructors, variadic helpers | argument cleanup regression tests |
-| LRN-008 | EAL-20260427-005 | Do not carry forward stale full-test262 claims after parser shortcut removal; rerun focused slices and record failures as blockers. | tracking, semantic queues, test262 validation | validation log plus open EAL record |
-| LRN-009 | EAL-20260427-006 | Standard builtin graphs contain real cycles; do not install descriptor-faithful back-links as retained refcount edges until cycle GC owns them. | builtin registry, object graph ownership, GC | WQ-014 graph/cycle regression before `prototype.constructor` restoration |
-| LRN-010 | EAL-20260427-007 | Builtins that return an existing object must return a retained value; borrowed returns are indistinguishable from owned values to VM call cleanup. | object builtins, collection prototypes, host call dispatch | retained-return regression tests for object-returning builtins |
+The reusable lesson catalog (`LRN-*`) has moved to `/GUIDE.md` Part B.6. New
+lessons should be appended there once promoted from a validated `EAL-*`
+record.
 
 ## Open Questions
 

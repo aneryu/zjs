@@ -34,7 +34,7 @@ Completeness means the selected QuickJS core engine scope has no intentional sem
 
 ## Design Principles
 
-- Follow `SPEX.md`: internal code must be Zig-style, allocator ownership must be explicit, errors must be explicit, and C ABI concepts must stay at narrow boundaries.
+- Follow `GUIDE.md` Part A: internal code must be Zig-style, allocator ownership must be explicit, errors must be explicit, and C ABI concepts must stay at narrow boundaries.
 - QuickJS C source defines JavaScript semantics. Zig APIs may be safer and more explicit, but observable JS behavior must match QuickJS.
 - Build from the bottom up. Do not implement frontend, VM execution, CLI, or test262 runner before the lower layers they depend on are stable.
 - Use structured Zig types for internal interfaces. Avoid long-lived `[*c]T`, raw pointer plus length APIs, and public `anyopaque` payload exposure.
@@ -50,10 +50,12 @@ This root document is the architecture contract. Detailed execution state lives 
 
 | Document | Purpose |
 |---|---|
+| `GUIDE.md` | Project engineering guide: C → Zig 0.16 migration spec (Part A) plus durable error workflow, status/classification vocabulary, and reusable lessons (Part B). |
+| `AGENTS.md` | Operational rulebook (no shortcuts, repository layout, common commands, change discipline, pre-commit checklist). |
 | `docs/quickjs-redesign/README.md` | Index, document ownership, and update rules for the redesign docs. |
 | `docs/quickjs-redesign/TRACKING.md` | Current phase board, validation log, decision log, risk log, and handoff notes. |
 | `docs/quickjs-redesign/ARCHITECTURE_REPAIR_PLAN.md` | Status calibration and parser-first architecture repair queue. |
-| `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fix evidence, and reusable lessons. |
+| `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md` | Active error ledger: per-failure reproduction, root cause, fix, validation. (Workflow and learning catalog live in `GUIDE.md` Part B.) |
 | `docs/quickjs-redesign/errors/README.md` | Storage rules for long-form per-error records. |
 | `docs/quickjs-redesign/PHASES_HISTORY.md` | Consolidated history of completed Phases 1-9 (scope, source owners, key targets, exit contracts, closing evidence). |
 | `docs/quickjs-redesign/archive/phases/` | Original per-phase execution plans for Phases 1-9; retained for deep-dive reference only. |
@@ -504,7 +506,7 @@ Rules:
 
 ## Assumptions
 
-- `SPEX.md` is mandatory for implementation style.
+- `GUIDE.md` (Part A: C → Zig 0.16 spec; Part B: error workflow and lessons) is mandatory for implementation style and failure handling.
 - Local `quickjs/test262.conf` is the future test262 baseline.
 - Local `quickjs/build/qjs` is the comparison oracle.
 - The implementation can be disruptive and does not need to preserve the previous Zig engine design.
