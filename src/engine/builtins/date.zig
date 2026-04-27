@@ -27,7 +27,11 @@ pub fn call(rt: *core.Runtime, args: []const core.Value) !core.Value {
 /// QuickJS source map: Date constructor. This preserves the current smoke/test
 /// compatible Date object payload while moving ownership out of the VM.
 pub fn construct(rt: *core.Runtime, args: []const core.Value) !core.Value {
-    const object = try core.Object.create(rt, core.class.ids.date, null);
+    return constructWithPrototype(rt, args, null);
+}
+
+pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
+    const object = try core.Object.create(rt, core.class.ids.date, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
     if (args.len >= 2) {

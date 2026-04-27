@@ -75,6 +75,10 @@ create a learning record.
 | EAL-20260424-001 | validated | low | docs | docs_tracking_gap | Redesign plan lacked a durable error and learning workflow. | `#eal-20260424-001-error-and-learning-workflow-missing` | `git diff --check -- QUICKJS_REDESIGN_PLAN.md docs/quickjs-redesign` | README, TRACKING, test262 parity |
 | EAL-20260424-002 | validated | high | 8-9 | quickjs_parity_gap | Real smoke runner initially failed 45/45 scripts because `zjs` did not yet produce smoke-visible output such as `print(...)`. | `#eal-20260424-002-smoke-runner-wired-before-output-semantics` | `zig build smoke --summary all` | Phase 8 smoke runner, Phase 9 runtime hardening |
 | EAL-20260426-003 | in_progress | high | AR | parser_gap, emitter_gap, opcode_gap, docs_tracking_gap | Parser dispatch is single-path, audited fixture opcodes were removed, native-method string synthesis is gone, and VM helper unsupported failures now surface as JS errors; narrow parser/builtin scaffolds still block semantic-complete claims. | `#eal-20260426-003-parser-and-vm-fixture-shortcuts` | `zig build test-frontend --summary all`; targeted parser/test262 slices | Frontend coverage, opcode execution, architecture repair |
+| EAL-20260427-004 | validated | high | WQ-015 | zig_lifetime_bug | Unsupported calls with evaluated string arguments could double-free argument constants on the TypeError path and panic during bytecode teardown. | `#eal-20260427-004-call-argument-cleanup-double-free` | `zig build test-exec --summary all`; `zig build smoke --summary all` | Opcode execution, runtime hardening |
+| EAL-20260427-005 | open | high | WQ-012 | parser_gap, builtin_gap, docs_tracking_gap | Test262 validation claims outpaced executable evidence; built-ins/global and Object/is are now repaired, but Map still has focused semantic failures. | `#eal-20260427-005-test262-validation-claims-outpaced-parser-semantics` | built-ins/global and Object/is targeted slices; Map blocker pending | TRACKING, frontend coverage, builtins matrix |
+| EAL-20260427-006 | parked | high | WQ-012/WQ-014 | zig_lifetime_bug, builtin_gap | Standard `prototype.constructor` back-links create a constructor/prototype refcount cycle and trip teardown assertions until WQ-014 graph tracing/cycle collection owns that edge. | `#eal-20260427-006-constructor-prototype-backlink-needs-cycle-gc` | pending WQ-014 cycle regression | Core runtime invariants, builtins matrix |
+| EAL-20260427-007 | validated | high | WQ-012 | zig_lifetime_bug, builtin_gap | `Object.defineProperty` returned a borrowed target object, so dropping the return value could release live prototype objects and crash later tests. | `#eal-20260427-007-object-defineproperty-returned-borrowed-target` | `Object.defineProperty returns retained target object`; Map focused run no longer exits 139 | Opcode execution, builtins matrix |
 
 ## Detailed Records
 
@@ -281,11 +285,25 @@ preserving the existing unhandled-rejection exception-slot path.
 
 Collection repair progress: supported `Map` / `Set` / `WeakMap` / `WeakSet`
 construction and selected `set/get/has/delete/clear/add` prototype method calls
-now lower through `quickjs_parser`. The VM `new_collection` /
-`collection_method` handlers now only collect operands and delegate to
-`builtins/collection.zig`, which owns the current narrow single-entry storage
-behavior while full iterable constructors, iteration order, descriptors, and
-weak-collection GC integration remain explicit future debt.
+now lower through `quickjs_parser`. The VM `new_collection` handler only
+collects constructor operands and delegates to `builtins/collection.zig`.
+Strong collection storage is now object-owned and multi-entry, and weak
+collections now store object identities rather than ordinary strong key
+properties with an explicit sweep hook for the future GC pass. Collection method
+calls lower through receiver-preserving `call_prop` and dispatch through native
+function objects in `exec/call.zig`; the old collection-specific parser/VM
+method opcode has been retired. VM-created collection instances now inherit the
+registered `Map` / `Set` / `WeakMap` / `WeakSet` prototype methods instead of
+defining method properties on each instance. Full iterable constructors,
+iteration order, and automatic weak-collection GC scheduling remain explicit
+future debt.
+
+Capacity/OOM hardening progress: GC, shape, and job registries now keep backing
+capacity so removal paths do not allocate and no longer use `catch unreachable`.
+VM closure and array-method argument buffers are allocator-backed instead of
+fixed four-slot arrays, and String.fromCharCode no longer has a hidden 64-item
+limit. This does not finish the full capacity audit; stack/global/collection
+growth still need broader failing-allocator coverage.
 
 Buffer/DataView repair progress: supported `ArrayBuffer` construction/slicing,
 narrow TypedArray shape creation, and `DataView` construction/get/set behavior
@@ -343,6 +361,185 @@ removed shortcut classes, and the AR closure gate requires `zig build test
 test262 slices for touched syntax or builtin domains, and the full local
 test262 gate before claiming semantic completion beyond the AR boundary.
 
+### EAL-20260427-004: Call Argument Cleanup Double-Free
+
+Status: validated
+Severity: high
+Phase: WQ-015
+Classification: zig_lifetime_bug
+
+Summary: `call` and `call_prop` popped arguments into allocator-backed slices
+with both an `errdefer` for partial stack-pop cleanup and a normal `defer` for
+successful argument ownership. When a later callable lookup or native dispatch
+returned `TypeError`, both defers ran and released the same string argument
+values. The next bytecode constant teardown observed refcounts already at zero
+and panicked.
+
+Reproduction:
+
+```bash
+./zig-out/bin/zjs -e 'const obj = {}; obj.missing("a", "a");'
+./zig-out/bin/zjs -e 'RegExp.test("a", "a");'
+```
+
+Fix: after stack-pop completion, the VM now disarms the partial-fill `errdefer`
+and lets the normal argument-slice cleanup release each argument exactly once.
+The same ownership shape was repaired across VM helpers that pop dynamic
+argument/value slices.
+
+Validation:
+
+```bash
+zig build test-exec --summary all
+zig build test --summary all
+zig build smoke --summary all
+```
+
+Current result: exec passes 58/58, aggregate passes 168/168, and smoke passes
+45/45. The exec gate includes a regression for missing function calls and
+unsupported `RegExp.test(...)` with evaluated string arguments.
+
+Learning: stack-pop partial cleanup and post-pop call cleanup need separate
+ownership states. Reusing one cursor for both is unsafe once later code can
+return an error.
+
+### EAL-20260427-005: Test262 Validation Claims Outpaced Parser Semantics
+
+Status: open
+Severity: high
+Phase: WQ-012
+Classification: parser_gap, builtin_gap, docs_tracking_gap
+
+Summary: Current local unit/smoke gates pass, but broad `run-test262` execution
+is not green. Focused reruns contradicted stale tracking entries that claimed
+broad test262 success. The first repair slice added real host callables for
+`assert`, `assert.throws`, `verifyProperty`, `verifyCallableProperty`, and
+`isConstructor`, plus the frontend callback/property-call support needed by the
+current global and Object.is tests. Those two targeted slices now pass. The
+first Map crash was fixed separately by EAL-20260427-007, leaving collection
+semantic gaps as the active blocker.
+
+Reproduction:
+
+```bash
+./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/global 0 400
+./zig-out/bin/run-test262 -t 8 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Object/is 0 100000
+./zig-out/bin/run-test262 -v -t 1 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Map 0 20
+```
+
+Initial observed result on 2026-04-27: built-ins/global reported 29/29 errors,
+Object/is reported 21/21 errors, Map reported 204/204 errors, and the root
+sample reported 11/11 errors. The first verbose samples failed with
+`SyntaxError`.
+
+Current observed result on 2026-04-27: built-ins/global passes 0/29 errors,
+Object/is passes 0/21 errors, and `built-ins/Map 0 21` passes 0/22 errors
+after the first Map constructor/groupBy repairs. The wider
+`built-ins/Map 0 60` tranche still reports 27/61 errors across iterator
+closing, custom adder invocation, prototype descriptor, and `clear` receiver
+semantics.
+
+Scope: this is not fixed by adding known-error entries or restoring the removed
+test262 metadata/source recognizers. The next repair needs real frontend support
+for remaining harness/source syntax plus real collection semantics, then the
+broader builtin slices can be used as semantic evidence again.
+
+### EAL-20260427-006: Constructor Prototype Backlink Needs Cycle GC
+
+Status: parked
+Severity: high
+Phase: WQ-012/WQ-014
+Classification: zig_lifetime_bug, builtin_gap
+
+Summary: The standard `Ctor.prototype.constructor === Ctor` descriptor cannot
+be installed by a simple retained object edge while the runtime still relies on
+refcount teardown without connected graph tracing. Adding that back-link in
+`builtins/registry.zig` created the expected constructor/prototype object cycle
+and caused teardown assertions during exec tests.
+
+Reproduction:
+
+```bash
+# Add a retained data property from each registered prototype object back to its
+# constructor value in builtins/registry.zig, then run:
+zig build test-exec --summary all
+```
+
+Observed result on 2026-04-27: the standard back-link makes the registry more
+descriptor-faithful, but object teardown no longer reaches zero because the
+constructor and prototype retain each other. The attempted line was backed out
+rather than hiding the leak or weakening teardown checks.
+
+Scope: this is a WQ-014 dependency, not a descriptor helper typo. Constructor
+and prototype back-links should be restored only after graph tracing/cycle
+removal can mark, unlink, and finalize the standard builtin object graph.
+
+### EAL-20260427-007: Object.defineProperty Returned Borrowed Target
+
+Status: validated
+Severity: high
+Phase: WQ-012
+Classification: zig_lifetime_bug, builtin_gap
+
+Summary: `Object.defineProperty` returned `object.value()` for its target
+without retaining it. VM call cleanup owns returned values, so a statement such
+as `Object.defineProperty(Map.prototype, ...)` could drop the returned target
+and release a live prototype object still reachable through the builtin
+constructor graph. The focused Map test262 range crashed only when a later test
+allocated after that corrupted teardown path.
+
+Reproduction:
+
+```bash
+./zig-out/bin/run-test262 -v -t 1 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Map 7 8
+```
+
+Observed result before the fix: `get-set-method-failure.js` reported
+`TypeError`, then the next selected Map test crashed the runner with exit 139.
+
+Fix: `callObjectStatic(..., "defineProperty", ...)` now returns
+`object.value().dup()` after defining the property. The exec regression covers a
+`Map.prototype` defineProperty call followed by ordinary `new Map()` and
+`map.set(...)` use.
+
+Validation:
+
+```bash
+zig build test-exec --summary all
+./zig-out/bin/run-test262 -v -t 1 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Map 0 20
+```
+
+Current result: exec passes 59/59 tests, the focused `built-ins/Map 0 21`
+tranche passes 0/22 errors, and the wider `built-ins/Map 0 60` tranche remains
+the active collection semantic blocker with 27/61 errors.
+
+### EAL-20260427-008: Map Iterator Semantics Remain Separate From First GroupBy Tranche
+
+Status: open
+Severity: medium
+Phase: WQ-012
+Classification: builtin_gap, frontend_gap
+
+Summary: The first Map tranche is now green, but expanding the same directory
+shows the next real boundary: iterator protocol and prototype descriptor
+semantics are still missing. The remaining failures include custom
+`Map.prototype.set` invocation during construction, iterator close-on-error
+paths, invalid iterator values, `new.target`, prototype descriptor checks, and
+`Map.prototype.clear` receiver validation.
+
+Reproduction:
+
+```bash
+./zig-out/bin/run-test262 -v -t 1 -c quickjs/test262.conf -d quickjs/test262/test/built-ins/Map 0 60
+```
+
+Observed result on 2026-04-27: prepared 61/204 tests,
+`Result: 27/61 errors, passed 34`.
+
+Scope: do not mark Map semantic-complete based on the green 0..21 tranche.
+The next repair should implement ordinary iterator protocol and callable
+custom-adder dispatch rather than adding more one-off parser recognizers.
+
 ## Learning Log
 
 | ID | Source | Lesson | Applies to | Enforcement |
@@ -354,6 +551,10 @@ test262 gate before claiming semantic completion beyond the AR boundary.
 | LRN-004 | prior parity work | Requests for faithful QuickJS rewrite require source-aligned behavior, not small optimizations presented as parity. | all implementation phases | source mapping and matrix exit criteria |
 | LRN-005 | prior runner performance work | Shared harness caches can add lock contention; prefer worker-local state unless evidence proves sharing is safe. | Phase 8 worker execution | test262 runner parity matrix |
 | LRN-006 | prior broad-suite crashes | When a broad suite crashes, isolate the smallest file or subdirectory before editing semantics. | test262 triage, builtins, VM | error workflow reproduction step |
+| LRN-007 | EAL-20260427-004 | Partial stack-pop cleanup must be disarmed before later fallible dispatch; otherwise normal cleanup and error cleanup can release the same values. | VM calls, constructors, variadic helpers | argument cleanup regression tests |
+| LRN-008 | EAL-20260427-005 | Do not carry forward stale full-test262 claims after parser shortcut removal; rerun focused slices and record failures as blockers. | tracking, semantic queues, test262 validation | validation log plus open EAL record |
+| LRN-009 | EAL-20260427-006 | Standard builtin graphs contain real cycles; do not install descriptor-faithful back-links as retained refcount edges until cycle GC owns them. | builtin registry, object graph ownership, GC | WQ-014 graph/cycle regression before `prototype.constructor` restoration |
+| LRN-010 | EAL-20260427-007 | Builtins that return an existing object must return a retained value; borrowed returns are indistinguishable from owned values to VM call cleanup. | object builtins, collection prototypes, host call dispatch | retained-return regression tests for object-returning builtins |
 
 ## Open Questions
 

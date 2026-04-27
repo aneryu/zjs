@@ -62,6 +62,7 @@ pub const Vm = struct {
                 bytecode.emitter.known.throw_type_error => return self.throwTypeError(),
                 bytecode.emitter.known.goto => try self.goto(function, &frame),
                 bytecode.emitter.known.call => try self.call(function, &frame),
+                bytecode.emitter.known.call_prop => try self.callProp(function, &frame),
                 bytecode.emitter.known.construct => try self.construct(function, &frame),
                 bytecode.emitter.known.array_method => try self.arrayMethod(function, &frame),
                 bytecode.emitter.known.set_prop => try self.setProp(function, &frame),
@@ -77,7 +78,6 @@ pub const Vm = struct {
                 bytecode.emitter.known.dataview_get => try self.dataViewGet(function, &frame),
                 bytecode.emitter.known.dataview_set => try self.dataViewSet(function, &frame),
                 bytecode.emitter.known.new_collection => try self.newCollection(function, &frame),
-                bytecode.emitter.known.collection_method => try self.collectionMethod(function, &frame),
                 bytecode.emitter.known.uri_call => try self.uriCall(function, &frame),
                 bytecode.emitter.known.promise_static => try self.promiseStatic(function, &frame),
                 bytecode.emitter.known.parse_int => try self.parseIntCall(function, &frame),
@@ -209,6 +209,9 @@ pub const Vm = struct {
             if (slot.name == atom_id) {
                 slot.value.free(self.ctx.runtime);
                 slot.value = value.dup();
+                if (self.global_object) |global| if (self.shouldMirrorGlobalProperty(value)) {
+                    try global.defineOwnProperty(self.ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+                };
                 return;
             }
         }
@@ -218,6 +221,14 @@ pub const Vm = struct {
         next[self.globals.len] = .{ .name = atom_id, .value = value.dup() };
         if (self.globals.len != 0) self.ctx.runtime.memory.free(globals_mod.Slot, self.globals);
         self.globals = next;
+        if (self.global_object) |global| if (self.shouldMirrorGlobalProperty(value)) {
+            try global.defineOwnProperty(self.ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+        };
+    }
+
+    fn shouldMirrorGlobalProperty(self: *Vm, value: core.Value) bool {
+        const global = self.global_object orelse return false;
+        return value.refHeader() != &global.header;
     }
 
     fn ensureGlobalObject(self: *Vm) !*core.Object {
@@ -231,6 +242,32 @@ pub const Vm = struct {
 
         self.global_object = global;
         return global;
+    }
+
+    fn builtinPrototype(self: *Vm, name: []const u8) !?*core.Object {
+        const global = try self.ensureGlobalObject();
+        const constructor_key = try self.ctx.runtime.internAtom(name);
+        defer self.ctx.runtime.atoms.free(constructor_key);
+        const constructor_value = global.getProperty(constructor_key);
+        defer constructor_value.free(self.ctx.runtime);
+        if (!constructor_value.isObject()) return null;
+        const constructor_header = constructor_value.refHeader() orelse return null;
+        const constructor: *core.Object = @fieldParentPtr("header", constructor_header);
+        const prototype_value = constructor.getProperty(core.atom.ids.prototype);
+        defer prototype_value.free(self.ctx.runtime);
+        if (!prototype_value.isObject()) return null;
+        const prototype_header = prototype_value.refHeader() orelse return null;
+        return @fieldParentPtr("header", prototype_header);
+    }
+
+    fn collectionPrototype(self: *Vm, kind: u32) !?*core.Object {
+        return self.builtinPrototype(switch (kind) {
+            1 => "Map",
+            2 => "Set",
+            3 => "WeakMap",
+            4 => "WeakSet",
+            else => return null,
+        });
     }
 
     fn call(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -251,15 +288,84 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
         const callee = try self.stack.pop();
         defer callee.free(self.ctx.runtime);
-        const result = try call_mod.callValue(self.ctx, self.output, callee, args);
+        const result = try call_mod.callValueWithGlobals(self.ctx, self.output, self.globals, callee, args);
         defer result.free(self.ctx.runtime);
         try self.stack.push(result);
+    }
+
+    fn callProp(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+        const atom_id = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
+        const argc = readInt(u32, function.code[frame.pc + 4 .. frame.pc + 8]);
+        frame.pc += 8;
+        var args: []core.Value = &.{};
+        if (argc != 0) args = try self.ctx.runtime.memory.alloc(core.Value, argc);
+        defer if (args.len != 0) self.ctx.runtime.memory.free(core.Value, args);
+
+        var filled_start: usize = args.len;
+        errdefer {
+            var i = filled_start;
+            while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
+        }
+        var remaining = argc;
+        while (remaining > 0) {
+            remaining -= 1;
+            args[remaining] = try self.stack.pop();
+            filled_start = remaining;
+        }
+        filled_start = args.len;
+        defer {
+            var i: usize = 0;
+            while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
+        }
+
+        const receiver = try self.stack.pop();
+        defer receiver.free(self.ctx.runtime);
+        const callee = self.getCallProperty(receiver, atom_id) catch |err| switch (err) {
+            error.TypeError => return self.throwTypeError(),
+            else => return err,
+        };
+        defer callee.free(self.ctx.runtime);
+        const result = call_mod.callValueWithThisAndGlobals(self.ctx, self.output, self.globals, receiver, callee, args) catch |err| switch (err) {
+            error.TypeError => return self.throwTypeError(),
+            else => return err,
+        };
+        defer result.free(self.ctx.runtime);
+        try self.stack.push(result);
+    }
+
+    fn getCallProperty(self: *Vm, receiver: core.Value, atom_id: core.Atom) !core.Value {
+        if (receiver.isObject()) {
+            const header = receiver.refHeader() orelse return error.TypeError;
+            const object: *core.Object = @fieldParentPtr("header", header);
+            const value = object.getProperty(atom_id);
+            if (!value.isUndefined()) return value;
+            value.free(self.ctx.runtime);
+            if (object.is_array) {
+                const prototype = (try self.builtinPrototype("Array")) orelse return core.Value.undefinedValue();
+                return prototype.getProperty(atom_id);
+            }
+            return core.Value.undefinedValue();
+        }
+        if (receiver.isString()) {
+            const prototype = (try self.builtinPrototype("String")) orelse return core.Value.undefinedValue();
+            return prototype.getProperty(atom_id);
+        }
+        if (receiver.isNumber()) {
+            const prototype = (try self.builtinPrototype("Number")) orelse return core.Value.undefinedValue();
+            return prototype.getProperty(atom_id);
+        }
+        if (receiver.isBool()) {
+            const prototype = (try self.builtinPrototype("Boolean")) orelse return core.Value.undefinedValue();
+            return prototype.getProperty(atom_id);
+        }
+        return error.TypeError;
     }
 
     fn construct(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -280,8 +386,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
         const callee = try self.stack.pop();
@@ -375,12 +482,13 @@ pub const Vm = struct {
             values[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = values.len;
         defer {
-            var index = filled_start;
+            var index: usize = 0;
             while (index < values.len) : (index += 1) values[index].free(self.ctx.runtime);
         }
 
-        const out = try builtins.array.construct(self.ctx.runtime, values);
+        const out = try builtins.array.constructWithPrototype(self.ctx.runtime, values, try self.builtinPrototype("Array"));
         defer out.free(self.ctx.runtime);
         try self.stack.push(out);
     }
@@ -414,8 +522,9 @@ pub const Vm = struct {
             values[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = values.len;
         defer {
-            var index = filled_start;
+            var index: usize = 0;
             while (index < values.len) : (index += 1) values[index].free(self.ctx.runtime);
         }
 
@@ -455,7 +564,7 @@ pub const Vm = struct {
     }
 
     fn newPromise(self: *Vm) !void {
-        const out = try builtins.promise.construct(self.ctx.runtime);
+        const out = try builtins.promise.constructWithPrototype(self.ctx.runtime, try self.builtinPrototype("Promise"));
         defer out.free(self.ctx.runtime);
         try self.stack.push(out);
     }
@@ -465,7 +574,7 @@ pub const Vm = struct {
         defer flags.free(self.ctx.runtime);
         const pattern = try self.stack.pop();
         defer pattern.free(self.ctx.runtime);
-        const out = try builtins.regexp.construct(self.ctx.runtime, pattern, flags);
+        const out = try builtins.regexp.constructWithPrototype(self.ctx.runtime, pattern, flags, try self.builtinPrototype("RegExp"));
         defer out.free(self.ctx.runtime);
         try self.stack.push(out);
     }
@@ -488,8 +597,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 
@@ -518,8 +628,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 
@@ -549,12 +660,13 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 
-        const out = try builtins.date.construct(self.ctx.runtime, args);
+        const out = try builtins.date.constructWithPrototype(self.ctx.runtime, args, try self.builtinPrototype("Date"));
         defer out.free(self.ctx.runtime);
         try self.stack.push(out);
     }
@@ -642,6 +754,11 @@ pub const Vm = struct {
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);
             },
+            7...20 => {
+                const out = try closure_mod.create(self.ctx.runtime, kind, 0, 0, 0);
+                defer out.free(self.ctx.runtime);
+                try self.stack.push(out);
+            },
             else => return self.throwTypeError(),
         }
     }
@@ -649,20 +766,29 @@ pub const Vm = struct {
     fn callClosure(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
         const argc = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
         frame.pc += 4;
-        var args: [4]core.Value = undefined;
-        if (argc > args.len) return self.throwTypeError();
+        var args: []core.Value = &.{};
+        if (argc != 0) args = try self.ctx.runtime.memory.alloc(core.Value, argc);
+        defer if (args.len != 0) self.ctx.runtime.memory.free(core.Value, args);
+
+        var filled_start: usize = args.len;
+        errdefer {
+            var i = filled_start;
+            while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
+        }
         var remaining = argc;
         while (remaining > 0) {
             remaining -= 1;
             args[remaining] = try self.stack.pop();
+            filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
             var i: usize = 0;
-            while (i < argc) : (i += 1) args[i].free(self.ctx.runtime);
+            while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
         const closure_value = try self.stack.pop();
         defer closure_value.free(self.ctx.runtime);
-        const out = closure_mod.call(self.ctx.runtime, closure_value, args[0..argc], self.globals) catch |err| switch (err) {
+        const out = closure_mod.call(self.ctx.runtime, closure_value, args, self.globals) catch |err| switch (err) {
             error.UnsupportedClosureCall => return self.throwTypeError(),
             else => return err,
         };
@@ -704,12 +830,13 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 
-        const out = builtins.string.construct(self.ctx.runtime, args) catch |err| switch (err) {
+        const out = builtins.string.constructWithPrototype(self.ctx.runtime, args, try self.builtinPrototype("String")) catch |err| switch (err) {
             error.UnsupportedStringCall => return self.throwTypeError(),
             else => return err,
         };
@@ -761,8 +888,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 
@@ -811,8 +939,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
         const view_value = try self.stack.pop();
@@ -846,8 +975,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
         const view_value = try self.stack.pop();
@@ -864,56 +994,7 @@ pub const Vm = struct {
     fn newCollection(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
         const kind = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
         frame.pc += 4;
-        const out = builtins.collection.construct(self.ctx.runtime, kind) catch |err| switch (err) {
-            error.UnsupportedCollectionCall => return self.throwTypeError(),
-            else => return err,
-        };
-        defer out.free(self.ctx.runtime);
-        try self.stack.push(out);
-    }
-
-    fn collectionMethod(self: *Vm, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
-        const method = readInt(u32, function.code[frame.pc .. frame.pc + 4]);
-        frame.pc += 4;
-        switch (method) {
-            1 => {
-                const value = try self.stack.pop();
-                defer value.free(self.ctx.runtime);
-                const key = try self.stack.pop();
-                defer key.free(self.ctx.runtime);
-                const object_value = try self.stack.pop();
-                defer object_value.free(self.ctx.runtime);
-                const args = [_]core.Value{ key, value };
-                try self.pushCollectionResult(object_value, method, args[0..]);
-            },
-            2, 3, 4 => {
-                const key = try self.stack.pop();
-                defer key.free(self.ctx.runtime);
-                const object_value = try self.stack.pop();
-                defer object_value.free(self.ctx.runtime);
-                const args = [_]core.Value{key};
-                try self.pushCollectionResult(object_value, method, args[0..]);
-            },
-            5 => {
-                const object_value = try self.stack.pop();
-                defer object_value.free(self.ctx.runtime);
-                try self.pushCollectionResult(object_value, method, &.{});
-            },
-            6 => {
-                const value = try self.stack.pop();
-                defer value.free(self.ctx.runtime);
-                const object_value = try self.stack.pop();
-                defer object_value.free(self.ctx.runtime);
-                const args = [_]core.Value{value};
-                try self.pushCollectionResult(object_value, method, args[0..]);
-            },
-            else => return self.throwTypeError(),
-        }
-    }
-
-    fn pushCollectionResult(self: *Vm, object_value: core.Value, method: u32, args: []const core.Value) !void {
-        const out = builtins.collection.methodCall(self.ctx.runtime, object_value, method, args) catch |err| switch (err) {
-            error.TypeError => return self.throwTypeError(),
+        const out = builtins.collection.constructWithPrototype(self.ctx.runtime, kind, try self.collectionPrototype(kind)) catch |err| switch (err) {
             error.UnsupportedCollectionCall => return self.throwTypeError(),
             else => return err,
         };
@@ -985,11 +1066,14 @@ pub const Vm = struct {
             else => return self.throwTypeError(),
         };
 
-        var args: [4]core.Value = undefined;
-        var filled_start: usize = argc;
+        var args: []core.Value = &.{};
+        if (argc != 0) args = try self.ctx.runtime.memory.alloc(core.Value, argc);
+        defer if (args.len != 0) self.ctx.runtime.memory.free(core.Value, args);
+
+        var filled_start: usize = args.len;
         errdefer {
             var index = filled_start;
-            while (index < argc) : (index += 1) args[index].free(self.ctx.runtime);
+            while (index < args.len) : (index += 1) args[index].free(self.ctx.runtime);
         }
         var remaining = argc;
         while (remaining > 0) {
@@ -997,9 +1081,10 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var index = filled_start;
-            while (index < argc) : (index += 1) args[index].free(self.ctx.runtime);
+            var index: usize = 0;
+            while (index < args.len) : (index += 1) args[index].free(self.ctx.runtime);
         }
         const array_value = try self.stack.pop();
         defer array_value.free(self.ctx.runtime);
@@ -1014,7 +1099,7 @@ pub const Vm = struct {
             return;
         }
 
-        const out = builtins.array.methodCall(self.ctx.runtime, array_value, method, args[0..argc]) catch |err| switch (err) {
+        const out = builtins.array.methodCall(self.ctx.runtime, array_value, method, args) catch |err| switch (err) {
             error.UnsupportedArrayCall => return self.throwTypeError(),
             else => return err,
         };
@@ -1107,8 +1192,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
         const number = builtins.math.call(id, args) catch |err| switch (err) {
@@ -1246,8 +1332,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 
@@ -1279,8 +1366,9 @@ pub const Vm = struct {
             args[remaining] = try self.stack.pop();
             filled_start = remaining;
         }
+        filled_start = args.len;
         defer {
-            var i = filled_start;
+            var i: usize = 0;
             while (i < args.len) : (i += 1) args[i].free(self.ctx.runtime);
         }
 

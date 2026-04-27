@@ -15,7 +15,11 @@ pub fn lengthAfterSet(index: u32, current: u32) u32 {
 /// QuickJS source map: narrow array literal helper used by transitional
 /// `new_array` bytecode.
 pub fn construct(rt: *core.Runtime, values: []const core.Value) !core.Value {
-    const object = try core.Object.createArray(rt, null);
+    return constructWithPrototype(rt, values, null);
+}
+
+pub fn constructWithPrototype(rt: *core.Runtime, values: []const core.Value, prototype: ?*core.Object) !core.Value {
+    const object = try core.Object.createArray(rt, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
     for (values, 0..) |value, index| {

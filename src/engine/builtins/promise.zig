@@ -5,10 +5,16 @@ const jobs = @import("../exec/jobs.zig");
 /// QuickJS source map: narrow Promise constructor payload used by transitional
 /// `new_promise` bytecode.
 pub fn construct(rt: *core.Runtime) !core.Value {
-    const object = try core.Object.create(rt, core.class.ids.promise, null);
+    return constructWithPrototype(rt, null);
+}
+
+pub fn constructWithPrototype(rt: *core.Runtime, prototype: ?*core.Object) !core.Value {
+    const object = try core.Object.create(rt, core.class.ids.promise, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try function_builtin.defineNativeMethod(rt, object, "then", 2);
-    try function_builtin.defineNativeMethod(rt, object, "catch", 1);
+    if (prototype == null) {
+        try function_builtin.defineNativeMethod(rt, object, "then", 2);
+        try function_builtin.defineNativeMethod(rt, object, "catch", 1);
+    }
     return object.value();
 }
 
@@ -17,6 +23,10 @@ pub fn construct(rt: *core.Runtime) !core.Value {
 /// resolve/all/race ignore arguments, reject records an unhandled reason, and
 /// every supported mode returns a Promise object.
 pub fn staticCall(ctx: *core.Context, mode: u32, reason: ?core.Value) !core.Value {
+    return staticCallWithPrototype(ctx, mode, reason, null);
+}
+
+pub fn staticCallWithPrototype(ctx: *core.Context, mode: u32, reason: ?core.Value, prototype: ?*core.Object) !core.Value {
     switch (mode) {
         1, 2, 3 => {},
         4 => {
@@ -25,7 +35,7 @@ pub fn staticCall(ctx: *core.Context, mode: u32, reason: ?core.Value) !core.Valu
         },
         else => return error.UnsupportedPromiseCall,
     }
-    return construct(ctx.runtime);
+    return constructWithPrototype(ctx.runtime, prototype);
 }
 
 pub fn enqueueReaction(queue: *jobs.Queue, job: jobs.Job) !void {

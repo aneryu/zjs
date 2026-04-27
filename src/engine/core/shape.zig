@@ -40,6 +40,7 @@ pub const Registry = struct {
     shape_hash_bits: u6 = initial_shape_hash_bits,
     shape_hash_count: usize = 0,
     shapes: []*Shape = &.{},
+    shapes_capacity: usize = 0,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) Registry {
         return .{ .memory = account, .atoms = atoms };
@@ -49,6 +50,9 @@ pub const Registry = struct {
         while (self.shapes.len != 0) {
             self.release(self.shapes[self.shapes.len - 1]);
         }
+        if (self.shapes_capacity != 0) self.memory.free(*Shape, self.shapes.ptr[0..self.shapes_capacity]);
+        self.shapes = &.{};
+        self.shapes_capacity = 0;
     }
 
     pub fn create(self: *Registry, proto_id: ?usize) !*Shape {
@@ -101,12 +105,18 @@ pub const Registry = struct {
     }
 
     fn link(self: *Registry, shape: *Shape) !void {
-        const next = try self.memory.alloc(*Shape, self.shapes.len + 1);
-        errdefer self.memory.free(*Shape, next);
-        @memcpy(next[0..self.shapes.len], self.shapes);
-        next[self.shapes.len] = shape;
-        if (self.shapes.len != 0) self.memory.free(*Shape, self.shapes);
-        self.shapes = next;
+        if (self.shapes.len == self.shapes_capacity) {
+            const next_capacity = if (self.shapes_capacity == 0) 4 else self.shapes_capacity * 2;
+            const next = try self.memory.alloc(*Shape, next_capacity);
+            errdefer self.memory.free(*Shape, next);
+            @memcpy(next[0..self.shapes.len], self.shapes);
+            if (self.shapes_capacity != 0) self.memory.free(*Shape, self.shapes.ptr[0..self.shapes_capacity]);
+            self.shapes = next[0..self.shapes.len];
+            self.shapes_capacity = next_capacity;
+        }
+        const len = self.shapes.len;
+        self.shapes = self.shapes.ptr[0 .. len + 1];
+        self.shapes[len] = shape;
         self.shape_hash_count += 1;
     }
 
@@ -119,16 +129,10 @@ pub const Registry = struct {
             }
         }
         const i = index orelse return;
-        if (self.shapes.len == 1) {
-            self.memory.free(*Shape, self.shapes);
-            self.shapes = &.{};
-        } else {
-            const next = self.memory.alloc(*Shape, self.shapes.len - 1) catch unreachable;
-            @memcpy(next[0..i], self.shapes[0..i]);
-            @memcpy(next[i..], self.shapes[i + 1 ..]);
-            self.memory.free(*Shape, self.shapes);
-            self.shapes = next;
+        if (i + 1 < self.shapes.len) {
+            std.mem.copyForwards(*Shape, self.shapes[i .. self.shapes.len - 1], self.shapes[i + 1 ..]);
         }
+        self.shapes = self.shapes[0 .. self.shapes.len - 1];
         self.shape_hash_count -= 1;
     }
 };

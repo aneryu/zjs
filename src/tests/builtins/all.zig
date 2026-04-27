@@ -14,6 +14,7 @@ test "support libraries cover unicode dtoa bignum and regexp basics" {
     const n = try libs.dtoa.parseNumber("12.5");
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("12.5", try libs.dtoa.formatNumber(&buf, n));
+    try std.testing.expect(std.math.isPositiveInf(try libs.dtoa.parseNumber("+Infinity")));
 
     var forty = try libs.bignum.parseBase10(std.testing.allocator, "40");
     defer forty.deinit();
@@ -82,6 +83,30 @@ test "intrinsic bootstrap registers global builtin domains through object proper
         try std.testing.expectEqual(false, desc.enumerable.?);
         try std.testing.expectEqual(true, desc.configurable.?);
     }
+
+    const map_atom = try rt.internAtom("Map");
+    defer rt.atoms.free(map_atom);
+    const map_ctor = intrinsics.global.getProperty(map_atom);
+    defer map_ctor.free(rt);
+    try expectObjectClass(map_ctor, core.class.ids.c_function);
+    const map_ctor_object: *core.Object = @fieldParentPtr("header", map_ctor.refHeader().?);
+    const prototype_atom = try rt.internAtom("prototype");
+    defer rt.atoms.free(prototype_atom);
+    const prototype_desc = map_ctor_object.getOwnProperty(prototype_atom).?;
+    defer prototype_desc.destroy(rt);
+    try std.testing.expectEqual(false, prototype_desc.writable.?);
+    try std.testing.expectEqual(false, prototype_desc.enumerable.?);
+    try std.testing.expectEqual(false, prototype_desc.configurable.?);
+    try expectObjectClass(prototype_desc.value, core.class.ids.object);
+    const map_proto: *core.Object = @fieldParentPtr("header", prototype_desc.value.refHeader().?);
+    const set_atom = try rt.internAtom("set");
+    defer rt.atoms.free(set_atom);
+    const set_desc = map_proto.getOwnProperty(set_atom).?;
+    defer set_desc.destroy(rt);
+    try std.testing.expectEqual(true, set_desc.writable.?);
+    try std.testing.expectEqual(false, set_desc.enumerable.?);
+    try std.testing.expectEqual(true, set_desc.configurable.?);
+    try expectObjectClass(set_desc.value, core.class.ids.c_function);
 }
 
 test "object function array string number boolean symbol bigint math date json regexp error promise collections" {
@@ -241,9 +266,14 @@ test "object function array string number boolean symbol bigint math date json r
     defer number_string_object.free(rt);
     try expectStringValue(rt, "123", try builtins.string.methodCall(rt, number_string_object, 9, &.{}));
     try expectStringValue(rt, "Hello", try builtins.string.fromCharCode(rt, &.{ core.Value.int32(72), core.Value.int32(101), core.Value.int32(108), core.Value.int32(108), core.Value.int32(111) }));
-    var too_many_chars: [65]core.Value = undefined;
-    for (&too_many_chars) |*slot| slot.* = core.Value.int32(65);
-    try std.testing.expectError(error.UnsupportedStringCall, builtins.string.fromCharCode(rt, too_many_chars[0..]));
+    var many_chars: [65]core.Value = undefined;
+    for (&many_chars) |*slot| slot.* = core.Value.int32(65);
+    try expectStringValue(rt, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", try builtins.string.fromCharCode(rt, many_chars[0..]));
+    const wide_from_char_code = try builtins.string.fromCharCode(rt, &.{core.Value.int32(0x0100)});
+    defer wide_from_char_code.free(rt);
+    const wide_string: *core.string.String = @fieldParentPtr("header", wide_from_char_code.refHeader().?);
+    try std.testing.expect(wide_string.isWide());
+    try std.testing.expectEqual(@as(u16, 0x0100), wide_string.codeUnitAt(0));
     try std.testing.expectEqual(@as(f64, 3.5), try builtins.number.parseFloat("3.5"));
     const parse_input_string = try core.string.String.createUtf8(rt, "0x10");
     const parse_input = parse_input_string.value();
@@ -448,20 +478,31 @@ test "object function array string number boolean symbol bigint math date json r
     const map_set_args = [_]core.Value{ map_key, map_stored };
     const map_set = try builtins.collection.methodCall(rt, collection_map, 1, map_set_args[0..]);
     defer map_set.free(rt);
-    try std.testing.expect(map_set.isUndefined());
+    try expectObjectClass(map_set, core.class.ids.map);
     try expectIntProperty(rt, collection_map, "size", 1);
+    const map_second_key = core.Value.int32(2);
+    const map_second_value = core.Value.int32(22);
+    const map_second_args = [_]core.Value{ map_second_key, map_second_value };
+    const map_second_set = try builtins.collection.methodCall(rt, collection_map, 1, map_second_args[0..]);
+    defer map_second_set.free(rt);
+    try expectObjectClass(map_second_set, core.class.ids.map);
+    try expectIntProperty(rt, collection_map, "size", 2);
     const map_get_args = [_]core.Value{map_key};
     try expectStringValue(rt, "value", try builtins.collection.methodCall(rt, collection_map, 2, map_get_args[0..]));
+    const map_second_get = try builtins.collection.methodCall(rt, collection_map, 2, &.{map_second_key});
+    defer map_second_get.free(rt);
+    try std.testing.expectEqual(@as(?i32, 22), map_second_get.asInt32());
     const map_has = try builtins.collection.methodCall(rt, collection_map, 3, map_get_args[0..]);
     defer map_has.free(rt);
     try std.testing.expectEqual(@as(?bool, true), map_has.asBool());
     const map_delete = try builtins.collection.methodCall(rt, collection_map, 4, map_get_args[0..]);
     defer map_delete.free(rt);
     try std.testing.expectEqual(@as(?bool, true), map_delete.asBool());
-    try expectIntProperty(rt, collection_map, "size", 0);
+    try expectIntProperty(rt, collection_map, "size", 1);
     const map_clear = try builtins.collection.methodCall(rt, collection_map, 5, &.{});
     defer map_clear.free(rt);
     try std.testing.expect(map_clear.isUndefined());
+    try expectIntProperty(rt, collection_map, "size", 0);
 
     const collection_set = try builtins.collection.construct(rt, 2);
     defer collection_set.free(rt);
@@ -469,11 +510,35 @@ test "object function array string number boolean symbol bigint math date json r
     const set_add_args = [_]core.Value{core.Value.int32(1)};
     const set_add = try builtins.collection.methodCall(rt, collection_set, 6, set_add_args[0..]);
     defer set_add.free(rt);
-    try std.testing.expect(set_add.isUndefined());
+    try expectObjectClass(set_add, core.class.ids.set);
     try expectIntProperty(rt, collection_set, "size", 1);
+    const set_second_add = try builtins.collection.methodCall(rt, collection_set, 6, &.{core.Value.int32(2)});
+    defer set_second_add.free(rt);
+    try expectObjectClass(set_second_add, core.class.ids.set);
+    const set_duplicate_add = try builtins.collection.methodCall(rt, collection_set, 6, set_add_args[0..]);
+    defer set_duplicate_add.free(rt);
+    try expectObjectClass(set_duplicate_add, core.class.ids.set);
+    try expectIntProperty(rt, collection_set, "size", 2);
     const set_has = try builtins.collection.methodCall(rt, collection_set, 3, set_add_args[0..]);
     defer set_has.free(rt);
     try std.testing.expectEqual(@as(?bool, true), set_has.asBool());
+
+    const collection_weakmap = try builtins.collection.construct(rt, 3);
+    defer collection_weakmap.free(rt);
+    try expectObjectClass(collection_weakmap, core.class.ids.weakmap);
+    const weakmap_key_object = try builtins.object.create(rt, null);
+    const weakmap_key = weakmap_key_object.value();
+    defer weakmap_key.free(rt);
+    const weakmap_set = try builtins.collection.methodCall(rt, collection_weakmap, 1, &.{ weakmap_key, core.Value.int32(44) });
+    defer weakmap_set.free(rt);
+    try expectObjectClass(weakmap_set, core.class.ids.weakmap);
+    const weakmap_get = try builtins.collection.methodCall(rt, collection_weakmap, 2, &.{weakmap_key});
+    defer weakmap_get.free(rt);
+    try std.testing.expectEqual(@as(?i32, 44), weakmap_get.asInt32());
+    const weakmap_primitive_has = try builtins.collection.methodCall(rt, collection_weakmap, 3, &.{core.Value.int32(1)});
+    defer weakmap_primitive_has.free(rt);
+    try std.testing.expectEqual(@as(?bool, false), weakmap_primitive_has.asBool());
+    try std.testing.expectError(error.TypeError, builtins.collection.methodCall(rt, collection_weakmap, 1, &.{ core.Value.int32(1), core.Value.int32(2) }));
 
     const collection_weakset = try builtins.collection.construct(rt, 4);
     defer collection_weakset.free(rt);
@@ -485,9 +550,21 @@ test "object function array string number boolean symbol bigint math date json r
     const weakset_args = [_]core.Value{weak_key};
     const weakset_add = try builtins.collection.methodCall(rt, collection_weakset, 6, weakset_args[0..]);
     defer weakset_add.free(rt);
+    try expectObjectClass(weakset_add, core.class.ids.weakset);
     const weakset_has = try builtins.collection.methodCall(rt, collection_weakset, 3, weakset_args[0..]);
     defer weakset_has.free(rt);
     try std.testing.expectEqual(@as(?bool, true), weakset_has.asBool());
+    const weakset_primitive_has = try builtins.collection.methodCall(rt, collection_weakset, 3, &.{core.Value.int32(1)});
+    defer weakset_primitive_has.free(rt);
+    try std.testing.expectEqual(@as(?bool, false), weakset_primitive_has.asBool());
+    var live_identity = @intFromPtr(weak_key.refHeader().?);
+    const removed_weakmap_entries = try builtins.collection.sweepWeakEntries(rt, @fieldParentPtr("header", collection_weakmap.refHeader().?), @ptrCast(&live_identity), keepOnlyIdentityLive);
+    try std.testing.expectEqual(@as(usize, 1), removed_weakmap_entries);
+    const weakmap_after_sweep = try builtins.collection.methodCall(rt, collection_weakmap, 3, &.{weakmap_key});
+    defer weakmap_after_sweep.free(rt);
+    try std.testing.expectEqual(@as(?bool, false), weakmap_after_sweep.asBool());
+    const removed_weakset_entries = try builtins.collection.sweepWeakEntries(rt, @fieldParentPtr("header", collection_weakset.refHeader().?), @ptrCast(&live_identity), keepOnlyIdentityLive);
+    try std.testing.expectEqual(@as(usize, 0), removed_weakset_entries);
 
     try std.testing.expectError(error.TypeError, builtins.collection.methodCall(rt, core.Value.int32(1), 3, set_add_args[0..]));
     try std.testing.expectError(error.UnsupportedCollectionCall, builtins.collection.construct(rt, 99));
@@ -502,6 +579,11 @@ fn expectStringValue(rt: *core.Runtime, expected: []const u8, value: core.Value)
     const header = value.refHeader().?;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     try std.testing.expect(string_value.eqlBytes(expected));
+}
+
+fn keepOnlyIdentityLive(context: ?*anyopaque, key_identity: usize) bool {
+    const live: *usize = @ptrCast(@alignCast(context.?));
+    return key_identity == live.*;
 }
 
 fn expectNumberValue(rt: *core.Runtime, expected: f64, value: core.Value) !void {

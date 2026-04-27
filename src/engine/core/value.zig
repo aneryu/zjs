@@ -57,6 +57,10 @@ pub const Value = struct {
         return .{ .tag = Tag.string, .payload = .{ .ref = header } };
     }
 
+    pub fn symbol(atom_id: u32) Value {
+        return .{ .tag = Tag.symbol, .payload = .{ .int32 = @intCast(atom_id) } };
+    }
+
     pub fn object(header: *gc.Header) Value {
         return .{ .tag = Tag.object, .payload = .{ .ref = header } };
     }

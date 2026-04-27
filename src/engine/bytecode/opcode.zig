@@ -155,7 +155,7 @@ fn trimArg(arg: []const u8) []const u8 {
 }
 
 fn parseU8(text: []const u8) u8 {
-    return std.fmt.parseInt(u8, text, 10) catch unreachable;
+    return std.fmt.parseInt(u8, text, 10) catch @panic("invalid QuickJS opcode integer metadata");
 }
 
 fn parseFormat(text: []const u8) Format {

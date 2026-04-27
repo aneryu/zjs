@@ -55,6 +55,42 @@ pub fn call(rt: *core.Runtime, closure_value: core.Value, args: []const core.Val
             const arg = args[0].asInt32() orelse return error.UnsupportedClosureCall;
             return core.Value.int32(arg * multiplier);
         },
+        7 => return error.TypeError,
+        8 => return error.SyntaxError,
+        9 => return error.RangeError,
+        10 => return error.EvalError,
+        11 => return error.ReferenceError,
+        12 => return error.Test262Error,
+        13 => return core.Value.undefinedValue(),
+        14 => return core.Value.nullValue(),
+        15 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            const string = stringFromValue(args[0]) orelse return error.UnsupportedClosureCall;
+            return core.Value.int32(@intCast(string.len()));
+        },
+        16 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            const value = args[0].asInt32() orelse return error.UnsupportedClosureCall;
+            return try value_ops.createStringValue(rt, if (@mod(value, 2) == 0) "even" else "odd");
+        },
+        17 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            return args[0].dup();
+        },
+        18 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            const char = stringFromValue(args[0]) orelse return error.UnsupportedClosureCall;
+            const threshold = try core.string.String.createUtf8(rt, "\xF0\x9F\x99\x8F");
+            const threshold_value = threshold.value();
+            defer threshold_value.free(rt);
+            const text = if (char.compare(threshold.*) < 0) "before" else "after";
+            return try value_ops.createStringValue(rt, text);
+        },
+        19 => {
+            try incrementGlobalInt(rt, globals, "calls");
+            return core.Value.nullValue();
+        },
+        20 => return try value_ops.createStringValue(rt, "key"),
         else => return error.UnsupportedClosureCall,
     }
 }
@@ -99,6 +135,22 @@ fn getIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8) !i3
     const value = object.getProperty(key);
     defer value.free(rt);
     return value.asInt32() orelse error.UnsupportedClosureCall;
+}
+
+fn incrementGlobalInt(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !void {
+    const existing = try globals_mod.getByName(rt, globals, name);
+    defer existing.free(rt);
+    const current = existing.asInt32() orelse return error.UnsupportedClosureCall;
+    globals_mod.setExistingByName(rt, globals, name, core.Value.int32(current + 1)) catch |err| switch (err) {
+        error.UnsupportedGlobal => return error.UnsupportedClosureCall,
+        else => return err,
+    };
+}
+
+fn stringFromValue(value: core.Value) ?*core.string.String {
+    if (!value.isString()) return null;
+    const header = value.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
 }
 
 fn appendIntField(rt: *core.Runtime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {

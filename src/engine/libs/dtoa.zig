@@ -1,5 +1,6 @@
 pub fn parseNumber(bytes: []const u8) !f64 {
     if (std.mem.eql(u8, bytes, "Infinity")) return std.math.inf(f64);
+    if (std.mem.eql(u8, bytes, "+Infinity")) return std.math.inf(f64);
     if (std.mem.eql(u8, bytes, "-Infinity")) return -std.math.inf(f64);
     if (std.mem.eql(u8, bytes, "NaN")) return std.math.nan(f64);
     return std.fmt.parseFloat(f64, bytes);

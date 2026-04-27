@@ -203,6 +203,62 @@ test "call subsystem installs and invokes host globals" {
     const test262_ctor = global.getProperty(test262_key);
     defer test262_ctor.free(rt);
     try std.testing.expectError(error.Test262Error, engine.exec.call.callValue(ctx, null, test262_ctor, &.{}));
+
+    const map_value = try engine.builtins.collection.construct(rt, 1);
+    defer map_value.free(rt);
+    const map_object: *core.Object = @fieldParentPtr("header", map_value.refHeader().?);
+    const set_key = try rt.internAtom("set");
+    defer rt.atoms.free(set_key);
+    const get_key = try rt.internAtom("get");
+    defer rt.atoms.free(get_key);
+    const map_set = map_object.getProperty(set_key);
+    defer map_set.free(rt);
+    const map_get = map_object.getProperty(get_key);
+    defer map_get.free(rt);
+    const stored_key_obj = try core.string.String.createUtf8(rt, "key");
+    const stored_key = stored_key_obj.value();
+    defer stored_key.free(rt);
+    const stored_value_obj = try core.string.String.createUtf8(rt, "value");
+    const stored_value = stored_value_obj.value();
+    defer stored_value.free(rt);
+    const set_args = [_]core.Value{ stored_key, stored_value };
+    const set_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_set, &set_args);
+    defer set_result.free(rt);
+    try std.testing.expect(set_result.same(map_value));
+    try std.testing.expectError(error.TypeError, engine.exec.call.callValue(ctx, null, map_set, &set_args));
+    const get_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_get, &.{stored_key});
+    defer get_result.free(rt);
+    var get_text = std.ArrayList(u8).empty;
+    defer get_text.deinit(std.testing.allocator);
+    try engine.exec.value_ops.appendRawString(rt, &get_text, get_result);
+    try std.testing.expectEqualStrings("value", get_text.items);
+}
+
+test "vm collection constructors use registered prototype methods" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("collection-prototype");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    var emit = engine.bytecode.emitter.Emitter.init(&function);
+    try emit.emitNewCollection(1);
+
+    var vm_instance = engine.exec.Vm.init(ctx);
+    defer vm_instance.deinit();
+    const result = try vm_instance.run(&function);
+    defer result.free(rt);
+
+    const object: *core.Object = @fieldParentPtr("header", result.refHeader().?);
+    const set_key = try rt.internAtom("set");
+    defer rt.atoms.free(set_key);
+    try std.testing.expect(object.getPrototype() != null);
+    try std.testing.expect(!object.hasOwnProperty(set_key));
+    try std.testing.expect(object.hasProperty(set_key));
+    try std.testing.expect(object.getPrototype().?.hasOwnProperty(set_key));
 }
 
 test "Engine eval executes test262 helpers through generic call paths" {
@@ -214,6 +270,19 @@ test "Engine eval executes test262 helpers through generic call paths" {
     try std.testing.expect(result.isUndefined());
     try std.testing.expectError(error.Test262Error, js.eval("assert.sameValue(1, 2);"));
     try std.testing.expectError(error.Test262Error, js.eval("throw new Test262Error('boom');"));
+}
+
+test "Engine eval TypeError with evaluated arguments does not double free constants" {
+    {
+        var js = try engine.Engine.init(std.testing.allocator);
+        defer js.deinit();
+        try std.testing.expectError(error.TypeError, js.eval("const obj = {}; obj.missing(\"a\", \"a\");"));
+    }
+    {
+        var js = try engine.Engine.init(std.testing.allocator);
+        defer js.deinit();
+        try std.testing.expectError(error.TypeError, js.eval("RegExp.test(\"a\", \"a\");"));
+    }
 }
 
 test "vm call handler accepts allocator-backed argument lists" {
@@ -277,6 +346,23 @@ test "Engine API eval and job queue are wired" {
     try js.job_queue.enqueue(countJob);
     js.runJobs();
     try std.testing.expectEqual(@as(usize, 2), job_counter);
+
+    job_counter = 0;
+    var i: usize = 0;
+    while (i < 16) : (i += 1) try js.job_queue.enqueue(countJob);
+    js.runJobs();
+    try std.testing.expectEqual(@as(usize, 16), job_counter);
+}
+
+test "job queue enqueue propagates allocator failure" {
+    var buffer: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    var account = core.memory.MemoryAccount.init(fixed.allocator());
+    var queue = engine.exec.jobs.Queue.init(&account);
+    defer queue.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, queue.enqueue(countJob));
+    try std.testing.expectEqual(@as(usize, 0), queue.jobs.len);
 }
 
 test "Engine eval executes simple variable assignment and print" {
@@ -1127,6 +1213,51 @@ test "Engine eval executes object helper smoke subset" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1 2\n3\na,b,c\n1,2,3\n[[\"a\",1],[\"b\",2],[\"c\",3]]\nabc\n10 20 30\n3\n", stream.buffered());
+}
+
+test "Object.defineProperty returns retained target object" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const proto = Map.prototype;
+        \\const returned = Object.defineProperty(proto, "sentinel", { value: 7, writable: true, configurable: true });
+        \\print(returned === proto);
+        \\print(Map.prototype.sentinel);
+        \\const map = new Map();
+        \\map.set("key", "value");
+        \\print(map.get("key"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\n7\nvalue\n", stream.buffered());
+}
+
+test "Engine eval executes Map groupBy and iterable construction" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\new Map();
+        \\const grouped = Map.groupBy([1, 2, 3], function (i) {
+        \\  return i % 2 === 0 ? "even" : "odd";
+        \\});
+        \\print(grouped.size);
+        \\print(Array.from(grouped.keys()).join(","));
+        \\print(grouped.get("odd").join(","));
+        \\const constructed = new Map([["a", 1], ["b", 2]]);
+        \\print(constructed.size);
+        \\print(constructed.get("b"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("2\nodd,even\n1,3\n2\n2\n", stream.buffered());
 }
 
 test "Engine eval executes typed array smoke subset" {

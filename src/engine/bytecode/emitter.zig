@@ -146,6 +146,15 @@ pub const Emitter = struct {
         try self.append(&bytes);
     }
 
+    pub fn emitCallProp(self: *Emitter, atom_id: atom.Atom, argc: u32) !void {
+        try self.function.retainAtomOperand(atom_id);
+        var bytes: [9]u8 = undefined;
+        bytes[0] = known.call_prop;
+        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
+        std.mem.writeInt(u32, bytes[5..9], argc, .little);
+        try self.append(&bytes);
+    }
+
     pub fn emitSetProp(self: *Emitter, atom_id: atom.Atom) !void {
         try self.emitKnownAtom(known.set_prop, atom_id);
     }
@@ -220,10 +229,6 @@ pub const Emitter = struct {
 
     pub fn emitNewCollection(self: *Emitter, kind: u32) !void {
         try self.emitKnownU32(known.new_collection, kind);
-    }
-
-    pub fn emitCollectionMethod(self: *Emitter, method: u32) !void {
-        try self.emitKnownU32(known.collection_method, method);
     }
 
     pub fn emitUriCall(self: *Emitter, mode: u32) !void {
@@ -314,7 +319,6 @@ pub const known = struct {
     pub const dataview_get: u8 = 182;
     pub const dataview_set: u8 = 183;
     pub const new_collection: u8 = 184;
-    pub const collection_method: u8 = 185;
     pub const uri_call: u8 = 186;
     pub const new_string_object: u8 = 153;
     pub const promise_static: u8 = 189;
@@ -341,6 +345,7 @@ pub const known = struct {
     pub const bigint_as_int_n: u8 = 155;
     pub const bigint_as_uint_n: u8 = 154;
     pub const bit_not: u8 = 151;
+    pub const call_prop: u8 = 152;
     pub const optional_get_prop: u8 = 207;
     pub const value_to_number: u8 = 208;
     pub const value_to_boolean: u8 = 209;

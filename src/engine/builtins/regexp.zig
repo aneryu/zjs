@@ -10,7 +10,11 @@ pub fn matches(program: regexp_lib.Program, input: []const u8) bool {
 /// QuickJS source map: narrow RegExp constructor payload used by transitional
 /// `new_regexp` bytecode.
 pub fn construct(rt: *core.Runtime, pattern: core.Value, flags: core.Value) !core.Value {
-    const object = try core.Object.create(rt, core.class.ids.regexp, null);
+    return constructWithPrototype(rt, pattern, flags, null);
+}
+
+pub fn constructWithPrototype(rt: *core.Runtime, pattern: core.Value, flags: core.Value, prototype: ?*core.Object) !core.Value {
+    const object = try core.Object.create(rt, core.class.ids.regexp, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try defineValueProperty(rt, object, "__regexp_source", pattern);
     try defineValueProperty(rt, object, "__regexp_flags", flags);

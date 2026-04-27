@@ -29,6 +29,25 @@ pub const ArrayStorageMode = enum {
     sparse,
 };
 
+pub const CollectionEntry = struct {
+    key: Value,
+    value: Value,
+
+    pub fn destroy(self: CollectionEntry, rt: *Runtime) void {
+        self.key.free(rt);
+        self.value.free(rt);
+    }
+};
+
+pub const WeakCollectionEntry = struct {
+    key_identity: usize,
+    value: Value,
+
+    pub fn destroy(self: WeakCollectionEntry, rt: *Runtime) void {
+        self.value.free(rt);
+    }
+};
+
 pub const Object = struct {
     header: gc.Header,
     class_id: class.ClassId,
@@ -45,6 +64,8 @@ pub const Object = struct {
     byte_storage: []u8 = &.{},
     string_data: ?Value = null,
     function_source: ?Value = null,
+    collection_entries: []CollectionEntry = &.{},
+    weak_collection_entries: []WeakCollectionEntry = &.{},
 
     pub fn create(rt: *Runtime, class_id: class.ClassId, prototype: ?*Object) !*Object {
         const self = try rt.memory.create(Object);
@@ -81,6 +102,10 @@ pub const Object = struct {
         if (self.byte_storage.len != 0) rt.memory.free(u8, self.byte_storage);
         if (self.string_data) |stored| stored.free(rt);
         if (self.function_source) |stored| stored.free(rt);
+        for (self.collection_entries) |entry| entry.destroy(rt);
+        if (self.collection_entries.len != 0) rt.memory.free(CollectionEntry, self.collection_entries);
+        for (self.weak_collection_entries) |entry| entry.destroy(rt);
+        if (self.weak_collection_entries.len != 0) rt.memory.free(WeakCollectionEntry, self.weak_collection_entries);
         rt.shapes.release(self.shape_ref);
         rt.memory.destroy(Object, self);
     }

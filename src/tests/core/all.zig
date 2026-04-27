@@ -315,7 +315,7 @@ test "memory account tracks same-allocator allocation and free" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
-test "gc registry tracks zero-ref objects and mark placeholders" {
+test "gc registry tracks zero-ref objects and cycle-removal scan state" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -327,12 +327,18 @@ test "gc registry tracks zero-ref objects and mark placeholders" {
 
     rt.gc.mark(header);
     try std.testing.expect(header.marked);
-    rt.gc.runCycleRemovalPlaceholder();
+    const empty_stats = rt.gc.runCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), empty_stats.scanned);
+    try std.testing.expectEqual(@as(usize, 0), empty_stats.zero_ref_candidates);
+    try std.testing.expectEqual(@as(usize, 0), empty_stats.unlinked_zero_ref);
     try std.testing.expect(!header.marked);
 
     try std.testing.expect(try rt.gc.releaseObject(header));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.zeroRefCount());
-    rt.gc.remove(header);
+    const zero_ref_stats = rt.gc.runCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), zero_ref_stats.scanned);
+    try std.testing.expectEqual(@as(usize, 1), zero_ref_stats.zero_ref_candidates);
+    try std.testing.expectEqual(@as(usize, 1), zero_ref_stats.unlinked_zero_ref);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.zeroRefCount());
 }

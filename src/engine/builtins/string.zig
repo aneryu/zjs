@@ -17,11 +17,15 @@ pub fn toUpperAscii(buf: []u8, bytes: []const u8) []u8 {
 /// QuickJS source map: narrow String wrapper constructor used by transitional
 /// `new_string_object` bytecode.
 pub fn construct(rt: *core.Runtime, args: []const core.Value) !core.Value {
+    return constructWithPrototype(rt, args, null);
+}
+
+pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     if (args.len >= 1) try appendValueString(rt, &buffer, args[0]);
 
-    const object = try core.Object.create(rt, core.class.ids.string, null);
+    const object = try core.Object.create(rt, core.class.ids.string, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
     const data = try core.string.String.createUtf8(rt, buffer.items);
@@ -35,13 +39,15 @@ pub fn construct(rt: *core.Runtime, args: []const core.Value) !core.Value {
 /// QuickJS source map: narrow String.fromCharCode helper used by transitional
 /// `string_from_char_code` bytecode.
 pub fn fromCharCode(rt: *core.Runtime, args: []const core.Value) !core.Value {
-    if (args.len > 64) return error.UnsupportedStringCall;
-    var units: [64]u8 = undefined;
+    var units: []u16 = &.{};
+    if (args.len != 0) units = try rt.memory.alloc(u16, args.len);
+    defer if (units.len != 0) rt.memory.free(u16, units);
     for (args, 0..) |value, i| {
         const code = value.asInt32() orelse return error.UnsupportedStringCall;
-        units[i] = @intCast(@as(u32, @bitCast(code)) & 0xff);
+        units[i] = @intCast(@as(u32, @bitCast(code)) & 0xffff);
     }
-    return createStringValue(rt, units[0..args.len]);
+    const string = try core.string.String.createUtf16(rt, units);
+    return string.value();
 }
 
 /// QuickJS source map: narrow charAt helper used by transitional

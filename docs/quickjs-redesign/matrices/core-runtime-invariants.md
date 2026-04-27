@@ -4,9 +4,14 @@ Purpose: make Phase 2 reviewable at subsystem and invariant level. A row can be
 marked `validated` only when the source mapping, focused tests, ownership notes,
 and status entry all exist.
 
-Architecture repair note: Phase 2 core fixtures passed, but GC cycle removal is
-still scaffolded. The core runtime subsystem is therefore `fixture_validated`
-until cycle handling is implemented or explicitly scoped out.
+Architecture repair note: Phase 2 core fixtures passed, and the semantic
+follow-up queue has replaced the named cycle-removal placeholder with a real
+scan phase and zero-ref unlink stats. Full QuickJS graph tracing/finalization is
+still scoped as follow-up work, so the core runtime subsystem remains
+`fixture_validated` rather than `semantic_complete`. This currently blocks
+descriptor-faithful builtin constructor/prototype back-links such as
+`Ctor.prototype.constructor`, because those standard edges form real object
+cycles that refcount teardown alone cannot collect.
 
 ## Runtime Foundation Matrix
 
@@ -26,7 +31,7 @@ until cycle handling is implemented or explicitly scoped out.
 | Shapes | shape helpers in `quickjs.c` | `core/shape.zig` | Shape hash, property shape entries, prototype-linked transitions, shared shape refcounts | Shape create/share/free, transition equality, proto transition | validated |
 | Function records | function object records in `quickjs.c` | `core/function.zig` | Native/bytecode/bound callable records, constructor flags, home object, lifetime | Native record, bytecode record, bound record, finalizer path | validated |
 | Module records | module records in `quickjs.c` | `core/module.zig` | Runtime module list, status, import/export record storage, namespace backing placeholders | Create/free module record, import/export metadata lifetime | validated |
-| GC scaffolding | cycle removal in `quickjs.c` | `core/gc.zig` | Refcount headers, GC object lists, mark/sweep hooks, cycle-removal placeholders visible in status | Zero-ref list, mark hook plumbing, leak-free teardown | validated |
+| GC scaffolding | cycle removal in `quickjs.c` | `core/gc.zig` | Refcount headers, GC object lists, mark/sweep hooks, explicit cycle-removal scan phase | Zero-ref list, mark clearing, cycle-removal stats, leak-free teardown | validated |
 | Stack and interrupt state | runtime/context state in `quickjs.c` | `core/runtime.zig`, `core/context.zig` | Stack limit stored and checked by later phases, interrupt hook storage, random state initialized | Stack limit set/get, interrupt hook set/get, deterministic teardown | validated |
 
 ## Phase 2 Exit Additions

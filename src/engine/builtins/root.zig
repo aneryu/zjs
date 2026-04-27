@@ -20,6 +20,7 @@ pub const buffer = @import("buffer.zig");
 pub const reflect_proxy = @import("reflect_proxy.zig");
 pub const iterator = @import("iterator.zig");
 pub const atomics = @import("atomics.zig");
+pub const registry = @import("registry.zig");
 
 const core = @import("../core/root.zig");
 
@@ -29,11 +30,7 @@ pub const Intrinsics = struct {
     pub fn init(rt: *core.Runtime) !Intrinsics {
         const global = try core.Object.create(rt, core.class.ids.object, null);
         errdefer global.value().free(rt);
-        inline for (domains) |name| {
-            const atom_id = try rt.internAtom(name);
-            defer rt.atoms.free(atom_id);
-            try global.defineOwnProperty(rt, atom_id, core.Descriptor.data(core.Value.undefinedValue(), true, false, true));
-        }
+        try registry.installStandardGlobals(rt, global);
         return .{ .global = global };
     }
 
