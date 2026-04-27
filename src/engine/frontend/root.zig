@@ -10,3 +10,4 @@ pub const source_pos = @import("source_pos.zig");
 // deletes the QuickParser. New parser code (F4+) consumes these.
 pub const qjs_token = @import("qjs_token.zig");
 pub const qjs_lexer = @import("qjs_lexer.zig");
+pub const qjs_parser = @import("qjs_parser.zig");

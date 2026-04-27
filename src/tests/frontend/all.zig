@@ -741,4 +741,7 @@ test "emitter writes opcode metadata and constants through Phase 4 structures" {
 }
 
 // F1 — QuickJS-aligned lexer tests (separate file)
-comptime { _ = @import("qjs_lexer_test.zig"); }
+comptime {
+    _ = @import("qjs_lexer_test.zig");
+    _ = @import("qjs_parser_test.zig");
+}

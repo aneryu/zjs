@@ -948,6 +948,26 @@ slices unchanged; `built-ins/Map`, `Set`, `WeakMap`, `WeakSet`,
 
 ### F4 — Generic expression parser
 
+> **Status (2026-04-27): first slice landed.** A new
+> `frontend/qjs_parser.zig` module ships with the full QuickJS-aligned
+> recursion structure and emits real QuickJS opcode ids via
+> `bytecode.opcode.op.<name>`. The first slice covers literals,
+> identifiers, parenthesized, member `.` and index `[]`, prefix
+> `+ - ~ ! void typeof`, right-associative `**`, the level 1-8 binary
+> operator table, `&&` / `||` / `??` with the standard
+> `dup ; if_false/if_true/is_undefined_or_null ; drop ; rhs`
+> short-circuit lowering, ternary `?:`, plain and compound
+> assignment with `(op - TOK_MUL_ASSIGN) + OP_mul` encoding, and the
+> comma operator. The 23-test byte-sequence suite in
+> `src/tests/frontend/qjs_parser_test.zig` validates exact emitted
+> bytes per QuickJS lowering. Deferred to subsequent F4 slices:
+> string literals (need `push_atom_value` plus interning), template
+> tagged templates, array/object literals, function calls plus `new`,
+> postfix `++/--`, `delete`, destructuring, optional chaining,
+> spread, arrow functions. F4 establishes the QuickJS-shaped output
+> that unblocks the F2+F3 atomic VM swap (which was previously
+> blocked by the fixture-shaped legacy parser; see §2.5.5).
+
 **QuickJS reference:** `js_parse_expr` (`quickjs.c:27645`),
 `js_parse_expr2` (`quickjs.c:27621`), `js_parse_assign_expr`
 (`quickjs.c:27615`), `js_parse_assign_expr2` (`quickjs.c:27311`),
