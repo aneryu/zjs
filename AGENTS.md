@@ -47,7 +47,10 @@ numbers in this file. Keep that information in
 - `QUICKJS_REDESIGN_PLAN.md`: architecture contract and long-term constraints.
 - `docs/quickjs-redesign/TRACKING.md`: current phase, validation log, risks, and
   handoff notes.
-- `docs/quickjs-redesign/phases/`: phase execution plans.
+- `docs/quickjs-redesign/PHASES_HISTORY.md`: consolidated history of completed
+  Phases 1-9 (original per-phase plans archived under `archive/phases/`).
+- `docs/quickjs-redesign/ARCHITECTURE_REPAIR_PLAN.md`: architecture repair
+  queue and post-AR follow-up status.
 - `docs/quickjs-redesign/matrices/`: subsystem coverage matrices and validation
   status.
 - `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md`: reusable failure records and

@@ -34,7 +34,7 @@ keeping JavaScript exceptions in context exception state.
 ## Coverage Matrix
 
 Opcode-level execution tracking lives in
-`../matrices/opcode-execution-matrix.md`. Phase 6 cannot complete until every
+`../../matrices/opcode-execution-matrix.md`. Phase 6 cannot complete until every
 reachable opcode has a handler or a tested lowering/removal path.
 
 ## Work Breakdown
@@ -73,7 +73,7 @@ Representative execution tests should cover:
 ## Exit Checklist
 
 - [x] `Engine.eval` executes representative bytecode programs.
-- [x] All reachable opcode rows in `../matrices/opcode-execution-matrix.md` are `validated`.
+- [x] All reachable opcode rows in `../../matrices/opcode-execution-matrix.md` are `validated`.
 - [x] JavaScript exceptions are not modeled as normal Zig errors internally.
 - [x] `runJobs` drains promise jobs deterministically.
 - [x] `status.zig` marks execution subsystems as `validated`.

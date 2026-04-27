@@ -26,7 +26,7 @@ use the rebuilt engine and no deleted engine path remains in the tooling graph.
 ## Parity Matrix
 
 Detailed test262 runner option and behavior tracking lives in
-`../matrices/test262-runner-parity.md`. Keep targeted runner fixtures separate
+`../../matrices/test262-runner-parity.md`. Keep targeted runner fixtures separate
 from full-suite evidence.
 
 ## Work Breakdown
@@ -77,7 +77,7 @@ zig build -Doptimize=ReleaseFast run-test262 --summary all
 - [x] `zjs <file.js>` works.
 - [x] Smoke runner uses manifest and golden expectations.
 - [x] Compare workflow has no unexpected failures against local QuickJS baseline.
-- [x] All non-deferred rows in `../matrices/test262-runner-parity.md` are `validated`.
+- [x] All non-deferred rows in `../../matrices/test262-runner-parity.md` are `validated`.
 - [x] `run-test262` follows QuickJS runner behavior for config, excludes, known errors, direct selection, harness loading, metadata, and workers.
 - [x] Final test262 gate has no new unexpected failures relative to local QuickJS configuration.
 - [x] `TRACKING.md` records final command evidence.

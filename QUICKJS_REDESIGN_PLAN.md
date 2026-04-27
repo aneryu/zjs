@@ -55,15 +55,8 @@ This root document is the architecture contract. Detailed execution state lives 
 | `docs/quickjs-redesign/ARCHITECTURE_REPAIR_PLAN.md` | Status calibration and parser-first architecture repair queue. |
 | `docs/quickjs-redesign/ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fix evidence, and reusable lessons. |
 | `docs/quickjs-redesign/errors/README.md` | Storage rules for long-form per-error records. |
-| `docs/quickjs-redesign/phases/01-bootstrap-source-baseline.md` | Phase 1 bootstrap, build wiring, source baseline, and status table plan. |
-| `docs/quickjs-redesign/phases/02-core-runtime-foundations.md` | Phase 2 value/runtime/context/refcount/atom/string/class/shape foundations. |
-| `docs/quickjs-redesign/phases/03-object-property-semantics.md` | Phase 3 ordinary object, descriptors, prototypes, property operations, and array core. |
-| `docs/quickjs-redesign/phases/04-opcode-bytecode-metadata.md` | Phase 4 opcode table, bytecode ownership, function/module/debug metadata. |
-| `docs/quickjs-redesign/phases/05-frontend-bytecode-emitter.md` | Phase 5 lexer/parser and direct parse-to-bytecode emitter. |
-| `docs/quickjs-redesign/phases/06-bytecode-execution.md` | Phase 6 VM execution, frames, calls, exceptions, eval, modules, promises, jobs. |
-| `docs/quickjs-redesign/phases/07-builtins-support-libraries.md` | Phase 7 builtins and regexp/unicode/bignum/dtoa support libraries. |
-| `docs/quickjs-redesign/phases/08-cli-tooling-validation.md` | Phase 8 `zjs`, smoke, compare, and test262 tooling. |
-| `docs/quickjs-redesign/phases/09-runtime-semantic-hardening.md` | Phase 9 runtime semantic hardening and documentation cleanup. |
+| `docs/quickjs-redesign/PHASES_HISTORY.md` | Consolidated history of completed Phases 1-9 (scope, source owners, key targets, exit contracts, closing evidence). |
+| `docs/quickjs-redesign/archive/phases/` | Original per-phase execution plans for Phases 1-9; retained for deep-dive reference only. |
 | `docs/quickjs-redesign/matrices/core-runtime-invariants.md` | Phase 2 runtime invariant coverage matrix. |
 | `docs/quickjs-redesign/matrices/object-property-matrix.md` | Phase 3 object/property behavior matrix. |
 | `docs/quickjs-redesign/matrices/frontend-coverage-matrix.md` | Phase 5 syntax/frontend/emitter coverage matrix. |

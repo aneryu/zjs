@@ -19,17 +19,13 @@ updated alongside implementation, tests, and phase documents.
 
 ## Phase Board
 
-| Phase | Status | Phase doc | Matrix | Required next evidence |
+Phases 1-9 are complete and archived. See `PHASES_HISTORY.md` for the consolidated
+summary and `archive/phases/` for the original per-phase plans. The active queue
+below tracks Architecture Repair closure and post-AR follow-up work.
+
+| Phase | Status | Reference | Matrix | Notes |
 |---|---|---|---|---|
-| 1 Bootstrap And Source Baseline | completed | `phases/01-bootstrap-source-baseline.md` | none | Phase 2 runtime/context init-deinit gate |
-| 2 Core Runtime Foundations | completed | `phases/02-core-runtime-foundations.md` | `matrices/core-runtime-invariants.md` | Phase 3 object/property gate |
-| 3 Object And Property Semantics | completed | `phases/03-object-property-semantics.md` | `matrices/object-property-matrix.md` | Phase 4 opcode metadata gate |
-| 4 Opcode And Bytecode Metadata | completed | `phases/04-opcode-bytecode-metadata.md` | `matrices/opcode-execution-matrix.md` | Phase 5 parser/emitter fixtures |
-| 5 Frontend And Bytecode Emitter | completed | `phases/05-frontend-bytecode-emitter.md` | `matrices/frontend-coverage-matrix.md` | Phase 6 execution fixtures |
-| 6 Bytecode Execution | completed | `phases/06-bytecode-execution.md` | `matrices/opcode-execution-matrix.md` | Phase 7 builtin/support library fixtures |
-| 7 Builtins And Support Libraries | completed | `phases/07-builtins-support-libraries.md` | `matrices/builtins-support-matrix.md` | Phase 8 smoke/compare/test262 gates |
-| 8 CLI Tooling And Validation | completed | `phases/08-cli-tooling-validation.md` | `matrices/test262-runner-parity.md` | Host-visible output transferred to Phase 9 runtime hardening |
-| 9 Runtime Semantic Hardening | completed | `phases/09-runtime-semantic-hardening.md` | `matrices/runtime-semantic-hardening.md` | BigInt/DataView/String wrapper coercion follow-up completed |
+| 1-9 Completed redesign phases | completed | `PHASES_HISTORY.md`, `archive/phases/` | matrices under `matrices/` | Exit contracts, closing evidence, and handoff notes captured in history doc |
 | AR Architecture Repair | completed | `ARCHITECTURE_REPAIR_PLAN.md` | source-aligned matrices | Follow-up semantic-completion queues own remaining builtins/libs/GC/capacity work |
 
 ## Work Queue

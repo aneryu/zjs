@@ -31,7 +31,7 @@ same object, property, call, and exception paths as user code.
 ## Coverage Matrix
 
 Detailed support-library and builtin-domain tracking lives in
-`../matrices/builtins-support-matrix.md`. Support libraries are validated before
+`../../matrices/builtins-support-matrix.md`. Support libraries are validated before
 dependent builtin domains are marked `validated`.
 
 ## Work Breakdown
@@ -80,7 +80,7 @@ Focused tests should cover:
 ## Exit Checklist
 
 - [x] Support libraries have focused tests and leak-free teardown.
-- [x] All non-deferred rows in `../matrices/builtins-support-matrix.md` are `validated`.
+- [x] All non-deferred rows in `../../matrices/builtins-support-matrix.md` are `validated`.
 - [x] Builtin domains have representative tests and smoke/compare coverage.
 - [x] Builtins do not bypass shared object/property/call/exception paths.
 - [x] `status.zig` marks completed builtin domains as `validated`.

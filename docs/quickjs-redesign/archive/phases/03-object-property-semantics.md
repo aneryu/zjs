@@ -24,7 +24,7 @@ flags, own-key order, extensibility, array index rules, and array length behavio
 
 ## Coverage Matrix
 
-Detailed behavior tracking lives in `../matrices/object-property-matrix.md`.
+Detailed behavior tracking lives in `../../matrices/object-property-matrix.md`.
 Each row should have focused tests before VM or builtin code depends on it.
 
 ## Work Breakdown
@@ -60,7 +60,7 @@ Focused tests should cover:
 ## Exit Checklist
 
 - [x] Ordinary object and array property semantics pass focused tests.
-- [x] All non-deferred rows in `../matrices/object-property-matrix.md` are `validated`.
+- [x] All non-deferred rows in `../../matrices/object-property-matrix.md` are `validated`.
 - [x] Builtins and VM can use shared object/property APIs without shortcuts.
 - [x] `status.zig` marks object/property/array core as `validated`.
 - [x] `TRACKING.md` records validation evidence and any deferred exotic behavior.

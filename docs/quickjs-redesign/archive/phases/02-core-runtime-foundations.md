@@ -35,7 +35,7 @@ records, module records, exception slots, allocator accounting, and GC scaffoldi
 ## Coverage Matrix
 
 Detailed invariant tracking lives in
-`../matrices/core-runtime-invariants.md`. Update the relevant row whenever an
+`../../matrices/core-runtime-invariants.md`. Update the relevant row whenever an
 area moves from `not_started` to `in_progress` or `validated`.
 
 ## Work Breakdown
@@ -74,7 +74,7 @@ Focused tests should cover:
 
 - [x] Runtime/context init-deinit is leak-free.
 - [x] QuickJS constants needed by later phases are locked by tests.
-- [x] All non-deferred rows in `../matrices/core-runtime-invariants.md` are `validated`.
+- [x] All non-deferred rows in `../../matrices/core-runtime-invariants.md` are `validated`.
 - [x] `status.zig` marks completed core foundations as `validated`.
 - [x] No public API exposes raw reference payloads or `anyopaque`.
 - [x] `TRACKING.md` records validation results and open risks.

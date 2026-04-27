@@ -13,15 +13,8 @@ progress, phase-level details, validation evidence, and handoff state.
 | `ERRORS_AND_LEARNINGS.md` | Durable failure records, root causes, fixes, regression evidence, and reusable lessons. |
 | `errors/README.md` | Storage rules for long-form per-error records. |
 | `archive/README.md` | Storage rules for superseded historical records that are no longer active status sources. |
-| `phases/01-bootstrap-source-baseline.md` | Bootstrap source tree, build wiring, source baseline, and status metadata. |
-| `phases/02-core-runtime-foundations.md` | Value model, runtime, context, atoms, strings, classes, shapes, refcount and GC foundations. |
-| `phases/03-object-property-semantics.md` | Ordinary object model, descriptors, prototypes, property operations, and array core semantics. |
-| `phases/04-opcode-bytecode-metadata.md` | Opcode table, bytecode formats, function bytecode, constants, module metadata, and debug tables. |
-| `phases/05-frontend-bytecode-emitter.md` | Lexer, parser, regexp literal handling, scope resolution, and direct bytecode emission. |
-| `phases/06-bytecode-execution.md` | VM dispatch, stack frames, calls, exceptions, eval, modules, promises, jobs, and iterators. |
-| `phases/07-builtins-support-libraries.md` | Builtins plus regexp, unicode, bignum, and dtoa support libraries. |
-| `phases/08-cli-tooling-validation.md` | `zjs`, smoke runner, compare runner integration, and test262 runner. |
-| `phases/09-runtime-semantic-hardening.md` | Runtime semantic hardening after tooling completion, starting with host-visible output through normal global lookup and calls. |
+| `PHASES_HISTORY.md` | Consolidated history of completed Phases 1-9: scope, QuickJS source owners, key target files, exit contracts, and closing evidence. |
+| `archive/phases/` | Original per-phase execution plans (Phase 1-9) preserved for deep-dive reference; not an active status source. |
 
 ## Matrix Map
 

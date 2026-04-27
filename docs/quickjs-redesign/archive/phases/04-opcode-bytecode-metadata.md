@@ -27,7 +27,7 @@ constant pools, scope records, module bytecode records, and debug/source tables.
 ## Coverage Matrix
 
 Opcode metadata and later execution tracking share
-`../matrices/opcode-execution-matrix.md`. Phase 4 owns metadata columns and
+`../../matrices/opcode-execution-matrix.md`. Phase 4 owns metadata columns and
 Phase 6 owns execution-handler columns.
 
 ## Work Breakdown
@@ -60,7 +60,7 @@ Focused tests should cover:
 ## Exit Checklist
 
 - [x] Opcode table matches QuickJS.
-- [x] Opcode metadata rows in `../matrices/opcode-execution-matrix.md` are ready for Phase 6 handler tracking.
+- [x] Opcode metadata rows in `../../matrices/opcode-execution-matrix.md` are ready for Phase 6 handler tracking.
 - [x] Bytecode structures are owned and freed deterministically.
 - [x] `status.zig` marks opcode and bytecode metadata as `validated`.
 - [x] `TRACKING.md` records validation evidence and any generation strategy.
