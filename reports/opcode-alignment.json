@@ -1,0 +1,548 @@
+{
+  "summary": {
+    "aligned": 7,
+    "mis_indexed": 27,
+    "bespoke": 61,
+    "total": 95
+  },
+  "baseline": {
+    "aligned": 7,
+    "mis_indexed": 27,
+    "bespoke": 61
+  },
+  "aligned": [
+    {
+      "name": "push_i32",
+      "id": 1,
+      "qjs_name": "push_i32"
+    },
+    {
+      "name": "push_const",
+      "id": 2,
+      "qjs_name": "push_const"
+    },
+    {
+      "name": "undefined_value",
+      "id": 6,
+      "qjs_name": "undefined"
+    },
+    {
+      "name": "null_value",
+      "id": 7,
+      "qjs_name": "null"
+    },
+    {
+      "name": "push_false",
+      "id": 9,
+      "qjs_name": "push_false"
+    },
+    {
+      "name": "push_true",
+      "id": 10,
+      "qjs_name": "push_true"
+    },
+    {
+      "name": "source_loc",
+      "id": 196,
+      "qjs_name": "source_loc"
+    }
+  ],
+  "mis_indexed": [
+    {
+      "name": "drop",
+      "qjs_name": "drop",
+      "emitter_id": 11,
+      "expected_id": 14,
+      "collides_with": "object"
+    },
+    {
+      "name": "return_undef",
+      "qjs_name": "return_undef",
+      "emitter_id": 45,
+      "expected_id": 41,
+      "collides_with": "check_brand"
+    },
+    {
+      "name": "import",
+      "qjs_name": "import",
+      "emitter_id": 59,
+      "expected_id": 54,
+      "collides_with": "get_ref_value"
+    },
+    {
+      "name": "get_var",
+      "qjs_name": "get_var",
+      "emitter_id": 61,
+      "expected_id": 56,
+      "collides_with": "define_var"
+    },
+    {
+      "name": "define_var",
+      "qjs_name": "define_var",
+      "emitter_id": 66,
+      "expected_id": 61,
+      "collides_with": "put_field"
+    },
+    {
+      "name": "define_class",
+      "qjs_name": "define_class",
+      "emitter_id": 91,
+      "expected_id": 85,
+      "collides_with": "put_arg"
+    },
+    {
+      "name": "goto",
+      "qjs_name": "goto",
+      "emitter_id": 117,
+      "expected_id": 106,
+      "collides_with": "with_make_ref"
+    },
+    {
+      "name": "bit_not",
+      "qjs_name": "not",
+      "emitter_id": 151,
+      "expected_id": 148,
+      "collides_with": "delete"
+    },
+    {
+      "name": "call",
+      "qjs_name": "call",
+      "emitter_id": 170,
+      "expected_id": 34,
+      "collides_with": "in"
+    },
+    {
+      "name": "for_in_next",
+      "qjs_name": "for_in_next",
+      "emitter_id": 176,
+      "expected_id": 127,
+      "collides_with": "private_in"
+    },
+    {
+      "name": "strict_neq",
+      "qjs_name": "strict_neq",
+      "emitter_id": 206,
+      "expected_id": 174,
+      "collides_with": "push_i8"
+    },
+    {
+      "name": "typeof_value",
+      "qjs_name": "typeof",
+      "emitter_id": 216,
+      "expected_id": 150,
+      "collides_with": "get_loc1"
+    },
+    {
+      "name": "gte",
+      "qjs_name": "gte",
+      "emitter_id": 218,
+      "expected_id": 168,
+      "collides_with": "get_loc3"
+    },
+    {
+      "name": "eq",
+      "qjs_name": "eq",
+      "emitter_id": 232,
+      "expected_id": 171,
+      "collides_with": "put_arg1"
+    },
+    {
+      "name": "strict_eq",
+      "qjs_name": "strict_eq",
+      "emitter_id": 233,
+      "expected_id": 173,
+      "collides_with": "put_arg2"
+    },
+    {
+      "name": "mul",
+      "qjs_name": "mul",
+      "emitter_id": 240,
+      "expected_id": 153,
+      "collides_with": "get_var_ref1"
+    },
+    {
+      "name": "div",
+      "qjs_name": "div",
+      "emitter_id": 241,
+      "expected_id": 154,
+      "collides_with": "get_var_ref2"
+    },
+    {
+      "name": "mod",
+      "qjs_name": "mod",
+      "emitter_id": 242,
+      "expected_id": 155,
+      "collides_with": "get_var_ref3"
+    },
+    {
+      "name": "add",
+      "qjs_name": "add",
+      "emitter_id": 243,
+      "expected_id": 156,
+      "collides_with": "put_var_ref0"
+    },
+    {
+      "name": "sub",
+      "qjs_name": "sub",
+      "emitter_id": 244,
+      "expected_id": 157,
+      "collides_with": "put_var_ref1"
+    },
+    {
+      "name": "shl",
+      "qjs_name": "shl",
+      "emitter_id": 245,
+      "expected_id": 158,
+      "collides_with": "put_var_ref2"
+    },
+    {
+      "name": "sar",
+      "qjs_name": "sar",
+      "emitter_id": 246,
+      "expected_id": 159,
+      "collides_with": "put_var_ref3"
+    },
+    {
+      "name": "shr",
+      "qjs_name": "shr",
+      "emitter_id": 247,
+      "expected_id": 160,
+      "collides_with": "set_var_ref0"
+    },
+    {
+      "name": "bit_and",
+      "qjs_name": "and",
+      "emitter_id": 248,
+      "expected_id": 161,
+      "collides_with": "set_var_ref1"
+    },
+    {
+      "name": "bit_xor",
+      "qjs_name": "xor",
+      "emitter_id": 249,
+      "expected_id": 162,
+      "collides_with": "set_var_ref2"
+    },
+    {
+      "name": "bit_or",
+      "qjs_name": "or",
+      "emitter_id": 250,
+      "expected_id": 163,
+      "collides_with": "set_var_ref3"
+    },
+    {
+      "name": "pow",
+      "qjs_name": "pow",
+      "emitter_id": 251,
+      "expected_id": 164,
+      "collides_with": "get_length"
+    }
+  ],
+  "bespoke": [
+    {
+      "name": "call_prop",
+      "id": 152,
+      "collides_with": "delete_var"
+    },
+    {
+      "name": "new_string_object",
+      "id": 153,
+      "collides_with": "mul"
+    },
+    {
+      "name": "bigint_as_uint_n",
+      "id": 154,
+      "collides_with": "div"
+    },
+    {
+      "name": "bigint_as_int_n",
+      "id": 155,
+      "collides_with": "mod"
+    },
+    {
+      "name": "throw_syntax_error",
+      "id": 156,
+      "collides_with": "add"
+    },
+    {
+      "name": "throw_range_error",
+      "id": 157,
+      "collides_with": "sub"
+    },
+    {
+      "name": "throw_reference_error",
+      "id": 159,
+      "collides_with": "sar"
+    },
+    {
+      "name": "new_date",
+      "id": 160,
+      "collides_with": "shr"
+    },
+    {
+      "name": "date_call",
+      "id": 161,
+      "collides_with": "and"
+    },
+    {
+      "name": "date_static",
+      "id": 162,
+      "collides_with": "xor"
+    },
+    {
+      "name": "date_method",
+      "id": 163,
+      "collides_with": "or"
+    },
+    {
+      "name": "throw_eval_error",
+      "id": 165,
+      "collides_with": "lt"
+    },
+    {
+      "name": "new_closure",
+      "id": 166,
+      "collides_with": "lte"
+    },
+    {
+      "name": "call_closure",
+      "id": 167,
+      "collides_with": "gt"
+    },
+    {
+      "name": "throw_type_error",
+      "id": 168,
+      "collides_with": "gte"
+    },
+    {
+      "name": "array_method",
+      "id": 169,
+      "collides_with": "instanceof"
+    },
+    {
+      "name": "set_prop",
+      "id": 171,
+      "collides_with": "eq"
+    },
+    {
+      "name": "object_keys",
+      "id": 172,
+      "collides_with": "neq"
+    },
+    {
+      "name": "object_values",
+      "id": 173,
+      "collides_with": "strict_eq"
+    },
+    {
+      "name": "object_entries",
+      "id": 174,
+      "collides_with": "strict_neq"
+    },
+    {
+      "name": "array_join",
+      "id": 175,
+      "collides_with": "is_undefined_or_null"
+    },
+    {
+      "name": "new_array_buffer",
+      "id": 177,
+      "collides_with": "push_bigint_i32"
+    },
+    {
+      "name": "new_typed_array",
+      "id": 179,
+      "collides_with": "enter_scope"
+    },
+    {
+      "name": "new_dataview",
+      "id": 180,
+      "collides_with": "leave_scope"
+    },
+    {
+      "name": "arraybuffer_slice",
+      "id": 181,
+      "collides_with": "label"
+    },
+    {
+      "name": "dataview_get",
+      "id": 182,
+      "collides_with": "scope_get_var_undef"
+    },
+    {
+      "name": "dataview_set",
+      "id": 183,
+      "collides_with": "scope_get_var"
+    },
+    {
+      "name": "new_collection",
+      "id": 184,
+      "collides_with": "scope_put_var"
+    },
+    {
+      "name": "uri_call",
+      "id": 186,
+      "collides_with": "scope_make_ref"
+    },
+    {
+      "name": "parse_int",
+      "id": 187,
+      "collides_with": "scope_get_ref"
+    },
+    {
+      "name": "parse_float",
+      "id": 188,
+      "collides_with": "scope_put_var_init"
+    },
+    {
+      "name": "promise_static",
+      "id": 189,
+      "collides_with": "scope_get_private_field"
+    },
+    {
+      "name": "new_regexp",
+      "id": 190,
+      "collides_with": "scope_get_private_field2"
+    },
+    {
+      "name": "regexp_method",
+      "id": 191,
+      "collides_with": "scope_put_private_field"
+    },
+    {
+      "name": "instanceof_array",
+      "id": 192,
+      "collides_with": "scope_in_private_field"
+    },
+    {
+      "name": "new_function",
+      "id": 193,
+      "collides_with": "get_field_opt_chain"
+    },
+    {
+      "name": "new_promise",
+      "id": 194,
+      "collides_with": "get_array_el_opt_chain"
+    },
+    {
+      "name": "construct",
+      "id": 195,
+      "collides_with": "set_class_name"
+    },
+    {
+      "name": "optional_get_prop",
+      "id": 207,
+      "collides_with": "push_i16"
+    },
+    {
+      "name": "value_to_number",
+      "id": 208,
+      "collides_with": "push_const8"
+    },
+    {
+      "name": "value_to_boolean",
+      "id": 209,
+      "collides_with": "fclosure8"
+    },
+    {
+      "name": "value_to_string",
+      "id": 210,
+      "collides_with": "push_empty_string"
+    },
+    {
+      "name": "prop_in",
+      "id": 211,
+      "collides_with": "get_loc8"
+    },
+    {
+      "name": "instanceof_object",
+      "id": 212,
+      "collides_with": "put_loc8"
+    },
+    {
+      "name": "string_from_char_code",
+      "id": 213,
+      "collides_with": "set_loc8"
+    },
+    {
+      "name": "string_method",
+      "id": 214,
+      "collides_with": "get_loc0_loc1"
+    },
+    {
+      "name": "math_call",
+      "id": 215,
+      "collides_with": "get_loc0"
+    },
+    {
+      "name": "object_is",
+      "id": 217,
+      "collides_with": "get_loc2"
+    },
+    {
+      "name": "string_char_at",
+      "id": 219,
+      "collides_with": "put_loc0"
+    },
+    {
+      "name": "logical_and",
+      "id": 220,
+      "collides_with": "put_loc1"
+    },
+    {
+      "name": "logical_or",
+      "id": 221,
+      "collides_with": "put_loc2"
+    },
+    {
+      "name": "get_prop",
+      "id": 222,
+      "collides_with": "put_loc3"
+    },
+    {
+      "name": "json_stringify",
+      "id": 223,
+      "collides_with": "set_loc0"
+    },
+    {
+      "name": "json_parse",
+      "id": 230,
+      "collides_with": "get_arg3"
+    },
+    {
+      "name": "nullish_coalesce",
+      "id": 231,
+      "collides_with": "put_arg0"
+    },
+    {
+      "name": "value_length",
+      "id": 234,
+      "collides_with": "put_arg3"
+    },
+    {
+      "name": "new_array",
+      "id": 235,
+      "collides_with": "set_arg0"
+    },
+    {
+      "name": "get_index",
+      "id": 236,
+      "collides_with": "set_arg1"
+    },
+    {
+      "name": "instanceof_value",
+      "id": 237,
+      "collides_with": "set_arg2"
+    },
+    {
+      "name": "factorial",
+      "id": 238,
+      "collides_with": "set_arg3"
+    },
+    {
+      "name": "new_object",
+      "id": 239,
+      "collides_with": "get_var_ref0"
+    }
+  ]
+}

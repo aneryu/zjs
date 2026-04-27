@@ -540,6 +540,12 @@ compiled but only one wired up) — not as a series of half-states.
 
 ### F0 — Baseline lock and measurement
 
+**Status:** completed 2026-04-27. Reporter, `-R <dir>` runner flag, and
+opcode-alignment audit landed; baseline snapshot stored under
+`docs/quickjs-redesign/baseline/2026-04-27/`. See parser-rewrite F0 row in
+`TRACKING.md` for the recorded numbers and gates.
+
+
 #### F0.1 Measurement plumbing
 
 - Persist failure reasons in the runner. Add a single-writer log file (e.g.

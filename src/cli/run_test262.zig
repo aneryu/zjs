@@ -31,7 +31,12 @@ fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []cons
 }
 
 fn printUsage(io: std.Io) !void {
-    try printError(io, "usage: run-test262 -c <test262.conf> [options] <test-root>\n", .{});
+    try printError(io,
+        "usage: run-test262 -c <test262.conf> [options] <test-root>\n" ++
+        "  -R <dir>  emit test262-failures.log, test262-buckets.json,\n" ++
+        "            and test262-by-dir.json under <dir>\n",
+        .{},
+    );
 }
 
 fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {

@@ -1,6 +1,6 @@
 # QuickJS Redesign Tracking
 
-Last updated: 2026-04-27
+Last updated: 2026-04-27 (parser-rewrite F0 complete)
 
 This file is the working ledger for the full QuickJS Zig redesign. It should be
 updated alongside implementation, tests, and phase documents.
@@ -27,6 +27,24 @@ below tracks Architecture Repair closure and post-AR follow-up work.
 |---|---|---|---|---|
 | 1-9 Completed redesign phases | completed | `PHASES_HISTORY.md`, `archive/phases/` | matrices under `matrices/` | Exit contracts, closing evidence, and handoff notes captured in history doc |
 | AR Architecture Repair | completed | `ARCHITECTURE_REPAIR_PLAN.md` | source-aligned matrices | Follow-up semantic-completion queues own remaining builtins/libs/GC/capacity work |
+| parser-rewrite | in_progress | `PARSER_REWRITE_PLAN.md` | n/a (per-phase deliverables in plan) | Removes the fixture-driven `QuickParser`, swaps the bytecode/VM substrate to QuickJS-aligned opcode ABI, and rewrites the dispatcher; tracked as F0..F12 sub-rows below |
+
+### parser-rewrite sub-rows
+
+| Phase | Status | Deliverables | Latest validation |
+|---|---|---|---|
+| F0 Baseline lock + measurement + subset isolation | completed | `-R <dir>` flag in `run-test262` emits `test262-failures.log` / `test262-buckets.json` / `test262-by-dir.json`; `Reporter` serialises stderr writes (F0.3) and aggregates failure buckets and per-directory passed/failed counts; `tools/compare/opcode_align_check.py` audits emitter ids vs `quickjs/quickjs-opcode.h` and emits `reports/opcode-alignment.json`; baseline committed under `docs/quickjs-redesign/baseline/2026-04-27/` | full corpus baseline captured 2026-04-27: 36698/48205 errors (60 known), buckets `SyntaxError=22041, TypeError=10363, Test262Error=4286, RangeError=1, Other=59, Empty=8`; opcode audit reproduces §2.5 numbers exactly (aligned=7, mis_indexed=27, bespoke=61); `zig build test --summary all` 169/169, `zig build smoke --summary all` 45/45 |
+| F1 Lexer completion | pending | aligned `TOK_*` enum, full string/template/regex/numeric/private-name lexer | not started |
+| F2+F3 Real opcode ABI + generic dispatcher (atomic) | pending | comptime `op` constants from `quickjs-opcode.h`, deletion of legacy `known` block, generic VM dispatcher | not started |
+| F4 Generic expression parser | pending | full Pratt parser per `js_parse_*` algorithm | not started |
+| F5 Generic statement parser | pending | full statement family + ASI + directive prologue | not started |
+| F6 Functions / arrows / defaults / destructuring / rest | pending | parser + emitter for ES function forms | not started |
+| F7 Classes + private fields + super | pending | class decl/expr, fields, private, super | not started |
+| F8 Modules + import/export | pending | static module graph, `js_parse_module` | not started |
+| F9 Generators / async / iterators / for-of | pending | iterator protocol opcodes, generator state machine | not started |
+| F10 Pipeline (resolve_variables / labels / pc2line / stack_size) | pending | three-phase compile mirroring QuickJS | not started |
+| F11 Error reporting | pending | source positions, surface mapping | not started |
+| F12 Misc + final | pending | template processing, residual semantics, full corpus gate | not started |
 
 ## Work Queue
 
