@@ -14,7 +14,18 @@ for simple `for-in`, Array map
 multiplication, named construction, named `instanceof`, and test262 helpers have
 been removed, and `Math`/`globalThis` no longer lower through private marker
 constants; remaining narrow source-shape lowering is tracked as parser/emitter
-follow-up semantic-completion debt, not as separate parser paths.
+follow-up semantic-completion debt, not as separate parser paths. The
+2026-04-27 parser generalization slice removed the remaining full-source
+substring recognizers for Map callback/iterator, Date try/catch, special
+assignment, and special function declaration shapes; the retained parser
+recognition for those covered fixtures is token-structured and still tracked as
+follow-up debt until the corresponding generic function/iterator semantics are
+ported. The same follow-up line now includes the 2026-04-27 collection parser
+generalization that recognizes covered set-like class/object literal shapes,
+iterator-return trackers, generator/function expression shapes, and constructor
+abrupt-completion callbacks through token-structured parsing; this closed the
+local Set/WeakMap/WeakSet broad slices while Promise remains a separate
+semantic-completion queue.
 
 ## Lexer Matrix
 

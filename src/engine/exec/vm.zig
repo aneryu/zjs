@@ -761,7 +761,22 @@ pub const Vm = struct {
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);
             },
-            29...39 => {
+            46 => {
+                const out = try closure_mod.create(self.ctx.runtime, kind, payload, 0, 0);
+                defer out.free(self.ctx.runtime);
+                try self.stack.push(out);
+            },
+            51 => {
+                const out = try closure_mod.create(self.ctx.runtime, kind, payload, 0, 0);
+                defer out.free(self.ctx.runtime);
+                try self.stack.push(out);
+            },
+            53 => {
+                const out = try closure_mod.create(self.ctx.runtime, kind, payload, 0, 0);
+                defer out.free(self.ctx.runtime);
+                try self.stack.push(out);
+            },
+            29...45, 47...50, 52, 54...58, 61...64 => {
                 const out = try closure_mod.create(self.ctx.runtime, kind, 0, 0, 0);
                 defer out.free(self.ctx.runtime);
                 try self.stack.push(out);

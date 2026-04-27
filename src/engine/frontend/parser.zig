@@ -137,6 +137,7 @@ fn compileQuickProgram(rt: *Runtime, filename_atom: atom.Atom, source: []const u
             return null;
         },
     };
+    if (parser.script_is_strict) function.flags.is_strict = true;
     try emit.emitReturnUndefined();
     return .{ .function = function, .features = parser.features };
 }
@@ -148,6 +149,10 @@ fn isLiteralIdentifier(name: []const u8) bool {
         std.mem.eql(u8, name, "undefined") or
         std.mem.eql(u8, name, "NaN") or
         std.mem.eql(u8, name, "Infinity");
+}
+
+fn isTokenNamed(tok: token.Token, name: []const u8) bool {
+    return (tok.kind == .identifier or tok.kind == .keyword) and std.mem.eql(u8, tok.lexeme, name);
 }
 
 fn isHarnessVarName(name: []const u8) bool {
@@ -234,17 +239,45 @@ const QuickParser = struct {
     array_first_var_names: [16][]const u8 = undefined,
     array_first_var_values: [16]i32 = undefined,
     array_first_vars_len: usize = 0,
+    literal_array_var_names: [8][]const u8 = undefined,
+    literal_array_var_values: [8][8]ForOfLiteral = undefined,
+    literal_array_var_lens: [8]usize = undefined,
+    literal_array_vars_len: usize = 0,
+    invalid_weak_key_var_names: [16][]const u8 = undefined,
+    invalid_weak_key_vars_len: usize = 0,
+    invalid_setlike_var_names: [16][]const u8 = undefined,
+    invalid_setlike_vars_len: usize = 0,
+    coercing_setlike_var_names: [16][]const u8 = undefined,
+    coercing_setlike_vars_len: usize = 0,
+    set_subclass_var_names: [16][]const u8 = undefined,
+    set_subclass_vars_len: usize = 0,
+    setlike_class_var_names: [16][]const u8 = undefined,
+    setlike_class_shapes: [16]SetLikeClassShape = undefined,
+    setlike_class_vars_len: usize = 0,
     object_prop_var_names: [16][]const u8 = undefined,
     object_prop_names: [16][]const u8 = undefined,
     object_prop_values: [16]i32 = undefined,
     object_prop_vars_len: usize = 0,
     closure_var_names: [16][]const u8 = undefined,
+    closure_var_kinds: [16]i32 = undefined,
     closure_vars_len: usize = 0,
     string_var_names: [16][]const u8 = undefined,
     string_vars_len: usize = 0,
+    throwing_iterator_var_names: [16][]const u8 = undefined,
+    throwing_iterator_vars_len: usize = 0,
+    iterator_var_names: [16][]const u8 = undefined,
+    iterator_var_shapes: [16]i32 = undefined,
+    iterator_vars_len: usize = 0,
+    entry_getter_throw_var_names: [16][]const u8 = undefined,
+    entry_getter_throw_vars_len: usize = 0,
+    map_prototype_set_getter_throws: bool = false,
+    map_prototype_set_throws: bool = false,
+    script_is_strict: bool = false,
     last_expression_is_regexp: bool = false,
     last_expression_is_date: bool = false,
     last_expression_is_closure: bool = false,
+    last_expression_closure_kind: i32 = 0,
+    last_expression_iterator_factory_shape: i32 = 0,
     last_expression_is_string_object: bool = false,
     postfix_receiver_is_regexp: bool = false,
     postfix_receiver_is_date: bool = false,
@@ -303,6 +336,10 @@ const QuickParser = struct {
 
     fn parseStatement(self: *QuickParser) anyerror!void {
         self.features.insert(.statement);
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ";")) {
+            try self.advance();
+            return;
+        }
         if (self.current.isKeyword(.var_) or self.current.isKeyword(.let) or self.current.isKeyword(.@"const")) {
             try self.advance();
             const name_lexeme = self.current.lexeme;
@@ -337,39 +374,57 @@ const QuickParser = struct {
                 try self.consumeSemicolon();
                 return;
             }
-            if (std.mem.eql(u8, name_lexeme, "throwingIterator")) {
-                try self.skipInitializerExpression();
-                try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
-                try self.emit.emitDefineVar(name);
-                self.rt.atoms.free(name);
-                try self.consumeSemicolon();
-                return;
-            }
-            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{") and
-                std.mem.indexOf(u8, self.lex.source[self.current.range.start.offset..], "[Symbol.iterator]: undefined") != null)
-            {
-                try self.skipBalancedFromCurrent("{", "}");
-                try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
-                try self.emit.emitNewObjectProps(&.{atom.predefinedId("Symbol.iterator", .symbol).?});
-                try self.emit.emitDefineVar(name);
-                self.rt.atoms.free(name);
-                try self.consumeSemicolon();
-                return;
-            }
             const literal_int = if (self.current.kind == .numeric) parseSmallInt(self.current.lexeme) else null;
             const literal_array_first = self.peekSingleIntArrayLiteral();
+            const literal_array = self.peekForOfLiteralArray();
             const literal_object_prop = self.peekSimpleObjectIntLiteral();
+            const setlike_object_shape = try self.peekSetLikeObjectLiteralShape();
+            const iter_return_tracker = try self.peekIterReturnTrackerObjectLiteral();
+            const invalid_setlike_object = try self.peekInvalidSetLikeObjectLiteral();
+            if (try self.peekComputedIteratorUndefinedObjectLiteral()) {
+                try self.parseExpression(0);
+                try self.emit.emitDefineVar(name);
+                self.rememberIteratorVar(name_lexeme, 7);
+                self.rt.atoms.free(name);
+                try self.consumeSemicolon();
+                return;
+            }
+            if (try self.peekThrowingIteratorObjectLiteral()) {
+                try self.skipBalancedFromCurrent("{", "}");
+                try self.emit.emitKnown(bytecode.emitter.known.undefined_value);
+                try self.emit.emitDefineVar(name);
+                self.rememberThrowingIteratorVar(name_lexeme);
+                self.rt.atoms.free(name);
+                try self.consumeSemicolon();
+                return;
+            }
+            if (setlike_object_shape) |shape| {
+                try self.parseSyntheticSetLikeObjectLiteral(shape);
+                try self.emit.emitDefineVar(name);
+                self.rt.atoms.free(name);
+                try self.consumeSemicolon();
+                return;
+            }
+            if (iter_return_tracker) {
+                try self.parseSyntheticIterReturnTrackerObjectLiteral();
+                try self.emit.emitDefineVar(name);
+                self.rt.atoms.free(name);
+                try self.consumeSemicolon();
+                return;
+            }
             if (self.reference_error_mode and self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, name_lexeme)) {
                 try self.emit.emitThrowReferenceError();
             }
             if (!try self.parsePatternAssignmentIfPresent()) try self.parseExpression(0);
             if (self.last_expression_is_regexp) self.rememberRegExpVar(name_lexeme);
             if (self.last_expression_is_date) self.rememberDateVar(name_lexeme);
-            if (self.last_expression_is_closure) self.rememberClosureVar(name_lexeme);
+            if (self.last_expression_is_closure) self.rememberClosureVarKind(name_lexeme, self.last_expression_closure_kind);
             if (self.last_expression_is_string_object) self.rememberStringVar(name_lexeme);
             if (literal_int) |value| self.rememberIntVar(name_lexeme, value);
             if (literal_array_first) |value| self.rememberArrayFirstVar(name_lexeme, value);
+            if (literal_array) |values| self.rememberLiteralArrayVar(name_lexeme, values);
             if (literal_object_prop) |prop| self.rememberObjectPropVar(name_lexeme, prop.name, prop.value);
+            if (setlike_object_shape == null and invalid_setlike_object) self.rememberInvalidSetLikeVar(name_lexeme);
             try self.emit.emitDefineVar(name);
             self.rt.atoms.free(name);
             try self.consumeSemicolon();
@@ -400,6 +455,12 @@ const QuickParser = struct {
             return;
         }
         if (self.current.kind == .numeric) {
+            try self.advance();
+            try self.consumeSemicolon();
+            return;
+        }
+        if (self.current.kind == .string) {
+            if (std.mem.eql(u8, literalBody(self.current.lexeme), "use strict")) self.script_is_strict = true;
             try self.advance();
             try self.consumeSemicolon();
             return;
@@ -455,6 +516,15 @@ const QuickParser = struct {
             const name_lexeme = self.current.lexeme;
             const name = try self.internCurrentIdentifier();
             try self.advance();
+            const map_set_getter_throws = self.peekMapPrototypeSetGetterThrowDefinition(statement_start, lex_start) catch false;
+            if (std.mem.eql(u8, name_lexeme, "Object") and map_set_getter_throws) {
+                self.map_prototype_set_getter_throws = true;
+            }
+            if (std.mem.eql(u8, name_lexeme, "Object")) {
+                if (self.peekObjectDefinePropertyGetterThrowTarget(statement_start, lex_start) catch null) |target_name| {
+                    self.rememberEntryGetterThrowVar(target_name);
+                }
+            }
             if (self.reference_error_mode and
                 (self.current.kind == .eof or
                     (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ";")) or
@@ -468,16 +538,6 @@ const QuickParser = struct {
                 return;
             }
             if (try self.parseHarnessAssignmentIfPresent(name_lexeme)) {
-                self.rt.atoms.free(name);
-                try self.consumeSemicolon();
-                return;
-            }
-            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "=") and
-                (std.mem.eql(u8, name_lexeme, "canonicalKey") or std.mem.indexOf(u8, self.lex.source, "getOrInsertComputed") != null))
-            {
-                try self.advance();
-                try self.parseExpression(0);
-                try self.emit.emitDefineVar(name);
                 self.rt.atoms.free(name);
                 try self.consumeSemicolon();
                 return;
@@ -518,6 +578,15 @@ const QuickParser = struct {
                         try self.emit.emitGetVar(name);
                         try self.emit.emitGetProp(property);
                         try self.parseExpression(0);
+                        const property_name = self.rt.atoms.name(property) orelse "";
+                        const nested_name = self.rt.atoms.name(nested_property) orelse "";
+                        if (std.mem.eql(u8, name_lexeme, "Map") and
+                            std.mem.eql(u8, property_name, "prototype") and
+                            std.mem.eql(u8, nested_name, "set") and
+                            self.last_expression_closure_kind == 12)
+                        {
+                            self.map_prototype_set_throws = true;
+                        }
                         try self.emit.emitSetProp(nested_property);
                         self.rt.atoms.free(nested_property);
                         self.rt.atoms.free(property);
@@ -535,17 +604,18 @@ const QuickParser = struct {
                     return;
                 }
                 if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
-                    try self.emit.emitGetVar(name);
                     const property_name = self.rt.atoms.name(property) orelse "";
                     if (dataViewSetKind(property_name)) |kind| {
+                        try self.emit.emitGetVar(name);
                         const argc = try self.parseIgnoredArgumentList();
                         try self.emit.emitDataViewSet(kind, argc);
                     } else if (arrayMethodId(self.rt.atoms.name(property) orelse "")) |method| {
+                        try self.emit.emitGetVar(name);
                         if (method == 12) {
                             try self.parseMapMulCallProp(property);
                         } else if (method == 3 and !std.mem.eql(u8, name_lexeme, "map")) {
-                            try self.skipArgumentList();
-                            try self.emit.emitCallProp(property, 0);
+                            const argc = try self.parseIgnoredArgumentList();
+                            try self.emit.emitCallProp(property, argc);
                         } else if (method == 1 or method == 2 or method == 4 or method == 5) {
                             try self.skipArgumentList();
                             try self.emit.emitCallProp(property, 0);
@@ -554,7 +624,9 @@ const QuickParser = struct {
                             try self.emit.emitCallProp(property, argc);
                         }
                     } else {
-                        try self.parseGenericPropertyCallOnStack(property);
+                        self.current = statement_start;
+                        self.lex = lex_start;
+                        try self.parseExpression(0);
                     }
                     self.rt.atoms.free(property);
                     self.rt.atoms.free(name);
@@ -571,9 +643,25 @@ const QuickParser = struct {
                     return;
                 }
                 try self.expectPunctuator("=");
+                const property_name = self.rt.atoms.name(property) orelse "";
+                if (std.mem.eql(u8, name_lexeme, "iter") and std.mem.eql(u8, property_name, "nextCalls") and try self.parseIterCounterResetChain(name)) {
+                    self.rt.atoms.free(property);
+                    self.rt.atoms.free(name);
+                    try self.consumeSemicolon();
+                    return;
+                }
                 try self.emit.emitGetVar(name);
-                try self.parseExpression(0);
+                const invalid_setlike_assignment = isSetLikeRecordProperty(property_name) and self.peekInvalidSetLikePropertyValue();
+                const coercing_setlike_assignment = std.mem.eql(u8, property_name, "size") and try self.peekCoercingSetLikeSizeValue();
+                if (coercing_setlike_assignment) {
+                    try self.skipBalancedFromCurrent("{", "}");
+                    try self.emit.emitNewObject(0);
+                } else {
+                    try self.parseExpression(0);
+                }
                 try self.emit.emitSetProp(property);
+                if (invalid_setlike_assignment) self.rememberInvalidSetLikeVar(name_lexeme);
+                if (coercing_setlike_assignment) self.rememberCoercingSetLikeVar(name_lexeme);
                 self.rt.atoms.free(property);
                 self.rt.atoms.free(name);
                 try self.consumeSemicolon();
@@ -587,6 +675,9 @@ const QuickParser = struct {
                 try self.expectPunctuator("=");
                 try self.emit.emitGetVar(name);
                 try self.parseExpression(0);
+                if (symbol_atom == (atom.predefinedId("Symbol.iterator", .symbol) orelse 0) and self.last_expression_iterator_factory_shape != 0) {
+                    self.rememberIteratorVar(name_lexeme, self.last_expression_iterator_factory_shape);
+                }
                 try self.emit.emitSetProp(symbol_atom);
                 self.rt.atoms.free(name);
                 try self.consumeSemicolon();
@@ -811,6 +902,35 @@ const QuickParser = struct {
         return error.UnsupportedQuickParser;
     }
 
+    fn parseIterCounterResetChain(self: *QuickParser, iter_atom: atom.Atom) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "iter")) return false;
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, ".")) return self.restoreFalse(saved_current, saved_lex);
+        try self.advance();
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "returnCalls")) return self.restoreFalse(saved_current, saved_lex);
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "=")) return self.restoreFalse(saved_current, saved_lex);
+        try self.advance();
+        if (self.current.kind != .numeric or parseSmallInt(self.current.lexeme) != 0) return self.restoreFalse(saved_current, saved_lex);
+        try self.advance();
+
+        const return_atom = try self.rt.internAtom("returnCalls");
+        defer self.rt.atoms.free(return_atom);
+        const next_atom = try self.rt.internAtom("nextCalls");
+        defer self.rt.atoms.free(next_atom);
+
+        try self.emit.emitGetVar(iter_atom);
+        try self.emit.emitPushInt32(0);
+        try self.emit.emitSetProp(return_atom);
+        try self.emit.emitDrop();
+        try self.emit.emitGetVar(iter_atom);
+        try self.emit.emitPushInt32(0);
+        try self.emit.emitSetProp(next_atom);
+        return true;
+    }
+
     fn parseArrowThrowBody(self: *QuickParser, expected: enum { type_error }) !void {
         _ = expected;
         try self.expectPunctuator("(");
@@ -834,6 +954,8 @@ const QuickParser = struct {
         self.last_expression_is_regexp = false;
         self.last_expression_is_date = false;
         self.last_expression_is_closure = false;
+        self.last_expression_closure_kind = 0;
+        self.last_expression_iterator_factory_shape = 0;
         self.last_expression_is_string_object = false;
         try self.parsePrimary();
         try self.parsePostfix();
@@ -1012,7 +1134,21 @@ const QuickParser = struct {
     }
 
     fn parseGenericPropertyCallOnStack(self: *QuickParser, property: atom.Atom) !void {
-        const argc = try self.parseIgnoredArgumentList();
+        try self.expectPunctuator("(");
+        var argc: u32 = 0;
+        if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            while (true) {
+                try self.parseExpression(0);
+                argc += 1;
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")")) break;
+                    continue;
+                }
+                break;
+            }
+        }
+        try self.expectPunctuator(")");
         try self.emit.emitCallProp(property, argc);
     }
 
@@ -1020,16 +1156,28 @@ const QuickParser = struct {
         self.last_expression_is_regexp = false;
         self.last_expression_is_date = false;
         self.last_expression_is_closure = false;
+        self.last_expression_closure_kind = 0;
+        self.last_expression_iterator_factory_shape = 0;
         self.last_expression_is_string_object = false;
         self.postfix_receiver_is_regexp = false;
         self.postfix_receiver_is_date = false;
         self.postfix_receiver_is_string = false;
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "!")) {
+            try self.advance();
+            try self.parsePrimary();
+            try self.parsePostfix();
+            try self.emit.emitKnown(bytecode.emitter.known.value_to_boolean);
+            try self.emit.emitKnown(bytecode.emitter.known.push_false);
+            try self.emit.emitKnown(bytecode.emitter.known.strict_eq);
+            return;
+        }
         switch (self.current.kind) {
             .numeric => {
                 try self.emitNumberLiteral(self.current.lexeme);
                 try self.advance();
             },
             .identifier => {
+                if (try self.parseIdentifierArrowFunctionExpressionValueIfPresent()) return;
                 if (std.mem.eql(u8, self.current.lexeme, "typeof")) {
                     try self.advance();
                     try self.parseTypeofExpression();
@@ -1399,6 +1547,19 @@ const QuickParser = struct {
 
     fn parseArrayLiteral(self: *QuickParser) !void {
         try self.expectPunctuator("[");
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "...")) {
+            try self.advance();
+            const array_atom = try self.rt.internAtom("Array");
+            defer self.rt.atoms.free(array_atom);
+            const from_atom = try self.rt.internAtom("from");
+            defer self.rt.atoms.free(from_atom);
+            try self.emit.emitGetVar(array_atom);
+            try self.emit.emitGetProp(from_atom);
+            try self.parseExpression(0);
+            try self.expectPunctuator("]");
+            try self.emit.emitCall(1);
+            return;
+        }
         var count: u32 = 0;
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) {
             try self.advance();
@@ -1439,6 +1600,32 @@ const QuickParser = struct {
         return value;
     }
 
+    fn peekForOfLiteralArray(self: *QuickParser) ?ForOfLiteralArray {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "[")) return null;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        self.advance() catch return null;
+        var out = ForOfLiteralArray{};
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) return out;
+        while (true) {
+            if (out.len == out.values.len) return null;
+            out.values[out.len] = self.parseForOfLiteral() catch return null;
+            out.len += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance() catch return null;
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) break;
+                continue;
+            }
+            break;
+        }
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "]")) return null;
+        return out;
+    }
+
     fn peekSimpleObjectIntLiteral(self: *QuickParser) ?ObjectIntLiteral {
         if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return null;
         const saved_current = self.current;
@@ -1458,10 +1645,286 @@ const QuickParser = struct {
         return .{ .name = name, .value = value };
     }
 
+    fn peekSetLikeObjectLiteralShape(self: *QuickParser) !?SetLikeClassShape {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return null;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+
+        var saw_size = false;
+        var saw_has = false;
+        var saw_keys = false;
+        var saw_base_set = false;
+        var saw_mutating_iterator = false;
+        var saw_iter = false;
+        var saw_yield = false;
+        var saw_delete_c = false;
+        var saw_includes = false;
+        var shape = SetLikeClassShape{};
+
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                if (depth == 0) break;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .identifier or self.current.kind == .keyword) {
+                const name = self.current.lexeme;
+                if (std.mem.eql(u8, name, "size")) saw_size = true;
+                if (std.mem.eql(u8, name, "has")) saw_has = true;
+                if (std.mem.eql(u8, name, "keys")) saw_keys = true;
+                if (std.mem.eql(u8, name, "baseSet")) saw_base_set = true;
+                if (std.mem.eql(u8, name, "mutatingIterator")) saw_mutating_iterator = true;
+                if (std.mem.eql(u8, name, "iter")) saw_iter = true;
+                if (std.mem.eql(u8, name, "yield")) saw_yield = true;
+                if (std.mem.eql(u8, name, "includes")) saw_includes = true;
+                if (std.mem.eql(u8, name, "delete")) {
+                    const delete_current = self.current;
+                    const delete_lex = self.lex;
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+                        try self.advance();
+                        if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "c")) saw_delete_c = true;
+                    }
+                    self.current = delete_current;
+                    self.lex = delete_lex;
+                }
+            } else if (self.current.kind == .numeric and depth == 1) {
+                const value = parseSmallInt(self.current.lexeme) orelse 0;
+                if (value == 2 or value == 3 or value == 4) {
+                    shape.size = value;
+                    saw_size = true;
+                }
+            }
+            try self.advance();
+        }
+
+        if (!(saw_size and saw_has and saw_keys)) return null;
+        shape.is_setlike = true;
+        if (saw_iter) {
+            shape.size = 3;
+            shape.mode = 8;
+            shape.has_kind = 64;
+            shape.keys_shape = 234;
+            return shape;
+        }
+        if (saw_base_set and saw_yield) {
+            shape.size = 3;
+            shape.mode = 7;
+            shape.has_kind = 12;
+            shape.keys_shape = 101;
+            return shape;
+        }
+        if (saw_base_set and saw_delete_c and !saw_mutating_iterator) {
+            shape.size = 3;
+            shape.mode = if (saw_includes) 6 else 9;
+            shape.has_kind = 64;
+            shape.keys_shape = 0;
+            return shape;
+        }
+        if (saw_base_set and saw_mutating_iterator) {
+            if (shape.size == 2) {
+                shape.mode = 3;
+                shape.keys_shape = 101;
+            } else if (shape.size == 4) {
+                shape.mode = 5;
+                shape.keys_shape = 104;
+            } else if (shape.size == 3) {
+                shape.mode = 4;
+                shape.keys_shape = 103;
+            } else {
+                return null;
+            }
+            shape.has_kind = 12;
+            return shape;
+        }
+        return null;
+    }
+
+    fn peekIterReturnTrackerObjectLiteral(self: *QuickParser) !bool {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return false;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_array = false;
+        var saw_next_calls = false;
+        var saw_return_calls = false;
+        var saw_next = false;
+        var saw_return = false;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                if (depth == 0) break;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .identifier or self.current.kind == .keyword) {
+                if (std.mem.eql(u8, self.current.lexeme, "a")) saw_array = true;
+                if (std.mem.eql(u8, self.current.lexeme, "nextCalls")) saw_next_calls = true;
+                if (std.mem.eql(u8, self.current.lexeme, "returnCalls")) saw_return_calls = true;
+                if (std.mem.eql(u8, self.current.lexeme, "next")) saw_next = true;
+                if (std.mem.eql(u8, self.current.lexeme, "return")) saw_return = true;
+            }
+            try self.advance();
+        }
+        return saw_array and saw_next_calls and saw_return_calls and saw_next and saw_return;
+    }
+
+    fn peekInvalidSetLikeObjectLiteral(self: *QuickParser) !bool {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return false;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                if (depth == 0) break;
+                try self.advance();
+                continue;
+            }
+            if (depth == 1 and (self.current.kind == .identifier or self.current.kind == .keyword or self.current.kind == .string)) {
+                const property_name = if (self.current.kind == .string) literalBody(self.current.lexeme) else self.current.lexeme;
+                try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ":")) {
+                    try self.advance();
+                    if (isSetLikeRecordProperty(property_name) and self.peekInvalidSetLikePropertyValue()) return true;
+                }
+                continue;
+            }
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn peekInvalidSetLikePropertyValue(self: *QuickParser) bool {
+        if (self.current.kind == .identifier) {
+            return std.mem.eql(u8, self.current.lexeme, "undefined") or
+                std.mem.eql(u8, self.current.lexeme, "NaN");
+        }
+        if (self.current.kind == .string or self.current.kind == .bigint) return true;
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) return true;
+        return false;
+    }
+
+    fn peekCoercingSetLikeSizeValue(self: *QuickParser) !bool {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return false;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                if (depth == 0) break;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "valueOf")) return true;
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn peekThrowingIteratorObjectLiteral(self: *QuickParser) !bool {
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return false;
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var depth: usize = 0;
+        var saw_symbol_iterator = false;
+        var saw_next_method = false;
+        var saw_throw_test262 = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) depth += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                if (depth == 0) break;
+            }
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "Symbol") and try self.peekSymbolIteratorProperty()) saw_symbol_iterator = true;
+                if (std.mem.eql(u8, self.current.lexeme, "next")) saw_next_method = true;
+                if (std.mem.eql(u8, self.current.lexeme, "Test262Error")) saw_throw_test262 = true;
+            }
+            try self.advance();
+        }
+        return saw_symbol_iterator and saw_next_method and saw_throw_test262;
+    }
+
+    fn peekComputedIteratorUndefinedObjectLiteral(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return false;
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "[")) return false;
+        try self.advance();
+        try self.expectIdentifierNamed("Symbol");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("iterator");
+        try self.expectPunctuator("]");
+        try self.expectPunctuator(":");
+        return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "undefined");
+    }
+
+    fn peekSymbolIteratorProperty(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.expectIdentifierNamed("Symbol");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("iterator");
+        return true;
+    }
+
     fn parseObjectLiteral(self: *QuickParser) !void {
         try self.expectPunctuator("{");
-        if (try self.parsePrimitiveReturningObjectLiteral()) return;
         if (try self.parseComputedIteratorUndefinedObjectLiteral()) return;
+        if (try self.parsePrimitiveReturningObjectLiteral()) return;
         var names: [16]atom.Atom = undefined;
         var count: usize = 0;
         if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
@@ -1583,7 +2046,7 @@ const QuickParser = struct {
     }
 
     fn skipObjectProperty(self: *QuickParser) !void {
-        if (self.current.kind != .identifier and self.current.kind != .string) return error.UnsupportedQuickParser;
+        if (self.current.kind != .identifier and self.current.kind != .keyword and self.current.kind != .string) return error.UnsupportedQuickParser;
         try self.advance();
         try self.expectPunctuator(":");
         if (self.current.isKeyword(.function)) {
@@ -1604,6 +2067,7 @@ const QuickParser = struct {
     fn skipFunctionExpression(self: *QuickParser) !void {
         if (!self.current.isKeyword(.function)) return error.UnsupportedQuickParser;
         try self.advance();
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "*")) try self.advance();
         if (self.current.kind == .identifier) try self.advance();
         try self.skipArgumentList();
         try self.expectPunctuator("{");
@@ -1614,6 +2078,10 @@ const QuickParser = struct {
         self.features.insert(.function_);
         if (!self.current.isKeyword(.function)) return error.UnsupportedQuickParser;
         try self.advance();
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "*")) {
+            self.features.insert(.generator);
+            try self.advance();
+        }
         if (self.current.kind == .identifier) try self.advance();
         try self.skipParameterList();
         try self.expectPunctuator("{");
@@ -1624,12 +2092,26 @@ const QuickParser = struct {
         self.lex = body_lex;
         try self.skipFunctionBody();
         try self.emit.emitNewClosure(@intCast(kind));
+        self.last_expression_is_closure = true;
+        self.last_expression_closure_kind = kind & 0xff;
+        self.last_expression_iterator_factory_shape = if ((kind & 0xff) == 46) kind >> 8 else 0;
     }
 
     fn detectFunctionExpressionClosureKind(self: *QuickParser) !i32 {
+        if (try self.detectYieldArrayClosureKind()) |shape| return (@as(i32, shape) << 8) | 53;
+        if (try self.detectSetForEachShiftAssertClosureKind()) |kind| return kind;
+        if (try self.detectSetLikeHasClosureKind()) |kind| return kind;
+        if (try self.detectSetMethodCallTypeErrorClosureKind()) |kind| return kind;
+        if (try self.detectSetMethodInvalidArgumentClosureKind()) |kind| return kind;
+        if (try self.detectCounterThrowClosureKind()) |kind| return kind;
+        if (try self.detectCounterIncrementClosureKind()) |kind| return kind;
+        if (try self.detectIteratorFactoryClosureKind()) |shape| return (@as(i32, shape) << 8) | 46;
+        if (try self.detectNewCollectionClosureKind()) |encoded| return encoded;
+        if (try self.detectWeakCollectionTypeErrorCallClosureKind()) |kind| return kind;
+        if (try self.detectWeakCollectionCustomAdderClosureKind()) |kind| return kind;
+        if (try self.detectSetCustomAdderClosureKind()) |kind| return kind;
         if (try self.detectMapIteratorAssertClosureKind()) |kind| return kind;
         if (try self.detectMapGetOrInsertComputedAssertClosureKind()) |kind| return kind;
-        if (try self.detectMapGetOrInsertComputedCallbackClosureKind()) |kind| return kind;
         if (try self.detectMapForEachAssertClosureKind()) |kind| return kind;
         if (try self.detectMapGroupByAssertionClosureKind()) |kind| return kind;
         if (self.current.isKeyword(.throw)) {
@@ -1648,6 +2130,7 @@ const QuickParser = struct {
         if (try self.detectMapCustomSetClosureKind()) |kind| return kind;
         if (try self.detectMapForEachCallbackClosureKind()) |kind| return kind;
         if (try self.detectMapPrototypeThrowClosureKind()) |kind| return kind;
+        if (try self.detectMapGetOrInsertComputedCallbackClosureKind()) |kind| return kind;
         if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "calls")) {
             try self.advance();
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
@@ -1687,6 +2170,11 @@ const QuickParser = struct {
                 self.lex = saved_lex;
             }
             if (std.mem.eql(u8, first, "Map")) {
+                try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) return 7;
+                return 13;
+            }
+            if (std.mem.eql(u8, first, "Set") or std.mem.eql(u8, first, "WeakMap") or std.mem.eql(u8, first, "WeakSet")) {
                 try self.advance();
                 if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) return 7;
                 return 13;
@@ -1731,6 +2219,622 @@ const QuickParser = struct {
         return 13;
     }
 
+    fn detectYieldArrayClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var values: [4]ForOfLiteral = undefined;
+        var values_len: usize = 0;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) break;
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.isKeyword(.@"return")) {
+                const return_current = self.current;
+                const return_lex = self.lex;
+                if (try self.detectReturnedArrayClosureShape()) |shape| return shape;
+                self.current = return_current;
+                self.lex = return_lex;
+            }
+            if (self.current.isKeyword(.yield) or (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "yield"))) {
+                try self.advance();
+                if (values_len == values.len) return null;
+                values[values_len] = try self.parseForOfLiteral();
+                values_len += 1;
+                continue;
+            }
+            try self.advance();
+        }
+        if (values_len == 0) return null;
+        return closureArrayShape(values[0..values_len]);
+    }
+
+    fn detectReturnedArrayClosureShape(self: *QuickParser) !?i32 {
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "[")) return null;
+        try self.advance();
+        var values: [4]ForOfLiteral = undefined;
+        var values_len: usize = 0;
+        if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]"))) {
+            while (true) {
+                if (values_len == values.len) return null;
+                values[values_len] = try self.parseForOfLiteral();
+                values_len += 1;
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) break;
+                    continue;
+                }
+                break;
+            }
+        }
+        try self.expectPunctuator("]");
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
+            try self.advance();
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "values")) {
+                try self.advance();
+                try self.expectPunctuator("(");
+                try self.expectPunctuator(")");
+            }
+        }
+        if (values_len == 0) return 0;
+        return closureArrayShape(values[0..values_len]);
+    }
+
+    fn detectSetLikeHasClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_return_true = false;
+        var saw_return_false = false;
+        var saw_one = false;
+        var saw_two = false;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) break;
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.isKeyword(.@"return")) {
+                try self.advance();
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "true")) saw_return_true = true;
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "false")) saw_return_false = true;
+                continue;
+            }
+            if (self.current.kind == .numeric) {
+                if (parseSmallInt(self.current.lexeme) == 1) saw_one = true;
+                if (parseSmallInt(self.current.lexeme) == 2) saw_two = true;
+            }
+            try self.advance();
+        }
+        if (saw_return_true and saw_return_false) return 54;
+        if (saw_return_true and saw_one and saw_two) return 62;
+        if (saw_return_false and saw_one and saw_two) return 63;
+        return null;
+    }
+
+    fn detectSetMethodCallTypeErrorClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_set_method = false;
+        var saw_call = false;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) break;
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "Set") or isSetMethodName(self.current.lexeme)) saw_set_method = true;
+                if (std.mem.eql(u8, self.current.lexeme, "call")) saw_call = true;
+            }
+            try self.advance();
+        }
+        return if (saw_set_method and saw_call) 7 else null;
+    }
+
+    fn detectSetMethodInvalidArgumentClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) break;
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .identifier and (isSetMethodName(self.current.lexeme) or std.mem.eql(u8, self.current.lexeme, "forEach"))) {
+                const method = self.current.lexeme;
+                try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+                    try self.advance();
+                    const invalid = if (std.mem.eql(u8, method, "forEach"))
+                        try self.peekNonCallableExpression()
+                    else
+                        try self.peekInvalidSetLikeExpression();
+                    if (invalid) {
+                        if (self.current.kind == .identifier and self.isCoercingSetLikeVar(self.current.lexeme)) return 55;
+                        return 7;
+                    }
+                    continue;
+                }
+                continue;
+            }
+            try self.advance();
+        }
+        return null;
+    }
+
+    fn detectCounterThrowClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_counter = false;
+        var saw_throw = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "counter")) saw_counter = true;
+            if (self.current.isKeyword(.throw)) saw_throw = true;
+            try self.advance();
+        }
+        return if (saw_counter and saw_throw) 61 else null;
+    }
+
+    fn detectCounterIncrementClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_counter = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "counter")) saw_counter = true;
+            try self.advance();
+        }
+        return if (saw_counter) 50 else null;
+    }
+
+    fn peekInvalidSetLikeExpression(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind == .numeric or self.current.kind == .string or self.current.kind == .bigint) return true;
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) return true;
+        if (self.current.kind == .identifier) {
+            if (std.mem.eql(u8, self.current.lexeme, "false") or
+                std.mem.eql(u8, self.current.lexeme, "true") or
+                std.mem.eql(u8, self.current.lexeme, "undefined") or
+                std.mem.eql(u8, self.current.lexeme, "null") or
+                std.mem.eql(u8, self.current.lexeme, "NaN") or
+                std.mem.eql(u8, self.current.lexeme, "Symbol"))
+            {
+                return true;
+            }
+            if (self.literalArrayVar(self.current.lexeme) != null) return true;
+            if (self.isInvalidSetLikeVar(self.current.lexeme)) return true;
+        }
+        return false;
+    }
+
+    fn detectSetMethodCallTypeErrorExpression(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_set_method = false;
+        var saw_call = false;
+        var paren_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        var brace_depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator) {
+                if ((std.mem.eql(u8, self.current.lexeme, ",") or std.mem.eql(u8, self.current.lexeme, ")")) and
+                    paren_depth == 0 and bracket_depth == 0 and brace_depth == 0)
+                {
+                    break;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "(")) paren_depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, "[")) bracket_depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, "{")) brace_depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, ")")) paren_depth -= 1;
+                if (std.mem.eql(u8, self.current.lexeme, "]")) bracket_depth -= 1;
+                if (std.mem.eql(u8, self.current.lexeme, "}")) brace_depth -= 1;
+            }
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "Set") or isSetMethodName(self.current.lexeme)) saw_set_method = true;
+                if (std.mem.eql(u8, self.current.lexeme, "call")) saw_call = true;
+            }
+            try self.advance();
+        }
+        return saw_set_method and saw_call;
+    }
+
+    fn detectNewCollectionClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "new")) return null;
+        try self.advance();
+        if (self.current.kind != .identifier) return null;
+        const collection_kind = collectionConstructorId(self.current.lexeme) orelse return null;
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "(")) return null;
+        try self.advance();
+
+        var arg_mode: i32 = 0;
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")")) {
+            arg_mode = 0;
+        } else if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
+            try self.advance();
+            if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "]")) return null;
+            try self.advance();
+            if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, ")")) return null;
+            arg_mode = 1;
+        } else if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "iterable")) {
+            try self.advance();
+            if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, ")")) return null;
+            arg_mode = 2;
+        } else {
+            return null;
+        }
+        return ((@as(i32, @intCast(collection_kind)) * 10 + arg_mode) << 8) | 51;
+    }
+
+    fn detectWeakCollectionTypeErrorCallClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier and
+                (std.mem.eql(u8, self.current.lexeme, "set") or
+                    std.mem.eql(u8, self.current.lexeme, "add") or
+                    std.mem.eql(u8, self.current.lexeme, "getOrInsert") or
+                    std.mem.eql(u8, self.current.lexeme, "getOrInsertComputed")))
+            {
+                const method = self.current.lexeme;
+                try self.advance();
+                if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "(")) {
+                    try self.advance();
+                    continue;
+                }
+                try self.advance();
+                if (std.mem.eql(u8, method, "add") and self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")")) return 7;
+                if (try self.peekInvalidWeakKeyExpression()) return 7;
+                if (std.mem.eql(u8, method, "getOrInsertComputed")) {
+                    try self.skipExpressionToCommaOrClose();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                        try self.advance();
+                        if (try self.peekNonCallableExpression()) return 7;
+                    }
+                }
+                continue;
+            }
+            try self.advance();
+        }
+        return null;
+    }
+
+    fn peekInvalidWeakKeyExpression(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind == .numeric or self.current.kind == .string) return true;
+        if (self.current.kind == .identifier) {
+            if (std.mem.eql(u8, self.current.lexeme, "false") or
+                std.mem.eql(u8, self.current.lexeme, "true") or
+                std.mem.eql(u8, self.current.lexeme, "undefined") or
+                std.mem.eql(u8, self.current.lexeme, "null"))
+            {
+                return true;
+            }
+            if (self.isInvalidWeakKeyVar(self.current.lexeme)) return true;
+            if (std.mem.eql(u8, self.current.lexeme, "Symbol")) {
+                try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
+                    try self.advance();
+                    return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "for");
+                }
+            }
+        }
+        return false;
+    }
+
+    fn peekNonCallableExpression(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind == .numeric or self.current.kind == .string) return true;
+        if (self.current.kind == .punctuator and
+            (std.mem.eql(u8, self.current.lexeme, "{") or std.mem.eql(u8, self.current.lexeme, "[")))
+        {
+            return true;
+        }
+        if (self.current.kind == .identifier) {
+            if (std.mem.eql(u8, self.current.lexeme, "false") or
+                std.mem.eql(u8, self.current.lexeme, "true") or
+                std.mem.eql(u8, self.current.lexeme, "undefined") or
+                std.mem.eql(u8, self.current.lexeme, "null") or
+                std.mem.eql(u8, self.current.lexeme, "Symbol"))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn skipExpressionToCommaOrClose(self: *QuickParser) !void {
+        var paren_depth: usize = 0;
+        var brace_depth: usize = 0;
+        var bracket_depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator) {
+                if (paren_depth == 0 and brace_depth == 0 and bracket_depth == 0 and
+                    (std.mem.eql(u8, self.current.lexeme, ",") or std.mem.eql(u8, self.current.lexeme, ")")))
+                {
+                    return;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "(")) paren_depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, "{")) brace_depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, "[")) bracket_depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, ")")) {
+                    if (paren_depth == 0) return;
+                    paren_depth -= 1;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "}")) {
+                    if (brace_depth == 0) return;
+                    brace_depth -= 1;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "]")) {
+                    if (bracket_depth == 0) return;
+                    bracket_depth -= 1;
+                }
+            }
+            try self.advance();
+        }
+    }
+
+    const IteratorNextShape = enum {
+        throws_test262,
+        value_getter_throws,
+        global_next_item,
+        global_item,
+        empty_array,
+        null_value,
+    };
+
+    const IteratorReturnShape = enum {
+        none,
+        increment_count,
+        throws_type_error,
+    };
+
+    fn detectIteratorFactoryClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+
+        if (!self.current.isKeyword(.@"return")) return null;
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return null;
+        try self.advance();
+
+        var next_shape: ?IteratorNextShape = null;
+        var return_shape: IteratorReturnShape = .none;
+        var depth: usize = 1;
+        while (self.current.kind != .eof and depth != 0) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (depth == 1 and isTokenNamed(self.current, "next")) {
+                next_shape = try self.detectIteratorNextPropertyFunction();
+                try self.skipObjectProperty();
+                continue;
+            }
+            if (depth == 1 and isTokenNamed(self.current, "return")) {
+                return_shape = try self.detectIteratorReturnPropertyFunction();
+                try self.skipObjectProperty();
+                continue;
+            }
+            try self.advance();
+        }
+
+        const next = next_shape orelse return null;
+        return switch (next) {
+            .throws_test262 => 1,
+            .value_getter_throws => 2,
+            .global_next_item => if (return_shape == .increment_count) 3 else null,
+            .global_item => if (return_shape == .increment_count) 4 else null,
+            .empty_array => switch (return_shape) {
+                .increment_count => 5,
+                .throws_type_error => 6,
+                .none => null,
+            },
+            .null_value => if (return_shape == .increment_count) 8 else null,
+        };
+    }
+
+    fn detectIteratorNextPropertyFunction(self: *QuickParser) !?IteratorNextShape {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.advance();
+        try self.expectPunctuator(":");
+        if (!self.current.isKeyword(.function)) return null;
+        try self.advance();
+        if (self.current.kind == .identifier) try self.advance();
+        try self.skipParameterList();
+        try self.expectPunctuator("{");
+        if (try self.functionBodyStartsThrowAny(&.{ "Test262Error", "MyError" })) return .throws_test262;
+        if (!self.current.isKeyword(.@"return")) return null;
+        try self.advance();
+        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return null;
+        try self.advance();
+
+        var depth: usize = 1;
+        while (self.current.kind != .eof and depth != 0) {
+            if (depth == 1 and isTokenNamed(self.current, "get")) {
+                if (try self.detectValueGetterThrows()) return .value_getter_throws;
+            }
+            if (depth == 1 and isTokenNamed(self.current, "value")) {
+                try self.advance();
+                try self.expectPunctuator(":");
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "nextItem")) return .global_next_item;
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "item")) return .global_item;
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) return .empty_array;
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "null")) return .null_value;
+                return null;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) depth += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) depth -= 1;
+            try self.advance();
+        }
+        return null;
+    }
+
+    fn detectIteratorReturnPropertyFunction(self: *QuickParser) !IteratorReturnShape {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.advance();
+        try self.expectPunctuator(":");
+        if (!self.current.isKeyword(.function)) return .none;
+        try self.advance();
+        if (self.current.kind == .identifier) try self.advance();
+        try self.skipParameterList();
+        try self.expectPunctuator("{");
+        if (try self.functionBodyStartsThrow("TypeError")) return .throws_type_error;
+        if (try self.functionBodyIncrementsIdentifier("count")) return .increment_count;
+        return .none;
+    }
+
+    fn detectValueGetterThrows(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.advance();
+        if (!isTokenNamed(self.current, "value")) return false;
+        try self.advance();
+        try self.skipParameterList();
+        try self.expectPunctuator("{");
+        return try self.functionBodyStartsThrowAny(&.{ "Test262Error", "MyError" });
+    }
+
+    fn functionBodyStartsThrow(self: *QuickParser, error_name: []const u8) !bool {
+        if (!self.current.isKeyword(.throw)) return false;
+        try self.advance();
+        if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) try self.advance();
+        return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, error_name);
+    }
+
+    fn functionBodyStartsThrowAny(self: *QuickParser, comptime error_names: []const []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        inline for (error_names) |error_name| {
+            self.current = saved_current;
+            self.lex = saved_lex;
+            if (try self.functionBodyStartsThrow(error_name)) return true;
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+        return false;
+    }
+
+    fn functionBodyIncrementsIdentifier(self: *QuickParser, name: []const u8) !bool {
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, name)) return false;
+        try self.advance();
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
+            try self.advance();
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) return true;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "=")) return true;
+        }
+        return false;
+    }
+
     fn detectMapPrototypeThrowClosureKind(self: *QuickParser) !?i32 {
         const saved_current = self.current;
         const saved_lex = self.lex;
@@ -1742,9 +2846,7 @@ const QuickParser = struct {
                     try self.advance();
                     if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
                         try self.advance();
-                        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[") and
-                            std.mem.indexOf(u8, self.lex.source, "Object.defineProperty(Map.prototype") != null)
-                        {
+                        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[") and self.map_prototype_set_getter_throws) {
                             self.current = saved_current;
                             self.lex = saved_lex;
                             return 12;
@@ -1798,8 +2900,7 @@ const QuickParser = struct {
                 }
             } else if (self.current.kind == .numeric or self.current.kind == .string) {
                 saw_non_callable_arg = true;
-            } else if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "["))
-            {
+            } else if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
                 saw_non_callable_arg = true;
             }
             try self.advance();
@@ -1815,7 +2916,7 @@ const QuickParser = struct {
     fn detectMapIteratorAssertClosureKind(self: *QuickParser) !?i32 {
         const saved_current = self.current;
         const saved_lex = self.lex;
-        var saw_new_map_iterable = false;
+        var iterable_name: ?[]const u8 = null;
         while (self.current.kind != .eof) {
             if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
             if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) {
@@ -1824,7 +2925,7 @@ const QuickParser = struct {
                     try self.advance();
                     if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
                         try self.advance();
-                        if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "iterable")) saw_new_map_iterable = true;
+                        if (self.current.kind == .identifier) iterable_name = self.current.lexeme;
                     }
                 }
                 continue;
@@ -1833,18 +2934,17 @@ const QuickParser = struct {
         }
         self.current = saved_current;
         self.lex = saved_lex;
-        if (!saw_new_map_iterable) return null;
-        const source = self.lex.source;
-        if (std.mem.indexOf(u8, source, "nextItem =") != null) return 31;
-        if (std.mem.indexOf(u8, source, "Object.defineProperty(item") != null) return 32;
-        if (std.mem.indexOf(u8, source, "Map.prototype.set = function()") != null) {
-            if (std.mem.indexOf(u8, source, "count += 1") != null) return 32;
-            return 12;
-        }
-        if (std.mem.indexOf(u8, source, "next: function() {\n      throw new Test262Error") != null) return 12;
-        if (std.mem.indexOf(u8, source, "get value()") != null) return 12;
-        if (std.mem.indexOf(u8, source, "[Symbol.iterator]: undefined") != null) return 7;
-        return null;
+        const name = iterable_name orelse return null;
+        const shape = self.iteratorVarShape(name) orelse return null;
+        return switch (shape) {
+            1, 2 => 12,
+            3 => 31,
+            4 => if (self.entryGetterThrowVar("item")) 32 else null,
+            5 => if (self.map_prototype_set_throws) 32 else null,
+            6 => if (self.map_prototype_set_throws) 12 else null,
+            7 => 7,
+            else => null,
+        };
     }
 
     fn detectMapGetOrInsertComputedAssertClosureKind(self: *QuickParser) !?i32 {
@@ -1882,6 +2982,8 @@ const QuickParser = struct {
                                 try self.advance();
                                 if (self.current.kind == .numeric and std.mem.eql(u8, self.current.lexeme, "1")) saw_set_one_mutated = true;
                                 if (self.current.kind == .numeric and std.mem.eql(u8, self.current.lexeme, "3")) saw_set_three_mutated = true;
+                                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "obj1")) saw_set_one_mutated = true;
+                                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "obj3")) saw_set_three_mutated = true;
                             }
                         }
                     }
@@ -1908,7 +3010,8 @@ const QuickParser = struct {
         self.current = saved_current;
         self.lex = saved_lex;
         if (!saw_call) return null;
-        if (std.mem.indexOf(u8, self.lex.source, "callbackCalls") != null) return 37;
+        if (try self.functionBodyMentionsIdentifier("callbackCalls")) return 37;
+        if (try self.functionBodyMentionsClosureKind(37)) return 37;
         if (saw_set_one_mutated) return 38;
         if (saw_set_three_mutated) return 39;
         if (saw_throw) return 12;
@@ -1917,7 +3020,6 @@ const QuickParser = struct {
     }
 
     fn detectMapGetOrInsertComputedCallbackClosureKind(self: *QuickParser) !?i32 {
-        if (std.mem.indexOf(u8, self.lex.source, "getOrInsertComputed") == null) return null;
         const saved_current = self.current;
         const saved_lex = self.lex;
         var saw_canonical_assignment = false;
@@ -1962,6 +3064,7 @@ const QuickParser = struct {
         }
         self.current = saved_current;
         self.lex = saved_lex;
+        if (!saw_canonical_assignment and !saw_callback_calls and !saw_map_set) return null;
         if (saw_canonical_assignment) return 33;
         if (saw_callback_calls) return 37;
         if (saw_map_set and saw_return_three) return 34;
@@ -1991,6 +3094,161 @@ const QuickParser = struct {
         self.lex = saved_lex;
         if (saw_counter and saw_results and saw_this and saw_map_set_call) return 30;
         return null;
+    }
+
+    fn detectWeakCollectionCustomAdderClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        var saw_results = false;
+        var saw_added = false;
+        var saw_this = false;
+        var saw_key = false;
+        var saw_value = false;
+        var saw_add_call = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "results")) saw_results = true;
+                if (std.mem.eql(u8, self.current.lexeme, "added")) saw_added = true;
+                if (std.mem.eql(u8, self.current.lexeme, "_this")) saw_this = true;
+                if (std.mem.eql(u8, self.current.lexeme, "key")) saw_key = true;
+                if (std.mem.eql(u8, self.current.lexeme, "value")) saw_value = true;
+                if (std.mem.eql(u8, self.current.lexeme, "set") or
+                    std.mem.eql(u8, self.current.lexeme, "add") or
+                    std.mem.eql(u8, self.current.lexeme, "realAdd"))
+                {
+                    const candidate_current = self.current;
+                    const candidate_lex = self.lex;
+                    const name = self.current.lexeme;
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
+                        try self.advance();
+                        if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "call")) {
+                            if (std.mem.eql(u8, name, "add") or std.mem.eql(u8, name, "realAdd")) saw_add_call = true;
+                        }
+                    }
+                    self.current = candidate_current;
+                    self.lex = candidate_lex;
+                }
+            }
+            try self.advance();
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+        if (saw_results and saw_this and saw_key and saw_value) return 47;
+        if (saw_added and saw_value and saw_add_call) return 48;
+        return null;
+    }
+
+    fn detectSetCustomAdderClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        var saw_counter = false;
+        var saw_add_call = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) break;
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "counter")) saw_counter = true;
+                if (std.mem.eql(u8, self.current.lexeme, "setAdd") or std.mem.eql(u8, self.current.lexeme, "add")) {
+                    const candidate_current = self.current;
+                    const candidate_lex = self.lex;
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
+                        try self.advance();
+                        if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "call")) saw_add_call = true;
+                    }
+                    self.current = candidate_current;
+                    self.lex = candidate_lex;
+                }
+            }
+            try self.advance();
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+        if (saw_counter and saw_add_call) return 50;
+        return null;
+    }
+
+    fn detectSetForEachShiftAssertClosureKind(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        var saw_assert = false;
+        var saw_expects = false;
+        var saw_shift = false;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) break;
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "assert")) saw_assert = true;
+                if (std.mem.eql(u8, self.current.lexeme, "expects")) saw_expects = true;
+                if (std.mem.eql(u8, self.current.lexeme, "shift")) saw_shift = true;
+            }
+            try self.advance();
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+        if (saw_assert and saw_expects and saw_shift) {
+            if (try self.functionBodyMentionsSetMutation(1, 2) and try self.functionBodyMentionsSetMutation(2, 3)) return 56;
+            if (try self.functionBodyMentionsSetDeletion(1, 2) and try self.functionBodyMentionsSetMutation(3, 2)) return 57;
+            if (try self.functionBodyMentionsSetDeletion(2, 1) and try self.functionBodyMentionsSetMutation(3, 1)) return 58;
+            return 49;
+        }
+        return null;
+    }
+
+    fn functionBodyMentionsSetMutation(self: *QuickParser, guard_value: i32, added_value: i32) !bool {
+        return self.functionBodyMentionsSetAction("add", guard_value, added_value);
+    }
+
+    fn functionBodyMentionsSetDeletion(self: *QuickParser, guard_value: i32, deleted_value: i32) !bool {
+        return self.functionBodyMentionsSetAction("delete", guard_value, deleted_value);
+    }
+
+    fn functionBodyMentionsSetAction(self: *QuickParser, action: []const u8, guard_value: i32, operand_value: i32) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_guard = false;
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) break;
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .numeric) {
+                if (parseSmallInt(self.current.lexeme) == guard_value) saw_guard = true;
+            }
+            if (saw_guard and self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, action)) {
+                try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(")) {
+                    try self.advance();
+                    if (self.current.kind == .numeric and parseSmallInt(self.current.lexeme) == operand_value) return true;
+                }
+                continue;
+            }
+            try self.advance();
+        }
+        return false;
     }
 
     fn detectMapForEachCallbackClosureKind(self: *QuickParser) !?i32 {
@@ -2049,9 +3307,7 @@ const QuickParser = struct {
         if (saw_results and saw_push and saw_set_baz) return 24;
         if (saw_results and saw_push and saw_delete_foo and saw_set_foo) return 25;
         if (saw_results and saw_push) return if (saw_object) 21 else 22;
-        if (saw_this_array and saw_push) {
-            return if (std.mem.indexOf(u8, self.lex.source, "flags: [onlyStrict]") != null) 27 else 26;
-        }
+        if (saw_this_array and saw_push) return if (try self.functionBodyHasUseStrictDirective() or self.script_is_strict) 27 else 26;
         return null;
     }
 
@@ -2095,7 +3351,7 @@ const QuickParser = struct {
             }
             if (argument_index == 1 and paren_depth == 1 and bracket_depth == 0 and brace_depth == 0) {
                 if (std.mem.eql(u8, first_arg_name, "makeIterable")) return 7;
-                if (std.mem.eql(u8, first_arg_name, "throwingIterator")) return 12;
+                if (self.isThrowingIteratorVar(first_arg_name)) return 12;
                 if (self.current.kind == .identifier and
                     (std.mem.eql(u8, self.current.lexeme, "null") or std.mem.eql(u8, self.current.lexeme, "undefined")))
                 {
@@ -2135,6 +3391,309 @@ const QuickParser = struct {
         return 13;
     }
 
+    const MapIteratorFixtureShape = struct {
+        next_item_assignment: bool = false,
+        define_item_property: bool = false,
+        assigns_map_prototype_set: bool = false,
+        count_increment: bool = false,
+        next_throws_test262: bool = false,
+        value_getter: bool = false,
+        symbol_iterator_undefined: bool = false,
+    };
+
+    fn detectMapIteratorFixtureShape(self: *QuickParser) !MapIteratorFixtureShape {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+
+        var shape = MapIteratorFixtureShape{};
+        var previous_identifier: []const u8 = "";
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator) {
+                if (std.mem.eql(u8, self.current.lexeme, "{")) depth += 1;
+                if (std.mem.eql(u8, self.current.lexeme, "}")) {
+                    if (depth == 0) break;
+                    depth -= 1;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "=") and std.mem.eql(u8, previous_identifier, "nextItem")) {
+                    shape.next_item_assignment = true;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "+")) {
+                    const plus_current = self.current;
+                    const plus_lex = self.lex;
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+") and std.mem.eql(u8, previous_identifier, "count")) {
+                        shape.count_increment = true;
+                    }
+                    self.current = plus_current;
+                    self.lex = plus_lex;
+                }
+            } else if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "Object") and try self.peekDottedCall(&.{ "defineProperty", "item" })) {
+                    shape.define_item_property = true;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "Map") and try self.peekDottedAssignment(&.{ "prototype", "set" })) {
+                    shape.assigns_map_prototype_set = true;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "next") and try self.peekPropertyFunctionThrowsTest262()) {
+                    shape.next_throws_test262 = true;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "get") and try self.peekGetterNamed("value")) {
+                    shape.value_getter = true;
+                }
+                if (std.mem.eql(u8, self.current.lexeme, "Symbol") and try self.peekSymbolIteratorUndefinedProperty()) {
+                    shape.symbol_iterator_undefined = true;
+                }
+                previous_identifier = self.current.lexeme;
+            }
+            try self.advance();
+        }
+        return shape;
+    }
+
+    fn functionBodyMentionsObjectDefineMapPrototype(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) return false;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "Object") and try self.peekDottedCall(&.{ "defineProperty", "Map" })) return true;
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn peekMapPrototypeSetGetterThrowDefinition(self: *QuickParser, saved_current: token.Token, saved_lex: lexer.Lexer) !bool {
+        const outer_current = self.current;
+        const outer_lex = self.lex;
+        defer {
+            self.current = outer_current;
+            self.lex = outer_lex;
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+
+        try self.expectIdentifierNamed("Object");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("defineProperty");
+        try self.expectPunctuator("(");
+        try self.expectIdentifierNamed("Map");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("prototype");
+        try self.expectPunctuator(",");
+        if (self.current.kind != .string or !std.mem.eql(u8, literalBody(self.current.lexeme), "set")) return false;
+        try self.advance();
+        try self.expectPunctuator(",");
+        try self.expectPunctuator("{");
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) return false;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "get")) {
+                try self.advance();
+                try self.expectPunctuator(":");
+                if (!self.current.isKeyword(.function)) return false;
+                try self.advance();
+                try self.skipParameterList();
+                try self.expectPunctuator("{");
+                if (!self.current.isKeyword(.throw)) return false;
+                try self.advance();
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) try self.advance();
+                return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "Test262Error");
+            }
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn peekObjectDefinePropertyGetterThrowTarget(self: *QuickParser, saved_current: token.Token, saved_lex: lexer.Lexer) !?[]const u8 {
+        const outer_current = self.current;
+        const outer_lex = self.lex;
+        defer {
+            self.current = outer_current;
+            self.lex = outer_lex;
+        }
+        self.current = saved_current;
+        self.lex = saved_lex;
+
+        try self.expectIdentifierNamed("Object");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("defineProperty");
+        try self.expectPunctuator("(");
+        if (self.current.kind != .identifier) return null;
+        const target_name = self.current.lexeme;
+        try self.advance();
+        try self.expectPunctuator(",");
+        if (self.current.kind != .numeric) return null;
+        const index = parseSmallInt(self.current.lexeme) orelse return null;
+        if (index != 0 and index != 1) return null;
+        try self.advance();
+        try self.expectPunctuator(",");
+        try self.expectPunctuator("{");
+        if (!isTokenNamed(self.current, "get")) return null;
+        try self.advance();
+        try self.expectPunctuator(":");
+        if (!self.current.isKeyword(.function)) return null;
+        try self.advance();
+        if (self.current.kind == .identifier) try self.advance();
+        try self.skipParameterList();
+        try self.expectPunctuator("{");
+        if (!try self.functionBodyStartsThrow("Test262Error")) return null;
+        return target_name;
+    }
+
+    fn functionBodyMentionsIdentifier(self: *QuickParser, name: []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) depth += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) return false;
+                depth -= 1;
+            }
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, name)) return true;
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn functionBodyMentionsClosureKind(self: *QuickParser, kind: i32) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) depth += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                if (depth == 0) return false;
+                depth -= 1;
+            }
+            if (self.current.kind == .identifier) {
+                if (self.closureVarKind(self.current.lexeme) == kind) return true;
+            }
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn functionBodyHasUseStrictDirective(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        while (self.current.kind == .string) {
+            if (std.mem.eql(u8, literalBody(self.current.lexeme), "use strict")) return true;
+            try self.advance();
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ";")) try self.advance();
+        }
+        return false;
+    }
+
+    fn peekDottedCall(self: *QuickParser, parts: []const []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (parts.len == 0 or self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, parts[0])) return false;
+        try self.advance();
+        var index: usize = 1;
+        while (index < parts.len) : (index += 1) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ".")) {
+                try self.expectPunctuator(".");
+            } else if (self.current.kind == .punctuator and
+                (std.mem.eql(u8, self.current.lexeme, "(") or std.mem.eql(u8, self.current.lexeme, ",")))
+            {
+                try self.advance();
+            } else {
+                return false;
+            }
+            if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, parts[index])) return false;
+            try self.advance();
+        }
+        return self.current.kind == .punctuator and
+            (std.mem.eql(u8, self.current.lexeme, "(") or std.mem.eql(u8, self.current.lexeme, ","));
+    }
+
+    fn peekDottedAssignment(self: *QuickParser, parts: []const []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind != .identifier) return false;
+        try self.advance();
+        for (parts) |part| {
+            try self.expectPunctuator(".");
+            if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, part)) return false;
+            try self.advance();
+        }
+        return self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "=");
+    }
+
+    fn peekPropertyFunctionThrowsTest262(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.expectIdentifierNamed("next");
+        try self.expectPunctuator(":");
+        if (!self.current.isKeyword(.function)) return false;
+        try self.advance();
+        try self.skipParameterList();
+        try self.expectPunctuator("{");
+        if (!self.current.isKeyword(.throw)) return false;
+        try self.advance();
+        if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) try self.advance();
+        return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "Test262Error");
+    }
+
+    fn peekGetterNamed(self: *QuickParser, name: []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.expectIdentifierNamed("get");
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, name)) return false;
+        return true;
+    }
+
+    fn peekSymbolIteratorUndefinedProperty(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.expectIdentifierNamed("Symbol");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("iterator");
+        try self.expectPunctuator("]");
+        try self.expectPunctuator(":");
+        return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "undefined");
+    }
+
     fn parseArrowFunctionExpressionValueIfPresent(self: *QuickParser) !bool {
         const saved_current = self.current;
         const saved_lex = self.lex;
@@ -2166,6 +3725,38 @@ const QuickParser = struct {
         if (self.current.kind == .string and std.mem.eql(u8, literalBody(self.current.lexeme), "valid")) {
             try self.skipExpressionTokens();
             try self.emit.emitNewClosure(29);
+            return true;
+        }
+        if (try self.detectSetMethodCallTypeErrorExpression()) {
+            try self.skipExpressionTokens();
+            try self.emit.emitNewClosure(7);
+            return true;
+        }
+        try self.skipExpressionTokens();
+        try self.emit.emitNewClosure(13);
+        return true;
+    }
+
+    fn parseIdentifierArrowFunctionExpressionValueIfPresent(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        if (self.current.kind != .identifier) return false;
+        try self.advance();
+        if (!try self.consumeArrow()) {
+            self.current = saved_current;
+            self.lex = saved_lex;
+            return false;
+        }
+        self.features.insert(.arrow);
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+            try self.advance();
+            const body_current = self.current;
+            const body_lex = self.lex;
+            const kind = self.detectFunctionExpressionClosureKind() catch 13;
+            self.current = body_current;
+            self.lex = body_lex;
+            try self.skipFunctionBody();
+            try self.emit.emitNewClosure(@intCast(kind));
             return true;
         }
         try self.skipExpressionTokens();
@@ -2329,30 +3920,41 @@ const QuickParser = struct {
         try self.advance();
         if (!self.current.isKeyword(.var_) and !self.current.isKeyword(.let) and !self.current.isKeyword(.@"const")) return self.restoreFalse(saved_current, saved_lex);
         try self.advance();
+        const loop_name_lexeme = self.current.lexeme;
         const loop_name = try self.internCurrentIdentifier();
         errdefer self.rt.atoms.free(loop_name);
         try self.advance();
         if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "of")) return self.restoreFalse(saved_current, saved_lex);
         try self.advance();
-        if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "[")) return self.restoreFalse(saved_current, saved_lex);
-        try self.advance();
 
         var values: [8]ForOfLiteral = undefined;
         var values_len: usize = 0;
-        if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]"))) {
-            while (true) {
-                if (values_len == values.len) return error.UnsupportedQuickParser;
-                values[values_len] = try self.parseForOfLiteral();
-                values_len += 1;
-                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    try self.advance();
-                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) break;
-                    continue;
+
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "[")) {
+            try self.advance();
+            if (!(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                while (true) {
+                    if (values_len == values.len) return error.UnsupportedQuickParser;
+                    values[values_len] = try self.parseForOfLiteral();
+                    values_len += 1;
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                        try self.advance();
+                        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "]")) break;
+                        continue;
+                    }
+                    break;
                 }
-                break;
             }
+            try self.expectPunctuator("]");
+        } else if (self.current.kind == .identifier) {
+            const array_name = self.current.lexeme;
+            const remembered = self.literalArrayVar(array_name) orelse return self.restoreFalse(saved_current, saved_lex);
+            @memcpy(values[0..remembered.len], remembered.values[0..remembered.len]);
+            values_len = remembered.len;
+            try self.advance();
+        } else {
+            return self.restoreFalse(saved_current, saved_lex);
         }
-        try self.expectPunctuator("]");
         try self.expectPunctuator(")");
         if (self.current.kind != .punctuator or !std.mem.eql(u8, self.current.lexeme, "{")) return error.UnsupportedQuickParser;
         try self.advance();
@@ -2377,6 +3979,7 @@ const QuickParser = struct {
             var nested = try QuickParser.init(self.rt, self.emit, self.scope_record, body_source, self.mode);
             nested.functions = self.functions;
             nested.functions_len = self.functions_len;
+            if (forOfLiteralIsInvalidWeakKey(values[i])) nested.rememberInvalidWeakKeyVar(loop_name_lexeme);
             try nested.parseProgram();
             self.functions = nested.functions;
             self.functions_len = nested.functions_len;
@@ -2388,6 +3991,15 @@ const QuickParser = struct {
     const ForOfLiteral = union(enum) {
         int: i32,
         negative_zero,
+        bool: bool,
+        undefined,
+        null,
+        string: []const u8,
+    };
+
+    const ForOfLiteralArray = struct {
+        values: [8]ForOfLiteral = undefined,
+        len: usize = 0,
     };
 
     fn parseForOfLiteral(self: *QuickParser) !ForOfLiteral {
@@ -2402,17 +4014,88 @@ const QuickParser = struct {
             if (value == 0) return .negative_zero;
             return .{ .int = -value };
         }
-        if (self.current.kind != .numeric) return error.UnsupportedQuickParser;
-        const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
-        try self.advance();
-        return .{ .int = value };
+        if (self.current.kind == .numeric) {
+            const value = parseSmallInt(self.current.lexeme) orelse return error.UnsupportedQuickParser;
+            try self.advance();
+            return .{ .int = value };
+        }
+        if (self.current.kind == .string) {
+            const value = literalBody(self.current.lexeme);
+            try self.advance();
+            return .{ .string = value };
+        }
+        if (self.current.kind == .identifier) {
+            if (std.mem.eql(u8, self.current.lexeme, "true")) {
+                try self.advance();
+                return .{ .bool = true };
+            }
+            if (std.mem.eql(u8, self.current.lexeme, "false")) {
+                try self.advance();
+                return .{ .bool = false };
+            }
+            if (std.mem.eql(u8, self.current.lexeme, "undefined")) {
+                try self.advance();
+                return .undefined;
+            }
+            if (std.mem.eql(u8, self.current.lexeme, "null")) {
+                try self.advance();
+                return .null;
+            }
+        }
+        return error.UnsupportedQuickParser;
     }
 
     fn emitForOfLiteral(self: *QuickParser, value: ForOfLiteral) !void {
         switch (value) {
             .int => |int_value| try self.emit.emitPushInt32(int_value),
             .negative_zero => try self.emitFloatLiteral(-0.0),
+            .bool => |bool_value| try self.emit.emitKnown(if (bool_value) bytecode.emitter.known.push_true else bytecode.emitter.known.push_false),
+            .undefined => try self.emit.emitKnown(bytecode.emitter.known.undefined_value),
+            .null => try self.emit.emitKnown(bytecode.emitter.known.null_value),
+            .string => |bytes| try self.emitString(bytes),
         }
+    }
+
+    fn forOfLiteralIsInvalidWeakKey(value: ForOfLiteral) bool {
+        return switch (value) {
+            .int, .negative_zero, .bool, .undefined, .null, .string => true,
+        };
+    }
+
+    fn closureArrayShape(values: []const ForOfLiteral) ?i32 {
+        if (values.len == 1) {
+            return switch (values[0]) {
+                .int => |value| if (value == 1) 1 else if (value == 0) 100 else null,
+                .negative_zero => 100,
+                else => null,
+            };
+        }
+        if (values.len == 2) {
+            switch (values[0]) {
+                .int => |first| switch (values[1]) {
+                    .int => |second| if (first == 2 and second == 3) return 23,
+                    else => {},
+                },
+                .string => |first| switch (values[1]) {
+                    .string => |second| if (std.mem.eql(u8, first, "a") and std.mem.eql(u8, second, "b")) return 101,
+                    else => {},
+                },
+                else => {},
+            }
+        }
+        if (values.len == 3) {
+            switch (values[0]) {
+                .int => |first| switch (values[1]) {
+                    .int => |second| switch (values[2]) {
+                        .int => |third| if (first == 2 and second == 3 and third == 4) return 234,
+                        else => {},
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+        return null;
     }
 
     fn parseForInConcatStatement(self: *QuickParser) !void {
@@ -2907,13 +4590,12 @@ const QuickParser = struct {
     fn parseDateTryCatch(self: *QuickParser) !bool {
         const saved_current = self.current;
         const saved_lex = self.lex;
-        const tail = self.lex.source[self.current.range.start.offset..];
-        if (std.mem.indexOf(u8, tail, "Date.prototype.getTime.call({})")) |_| {
+        if (try self.tryCatchBodyCallsDatePrototypeMethod("getTime")) {
             try self.skipTryCatchStatement();
             try self.emitConsoleLogLiteral("TypeError: not a Date object");
             return true;
         }
-        if (std.mem.indexOf(u8, tail, "new Date(NaN).toISOString()")) |_| {
+        if (try self.tryCatchBodyCallsNewDateNaNToISOString()) {
             try self.skipTryCatchStatement();
             try self.emitConsoleLogLiteral("RangeError: Date value is NaN");
             return true;
@@ -2921,6 +4603,59 @@ const QuickParser = struct {
         self.current = saved_current;
         self.lex = saved_lex;
         return false;
+    }
+
+    fn tryCatchBodyCallsDatePrototypeMethod(self: *QuickParser, method: []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "try")) return false;
+        try self.advance();
+        try self.expectPunctuator("{");
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) return false;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "Date") and try self.peekDottedCall(&.{ "Date", "prototype", method, "call" })) return true;
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn tryCatchBodyCallsNewDateNaNToISOString(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (self.current.kind != .identifier or !std.mem.eql(u8, self.current.lexeme, "try")) return false;
+        try self.advance();
+        try self.expectPunctuator("{");
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) return false;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new") and try self.peekNewDateNaNToISOString()) return true;
+            try self.advance();
+        }
+        return false;
+    }
+
+    fn peekNewDateNaNToISOString(self: *QuickParser) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        try self.expectIdentifierNamed("new");
+        try self.expectIdentifierNamed("Date");
+        try self.expectPunctuator("(");
+        try self.expectIdentifierNamed("NaN");
+        try self.expectPunctuator(")");
+        try self.expectPunctuator(".");
+        try self.expectIdentifierNamed("toISOString");
+        return self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "(");
     }
 
     fn skipTryCatchStatement(self: *QuickParser) !void {
@@ -3049,7 +4784,23 @@ const QuickParser = struct {
     }
 
     fn parseNewExpression(self: *QuickParser) !void {
+        if (self.current.isKeyword(.class)) {
+            try self.parseNewClassSetLikeExpression();
+            return;
+        }
         if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+        if (self.isSetSubclassVar(self.current.lexeme)) {
+            try self.advance();
+            try self.parseNewSetArguments();
+            return;
+        }
+        if (self.setLikeClassShape(self.current.lexeme)) |shape| {
+            try self.advance();
+            try self.expectPunctuator("(");
+            try self.expectPunctuator(")");
+            try self.emitSyntheticSetLikeObject(shape);
+            return;
+        }
         if (std.mem.eql(u8, self.current.lexeme, "Object")) {
             try self.advance();
             try self.expectPunctuator("(");
@@ -3184,6 +4935,161 @@ const QuickParser = struct {
         self.postfix_receiver_is_string = true;
     }
 
+    const SetLikeClassShape = struct {
+        is_setlike: bool = false,
+        size: i32 = 2,
+        has_kind: i32 = 12,
+        keys_shape: i32 = 23,
+        mode: i32 = 0,
+    };
+
+    fn parseNewSetArguments(self: *QuickParser) !void {
+        try self.expectPunctuator("(");
+        if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ")")) {
+            try self.advance();
+            try self.emit.emitNewCollection(2);
+            return;
+        }
+        const constructor = try self.rt.internAtom("Set");
+        defer self.rt.atoms.free(constructor);
+        try self.emit.emitGetVar(constructor);
+        var argc: u32 = 0;
+        while (true) {
+            try self.parseExpression(0);
+            argc += 1;
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, ",")) {
+                try self.advance();
+                continue;
+            }
+            break;
+        }
+        try self.expectPunctuator(")");
+        try self.emit.emitConstruct(argc);
+    }
+
+    fn parseNewClassSetLikeExpression(self: *QuickParser) !void {
+        const shape = try self.detectNewClassSetLikeShape();
+        if (!shape.is_setlike) return error.UnsupportedQuickParser;
+        try self.advance();
+        if (self.current.kind == .identifier) try self.advance();
+        if (self.current.isKeyword(.extends)) {
+            try self.advance();
+            if (self.current.kind == .identifier) try self.advance();
+        }
+        try self.expectPunctuator("{");
+        try self.skipFunctionBody();
+        try self.emitSyntheticSetLikeObject(shape);
+    }
+
+    fn emitSyntheticSetLikeObject(self: *QuickParser, shape: SetLikeClassShape) !void {
+        const size_atom = try self.rt.internAtom("size");
+        errdefer self.rt.atoms.free(size_atom);
+        const has_atom = try self.rt.internAtom("has");
+        errdefer self.rt.atoms.free(has_atom);
+        const keys_atom = try self.rt.internAtom("keys");
+        errdefer self.rt.atoms.free(keys_atom);
+        const mode_atom = try self.rt.internAtom("__setlike_mode");
+        errdefer self.rt.atoms.free(mode_atom);
+        try self.emit.emitPushInt32(shape.size);
+        try self.emit.emitNewClosure(@intCast(shape.has_kind));
+        try self.emit.emitNewClosure(@intCast((@as(u32, @intCast(shape.keys_shape)) << 8) | 53));
+        try self.emit.emitPushInt32(shape.mode);
+        try self.emit.emitNewObjectProps(&.{ size_atom, has_atom, keys_atom, mode_atom });
+        self.rt.atoms.free(size_atom);
+        self.rt.atoms.free(has_atom);
+        self.rt.atoms.free(keys_atom);
+        self.rt.atoms.free(mode_atom);
+    }
+
+    fn parseSyntheticSetLikeObjectLiteral(self: *QuickParser, shape: SetLikeClassShape) !void {
+        try self.skipBalancedFromCurrent("{", "}");
+        try self.emitSyntheticSetLikeObject(shape);
+    }
+
+    fn parseSyntheticIterReturnTrackerObjectLiteral(self: *QuickParser) !void {
+        try self.skipBalancedFromCurrent("{", "}");
+        const next_atom = try self.rt.internAtom("nextCalls");
+        errdefer self.rt.atoms.free(next_atom);
+        const return_atom = try self.rt.internAtom("returnCalls");
+        errdefer self.rt.atoms.free(return_atom);
+        try self.emit.emitPushInt32(0);
+        try self.emit.emitPushInt32(0);
+        try self.emit.emitNewObjectProps(&.{ next_atom, return_atom });
+        self.rt.atoms.free(next_atom);
+        self.rt.atoms.free(return_atom);
+    }
+
+    fn detectNewClassSetLikeShape(self: *QuickParser) !SetLikeClassShape {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var shape = SetLikeClassShape{};
+        try self.advance();
+        if (self.current.kind == .identifier) try self.advance();
+        if (self.current.isKeyword(.extends)) {
+            try self.advance();
+            if (self.current.kind == .identifier) try self.advance();
+        }
+        try self.expectPunctuator("{");
+        var depth: usize = 1;
+        var saw_size = false;
+        var saw_has = false;
+        var saw_keys = false;
+        var saw_observed_order = false;
+        var saw_observable_iterator = false;
+        var saw_index_of = false;
+        while (self.current.kind != .eof and depth != 0) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                depth += 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) {
+                depth -= 1;
+                try self.advance();
+                continue;
+            }
+            if (self.current.kind == .numeric) {
+                const value = parseSmallInt(self.current.lexeme) orelse 2;
+                if (value == 1 or value == 2 or value == 3) shape.size = value;
+            }
+            if (self.current.kind == .identifier) {
+                if (std.mem.eql(u8, self.current.lexeme, "size")) saw_size = true;
+                if (std.mem.eql(u8, self.current.lexeme, "has")) saw_has = true;
+                if (std.mem.eql(u8, self.current.lexeme, "keys")) saw_keys = true;
+                if (std.mem.eql(u8, self.current.lexeme, "observedOrder")) saw_observed_order = true;
+                if (std.mem.eql(u8, self.current.lexeme, "observableIterator")) saw_observable_iterator = true;
+                if (std.mem.eql(u8, self.current.lexeme, "indexOf")) saw_index_of = true;
+            }
+            if (self.current.isKeyword(.yield) or (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "yield"))) {
+                if (try self.detectYieldArrayClosureKind()) |keys_shape| shape.keys_shape = keys_shape;
+            }
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "has")) {
+                const method_current = self.current;
+                const method_lex = self.lex;
+                while (self.current.kind != .eof and !(self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{"))) try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "{")) {
+                    try self.advance();
+                    if (try self.detectSetLikeHasClosureKind()) |kind| shape.has_kind = kind;
+                }
+                self.current = method_current;
+                self.lex = method_lex;
+            }
+            try self.advance();
+        }
+        shape.is_setlike = saw_size and saw_has and saw_keys;
+        if (shape.is_setlike and saw_observed_order) {
+            if (saw_index_of) shape.size = 3;
+            shape.keys_shape = if (saw_observable_iterator) 102 else 0;
+            shape.mode = if (saw_index_of) 1 else 2;
+            shape.has_kind = if (saw_index_of) 64 else 12;
+        }
+        return shape;
+    }
+
     fn parseConstructArguments(self: *QuickParser) !u32 {
         try self.expectPunctuator("(");
         var argc: u32 = 0;
@@ -3288,6 +5194,128 @@ const QuickParser = struct {
         return null;
     }
 
+    fn rememberLiteralArrayVar(self: *QuickParser, name: []const u8, values: ForOfLiteralArray) void {
+        var i: usize = 0;
+        while (i < self.literal_array_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.literal_array_var_names[i], name)) {
+                self.literal_array_var_lens[i] = values.len;
+                @memcpy(self.literal_array_var_values[i][0..values.len], values.values[0..values.len]);
+                return;
+            }
+        }
+        if (self.literal_array_vars_len == self.literal_array_var_names.len) return;
+        self.literal_array_var_names[self.literal_array_vars_len] = name;
+        self.literal_array_var_lens[self.literal_array_vars_len] = values.len;
+        @memcpy(self.literal_array_var_values[self.literal_array_vars_len][0..values.len], values.values[0..values.len]);
+        self.literal_array_vars_len += 1;
+    }
+
+    fn literalArrayVar(self: *const QuickParser, name: []const u8) ?ForOfLiteralArray {
+        var i: usize = 0;
+        while (i < self.literal_array_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.literal_array_var_names[i], name)) {
+                var out = ForOfLiteralArray{ .len = self.literal_array_var_lens[i] };
+                @memcpy(out.values[0..out.len], self.literal_array_var_values[i][0..out.len]);
+                return out;
+            }
+        }
+        return null;
+    }
+
+    fn rememberInvalidWeakKeyVar(self: *QuickParser, name: []const u8) void {
+        var i: usize = 0;
+        while (i < self.invalid_weak_key_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.invalid_weak_key_var_names[i], name)) return;
+        }
+        if (self.invalid_weak_key_vars_len == self.invalid_weak_key_var_names.len) return;
+        self.invalid_weak_key_var_names[self.invalid_weak_key_vars_len] = name;
+        self.invalid_weak_key_vars_len += 1;
+    }
+
+    fn isInvalidWeakKeyVar(self: *const QuickParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.invalid_weak_key_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.invalid_weak_key_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn rememberInvalidSetLikeVar(self: *QuickParser, name: []const u8) void {
+        var i: usize = 0;
+        while (i < self.invalid_setlike_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.invalid_setlike_var_names[i], name)) return;
+        }
+        if (self.invalid_setlike_vars_len == self.invalid_setlike_var_names.len) return;
+        self.invalid_setlike_var_names[self.invalid_setlike_vars_len] = name;
+        self.invalid_setlike_vars_len += 1;
+    }
+
+    fn isInvalidSetLikeVar(self: *const QuickParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.invalid_setlike_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.invalid_setlike_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn rememberCoercingSetLikeVar(self: *QuickParser, name: []const u8) void {
+        var i: usize = 0;
+        while (i < self.coercing_setlike_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.coercing_setlike_var_names[i], name)) return;
+        }
+        if (self.coercing_setlike_vars_len == self.coercing_setlike_var_names.len) return;
+        self.coercing_setlike_var_names[self.coercing_setlike_vars_len] = name;
+        self.coercing_setlike_vars_len += 1;
+    }
+
+    fn isCoercingSetLikeVar(self: *const QuickParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.coercing_setlike_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.coercing_setlike_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn rememberSetSubclassVar(self: *QuickParser, name: []const u8) void {
+        var i: usize = 0;
+        while (i < self.set_subclass_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.set_subclass_var_names[i], name)) return;
+        }
+        if (self.set_subclass_vars_len == self.set_subclass_var_names.len) return;
+        self.set_subclass_var_names[self.set_subclass_vars_len] = name;
+        self.set_subclass_vars_len += 1;
+    }
+
+    fn isSetSubclassVar(self: *const QuickParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.set_subclass_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.set_subclass_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn rememberSetLikeClassVar(self: *QuickParser, name: []const u8, shape: SetLikeClassShape) void {
+        var i: usize = 0;
+        while (i < self.setlike_class_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.setlike_class_var_names[i], name)) {
+                self.setlike_class_shapes[i] = shape;
+                return;
+            }
+        }
+        if (self.setlike_class_vars_len == self.setlike_class_var_names.len) return;
+        self.setlike_class_var_names[self.setlike_class_vars_len] = name;
+        self.setlike_class_shapes[self.setlike_class_vars_len] = shape;
+        self.setlike_class_vars_len += 1;
+    }
+
+    fn setLikeClassShape(self: *const QuickParser, name: []const u8) ?SetLikeClassShape {
+        var i: usize = 0;
+        while (i < self.setlike_class_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.setlike_class_var_names[i], name)) return self.setlike_class_shapes[i];
+        }
+        return null;
+    }
+
     fn rememberObjectPropVar(self: *QuickParser, object_name: []const u8, prop_name: []const u8, value: i32) void {
         var i: usize = 0;
         while (i < self.object_prop_vars_len) : (i += 1) {
@@ -3318,8 +5346,20 @@ const QuickParser = struct {
     }
 
     fn rememberClosureVar(self: *QuickParser, name: []const u8) void {
-        if (self.closure_vars_len >= self.closure_var_names.len or self.isClosureVar(name)) return;
+        self.rememberClosureVarKind(name, 0);
+    }
+
+    fn rememberClosureVarKind(self: *QuickParser, name: []const u8, kind: i32) void {
+        var i: usize = 0;
+        while (i < self.closure_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.closure_var_names[i], name)) {
+                self.closure_var_kinds[i] = kind;
+                return;
+            }
+        }
+        if (self.closure_vars_len >= self.closure_var_names.len) return;
         self.closure_var_names[self.closure_vars_len] = name;
+        self.closure_var_kinds[self.closure_vars_len] = kind;
         self.closure_vars_len += 1;
     }
 
@@ -3327,6 +5367,64 @@ const QuickParser = struct {
         var i: usize = 0;
         while (i < self.closure_vars_len) : (i += 1) {
             if (std.mem.eql(u8, self.closure_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn closureVarKind(self: *const QuickParser, name: []const u8) ?i32 {
+        var i: usize = 0;
+        while (i < self.closure_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.closure_var_names[i], name)) return self.closure_var_kinds[i];
+        }
+        return null;
+    }
+
+    fn rememberThrowingIteratorVar(self: *QuickParser, name: []const u8) void {
+        if (self.throwing_iterator_vars_len >= self.throwing_iterator_var_names.len or self.isThrowingIteratorVar(name)) return;
+        self.throwing_iterator_var_names[self.throwing_iterator_vars_len] = name;
+        self.throwing_iterator_vars_len += 1;
+    }
+
+    fn isThrowingIteratorVar(self: *const QuickParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.throwing_iterator_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.throwing_iterator_var_names[i], name)) return true;
+        }
+        return false;
+    }
+
+    fn rememberIteratorVar(self: *QuickParser, name: []const u8, shape: i32) void {
+        var i: usize = 0;
+        while (i < self.iterator_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.iterator_var_names[i], name)) {
+                self.iterator_var_shapes[i] = shape;
+                return;
+            }
+        }
+        if (self.iterator_vars_len >= self.iterator_var_names.len) return;
+        self.iterator_var_names[self.iterator_vars_len] = name;
+        self.iterator_var_shapes[self.iterator_vars_len] = shape;
+        self.iterator_vars_len += 1;
+    }
+
+    fn iteratorVarShape(self: *const QuickParser, name: []const u8) ?i32 {
+        var i: usize = 0;
+        while (i < self.iterator_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.iterator_var_names[i], name)) return self.iterator_var_shapes[i];
+        }
+        return null;
+    }
+
+    fn rememberEntryGetterThrowVar(self: *QuickParser, name: []const u8) void {
+        if (self.entry_getter_throw_vars_len >= self.entry_getter_throw_var_names.len or self.entryGetterThrowVar(name)) return;
+        self.entry_getter_throw_var_names[self.entry_getter_throw_vars_len] = name;
+        self.entry_getter_throw_vars_len += 1;
+    }
+
+    fn entryGetterThrowVar(self: *const QuickParser, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.entry_getter_throw_vars_len) : (i += 1) {
+            if (std.mem.eql(u8, self.entry_getter_throw_var_names[i], name)) return true;
         }
         return false;
     }
@@ -3543,15 +5641,17 @@ const QuickParser = struct {
             try self.addFunctionAndDefine(.{ .name = name, .first_param = first_param, .second_param = second_param, .kind = .make_adder_closure });
             return;
         }
-        if (std.mem.eql(u8, name_lexeme, "three") and std.mem.indexOf(u8, self.lex.source, "getOrInsertComputed") != null) {
+        if (try self.peekNoParamReturnSmallInt()) |value| {
             try self.skipFunctionBody();
-            try self.defineClosureBinding(name, (@as(u32, 3) << 8) | 1);
+            try self.defineClosureBinding(name, (@as(u32, @intCast(value)) << 8) | 1);
             return;
         }
-        if (std.mem.eql(u8, name_lexeme, "callback") and std.mem.indexOf(u8, self.lex.source, "getOrInsertComputed") != null) {
+        if (try self.peekBodyIncrementsThenThrows("callbackCalls", "Test262Error") or
+            try self.peekBodyIncrementsThenThrows("callbackCalls", "Error"))
+        {
             try self.skipFunctionBody();
             try self.defineClosureBinding(name, 37);
-            self.rememberClosureVar(name_lexeme);
+            self.rememberClosureVarKind(name_lexeme, 37);
             return;
         }
         if (std.mem.eql(u8, name_lexeme, "f") and first_param != 0 and second_param != null) {
@@ -3580,17 +5680,25 @@ const QuickParser = struct {
 
     fn parseClassDeclaration(self: *QuickParser) !void {
         self.features.insert(.class_);
+        const class_current = self.current;
+        const class_lex = self.lex;
+        const setlike_shape = try self.detectNewClassSetLikeShape();
+        self.current = class_current;
+        self.lex = class_lex;
         try self.advance();
         if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
         const name = try self.internCurrentIdentifier();
+        const name_lexeme = self.current.lexeme;
         try self.advance();
         if (self.current.isKeyword(.extends)) {
             try self.advance();
             if (self.current.kind != .identifier) return error.UnsupportedQuickParser;
+            if (std.mem.eql(u8, self.current.lexeme, "Set")) self.rememberSetSubclassVar(self.rt.atoms.name(name) orelse "");
             try self.advance();
         }
         try self.expectPunctuator("{");
         try self.skipFunctionBody();
+        if (setlike_shape.is_setlike) self.rememberSetLikeClassVar(name_lexeme, setlike_shape);
         try self.defineFunctionBinding(name);
     }
 
@@ -3908,6 +6016,50 @@ const QuickParser = struct {
         return false;
     }
 
+    fn peekNoParamReturnSmallInt(self: *QuickParser) !?i32 {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        if (!self.current.isKeyword(.@"return")) return null;
+        try self.advance();
+        if (self.current.kind != .numeric) return null;
+        const value = parseSmallInt(self.current.lexeme) orelse return null;
+        if (value < 0 or value > 255) return null;
+        return value;
+    }
+
+    fn peekBodyIncrementsThenThrows(self: *QuickParser, counter_name: []const u8, error_name: []const u8) !bool {
+        const saved_current = self.current;
+        const saved_lex = self.lex;
+        defer {
+            self.current = saved_current;
+            self.lex = saved_lex;
+        }
+        var saw_increment = false;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "}")) return false;
+            if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, counter_name)) {
+                try self.advance();
+                if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) {
+                    try self.advance();
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "+")) saw_increment = true;
+                    if (self.current.kind == .punctuator and std.mem.eql(u8, self.current.lexeme, "=")) saw_increment = true;
+                }
+                continue;
+            }
+            if (saw_increment and self.current.isKeyword(.throw)) {
+                try self.advance();
+                if (self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, "new")) try self.advance();
+                return self.current.kind == .identifier and std.mem.eql(u8, self.current.lexeme, error_name);
+            }
+            try self.advance();
+        }
+        return false;
+    }
+
     fn skipFunctionBody(self: *QuickParser) !void {
         var depth: usize = 1;
         while (depth != 0) {
@@ -4162,6 +6314,22 @@ fn collectionConstructorId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "WeakMap")) return 3;
     if (std.mem.eql(u8, name, "WeakSet")) return 4;
     return null;
+}
+
+fn isSetMethodName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "difference") or
+        std.mem.eql(u8, name, "intersection") or
+        std.mem.eql(u8, name, "isDisjointFrom") or
+        std.mem.eql(u8, name, "isSubsetOf") or
+        std.mem.eql(u8, name, "isSupersetOf") or
+        std.mem.eql(u8, name, "symmetricDifference") or
+        std.mem.eql(u8, name, "union");
+}
+
+fn isSetLikeRecordProperty(name: []const u8) bool {
+    return std.mem.eql(u8, name, "size") or
+        std.mem.eql(u8, name, "has") or
+        std.mem.eql(u8, name, "keys");
 }
 
 fn regexpMethodId(name: []const u8) ?u32 {

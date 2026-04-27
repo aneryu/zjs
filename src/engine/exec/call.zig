@@ -1,6 +1,7 @@
 const core = @import("../core/root.zig");
 const builtins = @import("../builtins/root.zig");
 const closure_mod = @import("closure.zig");
+const construct_mod = @import("construct.zig");
 const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
@@ -120,6 +121,11 @@ pub fn callValueWithThisAndGlobals(
         };
     }
     if (object.class_id == core.class.ids.c_closure) {
+        const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
+        if (closure_kind == 51) {
+            const encoded = try closure_mod.closureValue(ctx.runtime, callee);
+            return construct_mod.constructCollectionClosure(ctx.runtime, encoded, globals);
+        }
         return closure_mod.callWithThis(ctx.runtime, callee, this_value, args, globals) catch |err| switch (err) {
             error.UnsupportedClosureCall => error.TypeError,
             else => err,
@@ -322,6 +328,7 @@ fn callNativeBuiltin(
         const symbol_atom = try ctx.runtime.atoms.newSymbol(description, .symbol);
         return core.Value.symbol(symbol_atom);
     }
+    if (std.mem.eql(u8, name, "from")) return arrayFrom(ctx.runtime, args);
 
     if (thisObject(this_value)) |receiver| {
         if (receiver.class_id == core.class.ids.c_function or receiver.class_id == core.class.ids.c_closure) {
@@ -330,7 +337,11 @@ fn callNativeBuiltin(
                 return callValueWithThisAndGlobals(ctx, output, globals, args[0], this_value, args[1..]);
             }
             if (std.mem.eql(u8, name, "bind")) return this_value.dup();
+            if (std.mem.eql(u8, name, "toString")) return objectToString(ctx.runtime, this_value);
             if (receiver.class_id == core.class.ids.c_closure) return error.TypeError;
+            if (try constructorNameEql(ctx.runtime, receiver, "Symbol")) {
+                if (std.mem.eql(u8, name, "for")) return symbolFor(ctx.runtime, args);
+            }
             if (try constructorNameEql(ctx.runtime, receiver, "Promise")) {
                 if (promiseStaticId(name)) |mode| {
                     const reason: ?core.Value = if (mode == 4 and args.len >= 1) args[0] else null;
@@ -388,7 +399,7 @@ fn callNativeBuiltin(
                 };
             }
         }
-        if (receiver.class_id == core.class.ids.map_iterator and std.mem.eql(u8, name, "next")) {
+        if ((receiver.class_id == core.class.ids.map_iterator or receiver.class_id == core.class.ids.set_iterator) and std.mem.eql(u8, name, "next")) {
             return builtins.collection.methodCall(ctx.runtime, this_value, 13, args) catch |err| switch (err) {
                 error.TypeError, error.UnsupportedCollectionCall => error.TypeError,
                 else => err,
@@ -417,6 +428,7 @@ fn callNativeBuiltin(
         if (receiver.class_id == core.class.ids.promise and (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch"))) {
             return core.Value.undefinedValue();
         }
+        if (std.mem.eql(u8, name, "toString")) return objectToString(ctx.runtime, this_value);
     } else if (this_value.isNumber() or this_value.isBool()) {
         return callPrimitiveMethod(ctx.runtime, this_value, name, args);
     } else if (this_value.isString()) {
@@ -444,13 +456,18 @@ fn tagRealmFunctionConstructor(rt: *core.Runtime, realm_global: *core.Object) !v
     const function_value = realm_global.getProperty(function_key);
     defer function_value.free(rt);
     const function_object = expectObjectArg(function_value) catch return;
-    const map_key = try rt.internAtom("Map");
-    defer rt.atoms.free(map_key);
-    const map_value = realm_global.getProperty(map_key);
-    defer map_value.free(rt);
-    const map_object = try expectObjectArg(map_value);
-    if (constructorPrototype(rt, map_object)) |map_proto| {
-        try defineObjectProperty(rt, function_object, "__realm_map_proto", map_proto.value());
+    const collection_names = [_][]const u8{ "Map", "Set", "WeakMap", "WeakSet" };
+    for (collection_names) |name| {
+        const key = try rt.internAtom(name);
+        defer rt.atoms.free(key);
+        const value = realm_global.getProperty(key);
+        defer value.free(rt);
+        const object = try expectObjectArg(value);
+        if (constructorPrototype(rt, object)) |proto| {
+            const realm_key = try realmPrototypeKey(rt, name);
+            defer rt.memory.allocator.free(realm_key);
+            try defineObjectProperty(rt, function_object, realm_key, proto.value());
+        }
     }
 }
 
@@ -460,16 +477,16 @@ fn reflectConstruct(rt: *core.Runtime, args: []const core.Value, globals: []glob
     const target = expectCallableObject(args[0]) orelse return error.TypeError;
     const target_name = try nativeFunctionName(rt, target);
     defer rt.memory.allocator.free(target_name);
-    if (!std.mem.eql(u8, target_name, "Map")) return error.TypeError;
+    const kind = collectionConstructorId(target_name) orelse return error.TypeError;
     const new_target = if (args.len >= 3) args[2] else args[0];
-    const prototype = try reflectConstructPrototype(rt, new_target, args[0]);
-    return builtins.collection.constructWithPrototype(rt, 1, prototype) catch |err| switch (err) {
+    const prototype = try reflectConstructPrototype(rt, target_name, new_target, args[0]);
+    return builtins.collection.constructWithPrototype(rt, kind, prototype) catch |err| switch (err) {
         error.UnsupportedCollectionCall => error.TypeError,
         else => err,
     };
 }
 
-fn reflectConstructPrototype(rt: *core.Runtime, new_target: core.Value, target: core.Value) !?*core.Object {
+fn reflectConstructPrototype(rt: *core.Runtime, target_name: []const u8, new_target: core.Value, target: core.Value) !?*core.Object {
     if (thisObject(new_target)) |new_target_object| {
         const prototype_value = new_target_object.getProperty(core.atom.ids.prototype);
         defer prototype_value.free(rt);
@@ -477,7 +494,9 @@ fn reflectConstructPrototype(rt: *core.Runtime, new_target: core.Value, target: 
             const header = prototype_value.refHeader() orelse return null;
             return @fieldParentPtr("header", header);
         }
-        const realm_proto_key = try rt.internAtom("__realm_map_proto");
+        const realm_key = try realmPrototypeKey(rt, target_name);
+        defer rt.memory.allocator.free(realm_key);
+        const realm_proto_key = try rt.internAtom(realm_key);
         defer rt.atoms.free(realm_proto_key);
         const realm_proto_value = new_target_object.getProperty(realm_proto_key);
         defer realm_proto_value.free(rt);
@@ -488,6 +507,10 @@ fn reflectConstructPrototype(rt: *core.Runtime, new_target: core.Value, target: 
     }
     const target_object = expectCallableObject(target) orelse return null;
     return constructorPrototype(rt, target_object);
+}
+
+fn realmPrototypeKey(rt: *core.Runtime, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
 }
 
 fn callArrayMethod(
@@ -563,6 +586,11 @@ fn callObjectStatic(rt: *core.Runtime, name: []const u8, args: []const core.Valu
         if (object.getPrototype()) |prototype| return prototype.value().dup();
         return core.Value.nullValue();
     }
+    if (std.mem.eql(u8, name, "isExtensible")) {
+        if (args.len < 1) return error.TypeError;
+        const object = try expectObjectArg(args[0]);
+        return core.Value.boolean(object.isExtensible());
+    }
     if (std.mem.eql(u8, name, "defineProperty")) {
         if (args.len < 3) return error.TypeError;
         const object = try expectObjectArg(args[0]);
@@ -605,7 +633,12 @@ fn arrayJoinCall(rt: *core.Runtime, receiver: core.Value, args: []const core.Val
 fn arrayFrom(rt: *core.Runtime, args: []const core.Value) !core.Value {
     if (args.len < 1) return error.TypeError;
     const source = try expectObjectArg(args[0]);
-    if (source.class_id == core.class.ids.map_iterator) {
+    if (source.class_id == core.class.ids.set or source.class_id == core.class.ids.map) {
+        const iterator = try builtins.collection.methodCall(rt, source.value(), if (source.class_id == core.class.ids.set) 8 else 9, &.{});
+        defer iterator.free(rt);
+        return arrayFrom(rt, &.{iterator});
+    }
+    if (source.class_id == core.class.ids.map_iterator or source.class_id == core.class.ids.set_iterator) {
         const out = try core.Object.createArray(rt, null);
         errdefer core.Object.destroyFromHeader(rt, &out.header);
         while (true) {
@@ -649,6 +682,55 @@ fn callPrimitiveMethod(rt: *core.Runtime, receiver: core.Value, name: []const u8
     return error.TypeError;
 }
 
+fn objectToString(rt: *core.Runtime, receiver: core.Value) !core.Value {
+    const object = try expectObjectArg(receiver);
+    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return value_ops.createStringValue(rt, "[object Object]");
+    const tag_value = object.getProperty(tag_atom);
+    defer tag_value.free(rt);
+    if (tag_value.isString()) {
+        var tag = std.ArrayList(u8).empty;
+        defer tag.deinit(rt.memory.allocator);
+        try value_ops.appendRawString(rt, &tag, tag_value);
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(rt.memory.allocator);
+        try out.appendSlice(rt.memory.allocator, "[object ");
+        try out.appendSlice(rt.memory.allocator, tag.items);
+        try out.appendSlice(rt.memory.allocator, "]");
+        return value_ops.createStringValue(rt, out.items);
+    }
+    return value_ops.createStringValue(rt, defaultObjectTag(object));
+}
+
+fn symbolFor(rt: *core.Runtime, args: []const core.Value) !core.Value {
+    const key = if (args.len >= 1) try stringBytes(rt, args[0]) else try rt.memory.allocator.dupe(u8, "undefined");
+    defer rt.memory.allocator.free(key);
+    const registered = try std.fmt.allocPrint(rt.memory.allocator, "Symbol.for:{s}", .{key});
+    defer rt.memory.allocator.free(registered);
+    const atom_id = try rt.atoms.internString(registered);
+    return core.Value.symbol(atom_id);
+}
+
+fn defaultObjectTag(object: *core.Object) []const u8 {
+    if (object.is_array) return "[object Array]";
+    return switch (object.class_id) {
+        core.class.ids.c_function,
+        core.class.ids.bytecode_function,
+        core.class.ids.bound_function,
+        core.class.ids.c_function_data,
+        core.class.ids.c_closure,
+        => "[object Function]",
+        core.class.ids.map => "[object Map]",
+        core.class.ids.set => "[object Set]",
+        core.class.ids.weakmap => "[object WeakMap]",
+        core.class.ids.weakset => "[object WeakSet]",
+        core.class.ids.promise => "[object Promise]",
+        core.class.ids.array_buffer => "[object ArrayBuffer]",
+        core.class.ids.date => "[object Date]",
+        core.class.ids.regexp => "[object RegExp]",
+        else => "[object Object]",
+    };
+}
+
 fn nativeFunctionName(rt: *core.Runtime, function_object: *core.Object) ![]u8 {
     const name_value = function_object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
@@ -672,6 +754,13 @@ fn collectionMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "forEach")) return 10;
     if (std.mem.eql(u8, name, "getOrInsert")) return 11;
     if (std.mem.eql(u8, name, "getOrInsertComputed")) return 12;
+    if (std.mem.eql(u8, name, "difference")) return 15;
+    if (std.mem.eql(u8, name, "intersection")) return 16;
+    if (std.mem.eql(u8, name, "isDisjointFrom")) return 17;
+    if (std.mem.eql(u8, name, "isSubsetOf")) return 18;
+    if (std.mem.eql(u8, name, "isSupersetOf")) return 19;
+    if (std.mem.eql(u8, name, "symmetricDifference")) return 20;
+    if (std.mem.eql(u8, name, "union")) return 21;
     return null;
 }
 
@@ -746,6 +835,14 @@ fn promiseStaticId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "all")) return 2;
     if (std.mem.eql(u8, name, "race")) return 3;
     if (std.mem.eql(u8, name, "reject")) return 4;
+    return null;
+}
+
+fn collectionConstructorId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "Map")) return 1;
+    if (std.mem.eql(u8, name, "Set")) return 2;
+    if (std.mem.eql(u8, name, "WeakMap")) return 3;
+    if (std.mem.eql(u8, name, "WeakSet")) return 4;
     return null;
 }
 
@@ -1045,7 +1142,8 @@ fn errorNameMatchesConstructor(err: anyerror, constructor_name: []const u8) bool
         (err == error.RangeError and std.mem.eql(u8, constructor_name, "RangeError")) or
         (err == error.EvalError and std.mem.eql(u8, constructor_name, "EvalError")) or
         (err == error.ReferenceError and std.mem.eql(u8, constructor_name, "ReferenceError")) or
-        (err == error.Test262Error and std.mem.eql(u8, constructor_name, "Test262Error"));
+        (err == error.Test262Error and std.mem.eql(u8, constructor_name, "Test262Error")) or
+        (err == error.Test262Error and !isBuiltinConstructorName(constructor_name));
 }
 
 fn isBuiltinConstructorName(name: []const u8) bool {

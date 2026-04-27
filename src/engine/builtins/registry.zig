@@ -115,7 +115,7 @@ pub fn installStandardGlobals(rt: *core.Runtime, global: *core.Object) !void {
             defer constructor_value.free(rt);
             try defineNativeMethods(rt, expectObject(constructor_value), spec.static_methods);
             if (std.mem.eql(u8, spec.name, "Symbol")) try installWellKnownSymbolProperties(rt, expectObject(constructor_value));
-            if (std.mem.eql(u8, spec.name, "Map")) try installMapExtras(rt, global, expectObject(constructor_value));
+            if (collectionTag(spec.name) != null) try installCollectionExtras(rt, global, spec.name, expectObject(constructor_value));
         }
     }
 
@@ -137,6 +137,7 @@ const object_static = [_]Method{
     .{ .name = "getOwnPropertyDescriptor", .length = 2 },
     .{ .name = "getOwnPropertyNames", .length = 1 },
     .{ .name = "getPrototypeOf", .length = 1 },
+    .{ .name = "isExtensible", .length = 1 },
     .{ .name = "keys", .length = 1 },
     .{ .name = "values", .length = 1 },
     .{ .name = "entries", .length = 1 },
@@ -211,6 +212,10 @@ const primitive_prototype = [_]Method{
     .{ .name = "valueOf", .length = 0 },
 };
 
+const symbol_static = [_]Method{
+    .{ .name = "for", .length = 1 },
+};
+
 const date_static = [_]Method{
     .{ .name = "UTC", .length = 7 },
     .{ .name = "parse", .length = 1 },
@@ -280,6 +285,8 @@ const weak_map_prototype = [_]Method{
     .{ .name = "get", .length = 1 },
     .{ .name = "has", .length = 1 },
     .{ .name = "delete", .length = 1 },
+    .{ .name = "getOrInsert", .length = 2 },
+    .{ .name = "getOrInsertComputed", .length = 2 },
 };
 
 const set_prototype = [_]Method{
@@ -287,6 +294,17 @@ const set_prototype = [_]Method{
     .{ .name = "has", .length = 1 },
     .{ .name = "delete", .length = 1 },
     .{ .name = "clear", .length = 0 },
+    .{ .name = "entries", .length = 0 },
+    .{ .name = "forEach", .length = 1 },
+    .{ .name = "keys", .length = 0 },
+    .{ .name = "values", .length = 0 },
+    .{ .name = "difference", .length = 1 },
+    .{ .name = "intersection", .length = 1 },
+    .{ .name = "isDisjointFrom", .length = 1 },
+    .{ .name = "isSubsetOf", .length = 1 },
+    .{ .name = "isSupersetOf", .length = 1 },
+    .{ .name = "symmetricDifference", .length = 1 },
+    .{ .name = "union", .length = 1 },
 };
 
 const weak_set_prototype = [_]Method{
@@ -317,7 +335,7 @@ const constructor_specs = [_]ConstructorSpec{
     .{ .name = "String", .length = 1, .static_methods = &string_static, .prototype_methods = &string_prototype },
     .{ .name = "Number", .length = 1, .static_methods = &number_static, .prototype_methods = &number_prototype },
     .{ .name = "Boolean", .length = 1, .prototype_methods = &primitive_prototype },
-    .{ .name = "Symbol", .length = 0, .prototype_methods = &primitive_prototype },
+    .{ .name = "Symbol", .length = 0, .static_methods = &symbol_static, .prototype_methods = &primitive_prototype },
     .{ .name = "BigInt", .length = 1, .prototype_methods = &primitive_prototype },
     .{ .name = "Date", .length = 7, .static_methods = &date_static, .prototype_methods = &date_prototype },
     .{ .name = "RegExp", .length = 2, .prototype_methods = &regexp_prototype },
@@ -383,6 +401,7 @@ fn installWellKnownSymbolProperties(rt: *core.Runtime, symbol_ctor: *core.Object
     try defineWellKnownSymbol(rt, symbol_ctor, "species", "Symbol.species");
     try defineWellKnownSymbol(rt, symbol_ctor, "iterator", "Symbol.iterator");
     try defineWellKnownSymbol(rt, symbol_ctor, "toStringTag", "Symbol.toStringTag");
+    try defineWellKnownSymbol(rt, symbol_ctor, "hasInstance", "Symbol.hasInstance");
 }
 
 fn defineWellKnownSymbol(rt: *core.Runtime, symbol_ctor: *core.Object, name: []const u8, symbol_name: []const u8) !void {
@@ -390,57 +409,118 @@ fn defineWellKnownSymbol(rt: *core.Runtime, symbol_ctor: *core.Object, name: []c
     try defineData(rt, symbol_ctor, name, core.Value.symbol(symbol_atom), Flags{ .writable = false, .enumerable = false, .configurable = false });
 }
 
-fn installMapExtras(rt: *core.Runtime, global: *core.Object, map_ctor: *core.Object) !void {
-    try installMapSpecies(rt, map_ctor);
-    try wireMapPrototypeGraph(rt, global, map_ctor);
-    try installMapPrototypeSymbols(rt, map_ctor);
+fn installCollectionExtras(rt: *core.Runtime, global: *core.Object, name: []const u8, ctor: *core.Object) !void {
+    if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) try installCollectionSpecies(rt, ctor);
+    try wireCollectionPrototypeGraph(rt, global, ctor);
+    try installCollectionPrototypeSymbols(rt, name, ctor);
+    try wireNativeFunctionPropertyPrototypes(rt, global, ctor);
+    const proto_value = ctor.getProperty(core.atom.ids.prototype);
+    defer proto_value.free(rt);
+    try wireNativeFunctionPropertyPrototypes(rt, global, expectObject(proto_value));
 }
 
-fn installMapSpecies(rt: *core.Runtime, map_ctor: *core.Object) !void {
+fn installCollectionSpecies(rt: *core.Runtime, ctor: *core.Object) !void {
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.UnsupportedBuiltinRegistry;
     const getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
     defer getter.free(rt);
     const getter_object = expectObject(getter);
     try function_builtin.defineNativeMethod(rt, getter_object, "call", 1);
-    try defineAccessorAtom(rt, map_ctor, species_atom, getter, core.Value.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineAccessorAtom(rt, ctor, species_atom, getter, core.Value.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
-fn wireMapPrototypeGraph(rt: *core.Runtime, global: *core.Object, map_ctor: *core.Object) !void {
-    const map_proto_value = map_ctor.getProperty(core.atom.ids.prototype);
-    defer map_proto_value.free(rt);
-    const map_proto = expectObject(map_proto_value);
-    map_proto.weak_constructor = map_ctor;
+fn wireCollectionPrototypeGraph(rt: *core.Runtime, global: *core.Object, ctor: *core.Object) !void {
+    const proto_value = ctor.getProperty(core.atom.ids.prototype);
+    defer proto_value.free(rt);
+    const proto = expectObject(proto_value);
+    proto.weak_constructor = ctor;
 
     const object_ctor_value = global.getProperty(core.atom.predefinedId("Object", .string).?);
     defer object_ctor_value.free(rt);
     const object_proto_value = expectObject(object_ctor_value).getProperty(core.atom.ids.prototype);
     defer object_proto_value.free(rt);
-    try map_proto.setPrototype(expectObject(object_proto_value));
+    try proto.setPrototype(expectObject(object_proto_value));
 
     const function_ctor_value = global.getProperty(core.atom.predefinedId("Function", .string).?);
     defer function_ctor_value.free(rt);
     const function_proto_value = expectObject(function_ctor_value).getProperty(core.atom.ids.prototype);
     defer function_proto_value.free(rt);
-    try map_ctor.setPrototype(expectObject(function_proto_value));
+    try ctor.setPrototype(expectObject(function_proto_value));
 }
 
-fn installMapPrototypeSymbols(rt: *core.Runtime, map_ctor: *core.Object) !void {
-    const map_proto_value = map_ctor.getProperty(core.atom.ids.prototype);
-    defer map_proto_value.free(rt);
-    const map_proto = expectObject(map_proto_value);
+fn installCollectionPrototypeSymbols(rt: *core.Runtime, name: []const u8, ctor: *core.Object) !void {
+    const proto_value = ctor.getProperty(core.atom.ids.prototype);
+    defer proto_value.free(rt);
+    const proto = expectObject(proto_value);
 
-    const size_getter = try function_builtin.nativeFunction(rt, "get size", 0);
-    defer size_getter.free(rt);
-    try defineAccessorAtom(rt, map_proto, core.atom.predefinedId("size", .string).?, size_getter, core.Value.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) {
+        const size_getter = try function_builtin.nativeFunction(rt, "get size", 0);
+        defer size_getter.free(rt);
+        try defineAccessorAtom(rt, proto, core.atom.predefinedId("size", .string).?, size_getter, core.Value.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    }
 
-    const entries_atom = try rt.internAtom("entries");
-    defer rt.atoms.free(entries_atom);
-    const entries_value = map_proto.getProperty(entries_atom);
-    defer entries_value.free(rt);
-    try defineDataAtom(rt, map_proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, entries_value, method_flags);
+    if (std.mem.eql(u8, name, "Map")) {
+        const entries_atom = try rt.internAtom("entries");
+        defer rt.atoms.free(entries_atom);
+        const entries_value = proto.getProperty(entries_atom);
+        defer entries_value.free(rt);
+        try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, entries_value, method_flags);
+    } else if (std.mem.eql(u8, name, "Set")) {
+        const values_atom = try rt.internAtom("values");
+        defer rt.atoms.free(values_atom);
+        const values_value = proto.getProperty(values_atom);
+        defer values_value.free(rt);
+        try defineDataAtom(rt, proto, core.atom.predefinedId("keys", .string).?, values_value, method_flags);
+        try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, values_value, method_flags);
+    }
 
-    const tag = try core.string.String.createUtf8(rt, "Map");
+    const tag = try core.string.String.createUtf8(rt, collectionTag(name) orelse return error.UnsupportedBuiltinRegistry);
     const tag_value = tag.value();
     defer tag_value.free(rt);
-    try defineDataAtom(rt, map_proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+}
+
+fn collectionTag(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "Map")) return "Map";
+    if (std.mem.eql(u8, name, "Set")) return "Set";
+    if (std.mem.eql(u8, name, "WeakMap")) return "WeakMap";
+    if (std.mem.eql(u8, name, "WeakSet")) return "WeakSet";
+    return null;
+}
+
+fn wireNativeFunctionPropertyPrototypes(rt: *core.Runtime, global: *core.Object, target: *core.Object) !void {
+    const function_ctor_value = global.getProperty(core.atom.predefinedId("Function", .string).?);
+    defer function_ctor_value.free(rt);
+    const function_proto_value = expectObject(function_ctor_value).getProperty(core.atom.ids.prototype);
+    defer function_proto_value.free(rt);
+    const function_proto = expectObject(function_proto_value);
+
+    const keys = try target.ownKeys(rt);
+    defer core.Object.freeKeys(rt, keys);
+    for (keys) |key| {
+        const desc = target.getOwnProperty(key) orelse continue;
+        defer desc.destroy(rt);
+        switch (desc.kind) {
+            .data => try wireNativeFunctionPrototype(desc.value, function_proto),
+            .accessor => {
+                try wireNativeFunctionPrototype(desc.getter, function_proto);
+                try wireNativeFunctionPrototype(desc.setter, function_proto);
+            },
+            .generic => {},
+        }
+    }
+}
+
+fn wireNativeFunctionPrototype(value: core.Value, function_proto: *core.Object) !void {
+    if (!value.isObject()) return;
+    const header = value.refHeader() orelse return;
+    const object: *core.Object = @fieldParentPtr("header", header);
+    switch (object.class_id) {
+        core.class.ids.c_function,
+        core.class.ids.c_function_data,
+        core.class.ids.c_closure,
+        core.class.ids.bytecode_function,
+        core.class.ids.bound_function,
+        => try object.setPrototype(function_proto),
+        else => {},
+    }
 }

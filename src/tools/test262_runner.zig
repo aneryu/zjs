@@ -951,10 +951,18 @@ fn makeTestSource(allocator: std.mem.Allocator, io: std.Io, harness_cache: *Harn
 }
 
 fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *HarnessCache, harness_prelude: []const u8, test_source: []const u8, metadata: TestMetadata) ![]u8 {
+    const strict_prefix = "\"use strict\";\n";
+    const strict_len: usize = if (metadata.hasFlag("onlyStrict")) strict_prefix.len else 0;
     if (metadata.hasFlag("raw")) {
-        const out = try allocator.alloc(u8, test_source.len + 1);
-        @memcpy(out[0..test_source.len], test_source);
-        out[test_source.len] = '\n';
+        const out = try allocator.alloc(u8, strict_len + test_source.len + 1);
+        var offset: usize = 0;
+        if (strict_len != 0) {
+            @memcpy(out[offset..][0..strict_prefix.len], strict_prefix);
+            offset += strict_prefix.len;
+        }
+        @memcpy(out[offset..][0..test_source.len], test_source);
+        offset += test_source.len;
+        out[offset] = '\n';
         return out;
     }
 
@@ -962,9 +970,13 @@ fn makeTestSourceFromBytes(allocator: std.mem.Allocator, harness_cache: *Harness
     for (metadata.includes.items) |include_name| {
         if (try harness_cache.get(include_name)) |bytes| includes_len += bytes.len + 1;
     }
-    const total_len = harness_prelude.len + includes_len + test_source.len + 1;
+    const total_len = strict_len + harness_prelude.len + includes_len + test_source.len + 1;
     const out = try allocator.alloc(u8, total_len);
     var offset: usize = 0;
+    if (strict_len != 0) {
+        @memcpy(out[offset..][0..strict_prefix.len], strict_prefix);
+        offset += strict_prefix.len;
+    }
     @memcpy(out[offset..][0..harness_prelude.len], harness_prelude);
     offset += harness_prelude.len;
     for (metadata.includes.items) |include_name| {

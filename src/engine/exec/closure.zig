@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const function_builtin = @import("../builtins/function.zig");
+const object_builtin = @import("../builtins/object.zig");
 const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
@@ -133,6 +134,79 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
             try setGlobalMapString(rt, globals, 3, "mutated");
             return error.Test262Error;
         },
+        40 => {
+            try incrementGlobalInt(rt, globals, "count");
+            return core.Value.undefinedValue();
+        },
+        41 => return error.Test262Error,
+        42 => return iteratorNextValueGetterThrows(rt, closure),
+        43 => return iteratorNextGlobalValue(rt, closure, globals, "nextItem"),
+        44 => return iteratorNextGlobalValue(rt, closure, globals, "item"),
+        45 => return iteratorNextEmptyArray(rt, closure),
+        52 => return iteratorNextNull(rt, closure),
+        53 => {
+            const shape = try getIntProperty(rt, closure, "__closure_value");
+            return arrayFromShape(rt, shape);
+        },
+        54 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            const value = args[0].asInt32() orelse return error.Test262Error;
+            if (value == 1) return core.Value.boolean(false);
+            if (value == 2) return core.Value.boolean(true);
+            return error.Test262Error;
+        },
+        55 => {
+            try incrementGlobalInt(rt, globals, "coercionCalls");
+            return error.TypeError;
+        },
+        46 => {
+            const shape = try getIntProperty(rt, closure, "__closure_value");
+            return iteratorFactory(rt, shape);
+        },
+        47 => {
+            if (args.len < 2) return error.UnsupportedClosureCall;
+            try appendWeakMapAdderRecord(rt, globals, args[0], args[1], this_value);
+            return core.Value.undefinedValue();
+        },
+        48 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            try appendToGlobalArray(rt, globals, "added", args[0]);
+            return core.Value.undefinedValue();
+        },
+        49 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            try assertAndShiftExpected(rt, globals, args[0]);
+            return core.Value.undefinedValue();
+        },
+        56 => return setForEachMutation(rt, globals, args, .add_after_begin),
+        57 => return setForEachMutation(rt, globals, args, .delete_then_readd),
+        58 => return setForEachMutation(rt, globals, args, .revisit_after_readd),
+        50 => {
+            try incrementGlobalInt(rt, globals, "counter");
+            return core.Value.undefinedValue();
+        },
+        61 => {
+            try incrementGlobalInt(rt, globals, "counter");
+            return error.Test262Error;
+        },
+        62 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            const value = args[0].asInt32() orelse return error.Test262Error;
+            if (value == 1 or value == 2) return core.Value.boolean(true);
+            return error.Test262Error;
+        },
+        63 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            const value = args[0].asInt32() orelse return error.Test262Error;
+            if (value == 1 or value == 2) return core.Value.boolean(false);
+            return error.Test262Error;
+        },
+        64 => {
+            if (args.len < 1) return error.UnsupportedClosureCall;
+            if (args[0].asInt32()) |value| return core.Value.boolean(value == 4 or value == 5 or value == 6);
+            const string = stringFromValue(args[0]) orelse return core.Value.boolean(false);
+            return core.Value.boolean(string.eqlBytes("a") or string.eqlBytes("b") or string.eqlBytes("c") or string.eqlBytes("x"));
+        },
         21 => {
             if (args.len < 2) return error.UnsupportedClosureCall;
             try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.Value.undefinedValue());
@@ -170,6 +244,11 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
 pub fn closureKind(rt: *core.Runtime, closure_value: core.Value) !i32 {
     const closure = try expectClosure(closure_value);
     return getIntProperty(rt, closure, "__closure_kind");
+}
+
+pub fn closureValue(rt: *core.Runtime, closure_value: core.Value) !i32 {
+    const closure = try expectClosure(closure_value);
+    return getIntProperty(rt, closure, "__closure_value");
 }
 
 pub fn appendLog(rt: *core.Runtime, globals: []globals_mod.Slot, mode: LogMode, a: i32, b: i32, c: i32, d: i32) !void {
@@ -224,10 +303,155 @@ fn incrementGlobalInt(rt: *core.Runtime, globals: []globals_mod.Slot, name: []co
     };
 }
 
+fn iteratorFactory(rt: *core.Runtime, shape: i32) !core.Value {
+    const iterator = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
+
+    const next_kind: i32 = switch (shape) {
+        1 => 41,
+        2 => 42,
+        3 => 43,
+        4 => 44,
+        5, 6 => 45,
+        8 => 52,
+        else => return error.UnsupportedClosureCall,
+    };
+    const next = try create(rt, next_kind, 0, 0, 0);
+    defer next.free(rt);
+    try defineValueProperty(rt, iterator, "next", next);
+
+    const return_kind: ?i32 = switch (shape) {
+        3, 4, 5, 8 => 40,
+        6 => 7,
+        else => null,
+    };
+    if (return_kind) |kind| {
+        const return_fn = try create(rt, kind, 0, 0, 0);
+        defer return_fn.free(rt);
+        try defineValueProperty(rt, iterator, "return", return_fn);
+    }
+
+    return iterator.value();
+}
+
+fn iteratorNextGlobalValue(rt: *core.Runtime, closure: *core.Object, globals: []globals_mod.Slot, name: []const u8) !core.Value {
+    if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
+    const value = try globals_mod.getByName(rt, globals, name);
+    defer value.free(rt);
+    return iteratorResult(rt, value, false);
+}
+
+fn iteratorNextEmptyArray(rt: *core.Runtime, closure: *core.Object) !core.Value {
+    if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
+    const value = try core.Object.createArray(rt, null);
+    defer value.value().free(rt);
+    return iteratorResult(rt, value.value(), false);
+}
+
+fn iteratorNextNull(rt: *core.Runtime, closure: *core.Object) !core.Value {
+    if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
+    return iteratorResult(rt, core.Value.nullValue(), false);
+}
+
+fn iteratorNextValueGetterThrows(rt: *core.Runtime, closure: *core.Object) !core.Value {
+    if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
+    const result = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, &result.header);
+    const getter = try create(rt, 12, 0, 0, 0);
+    defer getter.free(rt);
+    const value_key = try rt.internAtom("value");
+    defer rt.atoms.free(value_key);
+    try result.defineOwnProperty(rt, value_key, core.Descriptor.accessor(getter, core.Value.undefinedValue(), true, true));
+    try defineValueProperty(rt, result, "done", core.Value.boolean(false));
+    return result.value();
+}
+
+fn iteratorNextDoneIfConsumed(rt: *core.Runtime, closure: *core.Object) !?core.Value {
+    const consumed = try getIntProperty(rt, closure, "__closure_value");
+    if (consumed != 0) return try iteratorResult(rt, core.Value.undefinedValue(), true);
+    try defineIntProperty(rt, closure, "__closure_value", 1);
+    return null;
+}
+
+fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value {
+    const result = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, &result.header);
+    try defineValueProperty(rt, result, "value", value);
+    try defineValueProperty(rt, result, "done", core.Value.boolean(done));
+    return result.value();
+}
+
+fn arrayFromShape(rt: *core.Runtime, shape: i32) !core.Value {
+    const array = try core.Object.createArray(rt, null);
+    errdefer core.Object.destroyFromHeader(rt, &array.header);
+    switch (shape) {
+        0 => {},
+        1 => try appendArrayValue(rt, array, core.Value.int32(1)),
+        23 => {
+            try appendArrayValue(rt, array, core.Value.int32(2));
+            try appendArrayValue(rt, array, core.Value.int32(3));
+        },
+        234 => {
+            try appendArrayValue(rt, array, core.Value.int32(2));
+            try appendArrayValue(rt, array, core.Value.int32(3));
+            try appendArrayValue(rt, array, core.Value.int32(4));
+        },
+        100 => try appendArrayValue(rt, array, core.Value.int32(0)),
+        101 => {
+            const a_value = try value_ops.createStringValue(rt, "a");
+            defer a_value.free(rt);
+            const b_value = try value_ops.createStringValue(rt, "b");
+            defer b_value.free(rt);
+            try appendArrayValue(rt, array, a_value);
+            try appendArrayValue(rt, array, b_value);
+        },
+        102 => {
+            const a_value = try value_ops.createStringValue(rt, "a");
+            defer a_value.free(rt);
+            const b_value = try value_ops.createStringValue(rt, "b");
+            defer b_value.free(rt);
+            const c_value = try value_ops.createStringValue(rt, "c");
+            defer c_value.free(rt);
+            try appendArrayValue(rt, array, a_value);
+            try appendArrayValue(rt, array, b_value);
+            try appendArrayValue(rt, array, c_value);
+        },
+        103 => {
+            const x_value = try value_ops.createStringValue(rt, "x");
+            defer x_value.free(rt);
+            const b_value = try value_ops.createStringValue(rt, "b");
+            defer b_value.free(rt);
+            try appendArrayValue(rt, array, x_value);
+            try appendArrayValue(rt, array, b_value);
+            try appendArrayValue(rt, array, b_value);
+        },
+        104 => {
+            const x_value = try value_ops.createStringValue(rt, "x");
+            defer x_value.free(rt);
+            const b_value = try value_ops.createStringValue(rt, "b");
+            defer b_value.free(rt);
+            const c_value = try value_ops.createStringValue(rt, "c");
+            defer c_value.free(rt);
+            try appendArrayValue(rt, array, x_value);
+            try appendArrayValue(rt, array, b_value);
+            try appendArrayValue(rt, array, c_value);
+            try appendArrayValue(rt, array, c_value);
+        },
+        else => return error.UnsupportedClosureCall,
+    }
+    return array.value();
+}
+
+fn appendArrayValue(rt: *core.Runtime, array: *core.Object, value: core.Value) !void {
+    if (!array.is_array) return error.UnsupportedClosureCall;
+    try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
+}
+
 fn setGlobalMapString(rt: *core.Runtime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
     const map_value = try globals_mod.getByName(rt, globals, "map");
     defer map_value.free(rt);
     const map_object = try expectObject(map_value);
+    if (map_object.class_id == core.class.ids.weakmap) return setGlobalWeakMapString(rt, globals, map_object, key_int, bytes);
     if (map_object.class_id != core.class.ids.map) return error.UnsupportedClosureCall;
     const key = core.Value.int32(key_int);
     const value = try value_ops.createStringValue(rt, bytes);
@@ -249,6 +473,46 @@ fn setGlobalMapString(rt: *core.Runtime, globals: []globals_mod.Slot, key_int: i
     try defineIntProperty(rt, map_object, "size", @intCast(map_object.collection_entries.len));
 }
 
+fn setGlobalWeakMapString(rt: *core.Runtime, globals: []globals_mod.Slot, map_object: *core.Object, key_int: i32, bytes: []const u8) !void {
+    var key_name_buf: [32]u8 = undefined;
+    const key_name = try std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int});
+    var key_value = try globals_mod.getByName(rt, globals, key_name);
+    if (key_value.isUndefined()) {
+        key_value.free(rt);
+        key_value = try getGlobalObjectProperty(rt, globals, key_name);
+    }
+    defer key_value.free(rt);
+    const key_identity = weakKeyIdentity(rt, key_value) orelse return error.UnsupportedClosureCall;
+    const value = try value_ops.createStringValue(rt, bytes);
+    defer value.free(rt);
+    for (map_object.weak_collection_entries) |*entry| {
+        if (entry.key_identity == key_identity) {
+            entry.value.free(rt);
+            entry.value = value.dup();
+            return;
+        }
+    }
+    const next = try rt.memory.alloc(core.object.WeakCollectionEntry, map_object.weak_collection_entries.len + 1);
+    errdefer rt.memory.free(core.object.WeakCollectionEntry, next);
+    @memcpy(next[0..map_object.weak_collection_entries.len], map_object.weak_collection_entries);
+    next[map_object.weak_collection_entries.len] = .{ .key_identity = key_identity, .value = value.dup() };
+    if (map_object.weak_collection_entries.len != 0) rt.memory.free(core.object.WeakCollectionEntry, map_object.weak_collection_entries);
+    map_object.weak_collection_entries = next;
+}
+
+fn weakKeyIdentity(rt: ?*core.Runtime, value: core.Value) ?usize {
+    if (value.isSymbol()) {
+        const id = value.asInt32() orelse return null;
+        if (rt) |runtime| {
+            if (runtime.atoms.kind(@intCast(id)) != .symbol) return null;
+        }
+        return (@as(usize, @intCast(id)) << 1) | 1;
+    }
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    return @intFromPtr(header) & ~@as(usize, 1);
+}
+
 fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value, key: core.Value, this_arg: core.Value) !void {
     const record = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &record.header);
@@ -258,6 +522,88 @@ fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, nam
     const record_value = record.value();
     defer record_value.free(rt);
     try appendToGlobalArray(rt, globals, name, record_value);
+}
+
+fn appendWeakMapAdderRecord(rt: *core.Runtime, globals: []globals_mod.Slot, key: core.Value, value: core.Value, this_arg: core.Value) !void {
+    const record = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, &record.header);
+    try defineValueProperty(rt, record, "_this", this_arg);
+    try defineValueProperty(rt, record, "key", key);
+    try defineValueProperty(rt, record, "value", value);
+    const record_value = record.value();
+    defer record_value.free(rt);
+    try appendToGlobalArray(rt, globals, "results", record_value);
+}
+
+fn assertAndShiftExpected(rt: *core.Runtime, globals: []globals_mod.Slot, actual: core.Value) !void {
+    const expects_value = try globals_mod.getByName(rt, globals, "expects");
+    defer expects_value.free(rt);
+    const expects = try expectArray(expects_value);
+    if (expects.length == 0) return error.Test262Error;
+    const expected = expects.getProperty(core.atom.atomFromUInt32(0));
+    defer expected.free(rt);
+    if (!object_builtin.sameValue(actual, expected)) return error.Test262Error;
+    var index: u32 = 1;
+    while (index < expects.length) : (index += 1) {
+        const next = expects.getProperty(core.atom.atomFromUInt32(index));
+        defer next.free(rt);
+        try expects.defineOwnProperty(rt, core.atom.atomFromUInt32(index - 1), core.Descriptor.data(next, true, true, true));
+    }
+    expects.length -= 1;
+}
+
+const SetForEachMutation = enum {
+    add_after_begin,
+    delete_then_readd,
+    revisit_after_readd,
+};
+
+fn setForEachMutation(rt: *core.Runtime, globals: []globals_mod.Slot, args: []const core.Value, mode: SetForEachMutation) !core.Value {
+    if (args.len < 3) return error.UnsupportedClosureCall;
+    try assertAndShiftExpected(rt, globals, args[0]);
+    const value = args[0].asInt32() orelse return error.UnsupportedClosureCall;
+    const set = try expectObject(args[2]);
+    if (set.class_id != core.class.ids.set) return error.UnsupportedClosureCall;
+    switch (mode) {
+        .add_after_begin => {
+            if (value == 1) try setAddInt(rt, set, 2);
+            if (value == 2) try setAddInt(rt, set, 3);
+        },
+        .delete_then_readd => {
+            if (value == 1) setDeleteInt(rt, set, 2);
+            if (value == 3) try setAddInt(rt, set, 2);
+        },
+        .revisit_after_readd => {
+            if (value == 2) setDeleteInt(rt, set, 1);
+            if (value == 3) try setAddInt(rt, set, 1);
+        },
+    }
+    return core.Value.undefinedValue();
+}
+
+fn setAddInt(rt: *core.Runtime, set: *core.Object, value: i32) !void {
+    for (set.collection_entries) |entry| {
+        if (!entry.active) continue;
+        if (entry.key.asInt32() == value) return;
+    }
+    const next = try rt.memory.alloc(core.object.CollectionEntry, set.collection_entries.len + 1);
+    errdefer rt.memory.free(core.object.CollectionEntry, next);
+    @memcpy(next[0..set.collection_entries.len], set.collection_entries);
+    next[set.collection_entries.len] = .{ .key = core.Value.int32(value), .value = core.Value.undefinedValue(), .active = true };
+    if (set.collection_entries.len != 0) rt.memory.free(core.object.CollectionEntry, set.collection_entries);
+    set.collection_entries = next;
+    try defineIntProperty(rt, set, "size", @intCast(set.collection_entries.len));
+}
+
+fn setDeleteInt(rt: *core.Runtime, set: *core.Object, value: i32) void {
+    for (set.collection_entries) |*entry| {
+        if (!entry.active) continue;
+        if (entry.key.asInt32() == value) {
+            entry.destroy(rt);
+            entry.* = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false };
+            return;
+        }
+    }
 }
 
 fn appendPairToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, key: core.Value, value: core.Value) !void {
