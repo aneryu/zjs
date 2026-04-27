@@ -724,6 +724,23 @@ token->val <= TOK_LAST_KEYWORD`).
 > belong to two different opcodes simultaneously. F2 is consequently an
 > **atomic swap** that lands together with the minimal generic dispatcher
 > from F3 in a single transactional change.
+>
+> **Status (2026-04-27):** prep deliverables landed. `tools/generate_opcodes.py`
+> produces `src/engine/bytecode/opcodes_generated.zig` from
+> `quickjs-opcode.h` (246 DEF ids 0..245 plus 18 def-temp ids 179..196
+> overlapping the short range per `quickjs.c:1155`). `bytecode/opcode.zig`
+> exports the `op` constants. `tests/bytecode/opcode_alignment_test.zig`
+> locks the table to QuickJS header SHA-1
+> `4d7e310780bfae82a75e30e3d69ce91a2ec6ac66` and verifies every parsed
+> entry has a matching `op` constant at the QuickJS id. The 61 bespoke
+> opcode expansion plans (Buckets A/B/C in §2.5.5) are published in
+> `docs/quickjs-redesign/matrices/opcode-execution-matrix.md` so the
+> atomic swap can be executed without re-deriving each strategy.
+> The actual swap (VM dispatcher rewrite + parser/emitter call-site
+> replacement on all 350+ references + bespoke expansion implementation
+> + curated test262 re-validation) is deferred to a dedicated session.
+> The legacy `known` table in `bytecode/emitter.zig` is intentionally
+> kept intact until then to preserve gate green.
 
 #### F2.1 Compile-time opcode constants (no hand-written ids)
 

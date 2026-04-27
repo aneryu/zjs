@@ -106,3 +106,131 @@ row schema is:
   and linked from this file.
 - Any opcode marked lowering-only must have a test proving it is absent from final
   bytecode or handled safely if encountered.
+
+## F2 prep — Bespoke Opcode Expansion Plans
+
+Pre-flight audit (PARSER_REWRITE_PLAN.md §2.5) identified 61 bespoke opcodes
+in the legacy emitter that have no counterpart in `quickjs-opcode.h`. They
+currently squat on real QuickJS opcode ids that are reserved for unrelated
+operations, so the F2+F3 atomic swap (PARSER_REWRITE_PLAN.md §2.5.5/§2.5.6)
+must replace each emit site with a real op sequence, a real built-in call,
+or drop it entirely.
+
+This table is the published expansion plan that must land **before** F2's
+VM/parser rewrite. Each row commits a strategy. Entries are grouped by the
+three buckets defined in §2.5.5 and ordered by current emit-site frequency
+in `frontend/parser.zig`.
+
+### Bucket A — Expand to real op sequence inside the emitter
+
+Each row's "Real op sequence" column lists the QuickJS opcode names (from
+`bytecode/opcode.zig: op`) that must be emitted in place of the bespoke op.
+
+| Bespoke opcode | Strategy | Real op sequence | Notes |
+|---|---|---|---|
+| `set_prop name` | rewrite | `put_field name` | direct rename to QuickJS shape |
+| `get_prop name` | rewrite | `get_field name` | direct rename |
+| `optional_get_prop name` | rewrite | `get_field_opt_chain name` | Phase 1 temp; F10 lowers to real `get_field` chain |
+| `get_index` | rewrite | `get_array_el` | numeric/string index path |
+| `new_array n` | rewrite | `array_from n` | `array_from` matches stack contract `args... -> arr` |
+| `new_object n + atom_list` | rewrite | `object` + (`define_field name`)* | `object` pushes `{}`, then per-slot `define_field` |
+| `call_prop atom argc` | rewrite | `dup ; get_field atom ; swap ; call_method argc` | preserves `this` receiver |
+| `bit_not` | rename | `not` | QuickJS calls bitwise NOT just `not` |
+| `typeof_value` | rename | `typeof` | |
+| `bit_and / bit_or / bit_xor` | rename | `and / or / xor` | |
+| `gte` | keep | `gte` | exists in QuickJS, but at id 168 (we squat 218) — same swap fixes id |
+| `eq / strict_eq / strict_neq` | rename | identical names at correct ids | id swap only |
+| `mul / div / mod / add / sub / shl / sar / shr / pow` | rename | identical names at correct ids | id swap only |
+| `goto pc` | rewrite | `goto label` (label-relative) | F3.4 label resolution rewrites to relative `goto8`/`goto16` in resolve_labels |
+| `get_var atom` | keep | `get_var atom` | exists at correct id 56 (we squat 61) |
+| `define_var atom` | keep | `define_var atom` | exists at correct id 61 (we squat 66) |
+| `define_class atom` | keep | `define_class atom` | exists at correct id 85 (we squat 91) |
+| `import` | keep | `import` | exists at correct id 54 (we squat 59) |
+| `drop` | keep | `drop` | exists at correct id 14 (we squat 11) |
+| `return_undef` | keep | `return_undef` | exists at correct id 41 (we squat 45) |
+| `for_in_next atom patch` | rewrite | `for_in_next` (no atom; QuickJS form) | drop the atom payload — the real op uses iterator state on stack |
+| `value_length` | rewrite | `get_field length` | atom for `length` already in predefined table |
+| `logical_and` | rewrite | `dup ; if_false L_skip ; drop ; <rhs> ; L_skip:` | short-circuit branch |
+| `logical_or` | rewrite | `dup ; if_true L_skip ; drop ; <rhs> ; L_skip:` | |
+| `nullish_coalesce` | rewrite | `dup ; is_undefined_or_null ; if_false L_skip ; drop ; <rhs> ; L_skip:` | |
+| `value_to_number` | rewrite | (built-in coercion) | F4 emits explicit unary `+` lowering; no dedicated op |
+| `value_to_boolean` | rewrite | (built-in coercion) | use `lnot ; lnot` pair, or rely on truthiness in branch ops |
+| `value_to_string` | rewrite | `get_var String ; get_field call ; swap ; call_method 1` | invoke `String(value)` |
+| `prop_in` | rewrite | `in` | direct QuickJS opcode |
+| `instanceof_array / instanceof_object / instanceof_value` | rewrite | `instanceof` | unify on the generic op |
+| `factorial` | drop | (none — runtime call) | not a real JS op; remove from emitter and any fixture |
+| `new_array_buffer` | rewrite | `get_var ArrayBuffer ; call_constructor 0` | |
+
+### Bucket B — Reroute through a real built-in call
+
+Each row replaces the bespoke op with the standard call shape
+`get_var <Ctor> ; get_field <method> ; <args> ; call <argc>` (or
+`call_method` when receiver is on the stack). The relevant built-in is
+already implemented under `src/engine/builtins/*` (WQ-007/008/012); F2
+only changes how the parser reaches them.
+
+| Bespoke opcode | Replacement call shape |
+|---|---|
+| `math_call(id)` | `get_var Math ; get_field <method> ; <args> ; call argc` |
+| `string_method(id, argc)` | `get_field <method> ; call_method argc` (receiver pre-pushed) |
+| `string_from_char_code(argc)` | `get_var String ; get_field fromCharCode ; <args> ; call argc` |
+| `string_char_at` | `get_field charAt ; call_method 1` |
+| `array_method(method)` | `get_field <method> ; call_method argc` |
+| `array_join` | `get_field join ; call_method 0..1` |
+| `object_keys / object_values / object_entries` | `get_var Object ; get_field <method> ; call 1` |
+| `object_is` | `get_var Object ; get_field is ; call 2` |
+| `json_stringify` | `get_var JSON ; get_field stringify ; call 1..3` |
+| `json_parse` | `get_var JSON ; get_field parse ; call 1..2` |
+| `parse_int(argc)` | `get_var parseInt ; call argc` |
+| `parse_float` | `get_var parseFloat ; call 1` |
+| `uri_call(mode)` | `get_var <encodeURI/decodeURI/...> ; call 1` |
+| `new_date(argc)` | `get_var Date ; call_constructor argc` |
+| `date_call(argc)` | `get_var Date ; call argc` |
+| `date_static(encoded)` | `get_var Date ; get_field <method> ; call argc` |
+| `date_method(encoded)` | `get_field <method> ; call_method argc` |
+| `new_collection(kind)` | `get_var <Map/Set/WeakMap/WeakSet> ; call_constructor 0` |
+| `new_typed_array(elem)` | `get_var <Int8Array/...> ; call_constructor argc` |
+| `new_dataview(argc)` | `get_var DataView ; call_constructor argc` |
+| `dataview_get(kind, argc)` | `get_field <getInt8/getFloat32/...> ; call_method argc` |
+| `dataview_set(kind, argc)` | `get_field <setInt8/...> ; call_method argc` |
+| `arraybuffer_slice` | `get_field slice ; call_method argc` |
+| `new_string_object(argc)` | `get_var String ; call_constructor argc` |
+| `new_promise` | `get_var Promise ; call_constructor 1` |
+| `promise_static(mode)` | `get_var Promise ; get_field <resolve/reject/all/...> ; call argc` |
+| `new_regexp` | `regexp` (real QuickJS opcode at id 52) — pattern/flags from stack |
+| `regexp_method(method)` | `get_field <exec/test> ; call_method argc` |
+| `new_function atom` | `fclosure const_idx` — closure literal is a constant-pool entry, not a runtime call |
+| `new_closure encoded` | `fclosure const_idx` — same as `new_function`, the encoded scratch state goes away |
+| `call_closure argc` | `call argc` — just the QuickJS form |
+| `bigint_as_int_n / bigint_as_uint_n` | `get_var BigInt ; get_field asIntN/asUintN ; call 2` |
+
+### Bucket C — Drop entirely
+
+These have no real JS counterpart and were synthetic shortcuts for
+fixture-driven recognisers. The matching parser recogniser is removed in
+F11 (already partially scoped in WQ-011); no replacement op is needed.
+
+| Bespoke opcode | Replacement |
+|---|---|
+| `throw_type_error` | `throw_error <atom>, <ctor=TypeError>` (real QuickJS shape, format `atom_u8`) |
+| `throw_syntax_error` | `throw_error <atom>, <ctor=SyntaxError>` |
+| `throw_range_error` | `throw_error <atom>, <ctor=RangeError>` |
+| `throw_reference_error` | `throw_error <atom>, <ctor=ReferenceError>` |
+| `throw_eval_error` | `throw_error <atom>, <ctor=EvalError>` |
+| `construct argc` | `call_constructor argc` (real QuickJS shape) |
+
+### Open follow-ups
+
+- The encoded operand layouts for `dataview_get/set`, `string_method`,
+  `date_method` etc. (`(kind << 16) | argc`, `(id << 8) | argc`) lose
+  meaning once they become regular `call_method`s. F2 PR removes the
+  encoding helpers in `bytecode/emitter.zig` and the matching decode
+  branches in `exec/vm.zig`.
+- The fixture-only `factorial` op and any helper that exists solely for
+  test262 sanity (`new_function`, `new_closure`, `call_closure` in their
+  current bespoke form) move to `fclosure` + ordinary `call`. Closure
+  capture is handled by Phase 2 `resolve_variables` building the real
+  `closure_var[]` table.
+- After F2 lands, every row above must be removed from this matrix and
+  re-recorded as a regular validated entry in the per-family tables
+  (calls/properties/arithmetic/...) at the top of this file.

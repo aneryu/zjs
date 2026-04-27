@@ -164,3 +164,7 @@ fn parseFormat(text: []const u8) Format {
     }
     unreachable;
 }
+
+/// Import auto-generated opcode constants from quickjs-opcode.h.
+/// Regenerate with: python3 tools/generate_opcodes.py > src/engine/bytecode/opcodes_generated.zig
+pub const op = @import("opcodes_generated.zig").op;

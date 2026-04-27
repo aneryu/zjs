@@ -141,3 +141,7 @@ test "function bytecode owns code constants scopes module and debug metadata" {
     try dbg.add(.{ .pc = 3, .line = 2 });
     try std.testing.expectEqual(@as(?u32, 2), dbg.lineForPc(4));
 }
+
+comptime {
+    _ = @import("opcode_alignment_test.zig");
+}
