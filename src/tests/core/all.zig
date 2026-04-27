@@ -65,10 +65,12 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 1), core.atom.ids.null_);
     try std.testing.expectEqual(@as(core.Atom, 2), core.atom.ids.false_);
     try std.testing.expectEqual(@as(core.Atom, 3), core.atom.ids.true_);
-    try std.testing.expectEqual(@as(core.Atom, 35), core.atom.last_keyword);
-    try std.testing.expectEqual(@as(core.Atom, 44), core.atom.last_strict_keyword);
-    try std.testing.expectEqual(@as(core.Atom, 228), core.atom.ids.Symbol_asyncIterator);
-    try std.testing.expectEqual(@as(usize, 228), core.atom.predefined_count);
+    // F1.5: predefined atom layout matches quickjs-atom.h row-for-row.
+    // last_keyword == ATOM_await (46) and last_strict_keyword == ATOM_yield (45).
+    try std.testing.expectEqual(@as(core.Atom, 46), core.atom.last_keyword);
+    try std.testing.expectEqual(@as(core.Atom, 45), core.atom.last_strict_keyword);
+    try std.testing.expectEqual(@as(core.Atom, 229), core.atom.ids.Symbol_asyncIterator);
+    try std.testing.expectEqual(@as(usize, 229), core.atom.predefined_count);
 
     const brand = core.atom.predefinedById(core.atom.ids.Private_brand).?;
     try std.testing.expectEqual(core.atom.AtomKind.private, brand.kind);

@@ -1,0 +1,1200 @@
+//! QuickJS-aligned lexer (F1).
+//!
+//! Mirrors `next_token`, `js_parse_string`, `js_parse_template_part`,
+//! `js_parse_regexp`, and the helpers around them in
+//! `quickjs/quickjs.c:21794..23200`.
+//!
+//! This module coexists with the legacy `frontend/lexer.zig`. The
+//! legacy lexer keeps serving the QuickParser until F11; the new
+//! parser pipeline (F4+) uses this module.
+
+const std = @import("std");
+const atom_module = @import("../core/atom.zig");
+const memory = @import("../core/memory.zig");
+const unicode = @import("../libs/unicode.zig");
+const t = @import("qjs_token.zig");
+
+const Atom = atom_module.Atom;
+const AtomTable = atom_module.AtomTable;
+
+pub const Error = error{
+    UnexpectedEof,
+    UnterminatedString,
+    UnterminatedTemplate,
+    UnterminatedRegExp,
+    UnterminatedComment,
+    InvalidEscape,
+    InvalidUnicodeEscape,
+    InvalidUtf8,
+    InvalidNumber,
+    InvalidIdentifier,
+    InvalidPrivateName,
+    InvalidRegExp,
+    LegacyOctalInStrictMode,
+    HtmlCommentInModule,
+    OutOfMemory,
+};
+
+pub const Lexer = struct {
+    /// Allocator used for owned token payloads (decoded strings).
+    /// Tokens own their `payload.str.bytes`; the caller frees them via
+    /// `freeToken`.
+    allocator: std.mem.Allocator,
+    atoms: *AtomTable,
+
+    source: []const u8,
+    /// Current byte offset.
+    pos: usize = 0,
+    /// 1-based line/column of the byte at `pos`.
+    line: u32 = 1,
+    col: u32 = 1,
+
+    /// Parser flags that influence lexing (mirror `JSParseState` fields).
+    is_strict_mode: bool = false,
+    is_module: bool = false,
+    allow_html_comments: bool = true,
+    /// Set whenever a LineTerminator (or the equivalent) was skipped
+    /// before the most recently emitted token. Mirrors
+    /// `JSParseState.got_lf` (`quickjs.c:21572`).
+    got_lf: bool = false,
+
+    /// Snapshot taken at the start of the most recent token (so that
+    /// the parser can build a `Token` with `ptr`, `line_num`, and
+    /// `col_num` matching QuickJS).
+    mark_pos: usize = 0,
+    mark_line: u32 = 1,
+    mark_col: u32 = 1,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        atoms: *AtomTable,
+        source: []const u8,
+    ) Lexer {
+        return .{ .allocator = allocator, .atoms = atoms, .source = source };
+    }
+
+    pub fn freeToken(self: *Lexer, tok: *t.Token) void {
+        switch (tok.payload) {
+            .str => |s| if (s.bytes.len > 0) self.allocator.free(s.bytes),
+            else => {},
+        }
+    }
+
+    /// Produce the next token. Returns `TOK_EOF` at end of input.
+    pub fn next(self: *Lexer) Error!t.Token {
+        try self.skipTrivia();
+        self.mark();
+
+        if (self.pos >= self.source.len) {
+            return self.emit(t.TOK_EOF, .{ .none = {} });
+        }
+
+        const c = self.peek();
+
+        if (isAsciiIdentStart(c) or c >= 0x80 or self.startsUnicodeEscape()) {
+            return self.lexIdentifier();
+        }
+        if (std.ascii.isDigit(c)) return self.lexNumber(false);
+        if (c == '#') return self.lexPrivateName();
+        if (c == '"' or c == '\'') return self.lexString(c);
+        if (c == '`') return self.lexTemplate(.head_or_no_subst);
+        if (c == '.') return self.lexDotOrNumber();
+
+        return self.lexPunctuator();
+    }
+
+    /// Resume lexing a template after the parser closed a `${ ... }`
+    /// substitution. Mirrors the second call into
+    /// `js_parse_template_part` (`quickjs.c:21794`) once the parser has
+    /// consumed the closing `}`.
+    pub fn nextTemplatePart(self: *Lexer) Error!t.Token {
+        // No leading trivia: we are inside a template, so whitespace
+        // between `}` and the next `` ` `` or `${` is part of the cooked text.
+        self.mark();
+        return self.lexTemplate(.middle_or_tail);
+    }
+
+    /// Re-lex the most recently emitted `/`/`/=` punctuator as a regex
+    /// literal. Mirrors the QuickJS pattern of letting the parser ask
+    /// for a regexp once it knows it's in a regexp-allowed context
+    /// (`js_parse_regexp`, `quickjs.c:22005`). The caller passes the
+    /// `mark_pos` recorded before the slash so we restart from there.
+    pub fn rescanRegexp(self: *Lexer, slash_offset: usize) Error!t.Token {
+        // Reset position back to the slash. The caller is responsible
+        // for having recorded `mark_line`/`mark_col` before the slash.
+        self.pos = slash_offset;
+        self.line = self.mark_line;
+        self.col = self.mark_col;
+        self.mark();
+        return self.lexRegexp();
+    }
+
+    // ---- internals ---------------------------------------------------
+
+    inline fn peek(self: Lexer) u8 {
+        return self.source[self.pos];
+    }
+
+    inline fn peekAt(self: Lexer, n: usize) u8 {
+        return if (self.pos + n < self.source.len) self.source[self.pos + n] else 0;
+    }
+
+    inline fn remaining(self: Lexer) usize {
+        return self.source.len - self.pos;
+    }
+
+    inline fn bump(self: *Lexer) void {
+        const b = self.source[self.pos];
+        self.pos += 1;
+        if (b == '\n') {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+    }
+
+    fn mark(self: *Lexer) void {
+        self.mark_pos = self.pos;
+        self.mark_line = self.line;
+        self.mark_col = self.col;
+    }
+
+    fn emit(self: *Lexer, val: t.TokenKind, payload: t.Payload) t.Token {
+        return .{
+            .val = val,
+            .line_num = self.mark_line,
+            .col_num = self.mark_col,
+            .ptr = if (self.mark_pos < self.source.len)
+                self.source[self.mark_pos..].ptr
+            else
+                self.source.ptr + self.source.len,
+            .len = self.pos - self.mark_pos,
+            .payload = payload,
+        };
+    }
+
+    fn skipTrivia(self: *Lexer) Error!void {
+        self.got_lf = false;
+        var allow_html_close = self.col == 1;
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
+                self.bump();
+                continue;
+            }
+            if (c == '\n' or c == '\r') {
+                self.got_lf = true;
+                allow_html_close = true;
+                self.bump();
+                continue;
+            }
+            // U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR (UTF-8 E2 80 A8/A9)
+            if (c == 0xE2 and self.remaining() >= 3 and self.source[self.pos + 1] == 0x80) {
+                const b3 = self.source[self.pos + 2];
+                if (b3 == 0xA8 or b3 == 0xA9) {
+                    self.got_lf = true;
+                    allow_html_close = true;
+                    self.pos += 3;
+                    self.line += 1;
+                    self.col = 1;
+                    continue;
+                }
+            }
+            if (c == '/') {
+                if (self.peekAt(1) == '/') {
+                    try self.skipLineComment();
+                    continue;
+                }
+                if (self.peekAt(1) == '*') {
+                    const had_newline = try self.skipBlockComment();
+                    if (had_newline) {
+                        self.got_lf = true;
+                        allow_html_close = true;
+                    }
+                    continue;
+                }
+            }
+            // HTML-like comments are spec-permitted only in script mode
+            // (B.1.3). They begin with `<!--` anywhere, and `-->` only
+            // after a LineTerminator (or BOM/start of file).
+            if (c == '<' and self.allow_html_comments and !self.is_module and self.startsWithBytes("<!--")) {
+                try self.skipLineComment();
+                continue;
+            }
+            if (c == '-' and self.allow_html_comments and !self.is_module and allow_html_close and self.startsWithBytes("-->")) {
+                try self.skipLineComment();
+                continue;
+            }
+            // Hashbang only at start of file.
+            if (self.pos == 0 and self.startsWithBytes("#!")) {
+                try self.skipLineComment();
+                allow_html_close = true;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn skipLineComment(self: *Lexer) Error!void {
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == '\n' or c == '\r') return;
+            // U+2028/2029
+            if (c == 0xE2 and self.remaining() >= 3 and self.source[self.pos + 1] == 0x80) {
+                const b3 = self.source[self.pos + 2];
+                if (b3 == 0xA8 or b3 == 0xA9) return;
+            }
+            self.bump();
+        }
+    }
+
+    fn skipBlockComment(self: *Lexer) Error!bool {
+        self.bump(); // /
+        self.bump(); // *
+        var saw_newline = false;
+        while (self.pos + 1 < self.source.len) {
+            if (self.peek() == '*' and self.peekAt(1) == '/') {
+                self.bump();
+                self.bump();
+                return saw_newline;
+            }
+            const c = self.peek();
+            if (c == '\n' or c == '\r') saw_newline = true;
+            self.bump();
+        }
+        return error.UnterminatedComment;
+    }
+
+    fn startsWithBytes(self: Lexer, lit: []const u8) bool {
+        if (self.remaining() < lit.len) return false;
+        return std.mem.eql(u8, self.source[self.pos..][0..lit.len], lit);
+    }
+
+    fn startsUnicodeEscape(self: Lexer) bool {
+        return self.remaining() >= 2 and self.peek() == '\\' and self.peekAt(1) == 'u';
+    }
+
+    // ---- identifiers / keywords --------------------------------------
+
+    fn lexIdentifier(self: *Lexer) Error!t.Token {
+        var has_escape = false;
+        // Scratch buffer for the decoded identifier (used for keyword
+        // lookup and atom interning when escapes are present).
+        var decoded = std.ArrayList(u8).empty;
+        defer decoded.deinit(self.allocator);
+
+        // First code point.
+        if (self.peek() == '\\') {
+            const cp = try self.consumeUnicodeEscape();
+            if (!unicode.isIdentifierStart(cp)) return error.InvalidIdentifier;
+            try appendUtf8(&decoded, self.allocator, cp);
+            has_escape = true;
+        } else {
+            try self.consumeIdentCodePoint(&decoded, true);
+        }
+
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == '\\') {
+                if (!self.startsUnicodeEscape()) break;
+                const cp = try self.consumeUnicodeEscape();
+                if (!unicode.isIdentifierContinue(cp)) return error.InvalidIdentifier;
+                try appendUtf8(&decoded, self.allocator, cp);
+                has_escape = true;
+                continue;
+            }
+            if (isAsciiIdentContinue(c)) {
+                try decoded.append(self.allocator, c);
+                self.bump();
+                continue;
+            }
+            if (c >= 0x80) {
+                try self.consumeIdentCodePoint(&decoded, false);
+                continue;
+            }
+            break;
+        }
+
+        const lexeme = decoded.items;
+
+        // Keyword lookup. When the identifier was spelled with escapes
+        // it's not a keyword (per spec).
+        if (!has_escape) {
+            if (keywordLookup(lexeme)) |val| {
+                const ka = t.keywordAtom(val);
+                return self.emit(val, .{ .ident = .{
+                    .atom = ka,
+                    .has_escape = false,
+                    .is_reserved = isReservedKeyword(val, self.is_strict_mode),
+                } });
+            }
+        }
+
+        const a = try self.atoms.internString(lexeme);
+        return self.emit(t.TOK_IDENT, .{ .ident = .{
+            .atom = a,
+            .has_escape = has_escape,
+            .is_reserved = false,
+        } });
+    }
+
+    fn consumeIdentCodePoint(self: *Lexer, out: *std.ArrayList(u8), is_start: bool) Error!void {
+        const start = self.pos;
+        const c0 = self.peek();
+        if (c0 < 0x80) {
+            const ok = if (is_start) isAsciiIdentStart(c0) else isAsciiIdentContinue(c0);
+            if (!ok) return error.InvalidIdentifier;
+            self.bump();
+            try out.append(self.allocator, c0);
+            return;
+        }
+        const cp = try self.decodeUtf8();
+        const ok = if (is_start) unicode.isIdentifierStart(cp) else unicode.isIdentifierContinue(cp);
+        if (!ok) return error.InvalidIdentifier;
+        try out.appendSlice(self.allocator, self.source[start..self.pos]);
+    }
+
+    fn lexPrivateName(self: *Lexer) Error!t.Token {
+        // Consume `#`. The atom keeps the leading `#` (matches QuickJS
+        // representation: private name atoms start with `#`).
+        self.bump();
+        var decoded = std.ArrayList(u8).empty;
+        defer decoded.deinit(self.allocator);
+        try decoded.append(self.allocator, '#');
+        var has_escape = false;
+
+        if (self.pos >= self.source.len) return error.InvalidPrivateName;
+        if (self.peek() == '\\') {
+            const cp = try self.consumeUnicodeEscape();
+            if (!unicode.isIdentifierStart(cp)) return error.InvalidPrivateName;
+            try appendUtf8(&decoded, self.allocator, cp);
+            has_escape = true;
+        } else {
+            try self.consumeIdentCodePoint(&decoded, true);
+        }
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == '\\') {
+                if (!self.startsUnicodeEscape()) break;
+                const cp = try self.consumeUnicodeEscape();
+                if (!unicode.isIdentifierContinue(cp)) return error.InvalidPrivateName;
+                try appendUtf8(&decoded, self.allocator, cp);
+                has_escape = true;
+                continue;
+            }
+            if (isAsciiIdentContinue(c)) {
+                try decoded.append(self.allocator, c);
+                self.bump();
+                continue;
+            }
+            if (c >= 0x80) {
+                try self.consumeIdentCodePoint(&decoded, false);
+                continue;
+            }
+            break;
+        }
+
+        const a = try self.atoms.internString(decoded.items);
+        return self.emit(t.TOK_PRIVATE_NAME, .{ .ident = .{
+            .atom = a,
+            .has_escape = has_escape,
+            .is_reserved = false,
+        } });
+    }
+
+    // ---- numbers -----------------------------------------------------
+
+    fn lexDotOrNumber(self: *Lexer) Error!t.Token {
+        if (self.peekAt(1) == '.' and self.peekAt(2) == '.') {
+            self.bump();
+            self.bump();
+            self.bump();
+            return self.emit(t.TOK_ELLIPSIS, .{ .none = {} });
+        }
+        if (std.ascii.isDigit(self.peekAt(1))) {
+            return self.lexNumber(true);
+        }
+        self.bump();
+        return self.emit('.', .{ .none = {} });
+    }
+
+    fn lexNumber(self: *Lexer, leading_dot: bool) Error!t.Token {
+        const start = self.pos;
+        var is_bigint = false;
+
+        if (!leading_dot and self.peek() == '0' and self.remaining() >= 2) {
+            const p = self.peekAt(1);
+            switch (p) {
+                'x', 'X' => {
+                    self.bump();
+                    self.bump();
+                    if (!consumeHexDigits(self)) return error.InvalidNumber;
+                    if (self.pos < self.source.len and self.peek() == 'n') {
+                        is_bigint = true;
+                        self.bump();
+                    }
+                    return self.finishNumber(start, is_bigint, 16);
+                },
+                'o', 'O' => {
+                    self.bump();
+                    self.bump();
+                    if (!consumeOctalDigits(self)) return error.InvalidNumber;
+                    if (self.pos < self.source.len and self.peek() == 'n') {
+                        is_bigint = true;
+                        self.bump();
+                    }
+                    return self.finishNumber(start, is_bigint, 8);
+                },
+                'b', 'B' => {
+                    self.bump();
+                    self.bump();
+                    if (!consumeBinaryDigits(self)) return error.InvalidNumber;
+                    if (self.pos < self.source.len and self.peek() == 'n') {
+                        is_bigint = true;
+                        self.bump();
+                    }
+                    return self.finishNumber(start, is_bigint, 2);
+                },
+                else => {},
+            }
+        }
+
+        if (!leading_dot) {
+            try consumeDecDigitsRequired(self);
+        }
+        if (self.pos < self.source.len and self.peek() == '.') {
+            self.bump();
+            _ = consumeDecDigits(self);
+        } else if (leading_dot) {
+            // .NNN form: bumps already done by caller, just consume more digits
+            _ = consumeDecDigits(self);
+        }
+        if (self.pos < self.source.len and (self.peek() == 'e' or self.peek() == 'E')) {
+            self.bump();
+            if (self.pos < self.source.len and (self.peek() == '+' or self.peek() == '-')) self.bump();
+            if (!consumeDecDigits(self)) return error.InvalidNumber;
+        } else if (self.pos < self.source.len and self.peek() == 'n') {
+            is_bigint = true;
+            self.bump();
+        }
+        return self.finishNumber(start, is_bigint, 10);
+    }
+
+    fn finishNumber(self: *Lexer, start: usize, is_bigint: bool, base: u8) Error!t.Token {
+        // Reject identifier characters immediately after a numeric literal
+        // (e.g. `123abc` is a single error per spec, not two tokens).
+        if (self.pos < self.source.len) {
+            const nc = self.peek();
+            if (isAsciiIdentStart(nc) or std.ascii.isDigit(nc) or nc >= 0x80) {
+                return error.InvalidNumber;
+            }
+        }
+        const lexeme = self.source[start..self.pos];
+        if (is_bigint) {
+            return self.emit(t.TOK_NUMBER, .{ .num = .{
+                .value = 0,
+                .is_bigint = true,
+                .bigint_text = lexeme[0 .. lexeme.len - 1],
+            } });
+        }
+        const value = parseNumber(lexeme, base) catch return error.InvalidNumber;
+        return self.emit(t.TOK_NUMBER, .{ .num = .{ .value = value } });
+    }
+
+    // ---- strings -----------------------------------------------------
+
+    fn lexString(self: *Lexer, quote: u8) Error!t.Token {
+        self.bump(); // opening quote
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(self.allocator);
+
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == quote) {
+                self.bump();
+                const owned = try self.allocator.dupe(u8, buf.items);
+                return self.emit(t.TOK_STRING, .{ .str = .{ .bytes = owned, .sep = quote } });
+            }
+            if (c == '\n' or c == '\r') return error.UnterminatedString;
+            if (c == '\\') {
+                self.bump();
+                try self.decodeStringEscape(&buf);
+                continue;
+            }
+            try buf.append(self.allocator, c);
+            self.bump();
+        }
+        return error.UnterminatedString;
+    }
+
+    fn decodeStringEscape(self: *Lexer, out: *std.ArrayList(u8)) Error!void {
+        if (self.pos >= self.source.len) return error.InvalidEscape;
+        const c = self.peek();
+        switch (c) {
+            'n' => { self.bump(); try out.append(self.allocator, '\n'); },
+            't' => { self.bump(); try out.append(self.allocator, '\t'); },
+            'r' => { self.bump(); try out.append(self.allocator, '\r'); },
+            'b' => { self.bump(); try out.append(self.allocator, 0x08); },
+            'f' => { self.bump(); try out.append(self.allocator, 0x0C); },
+            'v' => { self.bump(); try out.append(self.allocator, 0x0B); },
+            '0' => {
+                self.bump();
+                if (self.pos < self.source.len and std.ascii.isDigit(self.peek())) {
+                    if (self.is_strict_mode) return error.LegacyOctalInStrictMode;
+                    // Legacy octal beyond \0 is reported by the parser layer;
+                    // here we treat following digits as separate characters.
+                }
+                try out.append(self.allocator, 0);
+            },
+            'x' => {
+                self.bump();
+                if (self.remaining() < 2) return error.InvalidEscape;
+                const h1 = self.peek();
+                const h2 = self.peekAt(1);
+                if (!std.ascii.isHex(h1) or !std.ascii.isHex(h2)) return error.InvalidEscape;
+                self.bump();
+                self.bump();
+                try out.append(self.allocator, @intCast(hexNibble(h1) * 16 + hexNibble(h2)));
+            },
+            'u' => {
+                // unicode escape (surrogate pair handled below)
+                const cp = try self.consumeUnicodeEscapeAfterBackslash();
+                try appendUtf8(out, self.allocator, cp);
+            },
+            '\n' => { self.bump(); }, // line continuation
+            '\r' => {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '\n') self.bump();
+            },
+            // U+2028 / U+2029 line continuation
+            0xE2 => {
+                if (self.remaining() >= 3 and self.source[self.pos + 1] == 0x80) {
+                    const b3 = self.source[self.pos + 2];
+                    if (b3 == 0xA8 or b3 == 0xA9) {
+                        self.pos += 3;
+                        self.line += 1;
+                        self.col = 1;
+                        return;
+                    }
+                }
+                // not a line separator: treat E2 byte as literal escape
+                self.bump();
+                try out.append(self.allocator, 0xE2);
+            },
+            else => {
+                // Legacy octal (\1..\7) is rejected in strict mode and in
+                // template literals; QuickJS reports it via cur_func->is_strict_mode.
+                if (c >= '1' and c <= '7') {
+                    if (self.is_strict_mode) return error.LegacyOctalInStrictMode;
+                    var value: u16 = 0;
+                    var count: u8 = 0;
+                    while (count < 3 and self.pos < self.source.len) : (count += 1) {
+                        const d = self.peek();
+                        if (d < '0' or d > '7') break;
+                        value = value * 8 + (d - '0');
+                        self.bump();
+                    }
+                    if (value > 0xFF) return error.InvalidEscape;
+                    try out.append(self.allocator, @intCast(value));
+                    return;
+                }
+                // identity escape: \\, \', \", \`, etc.
+                self.bump();
+                try out.append(self.allocator, c);
+            },
+        }
+    }
+
+    /// Called after a backslash has been consumed; the next byte is `u`.
+    /// Returns the decoded code point. Handles surrogate pair joining
+    /// when the next thing is also a `\uXXXX` escape forming a valid
+    /// surrogate pair.
+    fn consumeUnicodeEscapeAfterBackslash(self: *Lexer) Error!u21 {
+        if (self.peek() != 'u') return error.InvalidUnicodeEscape;
+        self.bump();
+        if (self.pos < self.source.len and self.peek() == '{') {
+            self.bump();
+            var value: u32 = 0;
+            var saw_digit = false;
+            while (self.pos < self.source.len and self.peek() != '}') {
+                const d = self.peek();
+                if (!std.ascii.isHex(d)) return error.InvalidUnicodeEscape;
+                value = value * 16 + hexNibble(d);
+                if (value > 0x10FFFF) return error.InvalidUnicodeEscape;
+                saw_digit = true;
+                self.bump();
+            }
+            if (!saw_digit or self.pos >= self.source.len) return error.InvalidUnicodeEscape;
+            self.bump(); // }
+            return @intCast(value);
+        }
+        const cp1 = try self.consumeFourHex();
+        // Surrogate pair: \uD800-\uDBFF followed by \uDC00-\uDFFF
+        if (cp1 >= 0xD800 and cp1 <= 0xDBFF and self.remaining() >= 6 and
+            self.peek() == '\\' and self.peekAt(1) == 'u' and self.peekAt(2) != '{')
+        {
+            self.bump();
+            self.bump();
+            const cp2 = try self.consumeFourHex();
+            if (cp2 >= 0xDC00 and cp2 <= 0xDFFF) {
+                return 0x10000 + ((@as(u21, cp1) - 0xD800) << 10) + (@as(u21, cp2) - 0xDC00);
+            }
+            // Not a low surrogate: per spec each lone surrogate is its
+            // own code unit. Returning cp1 here drops cp2; this edge
+            // case is exercised by F12 tests.
+            return @as(u21, cp1);
+        }
+        return @as(u21, cp1);
+    }
+
+    fn consumeUnicodeEscape(self: *Lexer) Error!u21 {
+        if (self.peek() != '\\') return error.InvalidUnicodeEscape;
+        self.bump();
+        return self.consumeUnicodeEscapeAfterBackslash();
+    }
+
+    fn consumeFourHex(self: *Lexer) Error!u16 {
+        if (self.remaining() < 4) return error.InvalidUnicodeEscape;
+        var v: u16 = 0;
+        var i: u8 = 0;
+        while (i < 4) : (i += 1) {
+            const d = self.peek();
+            if (!std.ascii.isHex(d)) return error.InvalidUnicodeEscape;
+            v = v * 16 + hexNibble(d);
+            self.bump();
+        }
+        return v;
+    }
+
+    // ---- templates ---------------------------------------------------
+
+    const TemplatePhase = enum { head_or_no_subst, middle_or_tail };
+
+    fn lexTemplate(self: *Lexer, phase: TemplatePhase) Error!t.Token {
+        if (phase == .head_or_no_subst) {
+            std.debug.assert(self.peek() == '`');
+            self.bump();
+        } else {
+            std.debug.assert(self.peek() == '}');
+            self.bump();
+        }
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(self.allocator);
+
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == '`') {
+                self.bump();
+                const part: t.TemplatePart = if (phase == .head_or_no_subst)
+                    .no_substitution
+                else
+                    .tail;
+                const owned = try self.allocator.dupe(u8, buf.items);
+                return self.emit(t.TOK_TEMPLATE, .{ .str = .{
+                    .bytes = owned,
+                    .sep = '`',
+                    .template = part,
+                } });
+            }
+            if (c == '$' and self.peekAt(1) == '{') {
+                self.bump();
+                self.bump();
+                const part: t.TemplatePart = if (phase == .head_or_no_subst)
+                    .head
+                else
+                    .middle;
+                const owned = try self.allocator.dupe(u8, buf.items);
+                return self.emit(t.TOK_TEMPLATE, .{ .str = .{
+                    .bytes = owned,
+                    .sep = '`',
+                    .template = part,
+                } });
+            }
+            if (c == '\\') {
+                self.bump();
+                try self.decodeStringEscape(&buf);
+                continue;
+            }
+            // Templates allow raw line terminators; normalize \r and
+            // \r\n to \n (per spec).
+            if (c == '\r') {
+                try buf.append(self.allocator, '\n');
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '\n') self.bump();
+                continue;
+            }
+            try buf.append(self.allocator, c);
+            self.bump();
+        }
+        return error.UnterminatedTemplate;
+    }
+
+    // ---- regex -------------------------------------------------------
+
+    fn lexRegexp(self: *Lexer) Error!t.Token {
+        std.debug.assert(self.peek() == '/');
+        self.bump(); // leading /
+        const pat_start = self.pos;
+        var in_class = false;
+        var escaped = false;
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (c == '\n' or c == '\r') return error.UnterminatedRegExp;
+            if (escaped) {
+                escaped = false;
+                self.bump();
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                self.bump();
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+                self.bump();
+                continue;
+            }
+            if (c == ']') {
+                in_class = false;
+                self.bump();
+                continue;
+            }
+            if (c == '/' and !in_class) break;
+            self.bump();
+        }
+        if (self.pos >= self.source.len) return error.UnterminatedRegExp;
+        const pat_end = self.pos;
+        self.bump(); // closing /
+        const flags_start = self.pos;
+        while (self.pos < self.source.len) {
+            const c = self.peek();
+            if (isAsciiIdentContinue(c) or c >= 0x80) {
+                self.bump();
+            } else break;
+        }
+        return self.emit(t.TOK_REGEXP, .{ .regexp = .{
+            .pattern = self.source[pat_start..pat_end],
+            .flags = self.source[flags_start..self.pos],
+        } });
+    }
+
+    // ---- punctuators -------------------------------------------------
+
+    fn lexPunctuator(self: *Lexer) Error!t.Token {
+        const c = self.peek();
+        switch (c) {
+            '+' => return self.lexPlus(),
+            '-' => return self.lexMinus(),
+            '*' => return self.lexStar(),
+            '/' => return self.lexSlash(),
+            '%' => return self.lexPercent(),
+            '=' => return self.lexEquals(),
+            '!' => return self.lexBang(),
+            '<' => return self.lexLt(),
+            '>' => return self.lexGt(),
+            '&' => return self.lexAmp(),
+            '|' => return self.lexPipe(),
+            '^' => return self.lexCaret(),
+            '?' => return self.lexQuestion(),
+            '~', '(', ')', '[', ']', '{', '}', ',', ';', ':' => {
+                self.bump();
+                return self.emit(@as(t.TokenKind, c), .{ .none = {} });
+            },
+            else => {
+                self.bump();
+                return error.InvalidIdentifier;
+            },
+        }
+    }
+
+    fn lexPlus(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '+') { self.bump(); return self.emit(t.TOK_INC, .{ .none = {} }); }
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_PLUS_ASSIGN, .{ .none = {} }); }
+        }
+        return self.emit('+', .{ .none = {} });
+    }
+
+    fn lexMinus(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '-') { self.bump(); return self.emit(t.TOK_DEC, .{ .none = {} }); }
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_MINUS_ASSIGN, .{ .none = {} }); }
+        }
+        return self.emit('-', .{ .none = {} });
+    }
+
+    fn lexStar(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '*') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_POW_ASSIGN, .{ .none = {} });
+                }
+                return self.emit(t.TOK_POW, .{ .none = {} });
+            }
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_MUL_ASSIGN, .{ .none = {} }); }
+        }
+        return self.emit('*', .{ .none = {} });
+    }
+
+    fn lexSlash(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len and self.peek() == '=') {
+            self.bump();
+            return self.emit(t.TOK_DIV_ASSIGN, .{ .none = {} });
+        }
+        return self.emit('/', .{ .none = {} });
+    }
+
+    fn lexPercent(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len and self.peek() == '=') {
+            self.bump();
+            return self.emit(t.TOK_MOD_ASSIGN, .{ .none = {} });
+        }
+        return self.emit('%', .{ .none = {} });
+    }
+
+    fn lexEquals(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '=') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_STRICT_EQ, .{ .none = {} });
+                }
+                return self.emit(t.TOK_EQ, .{ .none = {} });
+            }
+            if (self.peek() == '>') { self.bump(); return self.emit(t.TOK_ARROW, .{ .none = {} }); }
+        }
+        return self.emit('=', .{ .none = {} });
+    }
+
+    fn lexBang(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len and self.peek() == '=') {
+            self.bump();
+            if (self.pos < self.source.len and self.peek() == '=') {
+                self.bump();
+                return self.emit(t.TOK_STRICT_NEQ, .{ .none = {} });
+            }
+            return self.emit(t.TOK_NEQ, .{ .none = {} });
+        }
+        return self.emit('!', .{ .none = {} });
+    }
+
+    fn lexLt(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_LTE, .{ .none = {} }); }
+            if (self.peek() == '<') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_SHL_ASSIGN, .{ .none = {} });
+                }
+                return self.emit(t.TOK_SHL, .{ .none = {} });
+            }
+        }
+        return self.emit('<', .{ .none = {} });
+    }
+
+    fn lexGt(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_GTE, .{ .none = {} }); }
+            if (self.peek() == '>') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '>') {
+                    self.bump();
+                    if (self.pos < self.source.len and self.peek() == '=') {
+                        self.bump();
+                        return self.emit(t.TOK_SHR_ASSIGN, .{ .none = {} });
+                    }
+                    return self.emit(t.TOK_SHR, .{ .none = {} });
+                }
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_SAR_ASSIGN, .{ .none = {} });
+                }
+                return self.emit(t.TOK_SAR, .{ .none = {} });
+            }
+        }
+        return self.emit('>', .{ .none = {} });
+    }
+
+    fn lexAmp(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '&') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_LAND_ASSIGN, .{ .none = {} });
+                }
+                return self.emit(t.TOK_LAND, .{ .none = {} });
+            }
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_AND_ASSIGN, .{ .none = {} }); }
+        }
+        return self.emit('&', .{ .none = {} });
+    }
+
+    fn lexPipe(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '|') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_LOR_ASSIGN, .{ .none = {} });
+                }
+                return self.emit(t.TOK_LOR, .{ .none = {} });
+            }
+            if (self.peek() == '=') { self.bump(); return self.emit(t.TOK_OR_ASSIGN, .{ .none = {} }); }
+        }
+        return self.emit('|', .{ .none = {} });
+    }
+
+    fn lexCaret(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len and self.peek() == '=') {
+            self.bump();
+            return self.emit(t.TOK_XOR_ASSIGN, .{ .none = {} });
+        }
+        return self.emit('^', .{ .none = {} });
+    }
+
+    fn lexQuestion(self: *Lexer) Error!t.Token {
+        self.bump();
+        if (self.pos < self.source.len) {
+            if (self.peek() == '?') {
+                self.bump();
+                if (self.pos < self.source.len and self.peek() == '=') {
+                    self.bump();
+                    return self.emit(t.TOK_DOUBLE_QUESTION_MARK_ASSIGN, .{ .none = {} });
+                }
+                return self.emit(t.TOK_DOUBLE_QUESTION_MARK, .{ .none = {} });
+            }
+            if (self.peek() == '.' and !std.ascii.isDigit(self.peekAt(1))) {
+                self.bump();
+                return self.emit(t.TOK_QUESTION_MARK_DOT, .{ .none = {} });
+            }
+        }
+        return self.emit('?', .{ .none = {} });
+    }
+
+    // ---- utf-8 -------------------------------------------------------
+
+    fn decodeUtf8(self: *Lexer) Error!u21 {
+        const b0 = self.peek();
+        var len: usize = 0;
+        if (b0 < 0x80) len = 1
+        else if ((b0 & 0xE0) == 0xC0) len = 2
+        else if ((b0 & 0xF0) == 0xE0) len = 3
+        else if ((b0 & 0xF8) == 0xF0) len = 4
+        else return error.InvalidUtf8;
+
+        if (self.remaining() < len) return error.InvalidUtf8;
+        const slice = self.source[self.pos..][0..len];
+        const cp = std.unicode.utf8Decode(slice) catch return error.InvalidUtf8;
+        // Bump byte-by-byte (we treat all bytes as a single column).
+        self.pos += len;
+        self.col += 1;
+        return cp;
+    }
+};
+
+fn isAsciiIdentStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '$';
+}
+
+fn isAsciiIdentContinue(c: u8) bool {
+    return isAsciiIdentStart(c) or (c >= '0' and c <= '9');
+}
+
+fn hexNibble(c: u8) u16 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+    unreachable;
+}
+
+fn appendUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !void {
+    var buf: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(cp, &buf) catch {
+        // Encode lone surrogates as 3-byte ED A0..BF (CESU-8-style),
+        // matching how V8/QuickJS surface lone surrogate escapes.
+        if (cp >= 0xD800 and cp <= 0xDFFF) {
+            try out.append(allocator, 0xED);
+            try out.append(allocator, @intCast(0xA0 + ((cp - 0xD800) >> 6)));
+            try out.append(allocator, @intCast(0x80 | ((cp - 0xD800) & 0x3F)));
+            return;
+        }
+        return error.InvalidUnicodeEscape;
+    };
+    try out.appendSlice(allocator, buf[0..len]);
+}
+
+fn consumeHexDigits(self: *Lexer) bool {
+    var any = false;
+    while (self.pos < self.source.len) {
+        const c = self.peek();
+        if (std.ascii.isHex(c) or c == '_') {
+            if (c != '_') any = true;
+            self.bump();
+        } else break;
+    }
+    return any;
+}
+
+fn consumeOctalDigits(self: *Lexer) bool {
+    var any = false;
+    while (self.pos < self.source.len) {
+        const c = self.peek();
+        if ((c >= '0' and c <= '7') or c == '_') {
+            if (c != '_') any = true;
+            self.bump();
+        } else break;
+    }
+    return any;
+}
+
+fn consumeBinaryDigits(self: *Lexer) bool {
+    var any = false;
+    while (self.pos < self.source.len) {
+        const c = self.peek();
+        if (c == '0' or c == '1' or c == '_') {
+            if (c != '_') any = true;
+            self.bump();
+        } else break;
+    }
+    return any;
+}
+
+fn consumeDecDigits(self: *Lexer) bool {
+    var any = false;
+    while (self.pos < self.source.len) {
+        const c = self.peek();
+        if (std.ascii.isDigit(c) or c == '_') {
+            if (c != '_') any = true;
+            self.bump();
+        } else break;
+    }
+    return any;
+}
+
+fn consumeDecDigitsRequired(self: *Lexer) Error!void {
+    if (!consumeDecDigits(self)) return error.InvalidNumber;
+}
+
+fn parseNumber(lexeme: []const u8, base: u8) !f64 {
+    var stripped: [128]u8 = undefined;
+    var len: usize = 0;
+    for (lexeme) |c| {
+        if (c == '_') continue;
+        if (len >= stripped.len) return error.InvalidNumber;
+        stripped[len] = c;
+        len += 1;
+    }
+    const s = stripped[0..len];
+    if (base == 10) return std.fmt.parseFloat(f64, s) catch error.InvalidNumber;
+    if (s.len < 3) return error.InvalidNumber;
+    const value = std.fmt.parseUnsigned(u128, s[2..], base) catch return error.InvalidNumber;
+    return @floatFromInt(value);
+}
+
+fn keywordLookup(lexeme: []const u8) ?t.TokenKind {
+    if (lexeme.len < 2 or lexeme.len > 10) return null;
+    return switch (lexeme[0]) {
+        'a' => if (eq(lexeme, "await")) t.TOK_AWAIT else null,
+        'b' => if (eq(lexeme, "break")) t.TOK_BREAK else null,
+        'c' => if (eq(lexeme, "case")) t.TOK_CASE
+            else if (eq(lexeme, "catch")) t.TOK_CATCH
+            else if (eq(lexeme, "class")) t.TOK_CLASS
+            else if (eq(lexeme, "const")) t.TOK_CONST
+            else if (eq(lexeme, "continue")) t.TOK_CONTINUE
+            else null,
+        'd' => if (eq(lexeme, "debugger")) t.TOK_DEBUGGER
+            else if (eq(lexeme, "default")) t.TOK_DEFAULT
+            else if (eq(lexeme, "delete")) t.TOK_DELETE
+            else if (eq(lexeme, "do")) t.TOK_DO
+            else null,
+        'e' => if (eq(lexeme, "else")) t.TOK_ELSE
+            else if (eq(lexeme, "enum")) t.TOK_ENUM
+            else if (eq(lexeme, "export")) t.TOK_EXPORT
+            else if (eq(lexeme, "extends")) t.TOK_EXTENDS
+            else null,
+        'f' => if (eq(lexeme, "false")) t.TOK_FALSE
+            else if (eq(lexeme, "finally")) t.TOK_FINALLY
+            else if (eq(lexeme, "for")) t.TOK_FOR
+            else if (eq(lexeme, "function")) t.TOK_FUNCTION
+            else null,
+        'i' => if (eq(lexeme, "if")) t.TOK_IF
+            else if (eq(lexeme, "implements")) t.TOK_IMPLEMENTS
+            else if (eq(lexeme, "import")) t.TOK_IMPORT
+            else if (eq(lexeme, "in")) t.TOK_IN
+            else if (eq(lexeme, "instanceof")) t.TOK_INSTANCEOF
+            else if (eq(lexeme, "interface")) t.TOK_INTERFACE
+            else null,
+        'l' => if (eq(lexeme, "let")) t.TOK_LET else null,
+        'n' => if (eq(lexeme, "new")) t.TOK_NEW else if (eq(lexeme, "null")) t.TOK_NULL else null,
+        'o' => if (eq(lexeme, "of")) t.TOK_OF else null,
+        'p' => if (eq(lexeme, "package")) t.TOK_PACKAGE
+            else if (eq(lexeme, "private")) t.TOK_PRIVATE
+            else if (eq(lexeme, "protected")) t.TOK_PROTECTED
+            else if (eq(lexeme, "public")) t.TOK_PUBLIC
+            else null,
+        'r' => if (eq(lexeme, "return")) t.TOK_RETURN else null,
+        's' => if (eq(lexeme, "static")) t.TOK_STATIC
+            else if (eq(lexeme, "super")) t.TOK_SUPER
+            else if (eq(lexeme, "switch")) t.TOK_SWITCH
+            else null,
+        't' => if (eq(lexeme, "this")) t.TOK_THIS
+            else if (eq(lexeme, "throw")) t.TOK_THROW
+            else if (eq(lexeme, "true")) t.TOK_TRUE
+            else if (eq(lexeme, "try")) t.TOK_TRY
+            else if (eq(lexeme, "typeof")) t.TOK_TYPEOF
+            else null,
+        'v' => if (eq(lexeme, "var")) t.TOK_VAR else if (eq(lexeme, "void")) t.TOK_VOID else null,
+        'w' => if (eq(lexeme, "while")) t.TOK_WHILE else if (eq(lexeme, "with")) t.TOK_WITH else null,
+        'y' => if (eq(lexeme, "yield")) t.TOK_YIELD else null,
+        else => null,
+    };
+}
+
+inline fn eq(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+/// Returns true for keywords that are ReservedWord per spec; the rest
+/// (let, static, yield in non-strict, of) are contextual.
+fn isReservedKeyword(val: t.TokenKind, is_strict: bool) bool {
+    return switch (val) {
+        t.TOK_NULL, t.TOK_FALSE, t.TOK_TRUE, t.TOK_IF, t.TOK_ELSE, t.TOK_RETURN,
+        t.TOK_VAR, t.TOK_THIS, t.TOK_DELETE, t.TOK_VOID, t.TOK_TYPEOF, t.TOK_NEW,
+        t.TOK_IN, t.TOK_INSTANCEOF, t.TOK_DO, t.TOK_WHILE, t.TOK_FOR, t.TOK_BREAK,
+        t.TOK_CONTINUE, t.TOK_SWITCH, t.TOK_CASE, t.TOK_DEFAULT, t.TOK_THROW,
+        t.TOK_TRY, t.TOK_CATCH, t.TOK_FINALLY, t.TOK_FUNCTION, t.TOK_DEBUGGER,
+        t.TOK_WITH, t.TOK_CLASS, t.TOK_CONST, t.TOK_ENUM, t.TOK_EXPORT,
+        t.TOK_EXTENDS, t.TOK_IMPORT, t.TOK_SUPER => true,
+        // FutureReservedWord only in strict mode.
+        t.TOK_IMPLEMENTS, t.TOK_INTERFACE, t.TOK_LET, t.TOK_PACKAGE,
+        t.TOK_PRIVATE, t.TOK_PROTECTED, t.TOK_PUBLIC, t.TOK_STATIC,
+        t.TOK_YIELD => is_strict,
+        // Contextual.
+        t.TOK_AWAIT, t.TOK_OF => false,
+        else => false,
+    };
+}
+
+// memory module unused right now; kept for future eviction tests.
+comptime {
+    _ = memory;
+}

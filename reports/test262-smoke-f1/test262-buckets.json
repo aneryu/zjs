@@ -1,0 +1,13 @@
+{
+  "total_failed": 36758,
+  "buckets": {
+    "SyntaxError": 22041,
+    "TypeError": 10363,
+    "Test262Error": 4286,
+    "RangeError": 1,
+    "ReferenceError": 0,
+    "UnhandledPromiseRejection": 0,
+    "Other": 59,
+    "Empty": 8
+  }
+}

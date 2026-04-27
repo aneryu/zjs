@@ -588,6 +588,16 @@ across single- and multi-thread modes; baseline snapshot is committed;
 
 ### F1 — Lexer completion
 
+**Status:** completed 2026-04-27. New `frontend/qjs_token.zig` and
+`frontend/qjs_lexer.zig` ship the QuickJS-aligned token API and
+lexer; the predefined-atom table was repaired to match
+`quickjs-atom.h` row-for-row (missing `import` inserted at id 35,
+all subsequent ids bumped by +1, `last_keyword`/`last_strict_keyword`
+re-pointed at `await`/`yield`). The new module coexists with the
+legacy `frontend/lexer.zig` until F11 deletes the QuickParser. See
+the parser-rewrite F1 row in `TRACKING.md` for validation numbers
+and the deferred `dump-quickjs-tokens` follow-up.
+
 **QuickJS reference:** `next_token` (`quickjs.c:~22500`),
 `js_parse_template_part` (`quickjs.c:21794`), `js_parse_string`
 (`quickjs.c:21862`), `js_parse_regexp` (`quickjs.c:22005`),

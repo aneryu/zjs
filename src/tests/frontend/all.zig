@@ -739,3 +739,6 @@ test "emitter writes opcode metadata and constants through Phase 4 structures" {
     try std.testing.expectEqual(engine.bytecode.emitter.known.return_undef, function_bc.code[5]);
     try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
 }
+
+// F1 — QuickJS-aligned lexer tests (separate file)
+comptime { _ = @import("qjs_lexer_test.zig"); }
