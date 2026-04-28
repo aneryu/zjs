@@ -10,3 +10,4 @@ pub const debug = @import("debug.zig");
 pub const emitter = @import("emitter.zig");
 
 pub const Bytecode = function.Bytecode;
+pub const OpcodeFormat = function.OpcodeFormat;

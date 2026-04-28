@@ -1,6 +1,7 @@
 pub const subsystem_name = "exec";
 
 pub const vm = @import("vm.zig");
+pub const qjs_vm = @import("qjs_vm.zig");
 pub const frame = @import("frame.zig");
 pub const stack = @import("stack.zig");
 pub const call = @import("call.zig");

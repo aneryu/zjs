@@ -3,6 +3,10 @@ const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
 
+comptime {
+    _ = @import("qjs_vm_test.zig");
+}
+
 fn makeFunction(rt: *core.Runtime, code: []const u8) !engine.bytecode.Bytecode {
     const name = try rt.internAtom("exec");
     defer rt.atoms.free(name);

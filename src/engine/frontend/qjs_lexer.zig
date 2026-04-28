@@ -80,6 +80,11 @@ pub const Lexer = struct {
         }
     }
 
+    /// Return whether a line terminator was seen before the most recent token.
+    pub fn gotLineTerminator(self: *Lexer) bool {
+        return self.got_lf;
+    }
+
     /// Produce the next token. Returns `TOK_EOF` at end of input.
     pub fn next(self: *Lexer) Error!t.Token {
         try self.skipTrivia();
@@ -334,6 +339,16 @@ pub const Lexer = struct {
         // it's not a keyword (per spec).
         if (!has_escape) {
             if (keywordLookup(lexeme)) |val| {
+                // TOK_ASYNC is a contextual keyword, not a reserved keyword
+                // Treat it as an identifier for now
+                if (val == t.TOK_ASYNC) {
+                    const a = try self.atoms.internString(lexeme);
+                    return self.emit(t.TOK_IDENT, .{ .ident = .{
+                        .atom = a,
+                        .has_escape = false,
+                        .is_reserved = false,
+                    } });
+                }
                 const ka = t.keywordAtom(val);
                 return self.emit(val, .{ .ident = .{
                     .atom = ka,
@@ -1131,7 +1146,7 @@ fn parseNumber(lexeme: []const u8, base: u8) !f64 {
 fn keywordLookup(lexeme: []const u8) ?t.TokenKind {
     if (lexeme.len < 2 or lexeme.len > 10) return null;
     return switch (lexeme[0]) {
-        'a' => if (eq(lexeme, "await")) t.TOK_AWAIT else null,
+        'a' => if (eq(lexeme, "async")) t.TOK_ASYNC else if (eq(lexeme, "await")) t.TOK_AWAIT else null,
         'b' => if (eq(lexeme, "break")) t.TOK_BREAK else null,
         'c' => if (eq(lexeme, "case")) t.TOK_CASE
             else if (eq(lexeme, "catch")) t.TOK_CATCH

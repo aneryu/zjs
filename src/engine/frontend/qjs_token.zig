@@ -121,6 +121,7 @@ pub const TOK_STATIC: TokenKind = -42;
 pub const TOK_YIELD: TokenKind = -41;
 pub const TOK_AWAIT: TokenKind = -40;
 pub const TOK_OF: TokenKind = -39;
+pub const TOK_ASYNC: TokenKind = -38;
 
 pub const TOK_FIRST_KEYWORD: TokenKind = TOK_NULL;
 pub const TOK_LAST_KEYWORD: TokenKind = TOK_AWAIT;

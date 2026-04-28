@@ -56,6 +56,67 @@ pub const ParseFlags = packed struct(u32) {
     pub const default = ParseFlags{ .in_accepted = true };
 };
 
+/// Mirror `quickjs.c:21352` — BlockEnv for break/continue/finally tracking.
+pub const BlockEnv = struct {
+    prev: ?*BlockEnv,
+    label_name: Atom,
+    label_break: i32,
+    label_cont: i32,
+    drop_count: i32,
+    label_finally: i32,
+    scope_level: i32,
+    has_iterator: bool,
+    is_regular_stmt: bool,
+};
+
+/// Declaration mask for `parseStatementOrDecl`. Mirrors QuickJS `DECL_MASK_*`.
+pub const DeclMask = packed struct(u32) {
+    func: bool = false,
+    func_with_label: bool = false,
+    other: bool = false,
+    _padding: u29 = 0,
+};
+
+/// Function kind for F6. Mirrors QuickJS `JSFunctionKindEnum`.
+pub const FunctionKind = enum {
+    normal,
+    generator,
+    async,
+    async_generator,
+};
+
+/// Parse function kind for F6. Mirrors QuickJS `JSParseFunctionEnum`.
+pub const ParseFunctionKind = enum {
+    normal,
+    generator,
+    async,
+    async_generator,
+    arrow,
+    method,
+    get,
+    set,
+    class_constructor,
+    derived_class_constructor,
+    class_static_block,
+};
+
+/// Class element kind for F7. Mirrors QuickJS class element types.
+pub const ClassElementKind = enum {
+    field,
+    method,
+    getter,
+    setter,
+    static_field,
+    static_method,
+    static_getter,
+    static_setter,
+    private_field,
+    private_method,
+    private_getter,
+    private_setter,
+    static_block,
+};
+
 /// Minimal `JSParseState` analogue for F4 expression-level work. F5/F6
 /// expand this with `cur_func`, scope chain, label tracking, etc.
 pub const ParseState = struct {
@@ -64,8 +125,31 @@ pub const ParseState = struct {
     /// One-token lookahead. The lexer is the source of truth; we cache
     /// the most recently produced token here so the parser can `peek`.
     token: tok.Token,
+    /// Block environment stack for break/continue/finally tracking.
+    top_break: ?*BlockEnv = null,
+    /// Current scope level (for lexical declarations).
+    scope_level: i32 = 0,
+    /// Whether we're in strict mode.
+    is_strict: bool = false,
+    /// Whether we're in an eval context.
+    is_eval: bool = false,
+    /// Whether we're inside a class body (F7).
+    in_class: bool = false,
+    /// Whether the current class has an extends clause (F7).
+    class_has_extends: bool = false,
+    /// Whether we're in a static class element context (F7).
+    is_static: bool = false,
+    /// Whether we're in a constructor (F7).
+    in_constructor: bool = false,
+    /// Whether the last primary expression was super (F7).
+    last_was_super: bool = false,
+    /// Whether we're in a generator function (F9).
+    in_generator: bool = false,
 
     pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!ParseState {
+        // Mark bytecode as QuickJS-aligned format for dual-dispatch VM.
+        // See PARSER_REWRITE_PLAN.md §F2+F3 and bytecode/function.zig `OpcodeFormat`.
+        function.opcode_format = .qjs;
         var state = ParseState{
             .lex = lex,
             .function = function,
@@ -91,6 +175,63 @@ pub const ParseState = struct {
 
     fn isPunct(self: ParseState, ch: u8) bool {
         return self.token.val == @as(tok.TokenKind, @intCast(ch));
+    }
+
+    /// Check if we got a line terminator before the current token (for ASI).
+    fn gotLineTerminator(self: ParseState) bool {
+        return self.lex.gotLineTerminator();
+    }
+
+    // ---- label management ----
+    //
+    // F5/F6/F7 statement parsing uses direct `emitForwardJump` /
+    // `emitBackwardJump` / `patchForwardJump` to wire control flow.
+    // F10's resolve_labels pipeline will introduce proper LabelSlot
+    // tables (mirroring `quickjs.c:21338..21412`) to support labelled
+    // break/continue, finally pop counts, and iterator-close on break.
+    // The `BlockEnv` chain on this struct is reserved for that pipeline.
+
+    /// Expect a semicolon, applying ASI rules. Returns true if a semicolon
+    /// was present or inserted via ASI.
+    fn expectSemicolon(s: *ParseState) Error!bool {
+        if (s.isPunct(';')) {
+            try s.advance();
+            return true;
+        }
+        // ASI: if we have a line terminator or are at EOF or closing brace,
+        // insert a semicolon automatically.
+        if (s.gotLineTerminator() or s.peekKind() == tok.TOK_EOF or s.isPunct('}')) {
+            return true;
+        }
+        return Error.UnexpectedToken;
+    }
+
+    /// Expect a specific token kind.
+    fn expectToken(s: *ParseState, kind: tok.TokenKind) Error!void {
+        if (s.peekKind() != kind) return Error.UnexpectedToken;
+        try s.advance();
+    }
+
+    /// Check if the for loop head is for-in or for-of by looking ahead
+    /// for `for (var x in expr)` or `for (var x of expr)`
+    fn checkForInOfHead(s: *ParseState) bool {
+        // Save current token position
+        const saved_token = s.token;
+        defer s.token = saved_token;
+
+        // Skip var/let/const if present
+        if (s.peekKind() == tok.TOK_VAR or s.peekKind() == tok.TOK_LET or s.peekKind() == tok.TOK_CONST) {
+            _ = s.lex.next() catch return false;
+        }
+
+        // Skip identifier
+        if (s.peekKind() == tok.TOK_IDENT) {
+            _ = s.lex.next() catch return false;
+        }
+
+        // Check if next token is 'in' or 'of'
+        const next_kind = s.peekKind();
+        return next_kind == tok.TOK_IN or next_kind == tok.TOK_OF;
     }
 
     // ---- emit primitives -------------------------------------------------
@@ -188,6 +329,99 @@ pub const ParseState = struct {
         self.function.atom_operands = next;
     }
 };
+
+/// Check if `<ident> =>` is the arrow function head shape.
+/// Saves and restores lexer position so the cached token stays valid.
+fn checkIdentArrowHead(s: *ParseState) bool {
+    const saved_pos = s.lex.pos;
+    const saved_line = s.lex.line;
+    const saved_col = s.lex.col;
+    const saved_mark_pos = s.lex.mark_pos;
+    const saved_mark_line = s.lex.mark_line;
+    const saved_mark_col = s.lex.mark_col;
+    const peek_token = s.lex.next() catch return false;
+    defer {
+        s.lex.freeToken(@constCast(&peek_token));
+        s.lex.pos = saved_pos;
+        s.lex.line = saved_line;
+        s.lex.col = saved_col;
+        s.lex.mark_pos = saved_mark_pos;
+        s.lex.mark_line = saved_mark_line;
+        s.lex.mark_col = saved_mark_col;
+    }
+    return peek_token.val == tok.TOK_ARROW;
+}
+
+/// Check if we're at an arrow function head
+/// Mirrors `js_parse_skip_parens_token` in quickjs.c:24194.
+///
+/// Saves the lexer position and current token, performs lookahead by
+/// repeatedly advancing through tokens, then restores both on return.
+/// Each scan step both updates `s.token` (so peekKind reflects the
+/// lookahead) and frees the consumed token's payload to avoid leaks.
+fn checkArrowHead(s: *ParseState) bool {
+    // Save lexer position and the cached one-token lookahead.
+    const saved_pos = s.lex.pos;
+    const saved_line = s.lex.line;
+    const saved_col = s.lex.col;
+    const saved_mark_pos = s.lex.mark_pos;
+    const saved_mark_line = s.lex.mark_line;
+    const saved_mark_col = s.lex.mark_col;
+    const saved_token = s.token;
+
+    // Restore lexer + token state on every exit path. The intermediate
+    // scratch tokens we advance through get freed during the scan.
+    var success = false;
+    defer {
+        // Free the final scratch token (if any) before restoring.
+        if (!success) {
+            s.lex.freeToken(&s.token);
+        } else {
+            s.lex.freeToken(&s.token);
+        }
+        s.lex.pos = saved_pos;
+        s.lex.line = saved_line;
+        s.lex.col = saved_col;
+        s.lex.mark_pos = saved_mark_pos;
+        s.lex.mark_line = saved_mark_line;
+        s.lex.mark_col = saved_mark_col;
+        s.token = saved_token;
+    }
+
+    // Helper: advance s.token to the next token. Frees the consumed
+    // token's payload. Returns false on lex error.
+    const advanceLocal = struct {
+        fn call(state: *ParseState) bool {
+            const next = state.lex.next() catch return false;
+            state.lex.freeToken(&state.token);
+            state.token = next;
+            return true;
+        }
+    }.call;
+
+    // Check for ( ... ) => or ident =>
+    if (s.peekKind() == '(') {
+        if (!advanceLocal(s)) return false; // consume the '('
+        var depth: i32 = 1;
+        while (depth > 0) {
+            const k = s.peekKind();
+            if (k == tok.TOK_EOF) return false;
+            if (k == '(') depth += 1;
+            if (k == ')') depth -= 1;
+            if (depth == 0) break;
+            if (!advanceLocal(s)) return false;
+        }
+        if (!advanceLocal(s)) return false; // consume the ')'
+    } else if (s.peekKind() == tok.TOK_IDENT) {
+        if (!advanceLocal(s)) return false;
+    } else {
+        return false;
+    }
+
+    // Check for =>
+    success = s.peekKind() == tok.TOK_ARROW;
+    return success;
+}
 
 // =====================================================================
 // Expression parser entry points (mirror QuickJS function names).
@@ -552,6 +786,38 @@ pub fn parseUnary(s: *ParseState, flags: ParseFlags) Error!void {
         try emitPutLValueKeepTop(s, shape);
         return;
     }
+    // F9: Handle yield expressions in generator functions
+    if (k == tok.TOK_YIELD) {
+        if (!s.in_generator) {
+            // TODO: F9 proper error reporting for yield outside generator
+            // For now, just parse it as an identifier
+        }
+        try s.advance();
+        // Check for yield*
+        const is_yield_star = s.peekKind() == '*';
+        if (is_yield_star) {
+            try s.advance();
+            // Parse the expression after yield*
+            // TODO: F9 proper yield* semantics - for now, parse and drop
+            try parseAssignExpr(s);
+            try s.emitOp(opcode.op.yield_star);
+        } else {
+            // Check if there's an expression after yield
+            // yield without an expression is equivalent to yield undefined
+            if (s.peekKind() == @as(tok.TokenKind, @intCast(';')) or
+                s.peekKind() == @as(tok.TokenKind, @intCast('}')) or
+                s.peekKind() == @as(tok.TokenKind, @intCast(')')) or
+                s.peekKind() == tok.TOK_EOF) {
+                // yield without expression
+                try s.emitOp(opcode.op.@"undefined");
+            } else {
+                // yield with expression
+                try parseAssignExpr(s);
+            }
+            try s.emitOp(opcode.op.yield);
+        }
+        return;
+    }
     try parsePostfixExpr(s, flags);
     // PF_POW_ALLOWED: `a ** b` is right-associative and only allowed
     // when no unary prefix was consumed.
@@ -668,6 +934,7 @@ pub fn parseLhsExpr(s: *ParseState, flags: ParseFlags) Error!void {
     } else {
         try parsePrimary(s, flags);
     }
+    const was_super = s.last_was_super;
     var chain_buf: [16]usize = undefined;
     var chain_count: usize = 0;
     try parseMemberChain(s, flags, &chain_buf, &chain_count);
@@ -678,6 +945,22 @@ pub fn parseLhsExpr(s: *ParseState, flags: ParseFlags) Error!void {
         for (chain_buf[0..chain_count]) |offset| {
             std.mem.writeInt(u32, s.function.code[offset..][0..4], chain_end, .little);
         }
+    }
+    // F7: Handle super() constructor calls after member chain
+    if (was_super and chain_count == 0 and s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
+        // This is a direct super() call (not super.prop())
+        // TODO: F7 proper super() constructor call semantics
+        // For now, emit as a regular call as placeholder
+        const shape = try parseCallArgs(s, flags);
+        switch (shape) {
+            .direct => |argc| try s.emitOpU16(opcode.op.call, argc),
+            .applied => {
+                try s.emitOp(opcode.op.@"undefined");
+                try s.emitOp(opcode.op.swap);
+                try s.emitOpU16(opcode.op.apply, 0);
+            },
+        }
+        s.last_was_super = false;
     }
 }
 
@@ -719,8 +1002,18 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
             // If a call follows, use get_field2 to keep `obj` on the stack
             // so we can lower as `obj func args... call_method`. Otherwise
             // a plain get_field is sufficient.
+            // F7: if base was super, use get_super_value for property access.
+            // Note: get_super_value2 doesn't exist in QuickJS, so super method
+            // calls temporarily use get_field2 as a placeholder.
+            const was_super = s.last_was_super;
+            s.last_was_super = false;
             if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
-                try s.emitOpAtom(opcode.op.get_field2, name);
+                if (was_super) {
+                    // TODO: F7 proper super method call - QuickJS uses different opcodes
+                    try s.emitOpAtom(opcode.op.get_field2, name);
+                } else {
+                    try s.emitOpAtom(opcode.op.get_field2, name);
+                }
                 const shape = try parseCallArgs(s, flags);
                 switch (shape) {
                     .direct => |argc| try s.emitOpU16(opcode.op.call_method, argc),
@@ -732,7 +1025,11 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                     },
                 }
             } else {
-                try s.emitOpAtom(opcode.op.get_field, name);
+                if (was_super) {
+                    try s.emitOpAtom(opcode.op.get_super_value, name);
+                } else {
+                    try s.emitOpAtom(opcode.op.get_field, name);
+                }
             }
         } else if (k == tok.TOK_QUESTION_MARK_DOT) {
             // Optional-chain access: `obj?.x` / `obj?.[k]` / `obj?.()`.
@@ -1032,14 +1329,37 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
         tok.TOK_THIS => {
             try s.emitOp(opcode.op.push_this);
             try s.advance();
+            s.last_was_super = false;
+        },
+        tok.TOK_SUPER => {
+            // F7: emit get_super as placeholder. Full super semantics
+            // require class system integration and constructor context tracking.
+            try s.emitOp(opcode.op.get_super);
+            try s.advance();
+            s.last_was_super = true;
+        },
+        tok.TOK_CLASS => {
+            // Class expression
+            try parseClass(s, false);
         },
         tok.TOK_IDENT => {
+            // Check if this is an arrow function: ident =>
+            // Use proper lexer state save/restore for the lookahead so we
+            // don't desynchronize the lexer position from the cached token.
+            if (checkIdentArrowHead(s)) {
+                return parseArrowFunction(s);
+            }
             const ident = s.token.payload.ident.atom;
             try s.emitOpAtom(opcode.op.get_var, ident);
             try s.advance();
+            s.last_was_super = false;
         },
         else => {
             if (k == @as(tok.TokenKind, @intCast('('))) {
+                // Check if this is an arrow function
+                if (checkArrowHead(s)) {
+                    return parseArrowFunction(s);
+                }
                 try s.advance();
                 try parseExpr2(s, flags);
                 try expectPunct(s, ')');
@@ -1347,8 +1667,902 @@ fn emitForwardJump(s: *ParseState, op_id: u8) Error!usize {
     return operand_offset;
 }
 
+/// Emit a jump opcode whose target is already known (for backward jumps,
+/// e.g. while-loop continue or for-loop back edge). F10's resolve_labels
+/// will lower these to relative `goto8`/`goto16` once the pipeline lands.
+fn emitBackwardJump(s: *ParseState, op_id: u8, target: u32) Error!void {
+    var bytes: [5]u8 = undefined;
+    bytes[0] = op_id;
+    std.mem.writeInt(u32, bytes[1..5], target, .little);
+    try s.appendBytes(&bytes);
+}
+
+// =====================================================================
+// Statement parsing (F5)
+// =====================================================================
+
+/// Mirror `js_parse_block` (`quickjs.c:27827`).
+pub fn parseBlock(s: *ParseState) Error!void {
+    try s.expectToken('{');
+    // Check for directive prologue (simplified)
+    try parseDirectives(s);
+    while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+        try parseStatementOrDecl(s, DeclMask{ .other = true });
+    }
+    try s.expectToken('}');
+}
+
+/// Mirror `js_parse_directives` (`quickjs.c:35642`) - simplified version.
+/// Full directive handling deferred to F6/F10.
+fn parseDirectives(s: *ParseState) Error!void {
+    // TODO: Full directive prologue handling in F6/F10
+    // For now, just skip string literals at the start of a block
+    // and check for "use strict"
+    while (s.peekKind() == tok.TOK_STRING) {
+        const str_payload = s.token.payload.str;
+        // Check if this is "use strict"
+        if (str_payload.bytes.len == 10 and
+            std.mem.eql(u8, str_payload.bytes, "use strict")) {
+            s.is_strict = true;
+        }
+        try s.advance();
+        // Check for semicolon or ASI
+        if (s.isPunct(';')) {
+            try s.advance();
+        } else if (!s.gotLineTerminator() and
+                   s.peekKind() != '}' and
+                   s.peekKind() != tok.TOK_EOF) {
+            // Not a directive, break
+            break;
+        }
+    }
+}
+
+/// Mirror `js_parse_statement_or_decl` (`quickjs.c:28228`).
+pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
+    const tok_kind = s.peekKind();
+
+    switch (tok_kind) {
+        '{' => try parseBlock(s),
+        tok.TOK_RETURN => {
+            if (s.is_eval) return Error.UnexpectedToken;
+            try s.advance();
+            if (s.peekKind() != ';' and s.peekKind() != '}' and !s.gotLineTerminator()) {
+                try parseExpr(s);
+                try s.emitOp(opcode.op.@"return");
+            } else {
+                try s.emitOp(opcode.op.return_undef);
+            }
+            _ = try s.expectSemicolon();
+        },
+        tok.TOK_THROW => {
+            try s.advance();
+            if (s.gotLineTerminator()) return Error.UnexpectedToken;
+            try parseExpr(s);
+            try s.emitOp(opcode.op.throw);
+            _ = try s.expectSemicolon();
+        },
+        tok.TOK_VAR, tok.TOK_LET, tok.TOK_CONST => {
+            if (!decl_mask.other and (tok_kind == tok.TOK_LET or tok_kind == tok.TOK_CONST)) {
+                return Error.UnexpectedToken;
+            }
+            const var_tok = tok_kind;
+            try s.advance();
+            try parseVar(s, var_tok);
+            _ = try s.expectSemicolon();
+        },
+        tok.TOK_FUNCTION => {
+            if (!decl_mask.func and !decl_mask.func_with_label) {
+                return Error.UnexpectedToken;
+            }
+            try parseFunctionDecl(s, .normal);
+        },
+        tok.TOK_CLASS => {
+            if (!decl_mask.func) {
+                return Error.UnexpectedToken;
+            }
+            try parseClass(s, true);
+        },
+        tok.TOK_IMPORT => {
+            if (!decl_mask.other) {
+                return Error.UnexpectedToken;
+            }
+            // TODO: Implement full import parsing in F8
+            // For now, just skip the import statement
+            try s.advance();
+            while (s.peekKind() != tok.TOK_EOF and s.peekKind() != ';') {
+                try s.advance();
+            }
+            if (s.peekKind() == ';') try s.advance();
+        },
+        tok.TOK_EXPORT => {
+            if (!decl_mask.other) {
+                return Error.UnexpectedToken;
+            }
+            // TODO: Implement full export parsing in F8
+            // For now, just skip the export statement as a placeholder
+            try s.advance();
+            // Check for export default
+            if (s.peekKind() == tok.TOK_DEFAULT) {
+                try s.advance();
+                // Skip the default expression until semicolon
+                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != ';') {
+                    try s.advance();
+                }
+            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
+                // export { ... }
+                try s.advance();
+                // Skip until closing brace
+                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != '}') {
+                    try s.advance();
+                }
+                if (s.peekKind() == '}') try s.advance();
+            } else {
+                // Skip the rest of the export statement (export const, export function, etc.)
+                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != ';') {
+                    try s.advance();
+                }
+            }
+            if (s.peekKind() == ';') try s.advance();
+        },
+        tok.TOK_IF => {
+            try s.advance();
+            try s.expectToken('(');
+            try parseExpr(s);
+            try s.expectToken(')');
+            const if_false_off = try emitForwardJump(s, opcode.op.if_false);
+            try parseStatementOrDecl(s, DeclMask{});
+            if (s.peekKind() == tok.TOK_ELSE) {
+                try s.advance();
+                const else_goto_off = try emitForwardJump(s, opcode.op.goto);
+                // Patch if_false to land at the start of the else block.
+                try patchForwardJump(s, if_false_off);
+                try parseStatementOrDecl(s, DeclMask{});
+                // Patch the goto-over-else to land after the else block.
+                try patchForwardJump(s, else_goto_off);
+            } else {
+                // No else: patch if_false to land just past the then block.
+                try patchForwardJump(s, if_false_off);
+            }
+        },
+        tok.TOK_WHILE => {
+            try s.advance();
+            try s.expectToken('(');
+            // Loop top: condition is evaluated each iteration.
+            const top_pc: u32 = @intCast(s.function.code.len);
+            try parseExpr(s);
+            const exit_off = try emitForwardJump(s, opcode.op.if_false);
+            try s.expectToken(')');
+            // TODO: F10 push BlockEnv so labelled break/continue can target this loop.
+            try parseStatementOrDecl(s, DeclMask{});
+            // Back-edge to the top to re-test the condition.
+            try emitBackwardJump(s, opcode.op.goto, top_pc);
+            // Patch the if_false exit to land here.
+            try patchForwardJump(s, exit_off);
+        },
+        tok.TOK_DO => {
+            try s.advance();
+            // Body starts at this pc; if_true at the bottom branches back here.
+            const body_pc: u32 = @intCast(s.function.code.len);
+            // TODO: F10 push BlockEnv so labelled break/continue can target this loop.
+            try parseStatementOrDecl(s, DeclMask{});
+            try s.expectToken(tok.TOK_WHILE);
+            try s.expectToken('(');
+            try parseExpr(s);
+            try s.expectToken(')');
+            // Back-edge: re-enter body when the test is truthy.
+            try emitBackwardJump(s, opcode.op.if_true, body_pc);
+            _ = try s.expectSemicolon();
+        },
+        tok.TOK_FOR => {
+            try s.advance();
+            try s.expectToken('(');
+
+            // Check if this is for-in or for-of
+            const is_for_in_of = s.checkForInOfHead();
+            if (is_for_in_of) {
+                try parseForInOf(s);
+            } else {
+                // C-style `for (init ; test ; update) body`. Lower as:
+                //   init
+                //   top: test ; if_false → end ; body ; update ; goto → top
+                //   end:
+                // This pattern keeps `continue` semantics consistent only
+                // when continue jumps to `update`; F10 will introduce a
+                // dedicated continue label for the labelled-break case.
+                if (s.peekKind() == tok.TOK_VAR or s.peekKind() == tok.TOK_LET or s.peekKind() == tok.TOK_CONST) {
+                    const var_tok = s.peekKind();
+                    try s.advance();
+                    try parseVar(s, var_tok);
+                    _ = try s.expectSemicolon();
+                } else if (s.peekKind() != ';') {
+                    try parseExpr(s);
+                    try s.emitOp(opcode.op.drop);
+                    _ = try s.expectSemicolon();
+                } else {
+                    try s.advance(); // consume ';'
+                }
+
+                // Top of the loop — re-tested each iteration.
+                const top_pc: u32 = @intCast(s.function.code.len);
+
+                // Test condition.
+                if (s.peekKind() != ';') {
+                    try parseExpr(s);
+                } else {
+                    try s.emitOp(opcode.op.push_true);
+                }
+                _ = try s.expectSemicolon();
+
+                const exit_off = try emitForwardJump(s, opcode.op.if_false);
+
+                // TODO: F10 push BlockEnv so labelled break/continue can target this loop.
+
+                // Body.
+                try parseStatementOrDecl(s, DeclMask{});
+
+                // Update (only run after a normal body completion; F10 will
+                // also route `continue` here).
+                if (s.peekKind() != ')') {
+                    try parseExpr(s);
+                    try s.emitOp(opcode.op.drop);
+                }
+                try s.expectToken(')');
+
+                // Back-edge to the top.
+                try emitBackwardJump(s, opcode.op.goto, top_pc);
+
+                // Patch the `if_false` exit to land here.
+                try patchForwardJump(s, exit_off);
+            }
+        },
+        tok.TOK_BREAK, tok.TOK_CONTINUE => {
+            // Syntactically accept `break;` / `continue;` (with optional
+            // label) so test262 parser-only fixtures don't reject them,
+            // but emit no jump yet — F10's resolve_labels pipeline owns
+            // the BlockEnv chain that knows the right break/continue
+            // target for the current loop / labelled statement / switch.
+            // Until then, attempting to *execute* a function whose body
+            // hits this site will simply fall through to the next opcode,
+            // which is observably wrong; that's why this site is gated
+            // behind the `partial` F5 status in TRACKING.md.
+            try s.advance();
+            if (!s.gotLineTerminator() and s.peekKind() == tok.TOK_IDENT) {
+                try s.advance(); // consume the label name
+            }
+            _ = try s.expectSemicolon();
+        },
+        tok.TOK_SWITCH => {
+            // Simplified switch lowering. Each case checks the discriminant,
+            // and a matched case runs its body then jumps to the end (i.e.
+            // an *implicit* break). C-style fallthrough between cases and
+            // labelled break are deferred to F10's resolve_labels pipeline,
+            // which has the per-case label tables to do this correctly.
+            try s.advance();
+            try s.expectToken('(');
+            try parseExpr(s); // discriminant on stack
+            try s.expectToken(')');
+            try s.expectToken('{');
+
+            // Up to 32 case bodies per switch — enough for typical code.
+            // F10 will replace this with a properly-sized label table.
+            var end_jumps: [32]usize = undefined;
+            var end_jumps_count: usize = 0;
+            var default_jump_off: ?usize = null;
+
+            while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+                if (s.peekKind() == tok.TOK_CASE) {
+                    try s.advance();
+                    // dup ; case_expr ; strict_eq ; if_false → next_case
+                    try s.emitOp(opcode.op.dup);
+                    try parseExpr(s);
+                    try s.expectToken(':');
+                    try s.emitOp(opcode.op.strict_eq);
+                    const next_case_off = try emitForwardJump(s, opcode.op.if_false);
+
+                    // Matched: drop the discriminant, run body, jump to end.
+                    try s.emitOp(opcode.op.drop);
+                    while (s.peekKind() != tok.TOK_CASE and
+                        s.peekKind() != tok.TOK_DEFAULT and
+                        s.peekKind() != '}' and
+                        s.peekKind() != tok.TOK_EOF)
+                    {
+                        try parseStatementOrDecl(s, DeclMask{});
+                    }
+                    if (end_jumps_count >= end_jumps.len) return Error.UnexpectedToken;
+                    end_jumps[end_jumps_count] = try emitForwardJump(s, opcode.op.goto);
+                    end_jumps_count += 1;
+
+                    // Unmatched path lands at the next case header.
+                    try patchForwardJump(s, next_case_off);
+                } else if (s.peekKind() == tok.TOK_DEFAULT) {
+                    if (default_jump_off != null) return Error.UnexpectedToken;
+                    try s.advance();
+                    try s.expectToken(':');
+
+                    // Skip past the default body when the discriminant didn't
+                    // match it (we still need to fall through to remaining
+                    // cases). The matched path falls into the body directly.
+                    const skip_default_off = try emitForwardJump(s, opcode.op.goto);
+
+                    // Default body label.
+                    default_jump_off = s.function.code.len;
+                    try s.emitOp(opcode.op.drop);
+                    while (s.peekKind() != tok.TOK_CASE and
+                        s.peekKind() != tok.TOK_DEFAULT and
+                        s.peekKind() != '}' and
+                        s.peekKind() != tok.TOK_EOF)
+                    {
+                        try parseStatementOrDecl(s, DeclMask{});
+                    }
+                    if (end_jumps_count >= end_jumps.len) return Error.UnexpectedToken;
+                    end_jumps[end_jumps_count] = try emitForwardJump(s, opcode.op.goto);
+                    end_jumps_count += 1;
+
+                    try patchForwardJump(s, skip_default_off);
+                } else {
+                    return Error.UnexpectedToken;
+                }
+            }
+            try s.expectToken('}');
+
+            // No case matched — jump to default if it exists, otherwise drop
+            // the discriminant and fall through to end. The default body
+            // already drops the discriminant on its matched path.
+            if (default_jump_off) |target| {
+                try emitBackwardJump(s, opcode.op.goto, @intCast(target));
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
+
+            // Patch every case-end goto to land here.
+            for (end_jumps[0..end_jumps_count]) |off| {
+                try patchForwardJump(s, off);
+            }
+        },
+        tok.TOK_TRY => {
+            try s.advance();
+            try parseBlock(s);
+            // TODO: Implement catch/finally
+            if (s.peekKind() == tok.TOK_CATCH) {
+                try s.advance();
+                try s.expectToken('(');
+                while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
+                    try s.advance();
+                }
+                try s.expectToken(')');
+                try parseBlock(s);
+            }
+            if (s.peekKind() == tok.TOK_FINALLY) {
+                try s.advance();
+                try parseBlock(s);
+            }
+        },
+        tok.TOK_DEBUGGER => {
+            try s.advance();
+            _ = try s.expectSemicolon();
+        },
+        ';' => {
+            // Empty statement
+            try s.advance();
+        },
+        else => {
+            // Expression statement
+            try parseExpr(s);
+            try s.emitOp(opcode.op.drop);
+            _ = try s.expectSemicolon();
+        },
+    }
+}
+
 fn patchForwardJump(s: *ParseState, operand_offset: usize) Error!void {
     if (operand_offset + 4 > s.function.code.len) return Error.UnexpectedToken;
     const target: u32 = @intCast(s.function.code.len);
     std.mem.writeInt(u32, s.function.code[operand_offset..][0..4], target, .little);
+}
+
+/// Mirror `js_parse_var` (`quickjs.c:27847`) - simplified version for F5.
+/// Full scope management and destructuring deferred to F6/F10.
+fn parseVar(s: *ParseState, var_tok: tok.TokenKind) Error!void {
+    while (true) {
+        if (s.peekKind() == tok.TOK_IDENT) {
+            // Simple identifier binding
+            const atom_id = s.token.payload.ident.atom;
+            try s.advance();
+
+            // TODO: Full variable definition in F6/F10
+            // For now, just emit a placeholder
+            _ = atom_id;
+
+            // Check for initializer
+            if (s.peekKind() == '=') {
+                try s.advance();
+                try parseExpr(s);
+                // TODO: Emit proper put_var opcode in F6/F10
+                try s.emitOp(opcode.op.drop);
+            } else {
+                // const requires initializer
+                if (var_tok == tok.TOK_CONST) {
+                    return Error.UnexpectedToken;
+                }
+                // let requires initialization to undefined
+                if (var_tok == tok.TOK_LET) {
+                    try s.emitOp(opcode.op.undefined);
+                    // TODO: Emit proper scope_put_var_init in F6/F10
+                    try s.emitOp(opcode.op.drop);
+                }
+            }
+        } else if (s.peekKind() == '[' or s.peekKind() == '{') {
+            // Destructuring - deferred to F6
+            return Error.UnexpectedToken;
+        } else {
+            return Error.UnexpectedToken;
+        }
+
+        // Check for comma (multiple declarations)
+        if (s.peekKind() != ',') break;
+        try s.advance();
+    }
+}
+
+/// Parse for-in or for-of loop
+/// Mirrors `js_parse_for_in_of` in quickjs.c:27991
+fn parseForInOf(s: *ParseState) Error!void {
+    // Parse left-hand side (var declaration or lvalue expression)
+    const var_tok = s.peekKind();
+    if (var_tok == tok.TOK_VAR or var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST) {
+        try s.advance();
+        try parseVar(s, var_tok);
+    } else {
+        // TODO: Parse lvalue expression for for-in/of
+        // For now, just parse as expression
+        try parseExpr(s);
+    }
+
+    // Parse 'in' or 'of'
+    const in_of_tok = s.peekKind();
+    if (in_of_tok != tok.TOK_IN and in_of_tok != tok.TOK_OF) {
+        return Error.UnexpectedToken;
+    }
+    try s.advance();
+
+    const is_for_of = in_of_tok == tok.TOK_OF;
+
+    // Parse the right-hand side expression (the iterable)
+    try parseExpr(s);
+    try s.expectToken(')');
+
+    // Initialize the iterator for the iterable on the stack.
+    if (is_for_of) {
+        try s.emitOp(opcode.op.for_of_start);
+    } else {
+        try s.emitOp(opcode.op.for_in_start);
+    }
+
+    // Top of the loop — fetch the next iteration's value.
+    const top_pc: u32 = @intCast(s.function.code.len);
+    if (is_for_of) {
+        try s.emitOp(opcode.op.for_of_next);
+    } else {
+        try s.emitOp(opcode.op.for_in_next);
+    }
+
+    // `for_*_next` pushes a `done` flag on top; exit when truthy.
+    // The new parser uses `if_false` here as a placeholder until F10 wires
+    // the proper `iterator_get_value_done` + label dance from QuickJS.
+    const exit_off = try emitForwardJump(s, opcode.op.if_false);
+
+    // TODO: F10 push BlockEnv so labelled break/continue can close the iterator.
+
+    try parseStatementOrDecl(s, DeclMask{});
+
+    // Back-edge to fetch the next value.
+    try emitBackwardJump(s, opcode.op.goto, top_pc);
+
+    // Loop exit lands here.
+    try patchForwardJump(s, exit_off);
+
+    // Close iterator.
+    try s.emitOp(opcode.op.iterator_close);
+}
+
+/// Parse function declaration
+/// Mirrors `js_parse_function_decl` in quickjs.c:36388
+fn parseFunctionDecl(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
+    try s.advance();
+
+    // Check for generator: function*
+    const is_generator = s.peekKind() == '*';
+    if (is_generator) {
+        try s.advance();
+    }
+
+    // Parse function name (required for declarations)
+    if (s.peekKind() != tok.TOK_IDENT) {
+        return Error.UnexpectedToken;
+    }
+    const name_atom = s.token.payload.ident.atom;
+    _ = name_atom; // TODO: Register function name in scope in F6/F10
+    try s.advance();
+
+    // Set generator flag for yield parsing
+    const was_generator = s.in_generator;
+    s.in_generator = is_generator;
+    defer s.in_generator = was_generator;
+
+    // TODO: F9 async functions - need to detect async keyword before function
+
+    try parseFunctionParamsAndBody(s, func_kind);
+}
+
+/// Parse function parameters and body
+/// Shared by function declarations, expressions, and methods
+fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
+    try s.expectToken('(');
+
+    // TODO: Parse parameters with defaults and destructuring in F6
+    // For now, just skip the parameter list
+    // Parse simple parameter list
+    var param_count: u32 = 0;
+    while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
+        if (s.peekKind() == tok.TOK_IDENT) {
+            // Simple parameter
+            const param_atom = s.token.payload.ident.atom;
+            _ = param_atom; // TODO: Register parameter in scope in F6/F10
+            try s.advance();
+            param_count += 1;
+
+            // Check for default value
+            if (s.peekKind() == '=') {
+                // TODO: Handle default values in F6
+                try s.advance();
+                try parseExpr(s);
+                try s.emitOp(opcode.op.drop);
+            }
+        } else if (s.peekKind() == '{') {
+            // Object destructuring parameter: {a, b}
+            try parseDestructuringObject(s);
+            param_count += 1;
+        } else if (s.peekKind() == '[') {
+            // Array destructuring parameter: [a, b]
+            try parseDestructuringArray(s);
+            param_count += 1;
+        } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
+            // Rest parameter
+            try s.advance();
+            if (s.peekKind() == tok.TOK_IDENT) {
+                const rest_atom = s.token.payload.ident.atom;
+                _ = rest_atom; // TODO: Register rest parameter in F6/F10
+                try s.advance();
+            }
+            break;
+        } else {
+            // TODO: Handle destructuring in F6
+            return Error.UnexpectedToken;
+        }
+
+        if (s.peekKind() == ',') {
+            try s.advance();
+        } else if (s.peekKind() != ')') {
+            return Error.UnexpectedToken;
+        }
+    }
+
+    try s.expectToken(')');
+
+    // Parse function body — parseBlock consumes its own opening '{'.
+    try parseBlock(s);
+
+    // TODO: Emit function prologue and epilogue in F6/F10
+    _ = func_kind;
+}
+
+/// Parse arrow function
+/// Mirrors arrow function parsing in quickjs.c
+fn parseArrowFunction(s: *ParseState) Error!void {
+    // TODO: Handle async arrow functions in F6 (needs TOK_ASYNC token)
+
+    // Parse parameters. Two valid head shapes:
+    //   `ident => ...`    — single bare identifier parameter
+    //   `(...) => ...`    — parenthesized parameter list
+    if (s.peekKind() == tok.TOK_IDENT) {
+        // Single bare identifier parameter.
+        try s.advance();
+    } else {
+        try s.expectToken('(');
+
+        // TODO: Parse parameters with defaults and destructuring in F6
+        // For now, just skip the parameter list
+        while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
+            if (s.peekKind() == tok.TOK_IDENT) {
+                try s.advance();
+            } else if (s.peekKind() == '{') {
+                // Object destructuring parameter
+                try parseDestructuringObject(s);
+            } else if (s.peekKind() == '[') {
+                // Array destructuring parameter
+                try parseDestructuringArray(s);
+            } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
+                try s.advance();
+                if (s.peekKind() == tok.TOK_IDENT) {
+                    try s.advance();
+                }
+                break;
+            } else {
+                // TODO: Handle destructuring in F6
+                return Error.UnexpectedToken;
+            }
+
+            if (s.peekKind() == ',') {
+                try s.advance();
+            } else if (s.peekKind() != ')') {
+                return Error.UnexpectedToken;
+            }
+        }
+
+        try s.expectToken(')');
+    }
+
+    // Expect =>
+    try s.expectToken(tok.TOK_ARROW);
+
+    // Parse body (can be block or expression).
+    // parseBlock consumes its own opening '{'.
+    if (s.peekKind() == '{') {
+        try parseBlock(s);
+    } else {
+        // Expression body
+        try parseExpr(s);
+        try s.emitOp(opcode.op.@"return");
+    }
+}
+
+/// Parse object destructuring pattern
+/// Mirrors object destructuring in quickjs.c
+fn parseDestructuringObject(s: *ParseState) Error!void {
+    try s.expectToken('{');
+
+    while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+        if (s.peekKind() == tok.TOK_IDENT) {
+            const prop_atom = s.token.payload.ident.atom;
+            _ = prop_atom; // TODO: Register destructured property in scope in F6/F10
+            try s.advance();
+
+            // Check for renaming: {a: b}
+            if (s.peekKind() == ':') {
+                try s.advance();
+                if (s.peekKind() == tok.TOK_IDENT) {
+                    const target_atom = s.token.payload.ident.atom;
+                    _ = target_atom; // TODO: Register target in scope in F6/F10
+                    try s.advance();
+                } else {
+                    return Error.UnexpectedToken;
+                }
+            }
+
+            // Check for default value
+            if (s.peekKind() == '=') {
+                try s.advance();
+                try parseExpr(s);
+                try s.emitOp(opcode.op.drop);
+            }
+        } else {
+            return Error.UnexpectedToken;
+        }
+
+        if (s.peekKind() == ',') {
+            try s.advance();
+        } else if (s.peekKind() != '}') {
+            return Error.UnexpectedToken;
+        }
+    }
+
+    try s.expectToken('}');
+}
+
+/// Parse array destructuring pattern
+/// Mirrors array destructuring in quickjs.c
+fn parseDestructuringArray(s: *ParseState) Error!void {
+    try s.expectToken('[');
+
+    while (s.peekKind() != ']' and s.peekKind() != tok.TOK_EOF) {
+        if (s.peekKind() == tok.TOK_IDENT) {
+            const elem_atom = s.token.payload.ident.atom;
+            _ = elem_atom; // TODO: Register destructured element in scope in F6/F10
+            try s.advance();
+
+            // Check for default value
+            if (s.peekKind() == '=') {
+                try s.advance();
+                try parseExpr(s);
+                try s.emitOp(opcode.op.drop);
+            }
+        } else if (s.peekKind() == tok.TOK_ELLIPSIS) {
+            // Rest element: [...rest]
+            try s.advance();
+            if (s.peekKind() == tok.TOK_IDENT) {
+                const rest_atom = s.token.payload.ident.atom;
+                _ = rest_atom; // TODO: Register rest element in scope in F6/F10
+                try s.advance();
+            } else {
+                return Error.UnexpectedToken;
+            }
+            break; // Rest element must be last
+        } else {
+            // Skip empty slots in array destructuring
+            try s.advance();
+        }
+
+        if (s.peekKind() == ',') {
+            try s.advance();
+        } else if (s.peekKind() != ']') {
+            return Error.UnexpectedToken;
+        }
+    }
+
+    try s.expectToken(']');
+}
+
+// ---- F7 Class parsing -------------------------------------------------
+
+/// Parse class heritage (extends clause)
+/// Mirrors `js_parse_class_extends` in quickjs.c
+fn parseClassHeritage(s: *ParseState) Error!void {
+    if (s.peekKind() == tok.TOK_EXTENDS) {
+        try s.advance();
+        // Parse the parent class expression
+        try parseExpr(s);
+    }
+}
+
+/// Parse a single class element
+/// Mirrors class element parsing in quickjs.c
+fn parseClassElement(s: *ParseState) Error!void {
+    const saved_static = s.is_static;
+    const saved_in_constructor = s.in_constructor;
+
+    // Check for static modifier
+    if (s.peekKind() == tok.TOK_STATIC) {
+        s.is_static = true;
+        try s.advance();
+    }
+
+    // Check for private field (#x)
+    if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
+        // TODO: Implement private field parsing in F7
+        try s.advance();
+        if (s.peekKind() == '(') {
+            // Private method
+            // TODO: Parse method parameters and body
+            try parseFunctionParamsAndBody(s, .normal);
+        } else if (s.peekKind() == '=') {
+            // Private field with initializer
+            try s.advance();
+            try parseExpr(s);
+            try s.emitOp(opcode.op.drop);
+        }
+        // Optional semicolon after private field
+        if (s.peekKind() == ';') try s.advance();
+        s.is_static = saved_static;
+        s.in_constructor = saved_in_constructor;
+        return;
+    }
+
+    // Check for method or field
+    // TODO: Handle getter/setter in F7 (they are identifiers, not special tokens)
+    if (s.peekKind() == tok.TOK_IDENT) {
+        const prop_atom = s.token.payload.ident.atom;
+        const is_constructor = !s.is_static and prop_atom == atom_module.ids.constructor;
+        // get and set atoms are at IDs 66 and 67 in the predefined atoms table
+        const is_getter = prop_atom == 66;
+        const is_setter = prop_atom == 67;
+        try s.advance();
+
+        // Handle getter/setter: get prop() {} or set prop(val) {}
+        if (is_getter or is_setter) {
+            if (s.peekKind() != tok.TOK_IDENT) {
+                return Error.UnexpectedToken;
+            }
+            const method_name_atom = s.token.payload.ident.atom;
+            _ = method_name_atom; // TODO: Register property name
+            try s.advance();
+
+            if (s.peekKind() != '(') {
+                return Error.UnexpectedToken;
+            }
+            // TODO: Parse parameters with proper function kind for getter/setter
+            try parseFunctionParamsAndBody(s, .normal);
+            // Optional ASI semicolon after method
+            if (s.peekKind() == ';') try s.advance();
+            s.is_static = saved_static;
+            s.in_constructor = saved_in_constructor;
+            return;
+        }
+
+        if (s.peekKind() == '(') {
+            // Method or constructor
+            if (is_constructor) {
+                s.in_constructor = true;
+            }
+            // TODO: Parse parameters with proper function kind for constructor
+            try parseFunctionParamsAndBody(s, .normal);
+            if (is_constructor) {
+                s.in_constructor = saved_in_constructor;
+            }
+            // Optional ASI semicolon after method
+            if (s.peekKind() == ';') try s.advance();
+        } else if (s.peekKind() == '=') {
+            // Field with initializer
+            try s.advance();
+            try parseExpr(s);
+            try s.emitOp(opcode.op.drop);
+            // Optional ASI semicolon
+            if (s.peekKind() == ';') try s.advance();
+        } else if (s.peekKind() == ';') {
+            // Field without initializer, with semicolon
+            try s.advance();
+        }
+        // Else: field without initializer (no semicolon)
+    } else if (s.peekKind() == '{') {
+        // Static block — parseBlock consumes its own opening '{'.
+        if (!s.is_static) {
+            return Error.UnexpectedToken;
+        }
+        try parseBlock(s);
+    } else {
+        return Error.UnexpectedToken;
+    }
+
+    s.is_static = saved_static;
+    s.in_constructor = saved_in_constructor;
+}
+
+/// Parse class body
+/// Mirrors `js_parse_class_body` in quickjs.c
+fn parseClassBody(s: *ParseState) Error!void {
+    try s.expectToken('{');
+
+    while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+        try parseClassElement(s);
+    }
+
+    try s.expectToken('}');
+}
+
+/// Parse class declaration or expression
+/// Mirrors `js_parse_class` in quickjs.c:24667
+fn parseClass(s: *ParseState, is_decl: bool) Error!void {
+    try s.expectToken(tok.TOK_CLASS);
+
+    // Parse class name (required for declarations, optional for expressions)
+    if (is_decl) {
+        if (s.peekKind() != tok.TOK_IDENT) {
+            return Error.UnexpectedToken;
+        }
+        const name_atom = s.token.payload.ident.atom;
+        _ = name_atom; // TODO: Register class name in scope in F6/F10
+        try s.advance();
+    } else {
+        if (s.peekKind() == tok.TOK_IDENT) {
+            const name_atom = s.token.payload.ident.atom;
+            _ = name_atom; // TODO: Register class name in scope in F6/F10
+            try s.advance();
+        }
+    }
+
+    // Parse heritage (extends clause)
+    const saved_has_extends = s.class_has_extends;
+    const saved_in_class = s.in_class;
+
+    s.in_class = true;
+    s.class_has_extends = s.peekKind() == tok.TOK_EXTENDS;
+    try parseClassHeritage(s);
+
+    // Parse class body
+    try parseClassBody(s);
+
+    s.in_class = saved_in_class;
+    s.class_has_extends = saved_has_extends;
+
+    // TODO: Emit class construction opcodes in F7/F10
 }

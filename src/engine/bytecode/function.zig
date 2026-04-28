@@ -18,11 +18,26 @@ pub const Flags = packed struct(u16) {
     reserved: u8 = 0,
 };
 
+/// Opcode format tag for dual-dispatch VM during parser-rewrite transition.
+/// Mirrors PARSER_REWRITE_PLAN.md §F2+F3 — legacy QuickParser emits bespoke
+/// `bytecode.emitter.known.*` IDs; new `qjs_parser` emits real QuickJS
+/// `bytecode.opcode.op.*` IDs. The VM dispatches to the matching handler
+/// table based on this flag. F2+F3 atomic swap will collapse this back
+/// to a single format once all bespoke IDs are expanded.
+pub const OpcodeFormat = enum(u8) {
+    /// Legacy format with bespoke opcode IDs (emitter.known.*).
+    legacy,
+    /// QuickJS-aligned format with real opcode IDs (opcode.op.*).
+    qjs,
+};
+
 pub const Bytecode = struct {
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
     name: atom.Atom,
     flags: Flags = .{},
+    /// Opcode format — determines which VM dispatcher handles this bytecode.
+    opcode_format: OpcodeFormat = .legacy,
     arg_count: u16 = 0,
     var_count: u16 = 0,
     stack_size: u16 = 0,

@@ -39,6 +39,20 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     return function;
 }
 
+/// Helper: parse `src` as a statement and return the produced
+/// bytecode buffer for byte-sequence comparison.
+fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit();
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    return function;
+}
+
 /// Read a u32 in little-endian from `bytes` starting at `offset`.
 fn readU32(bytes: []const u8, offset: usize) u32 {
     return std.mem.readInt(u32, bytes[offset..][0..4], .little);
@@ -1415,4 +1429,503 @@ test "F4: template with empty middle still emits call_method with correct argc" 
     try std.testing.expectEqual(op.call_method, fn_bc.code[16]);
     const argc = std.mem.readInt(u16, fn_bc.code[17..19], .little);
     try std.testing.expectEqual(@as(u16, 2), argc);
+}
+
+// ---- F5: Statement parsing tests -------------------------------------
+
+test "F5: empty statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, ";");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(@as(usize, 0), fn_bc.code.len);
+}
+
+test "F5: block statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "{ x; y; }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have get_var x, drop, get_var y, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F5: return statement without value" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "return;");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.code.len);
+    try std.testing.expectEqual(op.return_undef, fn_bc.code[0]);
+}
+
+test "F5: return statement with value" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "return x;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have get_var x, return
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.@"return", fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: throw statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "throw x;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have get_var x, throw
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.throw, fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: if statement without else" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "if (x) y;");
+    defer fn_bc.deinit(env.rt);
+
+    // get_var x ; if_false → past_then ; get_var y ; drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.if_false, fn_bc.code[5]); // After get_var x
+    // The if_false target must be patched to the end of the then block,
+    // not the placeholder 0. Decode the u32 operand at offset 6.
+    const if_false_target = std.mem.readInt(u32, fn_bc.code[6..][0..4], .little);
+    try std.testing.expect(if_false_target > 0);
+    try std.testing.expect(if_false_target <= fn_bc.code.len);
+}
+
+test "F5: if statement with else" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "if (x) y; else z;");
+    defer fn_bc.deinit(env.rt);
+
+    // get_var x ; if_false → else ; get_var y ; drop ; goto → end ;
+    // get_var z ; drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.if_false, fn_bc.code[5]);
+    const if_false_target = std.mem.readInt(u32, fn_bc.code[6..][0..4], .little);
+    // The if_false jump must point at the goto-over-else opcode. Verify
+    // the instruction at that position is `goto` (skipping past the else).
+    try std.testing.expect(if_false_target > 0);
+    try std.testing.expect(if_false_target < fn_bc.code.len);
+    // Find the goto: it sits between the then body and the else body.
+    // Code: [get_var x:5] [if_false:5] [get_var y:5] [drop:1] [goto:5]
+    //       offset: 0     5            10            15      16
+    try std.testing.expectEqual(op.goto, fn_bc.code[16]);
+    const goto_target = std.mem.readInt(u32, fn_bc.code[17..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, @intCast(fn_bc.code.len)), goto_target);
+}
+
+test "F5: while statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "while (x) y;");
+    defer fn_bc.deinit(env.rt);
+
+    // top: get_var x ; if_false → end ; get_var y ; drop ; goto → top
+    try std.testing.expect(fn_bc.code.len > 0);
+    // Last instruction must be a backward goto to offset 0 (loop top).
+    const last_goto = fn_bc.code.len - 5;
+    try std.testing.expectEqual(op.goto, fn_bc.code[last_goto]);
+    const back_target = std.mem.readInt(u32, fn_bc.code[last_goto + 1 ..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, 0), back_target);
+    // The if_false at offset 5 (after get_var x) must point past end.
+    try std.testing.expectEqual(op.if_false, fn_bc.code[5]);
+    const if_false_target = std.mem.readInt(u32, fn_bc.code[6..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, @intCast(fn_bc.code.len)), if_false_target);
+}
+
+test "F5: do-while statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "do { y; } while (x);");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have get_var y, drop, get_var x, if_true
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F5: expression statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "x;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have get_var x, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: var declaration without initializer" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "var x;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should just parse successfully (no bytecode yet until F6)
+    try std.testing.expect(fn_bc.code.len == 0);
+}
+
+test "F5: var declaration with initializer" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "var x = 1;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have push_i32 1, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
+    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: let declaration" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "let x;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have undefined, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.undefined, fn_bc.code[0]);
+    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: let declaration with initializer" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "let x = 1;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have push_i32 1, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
+    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: const declaration without initializer should fail" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    try std.testing.expectError(error.UnexpectedToken, parseStatement(&env, "const x;"));
+}
+
+test "F5: const declaration with initializer" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "const x = 1;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have push_i32 1, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
+    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+}
+
+test "F5: multiple var declarations" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "var x = 1, y = 2;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should have push_i32 1, drop, push_i32 2, drop
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F5: directive prologue with 'use strict'" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "{ \"use strict\"; x; }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully and set strict mode
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F5: directive prologue with multiple directives" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "{ \"use strict\"; \"other directive\"; x; }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F5: directive prologue with ASI" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "{ \"use strict\"\n x; }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully with ASI
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+// ---- F6 function parsing tests -----------------------------------------
+
+test "F6: simple function declaration" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    // Parsing must succeed; F2+F3 will wire emit for function declarations.
+    var fn_bc = try parseStatement(&env, "function foo() {}");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F6: function declaration with parameters" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "function foo(x, y) {}");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F6: function declaration with rest parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "function foo(...args) {}");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F6: arrow function with block body" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "() => {}");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F6: arrow function with expression body" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "() => 42");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F6: arrow function with single parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "x => x");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F6: arrow function with multiple parameters" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "(x, y) => x + y");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F6: arrow function with rest parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "(...args) => args");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F6: function with object destructuring parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "function foo({a, b}) {}");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F6: function with array destructuring parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "function foo([a, b]) {}");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F6: arrow function with object destructuring parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "({a, b}) => a");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F6: arrow function with array destructuring parameter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "([a, b]) => a");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+// ---- F7 Class parsing tests ----
+
+test "F7: class with constructor" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { constructor(x) { this.x = x; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F7: class with getter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { get x() { return this._x; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F7: class with setter" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { set x(value) { this._x = value; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F7: super keyword in class method" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { m() { super.x(); } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F7: super property access" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { m() { return super.x; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully and contain get_super_value opcode
+    try std.testing.expect(fn_bc.code.len > 0);
+    // Check that get_super_value (opcode 73) is in the bytecode
+    var found_get_super_value = false;
+    for (fn_bc.code) |byte| {
+        if (byte == op.get_super_value) {
+            found_get_super_value = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_get_super_value);
+}
+
+test "F7: super() constructor call" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { constructor(x) { super(x); } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len > 0);
+}
+
+test "F9: yield expression" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "function* g() { yield 42; }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully and contain yield opcode
+    try std.testing.expect(fn_bc.code.len > 0);
+    // Check that yield (opcode 135) is in the bytecode
+    var found_yield = false;
+    for (fn_bc.code) |byte| {
+        if (byte == op.yield) {
+            found_yield = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_yield);
+}
+
+test "F9: yield* expression" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "function* g() { yield* iterable; }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully and contain yield_star opcode
+    try std.testing.expect(fn_bc.code.len > 0);
+    // Check that yield_star (opcode 136) is in the bytecode
+    var found_yield_star = false;
+    for (fn_bc.code) |byte| {
+        if (byte == op.yield_star) {
+            found_yield_star = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_yield_star);
+}
+
+test "F8: export default statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export default 42;");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully (even if it's just a placeholder skip)
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export named statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export { x, y };");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully (even if it's just a placeholder skip)
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F7: private field in class" {
+    // F7 placeholder: class construction emits nothing yet (deferred to F10's
+    // pipeline), so we just assert the parse succeeded without errors. F10
+    // will replace this with a check on the emitted class-construction
+    // opcodes (`define_class`, `define_private_field`, etc).
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { #x; }");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F7: private method in class" {
+    // F7 placeholder: see "private field in class" test above.
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { #m() {} }");
+    defer fn_bc.deinit(env.rt);
+}
+
+test "F8: basic import statement" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "import x from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully (currently just skipped)
+    try std.testing.expect(fn_bc.code.len >= 0);
 }

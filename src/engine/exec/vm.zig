@@ -6,6 +6,7 @@ const closure_mod = @import("closure.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const globals_mod = @import("globals.zig");
+const qjs_vm = @import("qjs_vm.zig");
 const stack_mod = @import("stack.zig");
 const property_ops = @import("property_ops.zig");
 const test262_helpers = @import("test262_helpers.zig");
@@ -44,6 +45,14 @@ pub const Vm = struct {
     }
 
     pub fn run(self: *Vm, function: *const bytecode.Bytecode) !core.Value {
+        // Dual-dispatch path for parser-rewrite F2+F3 transition.
+        // QuickJS-format bytecode (from new qjs_parser) routes through
+        // the dedicated `qjs_vm` dispatcher; legacy bespoke-format
+        // bytecode continues through the switch below.
+        if (function.opcode_format == .qjs) {
+            return qjs_vm.run(self.ctx, &self.stack, function);
+        }
+
         var frame = frame_mod.Frame.init(function);
         defer frame.deinit(&self.ctx.runtime.memory, self.ctx.runtime);
 
