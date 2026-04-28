@@ -67,6 +67,13 @@ pub const Config = struct {
     threads: u32 = 1,
     known_error_file: ?[]const u8 = null,
     reports_dir: ?[]const u8 = null,
+    /// Path to a previously committed `test262-by-dir.json` snapshot.
+    /// When set, after the run completes `runSelectedTests` compares
+    /// per-directory `passed` counts against the baseline; if any
+    /// directory's passed count drops, the run records the regression
+    /// and the CLI exits non-zero. Anti-regression gate per
+    /// `PARSER_REWRITE_PLAN.md` §4 "Cross-Phase Discipline".
+    regression_baseline: ?[]const u8 = null,
     start_index: ?usize = null,
     stop_index: ?usize = null,
     files: BoundedList = .{},
@@ -120,6 +127,8 @@ pub fn parseArgs(args: []const []const u8) RunnerArgsError!Config {
             if (config.threads == 0) return error.Usage;
         } else if (std.mem.eql(u8, arg, "-R")) {
             config.reports_dir = try nextValue(args, &i);
+        } else if (std.mem.eql(u8, arg, "--regression-baseline")) {
+            config.regression_baseline = try nextValue(args, &i);
         } else if (arg.len != 0 and arg[0] == '-') {
             return error.Usage;
         } else if (isDecimal(arg)) {
@@ -222,6 +231,10 @@ pub const ExecutionSummary = struct {
     failed: usize = 0,
     known_failures: usize = 0,
     fixed: usize = 0,
+    /// Count of directories whose pass rate regressed against the
+    /// baseline supplied via `--regression-baseline`. Zero when the
+    /// flag is not used or no regressions were detected.
+    regressions: usize = 0,
 
     pub fn deinit(self: *ExecutionSummary, allocator: std.mem.Allocator) void {
         self.selection.deinit(allocator);
@@ -444,6 +457,125 @@ fn renderByDirJson(
 
 fn lessThanDirEntry(_: void, lhs: Reporter.DirEntry, rhs: Reporter.DirEntry) bool {
     return std.mem.lessThan(u8, lhs.dir, rhs.dir);
+}
+
+/// Anti-regression baseline machinery (CC-1 / plan §4).
+///
+/// `BaselineEntry` is the subset of `Reporter.DirEntry` we actually need
+/// for the regression check — only the directory path and the passed
+/// count. Failure / known_failed columns are ignored on purpose: the
+/// gate only fires when `passed` decreases (i.e. a real regression).
+pub const BaselineEntry = struct {
+    dir: []const u8,
+    passed: usize,
+};
+
+/// Parse a `test262-by-dir.json` snapshot in the format produced by
+/// `renderByDirJson`. Returns owned slice of entries; caller frees with
+/// `freeBaseline`. The parser is intentionally tight to that shape
+/// (one entry per non-bracket line) — no attempt is made to handle
+/// arbitrary JSON.
+pub fn parseBaseline(allocator: std.mem.Allocator, bytes: []const u8) ![]BaselineEntry {
+    var list: std.ArrayList(BaselineEntry) = .empty;
+    errdefer freeBaselineList(allocator, &list);
+
+    var line_iter = std.mem.splitScalar(u8, bytes, '\n');
+    while (line_iter.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] != '{') continue; // skip the bracket lines
+        const dir_value = try extractJsonStringField(line, "dir");
+        const passed_value = try extractJsonNumberField(line, "passed");
+        const dir_owned = try allocator.dupe(u8, dir_value);
+        errdefer allocator.free(dir_owned);
+        try list.append(allocator, .{ .dir = dir_owned, .passed = passed_value });
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+pub fn freeBaseline(allocator: std.mem.Allocator, entries: []BaselineEntry) void {
+    for (entries) |entry| allocator.free(entry.dir);
+    allocator.free(entries);
+}
+
+fn freeBaselineList(allocator: std.mem.Allocator, list: *std.ArrayList(BaselineEntry)) void {
+    for (list.items) |entry| allocator.free(entry.dir);
+    list.deinit(allocator);
+}
+
+fn extractJsonStringField(line: []const u8, field: []const u8) ![]const u8 {
+    var name_buf: [64]u8 = undefined;
+    if (field.len + 3 > name_buf.len) return error.InvalidBaseline;
+    name_buf[0] = '"';
+    @memcpy(name_buf[1 .. 1 + field.len], field);
+    name_buf[1 + field.len] = '"';
+    name_buf[2 + field.len] = ':';
+    const needle = name_buf[0 .. field.len + 3];
+    const idx = std.mem.indexOf(u8, line, needle) orelse return error.InvalidBaseline;
+    var pos = idx + needle.len;
+    while (pos < line.len and (line[pos] == ' ' or line[pos] == '\t')) pos += 1;
+    if (pos >= line.len or line[pos] != '"') return error.InvalidBaseline;
+    pos += 1;
+    const start = pos;
+    while (pos < line.len and line[pos] != '"') pos += 1;
+    if (pos >= line.len) return error.InvalidBaseline;
+    return line[start..pos];
+}
+
+fn extractJsonNumberField(line: []const u8, field: []const u8) !usize {
+    var name_buf: [64]u8 = undefined;
+    if (field.len + 3 > name_buf.len) return error.InvalidBaseline;
+    name_buf[0] = '"';
+    @memcpy(name_buf[1 .. 1 + field.len], field);
+    name_buf[1 + field.len] = '"';
+    name_buf[2 + field.len] = ':';
+    const needle = name_buf[0 .. field.len + 3];
+    const idx = std.mem.indexOf(u8, line, needle) orelse return error.InvalidBaseline;
+    var pos = idx + needle.len;
+    while (pos < line.len and (line[pos] == ' ' or line[pos] == '\t')) pos += 1;
+    const start = pos;
+    while (pos < line.len and line[pos] >= '0' and line[pos] <= '9') pos += 1;
+    if (pos == start) return error.InvalidBaseline;
+    return std.fmt.parseInt(usize, line[start..pos], 10) catch error.InvalidBaseline;
+}
+
+pub const RegressionResult = struct {
+    /// Number of directories where `current.passed < baseline.passed`.
+    count: usize,
+    /// Number of baseline directories matched in the current run (used
+    /// by tests to verify the comparison covered the input).
+    matched: usize,
+};
+
+/// Compare the current run's `Reporter.DirEntry` snapshot against a
+/// baseline. Prints one line to stderr per regressed directory. The
+/// CLI uses the returned `count` to decide the exit code.
+pub fn checkRegressions(
+    io: std.Io,
+    reporter: *Reporter,
+    baseline: []const BaselineEntry,
+) !RegressionResult {
+    var result = RegressionResult{ .count = 0, .matched = 0 };
+    for (baseline) |b| {
+        const current = findDirEntry(reporter.by_dir.items, b.dir) orelse continue;
+        result.matched += 1;
+        if (current.passed < b.passed) {
+            result.count += 1;
+            try reporter.lockedPrint(
+                io,
+                "regression: {s} passed {d} -> {d} (-{d})\n",
+                .{ b.dir, b.passed, current.passed, b.passed - current.passed },
+            );
+        }
+    }
+    return result;
+}
+
+fn findDirEntry(entries: []const Reporter.DirEntry, dir: []const u8) ?*const Reporter.DirEntry {
+    for (entries) |*e| {
+        if (std.mem.eql(u8, e.dir, dir)) return e;
+    }
+    return null;
 }
 
 const WorkerResult = struct {
@@ -807,6 +939,38 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
     }
 
     try reporter.flush(io);
+
+    if (config.regression_baseline) |baseline_path| {
+        const baseline_bytes = std.Io.Dir.cwd().readFileAlloc(
+            io,
+            baseline_path,
+            allocator,
+            .limited(8 * 1024 * 1024),
+        ) catch |err| blk: {
+            try reporter.lockedPrint(
+                io,
+                "regression-baseline: unable to read {s}: {s}\n",
+                .{ baseline_path, @errorName(err) },
+            );
+            break :blk null;
+        };
+        if (baseline_bytes) |bytes| {
+            defer allocator.free(bytes);
+            const entries = parseBaseline(allocator, bytes) catch |err| {
+                try reporter.lockedPrint(
+                    io,
+                    "regression-baseline: parse error in {s}: {s}\n",
+                    .{ baseline_path, @errorName(err) },
+                );
+                prepared.tests.deinit();
+                prepared.skipped_features.deinit();
+                return summary;
+            };
+            defer freeBaseline(allocator, entries);
+            const regression_result = try checkRegressions(io, &reporter, entries);
+            summary.regressions = regression_result.count;
+        }
+    }
 
     prepared.tests.deinit();
     prepared.skipped_features.deinit();

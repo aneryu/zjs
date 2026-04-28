@@ -948,25 +948,76 @@ slices unchanged; `built-ins/Map`, `Set`, `WeakMap`, `WeakSet`,
 
 ### F4 — Generic expression parser
 
-> **Status (2026-04-27): first slice landed.** A new
-> `frontend/qjs_parser.zig` module ships with the full QuickJS-aligned
-> recursion structure and emits real QuickJS opcode ids via
-> `bytecode.opcode.op.<name>`. The first slice covers literals,
-> identifiers, parenthesized, member `.` and index `[]`, prefix
-> `+ - ~ ! void typeof`, right-associative `**`, the level 1-8 binary
-> operator table, `&&` / `||` / `??` with the standard
-> `dup ; if_false/if_true/is_undefined_or_null ; drop ; rhs`
-> short-circuit lowering, ternary `?:`, plain and compound
-> assignment with `(op - TOK_MUL_ASSIGN) + OP_mul` encoding, and the
-> comma operator. The 23-test byte-sequence suite in
-> `src/tests/frontend/qjs_parser_test.zig` validates exact emitted
-> bytes per QuickJS lowering. Deferred to subsequent F4 slices:
-> string literals (need `push_atom_value` plus interning), template
-> tagged templates, array/object literals, function calls plus `new`,
-> postfix `++/--`, `delete`, destructuring, optional chaining,
-> spread, arrow functions. F4 establishes the QuickJS-shaped output
-> that unblocks the F2+F3 atomic VM swap (which was previously
-> blocked by the fixture-shaped legacy parser; see §2.5.5).
+> **Status (2026-04-27): F4 feature-complete across nine slices.**
+> `frontend/qjs_parser.zig` mirrors the QuickJS expression-parser
+> tower function-by-function and emits real `bytecode.opcode.op.<name>`
+> opcodes byte-for-byte against the QuickJS lowering reference:
+>
+> - **Recursion tower** (`parseExpr` / `parseExpr2` /
+>   `parseAssignExpr2` / `parseCondExpr` / `parseCoalesceExpr` /
+>   `parseLogicalAndOr` / `parseExprBinary` levels 1-8 / `parseUnary`
+>   / `parsePostfixExpr` / `parseLhsExpr` / `parsePrimary`) with the
+>   full level table, prefix `+ - ~ ! void typeof delete ++ --`,
+>   right-associative `**`, `&&` / `||` / `??` short-circuit,
+>   ternary, plain and compound assignment with `(op - TOK_MUL_ASSIGN)
+>   + OP_mul` encoding, and the comma operator.
+> - **Literals**: `push_i32` / `push_const` / `push_atom_value` /
+>   `push_empty_string` / `true` / `false` / `null` / `push_this` /
+>   `undefined`; array literals with holes and spread (collect-then-
+>   `array_from` for dense, switch to `array_from + push_i32 idx +
+>   define_array_el+inc / append + drop` on first `...`); object
+>   literals with shorthand and string/numeric keys (`object +
+>   define_field`); template literals via `String.prototype.concat`
+>   lowering; tagged templates (`tag\`...\`` and `obj.tag\`...\``)
+>   accepted with a placeholder template object.
+> - **Calls and member chain**: plain `call`, method via `get_field2 +
+>   call_method` (and `get_array_el2 + call_method`), `call_constructor`,
+>   spread via `apply 0` / `apply 1`, optional chain `?.b` / `?.[k]`
+>   / `?.()` / `obj?.b()` / `obj?.[k]()` emitting the inline
+>   `optional_chain_test` shape (`dup ; is_undefined_or_null ;
+>   if_false NEXT ; drop ; undefined ; goto CHAIN_EXIT ; NEXT:`)
+>   per `quickjs.c:26158` with chain-exit gotos collected in a
+>   16-slot per-`parseLhsExpr` buffer and patched at chain end.
+> - **`put_lvalue` integration** (`quickjs.c:25466..25553`):
+>   `LhsShape` classifier (`var_ref` / `dotted` / `indexed` /
+>   `none`) plus `emitPutLValueKeepTop` / `emitPutLValueKeepSecond`
+>   covering plain assign, compound assign, prefix update, and
+>   postfix update for all three target depths with the QuickJS
+>   stack-rearrange templates (`insert2`, `insert3`, `perm3`,
+>   `perm4`).
+> - **`delete`** through the same classifier: bare-identifier becomes
+>   `delete_var <atom>`, multi-level `a.b.c` rewrites only the
+>   trailing `get_field` to `push_atom_value`, indexed truncates the
+>   trailing `get_array_el`, non-reference falls back to
+>   `drop ; push_true`.
+>
+> The 280-test byte-sequence suite in
+> `src/tests/frontend/qjs_parser_test.zig` validates exact byte
+> offsets, u16 argc operands, and goto-target invariants for every
+> emitted shape.
+>
+> **F4-scoped deviations carried forward** to other phases (per the
+> plan §2 phase map):
+>
+> - Tagged-template object construction (sealed cooked array with
+>   `raw` property pointing to a sealed raw array) → **F12** (the
+>   plan's explicit RegExp + templates phase). F4 emits
+>   `OP_undefined` as the placeholder template-object slot so the
+>   parser accepts the syntax and the call shape matches QuickJS.
+> - `delete a?.b` chain-failure epilogue (the chain-exit needs a
+>   `drop ; push_true` so both paths produce a bool; current code
+>   leaves only `[undefined]` on the chain-exit path) → **F10**
+>   (`resolve_labels` has the parser-state visibility to weave this
+>   cleanly).
+> - Destructuring + arrow functions → **F6** per the plan §2 phase
+>   map (`Functions / arrows / defaults / destructuring / rest`).
+> - `import.meta` / `import()` / `new.target` / `super` / `yield` /
+>   `await` → **F7-F9** per the plan.
+>
+> F4 unblocks the F2+F3 atomic VM swap (the new parser now produces
+> QuickJS-shaped bytecode the rewritten VM will execute) and the
+> F5 generic statement parser (which builds on F4's expression
+> layer).
 
 **QuickJS reference:** `js_parse_expr` (`quickjs.c:27645`),
 `js_parse_expr2` (`quickjs.c:27621`), `js_parse_assign_expr`

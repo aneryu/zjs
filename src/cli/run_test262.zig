@@ -20,7 +20,8 @@ pub fn main(init: std.process.Init) !void {
 
     try printSummary(io, summary);
     const has_unexpected = summary.failed != 0 or summary.fixed != 0;
-    std.process.exit(if (has_unexpected) 1 else 0);
+    const has_regression = summary.regressions != 0;
+    std.process.exit(if (has_unexpected or has_regression) 1 else 0);
 }
 
 fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
@@ -33,8 +34,10 @@ fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []cons
 fn printUsage(io: std.Io) !void {
     try printError(io,
         "usage: run-test262 -c <test262.conf> [options] <test-root>\n" ++
-        "  -R <dir>  emit test262-failures.log, test262-buckets.json,\n" ++
-        "            and test262-by-dir.json under <dir>\n",
+        "  -R <dir>                 emit test262-failures.log, test262-buckets.json,\n" ++
+        "                           and test262-by-dir.json under <dir>\n" ++
+        "  --regression-baseline F  exit non-zero if any directory's `passed`\n" ++
+        "                           count is lower than F (a previous by-dir.json)\n",
         .{},
     );
 }
@@ -64,6 +67,7 @@ fn printSummary(io: std.Io, summary: runner.ExecutionSummary) !void {
     try stdout.print("Result: {d}/{d} errors, passed {d}", .{ summary.failed, summary.selection.selected_tests, summary.passed });
     if (summary.known_failures != 0) try stdout.print(", known {d}", .{summary.known_failures});
     if (summary.fixed != 0) try stdout.print(", fixed {d}", .{summary.fixed});
+    if (summary.regressions != 0) try stdout.print(", regressed {d}", .{summary.regressions});
     try stdout.print("\n", .{});
     try stdout.flush();
 }

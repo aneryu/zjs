@@ -105,13 +105,25 @@ pub const Lexer = struct {
 
     /// Resume lexing a template after the parser closed a `${ ... }`
     /// substitution. Mirrors the second call into
-    /// `js_parse_template_part` (`quickjs.c:21794`) once the parser has
-    /// consumed the closing `}`.
+    /// `js_parse_template_part` (`quickjs.c:21794`).
+    ///
+    /// **Lexer position contract**: must be called with `pos` AT the
+    /// closing `}` byte. The `nextTemplatePartAfterBrace` variant is
+    /// for the parser case where the `}` has already been advanced past
+    /// (i.e. the parser observed `}` as the lookahead token after the
+    /// substitution's expression, so `lex.pos` is one byte past `}`).
     pub fn nextTemplatePart(self: *Lexer) Error!t.Token {
-        // No leading trivia: we are inside a template, so whitespace
-        // between `}` and the next `` ` `` or `${` is part of the cooked text.
         self.mark();
         return self.lexTemplate(.middle_or_tail);
+    }
+
+    /// Like `nextTemplatePart`, but assumes the closing `}` has already
+    /// been lexed and consumed by the parser's lookahead. Used by the
+    /// expression parser, which discovers `}` only via its standard
+    /// post-expression lookahead.
+    pub fn nextTemplatePartAfterBrace(self: *Lexer) Error!t.Token {
+        self.mark();
+        return self.lexTemplateBody(.middle_or_tail, false);
     }
 
     /// Re-lex the most recently emitted `/`/`/=` punctuator as a regex
@@ -672,12 +684,18 @@ pub const Lexer = struct {
     const TemplatePhase = enum { head_or_no_subst, middle_or_tail };
 
     fn lexTemplate(self: *Lexer, phase: TemplatePhase) Error!t.Token {
-        if (phase == .head_or_no_subst) {
-            std.debug.assert(self.peek() == '`');
-            self.bump();
-        } else {
-            std.debug.assert(self.peek() == '}');
-            self.bump();
+        return self.lexTemplateBody(phase, true);
+    }
+
+    fn lexTemplateBody(self: *Lexer, phase: TemplatePhase, expect_open_byte: bool) Error!t.Token {
+        if (expect_open_byte) {
+            if (phase == .head_or_no_subst) {
+                std.debug.assert(self.peek() == '`');
+                self.bump();
+            } else {
+                std.debug.assert(self.peek() == '}');
+                self.bump();
+            }
         }
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.allocator);
