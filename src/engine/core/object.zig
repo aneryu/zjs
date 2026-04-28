@@ -71,6 +71,9 @@ pub const Object = struct {
     iterator_index: usize = 0,
     iterator_kind: u8 = 0,
     weak_constructor: ?*Object = null,
+    function_bytecode: ?Value = null,
+    function_captures: []Value = &.{},
+    var_ref_value: ?Value = null,
 
     pub fn create(rt: *Runtime, class_id: class.ClassId, prototype: ?*Object) !*Object {
         const self = try rt.memory.create(Object);
@@ -112,6 +115,10 @@ pub const Object = struct {
         for (self.weak_collection_entries) |entry| entry.destroy(rt);
         if (self.weak_collection_entries.len != 0) rt.memory.free(WeakCollectionEntry, self.weak_collection_entries);
         if (self.iterator_target) |stored| stored.free(rt);
+        if (self.function_bytecode) |stored| stored.free(rt);
+        for (self.function_captures) |stored| stored.free(rt);
+        if (self.function_captures.len != 0) rt.memory.free(Value, self.function_captures);
+        if (self.var_ref_value) |stored| stored.free(rt);
         rt.shapes.release(self.shape_ref);
         rt.memory.destroy(Object, self);
     }

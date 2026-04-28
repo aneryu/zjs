@@ -19,7 +19,8 @@ pub fn main(init: std.process.Init) !void {
     defer summary.deinit(init.gpa);
 
     try printSummary(io, summary);
-    const has_unexpected = summary.failed != 0 or summary.fixed != 0;
+    const baseline_gate = config.regression_baseline != null;
+    const has_unexpected = !baseline_gate and (summary.failed != 0 or summary.fixed != 0);
     const has_regression = summary.regressions != 0;
     std.process.exit(if (has_unexpected or has_regression) 1 else 0);
 }

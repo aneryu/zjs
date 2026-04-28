@@ -135,6 +135,25 @@ pub const op = struct {
         zig_code += f"    {row},\n"
     zig_code += "};\n"
 
+    # Opcode-name lookup table for tooling (bytecode dumper, debug
+    # printers, error messages). Indexed by opcode id; ids that do not
+    # correspond to any DEF entry get the literal string "?<id>" so a
+    # caller can still print something meaningful.
+    name_table = [None] * 256
+    for idx, (name, _sz, _np, _nh, _fmt) in enumerate(defs):
+        if idx < 256:
+            name_table[idx] = name
+    zig_code += "\n// Opcode name lookup indexed by opcode id. Slots without a\n"
+    zig_code += "// DEF entry contain an empty string; callers should treat\n"
+    zig_code += "// `opcode_name[id].len == 0` as 'unknown opcode'.\n"
+    zig_code += "pub const opcode_name: [256][]const u8 = .{\n"
+    for row_start in range(0, 256, 4):
+        row_items = []
+        for v in name_table[row_start:row_start + 4]:
+            row_items.append(f'"{v}"' if v is not None else '""')
+        zig_code += "    " + ", ".join(row_items) + ",\n"
+    zig_code += "};\n"
+
     # Write to stdout
     print(zig_code)
 

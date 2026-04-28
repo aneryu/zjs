@@ -12,6 +12,8 @@ pub const ObjectKind = enum {
     string,
 };
 
+pub const ObjectDestroyFn = *const fn (header: *ObjectHeader, destroy_ctx: *anyopaque) void;
+
 pub const Phase = enum {
     none,
     decref,
@@ -28,6 +30,8 @@ pub const ObjectHeader = struct {
     ref_count: usize = 1,
     marked: bool = false,
     in_zero_ref: bool = false,
+    destroy_fn: ?ObjectDestroyFn = null,
+    destroy_ctx: ?*anyopaque = null,
 
     pub fn retain(self: *ObjectHeader) void {
         std.debug.assert(self.ref_count > 0);
@@ -62,6 +66,8 @@ pub const Registry = struct {
         header.ref_count = 1;
         header.marked = false;
         header.in_zero_ref = false;
+        header.destroy_fn = null;
+        header.destroy_ctx = null;
         try append(self.memory, *ObjectHeader, &self.objects, &self.objects_capacity, header);
     }
 
@@ -73,6 +79,21 @@ pub const Registry = struct {
         std.debug.assert(header.ref_count > 0);
         header.ref_count -= 1;
         if (header.ref_count != 0) return false;
+
+        // Callback-owned objects (for example FunctionBytecode) are released
+        // immediately. They are not placed in the zero-ref queue because the
+        // registry is used only for bookkeeping; immediate release avoids
+        // needing a GC graph traversal for parser-owned bytecode objects.
+        if (header.destroy_fn) |destroy_fn| {
+            if (header.destroy_ctx) |ctx| {
+                self.remove(header);
+                destroy_fn(header, ctx);
+                return true;
+            }
+            self.remove(header);
+            return true;
+        }
+
         if (!header.in_zero_ref) {
             try append(self.memory, *ObjectHeader, &self.zero_ref, &self.zero_ref_capacity, header);
             header.in_zero_ref = true;

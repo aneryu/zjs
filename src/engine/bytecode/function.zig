@@ -1,4 +1,5 @@
 const atom = @import("../core/atom.zig");
+const gc = @import("../core/gc.zig");
 const memory = @import("../core/memory.zig");
 const Value = @import("../core/value.zig").Value;
 const constant = @import("constant.zig");
@@ -6,6 +7,7 @@ const debug = @import("debug.zig");
 const module = @import("module.zig");
 const scope = @import("scope.zig");
 const function_def = @import("function_def.zig");
+const runtime = @import("../core/runtime.zig");
 
 pub const Flags = packed struct(u16) {
     has_prototype: bool = false,
@@ -117,20 +119,22 @@ pub const Bytecode = struct {
     }
 };
 
-/// Mirrors `JSFunctionBytecode` (`quickjs.c:768`).
+/// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
 ///
 /// This is the final compiled bytecode structure produced by the
 /// js_create_function equivalent. It contains the fully processed
 /// bytecode after all pipeline phases (resolve_variables, resolve_labels,
 /// compute_stack_size, etc.).
 ///
-/// Unlike QuickJS's single contiguous allocation, this Zig version uses
-/// separate allocations for each field, which is simpler and more idiomatic.
+/// Field order matches QuickJS exactly for strong alignment (§1.5.3).
+/// Uses flat per-field allocation instead of QuickJS's single contiguous
+/// allocation - registered as deviation D2 in parser-deviation-matrix.md.
 pub const FunctionBytecode = struct {
+    header: gc.ObjectHeader,
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
 
-    // Flags (mirrors JSFunctionBytecode packed fields)
+    // Flags (mirrors JSFunctionBytecode packed fields, same order as quickjs.c:770-782)
     is_strict_mode: bool = false,
     has_prototype: bool = false,
     has_simple_parameter_list: bool = true,
@@ -143,43 +147,40 @@ pub const FunctionBytecode = struct {
     arguments_allowed: bool = false,
     backtrace_barrier: bool = false,
 
-    // Bytecode
+    // Bytecode (quickjs.c:783-784)
     byte_code: []u8 = &.{},
+    byte_code_len: i32 = 0,
 
-    // Metadata
+    // Metadata (quickjs.c:785-792)
     func_name: atom.Atom,
+    vardefs: []function_def.VarDef = &.{},
+    closure_var: []function_def.ClosureVar = &.{},
     arg_count: u16 = 0,
     var_count: u16 = 0,
     defined_arg_count: u16 = 0,
     stack_size: u16 = 0,
     var_ref_count: u16 = 0,
-
-    // Variable definitions (args + vars)
-    vardefs: []function_def.VarDef = &.{},
-
-    // Closure variables
-    closure_var: []function_def.ClosureVar = &.{},
     closure_var_count: u16 = 0,
-
-    // Constant pool (contains child Function objects)
-    cpool: []Value = &.{},
     cpool_count: i32 = 0,
 
-    // Source location
+    // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
+    // tracks this differently via the runtime context.
+
+    // Constant pool (contains child Function objects) (quickjs.c:796)
+    cpool: []Value = &.{},
+
+    // Source location (quickjs.c:797-803)
     filename: atom.Atom,
     line_num: i32 = 0,
     col_num: i32 = 0,
-
-    // pc2line data
-    pc2line_buf: []u8 = &.{},
-    pc2line_len: i32 = 0,
-
-    // Source (optional)
-    source: ?[]const u8 = null,
     source_len: i32 = 0,
+    pc2line_len: i32 = 0,
+    pc2line_buf: []u8 = &.{},
+    source: ?[]const u8 = null,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) FunctionBytecode {
         return .{
+            .header = .{ .kind = .function_bytecode },
             .memory = account,
             .atoms = atoms,
             .func_name = atoms.dup(name),
@@ -192,6 +193,7 @@ pub const FunctionBytecode = struct {
         self.atoms.free(self.filename);
 
         if (self.byte_code.len != 0) self.memory.free(u8, self.byte_code);
+        self.byte_code_len = 0;
 
         for (self.vardefs) |*v| self.atoms.free(v.var_name);
         if (self.vardefs.len != 0) self.memory.free(function_def.VarDef, self.vardefs);
@@ -203,11 +205,13 @@ pub const FunctionBytecode = struct {
         if (self.cpool.len != 0) self.memory.free(Value, self.cpool);
 
         if (self.pc2line_buf.len != 0) self.memory.free(u8, self.pc2line_buf);
+        self.pc2line_len = 0;
 
         if (self.source) |src| {
             // Cast away const for freeing - the memory was allocated as mutable
             self.memory.free(u8, @constCast(src));
         }
+        self.source_len = 0;
 
         self.byte_code = &.{};
         self.vardefs = &.{};
@@ -217,3 +221,10 @@ pub const FunctionBytecode = struct {
         self.source = null;
     }
 };
+
+pub fn destroyFunctionBytecode(header: *gc.ObjectHeader, destroy_ctx: *anyopaque) void {
+    const rt: *runtime.Runtime = @ptrCast(@alignCast(destroy_ctx));
+    const fb: *FunctionBytecode = @fieldParentPtr("header", header);
+    fb.deinit(rt);
+    rt.memory.free(FunctionBytecode, fb[0..1]);
+}

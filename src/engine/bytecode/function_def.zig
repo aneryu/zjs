@@ -63,9 +63,11 @@ pub const VarKind = enum(u4) {
 pub const VarDef = struct {
     var_name: atom.Atom,
     scope_level: i32, // index into scopes of this variable lexical scope
+    scope_next: i32 = -1, // index into vars of the next variable in the same or enclosing lexical scope
     is_lexical: bool = false,
     is_const: bool = false,
     is_captured: bool = false,
+    tdz_emitted_at_decl: bool = false,
     var_kind: VarKind = .normal,
 };
 
@@ -187,6 +189,7 @@ pub const FunctionDef = struct {
 
     // Bytecode (Phase 1)
     byte_code: []u8 = &.{},
+    atom_operands: []atom.Atom = &.{},
     last_opcode_pos: i32 = -1,
 
     // Labels
@@ -219,6 +222,9 @@ pub const FunctionDef = struct {
 
     // Child functions (nested functions)
     child_list: []FunctionDef = &.{},
+    emit_top_level_closure_init: bool = false,
+    top_level_closure_var_idx: i32 = -1,
+    child_decl_init_keep_value: bool = false,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) FunctionDef {
         return .{
@@ -265,6 +271,23 @@ pub const FunctionDef = struct {
         return idx;
     }
 
+    /// Append a formal argument definition. Mirrors the `args` side of
+    /// QuickJS function metadata; parser lowering resolves matching
+    /// identifier references to `get_arg*` opcodes.
+    pub fn appendArg(self: *FunctionDef, var_def: VarDef) !i32 {
+        const new_len = self.args.len + 1;
+        const next = try self.memory.alloc(VarDef, new_len);
+        errdefer self.memory.free(VarDef, next);
+        @memcpy(next[0..self.args.len], self.args);
+        next[self.args.len] = var_def;
+        next[self.args.len].var_name = self.atoms.dup(var_def.var_name);
+        if (self.args.len != 0) self.memory.free(VarDef, self.args);
+        self.args = next;
+        self.arg_count = @intCast(self.args.len);
+        self.defined_arg_count = @intCast(self.args.len);
+        return @intCast(self.args.len - 1);
+    }
+
     /// Append a child FunctionDef to `child_list`. Mirrors
     /// `list_add_tail(&fd->link, &parent->child_list)` in
     /// `js_new_function_def` (`quickjs.c:31487`). The child is
@@ -290,9 +313,14 @@ pub const FunctionDef = struct {
         is_lexical: bool,
         is_const: bool,
     ) !i32 {
+        const prev_first: i32 = if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < self.scopes.len)
+            self.scopes[@intCast(scope_level)].first
+        else
+            -1;
         const idx = try self.appendVar(.{
             .var_name = name,
             .scope_level = scope_level,
+            .scope_next = prev_first,
             .is_lexical = is_lexical,
             .is_const = is_const,
             .var_kind = var_kind,
@@ -302,6 +330,21 @@ pub const FunctionDef = struct {
             self.scope_first = idx;
         }
         return idx;
+    }
+
+    /// Append a closure variable entry. Used for top-level module/eval
+    /// bindings and, later, captured parent-scope variables.
+    pub fn addClosureVar(self: *FunctionDef, closure_var: ClosureVar) !i32 {
+        const new_len = self.closure_var.len + 1;
+        const next = try self.memory.alloc(ClosureVar, new_len);
+        errdefer self.memory.free(ClosureVar, next);
+        @memcpy(next[0..self.closure_var.len], self.closure_var);
+        next[self.closure_var.len] = closure_var;
+        next[self.closure_var.len].var_name = self.atoms.dup(closure_var.var_name);
+        if (self.closure_var.len != 0) self.memory.free(ClosureVar, self.closure_var);
+        self.closure_var = next;
+        self.closure_var_count = @intCast(self.closure_var.len);
+        return @intCast(self.closure_var.len - 1);
     }
 
     /// Find a var by name, searching newest-first. Returns the var
@@ -316,6 +359,15 @@ pub const FunctionDef = struct {
         return -1;
     }
 
+    pub fn findArg(self: *const FunctionDef, name: atom.Atom) i32 {
+        var i: usize = self.args.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.args[i].var_name == name) return @intCast(i);
+        }
+        return -1;
+    }
+
     /// Append bytes to the byte_code buffer. Used for nested function
     /// bytecode emission during parsing.
     pub fn appendByteCode(self: *FunctionDef, bytes: []const u8) !void {
@@ -326,6 +378,26 @@ pub const FunctionDef = struct {
         @memcpy(next[old_len..], bytes);
         if (self.byte_code.len != 0) self.memory.free(u8, self.byte_code);
         self.byte_code = next;
+    }
+
+    pub fn appendAtomOperand(self: *FunctionDef, atom_id: atom.Atom) !void {
+        const next = try self.memory.alloc(atom.Atom, self.atom_operands.len + 1);
+        errdefer self.memory.free(atom.Atom, next);
+        @memcpy(next[0..self.atom_operands.len], self.atom_operands);
+        next[self.atom_operands.len] = self.atoms.dup(atom_id);
+        if (self.atom_operands.len != 0) self.memory.free(atom.Atom, self.atom_operands);
+        self.atom_operands = next;
+    }
+
+    pub fn appendCpool(self: *FunctionDef, value: Value) !u32 {
+        const next = try self.memory.alloc(Value, self.cpool.len + 1);
+        errdefer self.memory.free(Value, next);
+        @memcpy(next[0..self.cpool.len], self.cpool);
+        next[self.cpool.len] = value.dup();
+        if (self.cpool.len != 0) self.memory.free(Value, self.cpool);
+        self.cpool = next;
+        self.cpool_count = @intCast(self.cpool.len);
+        return @intCast(self.cpool.len - 1);
     }
 
     pub fn deinit(self: *FunctionDef, rt: anytype) void {
@@ -345,6 +417,8 @@ pub const FunctionDef = struct {
         if (self.global_vars.len != 0) self.memory.free(GlobalVar, self.global_vars);
 
         if (self.byte_code.len != 0) self.memory.free(u8, self.byte_code);
+        for (self.atom_operands) |atom_id| self.atoms.free(atom_id);
+        if (self.atom_operands.len != 0) self.memory.free(atom.Atom, self.atom_operands);
 
         // Free label reloc entries
         for (self.label_slots) |*ls| {
@@ -359,6 +433,8 @@ pub const FunctionDef = struct {
 
         for (self.cpool) |v| v.free(rt);
         if (self.cpool.len != 0) self.memory.free(Value, self.cpool);
+
+        self.cpool_count = 0;
 
         for (self.closure_var) |*cv| self.atoms.free(cv.var_name);
         if (self.closure_var.len != 0) self.memory.free(ClosureVar, self.closure_var);
@@ -376,11 +452,15 @@ pub const FunctionDef = struct {
         self.scopes = &.{};
         self.global_vars = &.{};
         self.byte_code = &.{};
+        self.atom_operands = &.{};
         self.label_slots = &.{};
         self.cpool = &.{};
         self.closure_var = &.{};
         self.jump_slots = &.{};
         self.source_loc_slots = &.{};
         self.child_list = &.{};
+        self.emit_top_level_closure_init = false;
+        self.top_level_closure_var_idx = -1;
+        self.child_decl_init_keep_value = false;
     }
 };

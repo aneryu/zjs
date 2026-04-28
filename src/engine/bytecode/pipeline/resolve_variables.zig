@@ -13,8 +13,15 @@ const function_def_mod = @import("../function_def.zig");
 const opcode = @import("../opcode.zig");
 const scope = @import("../scope.zig");
 
+// Global variable definition flags (mirrors quickjs.c)
+const DEFINE_GLOBAL_LEX_VAR: u8 = 1 << 7;
+const DEFINE_GLOBAL_FUNC_VAR: u8 = 1 << 6;
+
 pub const Error = error{
     InvalidBytecode,
+    NoFunctionDef,
+    NoParentScope,
+    ClosureVarNotFound,
 };
 
 /// Context for variable resolution.
@@ -83,6 +90,26 @@ fn isScopeVarOp(op_id: u8) bool {
         op_id == opcode.op.scope_put_var or
         op_id == opcode.op.scope_get_var_undef or
         op_id == opcode.op.scope_put_var_init;
+}
+
+/// Returns true if the opcode at `op_id` is a Phase 1 temporary
+/// private field opcode that `resolve_variables` needs to lower.
+fn isScopePrivateFieldOp(op_id: u8) bool {
+    return op_id == opcode.op.scope_get_private_field or
+        op_id == opcode.op.scope_get_private_field2 or
+        op_id == opcode.op.scope_put_private_field or
+        op_id == opcode.op.scope_in_private_field;
+}
+
+/// Maps a scope_* private field opcode to its final form.
+fn lowerScopePrivateFieldOp(op_id: u8) u8 {
+    return switch (op_id) {
+        opcode.op.scope_get_private_field => opcode.op.get_private_field,
+        opcode.op.scope_get_private_field2 => opcode.op.get_private_field,
+        opcode.op.scope_put_private_field => opcode.op.put_private_field,
+        opcode.op.scope_in_private_field => opcode.op.private_in,
+        else => unreachable,
+    };
 }
 
 /// Maps a scope_* var opcode to its global-form counterpart (5-byte
@@ -159,6 +186,134 @@ fn selectShortLoc(base_op: u8, idx: u16) ShortLocForm {
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
 
+fn lookupClosureVar(ctx: *const Context, atom_id: u32) ?u16 {
+    const fd = ctx.function_def orelse return null;
+    for (fd.closure_var, 0..) |cv, idx| {
+        if (cv.var_name == atom_id) return @intCast(idx);
+    }
+    var maybe_parent = fd.parent;
+    while (maybe_parent) |parent| {
+        for (parent.closure_var, 0..) |cv, idx| {
+            if (cv.var_name == atom_id) return @intCast(idx);
+        }
+        const parent_var = parent.findVar(atom_id);
+        if (parent_var >= 0) return @intCast(parent_var);
+        const parent_arg = parent.findArg(atom_id);
+        if (parent_arg >= 0) return @intCast(parent_arg);
+        maybe_parent = parent.parent;
+    }
+    return null;
+}
+
+fn closureVarKind(ctx: *const Context, idx: u16) function_def_mod.VarKind {
+    const fd = ctx.function_def orelse return .normal;
+    if (idx >= fd.closure_var.len) return .normal;
+    return fd.closure_var[idx].var_kind;
+}
+
+fn closureVarKindForAtom(ctx: *const Context, atom_id: u32) function_def_mod.VarKind {
+    const fd = ctx.function_def orelse return .normal;
+    for (fd.closure_var) |cv| {
+        if (cv.var_name == atom_id) return cv.var_kind;
+    }
+    var maybe_parent = fd.parent;
+    while (maybe_parent) |parent| {
+        for (parent.closure_var) |cv| {
+            if (cv.var_name == atom_id) return cv.var_kind;
+        }
+        const parent_var = parent.findVar(atom_id);
+        if (parent_var >= 0) return parent.vars[@intCast(parent_var)].var_kind;
+        maybe_parent = parent.parent;
+    }
+    return .normal;
+}
+
+fn closureVarIsLexicalForAtom(ctx: *const Context, atom_id: u32) bool {
+    const fd = ctx.function_def orelse return true;
+    for (fd.closure_var) |cv| {
+        if (cv.var_name == atom_id) return cv.is_lexical;
+    }
+    var maybe_parent = fd.parent;
+    while (maybe_parent) |parent| {
+        for (parent.closure_var) |cv| {
+            if (cv.var_name == atom_id) return cv.is_lexical;
+        }
+        maybe_parent = parent.parent;
+    }
+    return true;
+}
+
+fn isAncestorLocalOrArg(ctx: *const Context, atom_id: u32) bool {
+    const fd = ctx.function_def orelse return false;
+    var maybe_parent = fd.parent;
+    var depth: usize = 1;
+    while (maybe_parent) |parent| {
+        if (parent.findVar(atom_id) >= 0) return depth > 1;
+        if (parent.findArg(atom_id) >= 0) return true;
+        maybe_parent = parent.parent;
+        depth += 1;
+    }
+    return false;
+}
+
+fn lowerScopeVarOpClosure(op_id: u8) u8 {
+    return switch (op_id) {
+        opcode.op.scope_get_var => opcode.op.get_var_ref_check,
+        opcode.op.scope_get_var_undef => opcode.op.get_var_ref,
+        opcode.op.scope_put_var => opcode.op.put_var_ref_check,
+        opcode.op.scope_put_var_init => opcode.op.put_var_ref,
+        else => unreachable,
+    };
+}
+
+fn selectShortVarRef(base_op: u8, idx: u16) ShortLocForm {
+    if (idx < 4) {
+        const short_base: u8 = switch (base_op) {
+            opcode.op.get_var_ref => opcode.op.get_var_ref0,
+            opcode.op.put_var_ref => opcode.op.put_var_ref0,
+            opcode.op.set_var_ref => opcode.op.set_var_ref0,
+            else => return .{ .op_id = base_op, .size = 3, .operand_size = 2 },
+        };
+        return .{
+            .op_id = short_base + @as(u8, @intCast(idx)),
+            .size = 1,
+            .operand_size = 0,
+        };
+    }
+    return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
+}
+
+fn selectShortArg(base_op: u8, idx: u16) ShortLocForm {
+    if (idx < 4) {
+        const short_base: u8 = switch (base_op) {
+            opcode.op.get_arg => opcode.op.get_arg0,
+            opcode.op.put_arg => opcode.op.put_arg0,
+            else => unreachable,
+        };
+        return .{
+            .op_id = short_base + @as(u8, @intCast(idx)),
+            .size = 1,
+            .operand_size = 0,
+        };
+    }
+    return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
+}
+
+fn lookupArg(ctx: *const Context, atom_id: u32) ?u16 {
+    const fd = ctx.function_def orelse return null;
+    const idx = fd.findArg(atom_id);
+    if (idx < 0) return null;
+    return @intCast(idx);
+}
+
+fn lowerScopeVarOpArg(op_id: u8) ?u8 {
+    return switch (op_id) {
+        opcode.op.scope_get_var, opcode.op.scope_get_var_undef => opcode.op.get_arg,
+        opcode.op.scope_put_var, opcode.op.scope_put_var_init => opcode.op.put_arg,
+        else => null,
+    };
+}
+
 /// If the FunctionDef has a `VarDef` for `atom_id`, return its var
 /// index. Mirrors a simplified `find_var` (`quickjs.c:23378`) — this
 /// scan ignores arg vs var split since the parser does not yet
@@ -171,6 +326,49 @@ fn lookupLocal(ctx: *const Context, atom_id: u32) ?u16 {
     return @intCast(idx);
 }
 
+/// Resolve a variable by walking the current function's scope at
+/// `scope_level`. Mirrors the local-only portion of
+/// `resolve_scope_var` (`quickjs.c:32377-32420`). Returns the local
+/// var index if found, or null otherwise.
+///
+/// NOTE: parent-scope traversal + `get_closure_var` synthesis is
+/// part of M1.1 outstanding work. The parser does not yet populate
+/// `closure_var`, so attempting to materialise closure variables
+/// here would fail. We keep the resolution local-only for now;
+/// captured-variable references therefore fall back to the global
+/// `get_var` / `put_var` path, which is wrong semantically but
+/// matches the pre-M1.1 behaviour and keeps the test262 baseline.
+fn resolveScopeVar(ctx: *const Context, atom_id: u32, scope_level: i32) ?u16 {
+    const fd = ctx.function_def orelse return null;
+
+    // Check the current scope level chain.
+    var scope_idx = scope_level;
+    while (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+        var idx: i32 = fd.scopes[@intCast(scope_idx)].first;
+        while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
+            const vd = &fd.vars[@intCast(idx)];
+            if (vd.var_name == atom_id) return @intCast(idx);
+            idx = vd.scope_next;
+        }
+        scope_idx = fd.scopes[@intCast(scope_idx)].parent;
+    }
+
+    // Fall back to a flat var scan for legacy callers that don't
+    // record scope_level on every emission.
+    if (fd.use_short_opcodes) {
+        var flat_i: usize = fd.vars.len;
+        while (flat_i > 0) {
+            flat_i -= 1;
+            const v = fd.vars[flat_i];
+            if (v.var_name == atom_id and v.scope_level == scope_level) return @intCast(flat_i);
+        }
+        return null;
+    }
+    const flat = fd.findVar(atom_id);
+    if (flat < 0) return null;
+    return @intCast(flat);
+}
+
 /// True iff the local at `loc_idx` is a lexical (`let`/`const`) var
 /// — these need TDZ check variants. `var` slots return false (var
 /// is hoisted and starts as `undefined`, no TDZ).
@@ -178,6 +376,17 @@ fn isLexicalLocal(ctx: *const Context, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (loc_idx >= fd.vars.len) return false;
     return fd.vars[loc_idx].is_lexical;
+}
+
+fn localTdzEmittedAtDecl(ctx: *const Context, loc_idx: u16) bool {
+    const fd = ctx.function_def orelse return false;
+    if (loc_idx >= fd.vars.len) return false;
+    return fd.vars[loc_idx].tdz_emitted_at_decl;
+}
+
+fn useUncheckedLexicalLocals(ctx: *const Context) bool {
+    const fd = ctx.function_def orelse return false;
+    return fd.use_short_opcodes;
 }
 
 /// Promote a Phase-1 var op to its TDZ-checked counterpart for
@@ -247,6 +456,18 @@ pub fn run(ctx: *Context) !void {
     // We also count the number of jump opcodes (format `.label`) so
     // we can size the pc-map and the jump-site list ahead of the
     // second pass.
+    //
+    // Global vars pre-pass: each global var emits OP_check_define_var
+    // (6 bytes: 1 opcode + 4 atom + 1 flags). Count them for sizing.
+    var global_vars_size: usize = 0;
+    var global_vars_atom_count: usize = 0;
+    if (ctx.function_def) |fd| {
+        if (fd.global_var_count > 0) {
+            global_vars_size = @as(usize, @intCast(fd.global_var_count)) * 6;
+            global_vars_atom_count = @as(usize, @intCast(fd.global_var_count));
+        }
+    }
+
     // Count lexical locals so we can size the TDZ prologue. Each
     // lexical slot needs an `OP_set_loc_uninitialized <u16 idx>`
     // (3 bytes) emitted before the body so `get_loc_check` knows
@@ -255,30 +476,108 @@ pub fn run(ctx: *Context) !void {
     var prologue_lexical_count: usize = 0;
     if (ctx.function_def) |fd| {
         for (fd.vars) |v| {
-            if (v.is_lexical) prologue_lexical_count += 1;
+            if (v.is_lexical and !v.tdz_emitted_at_decl) prologue_lexical_count += 1;
         }
     }
     const prologue_size: usize = prologue_lexical_count * 3;
+    var child_decl_init_size: usize = 0;
+    if (ctx.function_def) |fd| {
+        for (fd.child_list) |child| {
+            if (child.emit_top_level_closure_init) continue;
+            const var_idx_i = fd.findVar(child.func_name);
+            if (var_idx_i < 0) continue;
+            const form = selectShortLoc(if (child.child_decl_init_keep_value) opcode.op.set_loc else opcode.op.put_loc, @intCast(var_idx_i));
+            child_decl_init_size += 2 + form.size;
+        }
+    }
 
-    var output_size: usize = prologue_size;
-    var output_atom_count: usize = 0;
+    var output_size: usize = global_vars_size + child_decl_init_size + prologue_size;
+    var output_atom_count: usize = global_vars_atom_count;
     var jump_count: usize = 0;
     var i: usize = 0;
     while (i < func.code.len) {
         const op = func.code[i];
-        if (isScopeVarOp(op)) {
+        // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
+        if (op == opcode.op.eval) {
+            if (i + 4 > func.code.len) return error.InvalidBytecode;
+            // Format: call_argc (u16) + scope_idx (u16)
+            _ = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little); // call_argc
+            const scope_idx = std.mem.readInt(u16, func.code[i + 3 ..][0..2], .little);
+
+            // Rewrite scope_idx to s->scopes[scope].first + 1
+            const fd = ctx.function_def orelse {
+                // If no FunctionDef, copy through as-is
+                output_size += 4;
+                i += 4;
+                continue;
+            };
+            if (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+                // TODO: mark_eval_captured_variables(ctx, fd, scope_idx)
+                _ = fd.scopes[@intCast(scope_idx)].first + 1; // new_scope_idx
+                output_size += 4;
+                i += 4;
+                continue;
+            } else {
+                // Invalid scope_idx, copy through as-is
+                output_size += 4;
+                i += 4;
+                continue;
+            }
+        } else if (op == opcode.op.apply_eval) {
+            if (i + 2 > func.code.len) return error.InvalidBytecode;
+            // Format: scope_idx (u16)
+            const scope_idx = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+
+            // Rewrite scope_idx to s->scopes[scope].first + 1
+            const fd = ctx.function_def orelse {
+                // If no FunctionDef, copy through as-is
+                output_size += 2;
+                i += 2;
+                continue;
+            };
+            if (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+                // TODO: mark_eval_captured_variables(ctx, fd, scope_idx)
+                _ = fd.scopes[@intCast(scope_idx)].first + 1; // new_scope_idx
+                output_size += 2;
+                i += 2;
+                continue;
+            } else {
+                // Invalid scope_idx, copy through as-is
+                output_size += 2;
+                i += 2;
+                continue;
+            }
+        } else if (isScopeVarOp(op)) {
             if (i + 7 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
-            if (lookupLocal(ctx, atom_id)) |loc_idx| {
-                if (isLexicalLocal(ctx, loc_idx)) {
-                    // Lexical: 3-byte check variant, no short form.
+            const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+            if (lookupArg(ctx, atom_id)) |arg_idx| {
+                const arg_op = lowerScopeVarOpArg(op).?;
+                const form = selectShortArg(arg_op, arg_idx);
+                output_size += form.size;
+            } else if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+                if (isLexicalLocal(ctx, loc_idx) and
+                    (!useUncheckedLexicalLocals(ctx) or localTdzEmittedAtDecl(ctx, loc_idx)) and
+                    !(op == opcode.op.scope_put_var_init and localTdzEmittedAtDecl(ctx, loc_idx)))
+                {
+                    // Lexical: 3-byte TDZ-check variant.
                     output_size += 3;
                 } else {
-                    // var: pick shortest form (1, 2, or 3 bytes).
+                    // var: shortest form (1, 2, or 3 bytes).
                     const local_op = lowerScopeVarOpLocal(op);
                     const form = selectShortLoc(local_op, loc_idx);
                     output_size += form.size;
                 }
+            } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                var ref_op = lowerScopeVarOpClosure(op);
+                if (op == opcode.op.scope_get_var and (closureVarKind(ctx, ref_idx) == .function_decl or closureVarKindForAtom(ctx, atom_id) == .function_decl or isAncestorLocalOrArg(ctx, atom_id) or !closureVarIsLexicalForAtom(ctx, atom_id))) {
+                    ref_op = opcode.op.get_var_ref;
+                }
+                if (op == opcode.op.scope_put_var and !closureVarIsLexicalForAtom(ctx, atom_id)) {
+                    ref_op = opcode.op.put_var_ref;
+                }
+                const form = selectShortVarRef(ref_op, ref_idx);
+                output_size += form.size;
             } else {
                 // Global: 5-byte atom form, one atom operand.
                 output_size += 5;
@@ -337,13 +636,57 @@ pub fn run(ctx: *Context) !void {
     var in_atom_idx: usize = 0;
     var out_jump_idx: usize = 0;
 
+    // Emit global vars pre-pass (mirrors quickjs.c:33636-33672).
+    // For each global var, emit OP_check_define_var with flags.
+    if (ctx.function_def) |fd| {
+        for (fd.global_vars) |gv| {
+            // Check for conflicts with closure vars (simplified - full check
+            // requires eval_type and is_lexical flag handling per QuickJS)
+            var flags: u8 = 0;
+            if (gv.is_lexical) flags |= DEFINE_GLOBAL_LEX_VAR;
+            if (gv.cpool_idx >= 0) flags |= DEFINE_GLOBAL_FUNC_VAR;
+
+            output[out_idx] = opcode.op.check_define_var;
+            std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], gv.var_name, .little);
+            output[out_idx + 5] = flags;
+            output_atoms[out_atom_idx] = ctx.atoms.dup(gv.var_name);
+            out_idx += 6;
+            out_atom_idx += 1;
+        }
+    }
+
+    if (ctx.function_def) |fd| {
+        for (fd.child_list) |child| {
+            if (child.emit_top_level_closure_init) continue;
+            const var_idx_i = fd.findVar(child.func_name);
+            if (var_idx_i < 0) continue;
+            if (child.parent_cpool_idx < 0) return error.InvalidBytecode;
+            const var_idx: u16 = @intCast(var_idx_i);
+            output[out_idx] = opcode.op.fclosure8;
+            output[out_idx + 1] = @intCast(child.parent_cpool_idx);
+            out_idx += 2;
+            const form = selectShortLoc(if (child.child_decl_init_keep_value) opcode.op.set_loc else opcode.op.put_loc, var_idx);
+            output[out_idx] = form.op_id;
+            switch (form.operand_size) {
+                0 => {},
+                1 => output[out_idx + 1] = @intCast(var_idx),
+                2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], var_idx, .little),
+                else => unreachable,
+            }
+            out_idx += form.size;
+        }
+    }
+
     // Emit the TDZ prologue: one `set_loc_uninitialized <idx>` per
     // lexical local. This marks the slots so `get_loc_check` /
     // `put_loc_check` throw `ReferenceError` until
     // `put_loc_check_init` runs.
     if (ctx.function_def) |fd| {
-        for (fd.vars, 0..) |v, var_idx| {
-            if (!v.is_lexical) continue;
+        var var_idx = fd.vars.len;
+        while (var_idx > 0) {
+            var_idx -= 1;
+            const v = fd.vars[var_idx];
+            if (!v.is_lexical or v.tdz_emitted_at_decl) continue;
             output[out_idx] = opcode.op.set_loc_uninitialized;
             std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], @intCast(var_idx), .little);
             out_idx += 3;
@@ -353,40 +696,119 @@ pub fn run(ctx: *Context) !void {
     i = 0;
     while (i < func.code.len) {
         // pc_map for input pc i maps to output pc out_idx (after the
-        // prologue), so jumps that reference the post-prologue body
-        // resolve correctly.
+        // global_vars pre-pass and TDZ prologue), so jumps that reference
+        // the post-prologue body resolve correctly.
         pc_map[i] = out_idx;
         const op = func.code[i];
-        if (isScopeVarOp(op)) {
+        // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
+        if (op == opcode.op.eval) {
+            if (i + 4 > func.code.len) return error.InvalidBytecode;
+            const call_argc = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+            const scope_idx = std.mem.readInt(u16, func.code[i + 3 ..][0..2], .little);
+
+            const fd = ctx.function_def orelse {
+                // If no FunctionDef, copy through as-is
+                @memcpy(output[out_idx .. out_idx + 4], func.code[i .. i + 4]);
+                out_idx += 4;
+                i += 4;
+                continue;
+            };
+            if (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+                // TODO: mark_eval_captured_variables(ctx, fd, scope_idx)
+                const new_scope_idx = fd.scopes[@intCast(scope_idx)].first + 1;
+                output[out_idx] = opcode.op.eval;
+                std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], call_argc, .little);
+                std.mem.writeInt(u16, output[out_idx + 3 ..][0..2], @intCast(new_scope_idx), .little);
+                out_idx += 4;
+                i += 4;
+                continue;
+            } else {
+                // Invalid scope_idx, copy through as-is
+                @memcpy(output[out_idx .. out_idx + 4], func.code[i .. i + 4]);
+                out_idx += 4;
+                i += 4;
+                continue;
+            }
+        } else if (op == opcode.op.apply_eval) {
+            if (i + 2 > func.code.len) return error.InvalidBytecode;
+            const scope_idx = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+
+            const fd = ctx.function_def orelse {
+                // If no FunctionDef, copy through as-is
+                @memcpy(output[out_idx .. out_idx + 2], func.code[i .. i + 2]);
+                out_idx += 2;
+                i += 2;
+                continue;
+            };
+            if (scope_idx >= 0 and @as(usize, @intCast(scope_idx)) < fd.scopes.len) {
+                // TODO: mark_eval_captured_variables(ctx, fd, scope_idx)
+                const new_scope_idx = fd.scopes[@intCast(scope_idx)].first + 1;
+                output[out_idx] = opcode.op.apply_eval;
+                std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], @intCast(new_scope_idx), .little);
+                out_idx += 2;
+                i += 2;
+                continue;
+            } else {
+                // Invalid scope_idx, copy through as-is
+                @memcpy(output[out_idx .. out_idx + 2], func.code[i .. i + 2]);
+                out_idx += 2;
+                i += 2;
+                continue;
+            }
+        } else if (isScopeVarOp(op)) {
             if (i + 7 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
-            // scope_level at func.code[i+5..i+7] is unused in this
-            // simplified path; the full §F10.1 Outstanding pipeline
-            // will check it via `is_child_scope` for shadowing.
-            if (lookupLocal(ctx, atom_id)) |loc_idx| {
-                if (isLexicalLocal(ctx, loc_idx)) {
-                    // Lexical: emit 3-byte TDZ-check variant.
+            const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+            if (lookupArg(ctx, atom_id)) |arg_idx| {
+                const arg_op = lowerScopeVarOpArg(op).?;
+                const form = selectShortArg(arg_op, arg_idx);
+                output[out_idx] = form.op_id;
+                switch (form.operand_size) {
+                    0 => {},
+                    2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], arg_idx, .little),
+                    else => unreachable,
+                }
+                out_idx += form.size;
+                in_atom_idx += 1;
+            } else if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+                if (isLexicalLocal(ctx, loc_idx) and
+                    (!useUncheckedLexicalLocals(ctx) or localTdzEmittedAtDecl(ctx, loc_idx)) and
+                    !(op == opcode.op.scope_put_var_init and localTdzEmittedAtDecl(ctx, loc_idx)))
+                {
                     output[out_idx] = lowerScopeVarOpLexical(op);
                     std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
                     out_idx += 3;
-                    in_atom_idx += 1;
                 } else {
-                    // var: emit shortest form. The input atom slot is
-                    // consumed but we do NOT re-emit it.
                     const local_op = lowerScopeVarOpLocal(op);
                     const form = selectShortLoc(local_op, loc_idx);
                     output[out_idx] = form.op_id;
                     switch (form.operand_size) {
-                        0 => {}, // idx encoded in opcode id
+                        0 => {},
                         1 => output[out_idx + 1] = @intCast(loc_idx),
                         2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little),
                         else => unreachable,
                     }
                     out_idx += form.size;
-                    in_atom_idx += 1;
                 }
+                in_atom_idx += 1;
+            } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                var ref_op = lowerScopeVarOpClosure(op);
+                if (op == opcode.op.scope_get_var and (closureVarKind(ctx, ref_idx) == .function_decl or closureVarKindForAtom(ctx, atom_id) == .function_decl or isAncestorLocalOrArg(ctx, atom_id) or !closureVarIsLexicalForAtom(ctx, atom_id))) {
+                    ref_op = opcode.op.get_var_ref;
+                }
+                if (op == opcode.op.scope_put_var and !closureVarIsLexicalForAtom(ctx, atom_id)) {
+                    ref_op = opcode.op.put_var_ref;
+                }
+                const form = selectShortVarRef(ref_op, ref_idx);
+                output[out_idx] = form.op_id;
+                switch (form.operand_size) {
+                    0 => {},
+                    2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], ref_idx, .little),
+                    else => unreachable,
+                }
+                out_idx += form.size;
+                in_atom_idx += 1;
             } else {
-                // Global lowering: emit get_var / put_var with atom.
                 output[out_idx] = lowerScopeVarOpGlobal(op);
                 std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
                 output_atoms[out_atom_idx] = func.atoms.dup(atom_id);

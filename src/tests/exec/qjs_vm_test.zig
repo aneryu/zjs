@@ -37,6 +37,25 @@ fn parseAndRun(rt: *core.Runtime, ctx: *core.Context, src: []const u8) !core.Val
     return vm.run(&function);
 }
 
+fn parseAndRunWithTopLevelChildren(rt: *core.Runtime, ctx: *core.Context, src: []const u8) !core.Value {
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(rt);
+    state.top_level_functions_as_children = true;
+    try qjs_parser.parseExpr(&state);
+
+    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
+
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    return vm.run(&function);
+}
+
 test "F2+F3 dual-dispatch: integer literal executes via qjs_vm" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
@@ -44,6 +63,149 @@ test "F2+F3 dual-dispatch: integer literal executes via qjs_vm" {
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "42");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "F10.2: qjs_vm executes push_i8 short integer" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.opcode_format = .qjs;
+
+    const op = engine.bytecode.opcode.op;
+    var code = [_]u8{ op.push_i8, @bitCast(@as(i8, -42)), op.@"return" };
+    try function.setCode(&code);
+
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    const result = try vm.run(&function);
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, -42), result.asInt32().?);
+}
+
+test "F10.2: qjs_vm executes push_i16 short integer" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.opcode_format = .qjs;
+
+    const op = engine.bytecode.opcode.op;
+    var code = [_]u8{0} ** 4;
+    code[0] = op.push_i16;
+    std.mem.writeInt(i16, code[1..3], 300, .little);
+    code[3] = op.@"return";
+    try function.setCode(&code);
+
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    const result = try vm.run(&function);
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 300), result.asInt32().?);
+}
+
+test "F10.2: qjs_vm executes get_loc0_loc1 coalesced local reads" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.opcode_format = .qjs;
+    function.var_count = 2;
+
+    const op = engine.bytecode.opcode.op;
+    var code = [_]u8{0} ** 14;
+    code[0] = op.push_i32;
+    std.mem.writeInt(i32, code[1..5], 41, .little);
+    code[5] = op.put_loc0;
+    code[6] = op.push_1;
+    code[7] = op.put_loc1;
+    code[8] = op.get_loc0_loc1;
+    code[9] = op.add;
+    code[10] = op.@"return";
+    try function.setCode(code[0..11]);
+
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    const result = try vm.run(&function);
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "F10.2: qjs_vm executes relative goto" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.opcode_format = .qjs;
+
+    const op = engine.bytecode.opcode.op;
+    var code = [_]u8{0} ** 13;
+    code[0] = op.goto;
+    std.mem.writeInt(i32, code[1..5], 10, .little);
+    code[5] = op.push_i32;
+    std.mem.writeInt(i32, code[6..10], 1, .little);
+    code[10] = op.drop;
+    code[11] = op.push_2;
+    code[12] = op.@"return";
+    try function.setCode(&code);
+
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    const result = try vm.run(&function);
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 2), result.asInt32().?);
+}
+
+test "F10.2: qjs_vm executes if_false8 relative branch" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+    function.opcode_format = .qjs;
+
+    const op = engine.bytecode.opcode.op;
+    const code = [_]u8{
+        op.push_0,
+        op.if_false8,
+        3,
+        op.push_1,
+        op.@"return",
+        op.push_i8,
+        42,
+        op.@"return",
+    };
+    try function.setCode(&code);
+
+    var vm = engine.exec.Vm.init(ctx);
+    defer vm.deinit();
+    const result = try vm.run(&function);
     defer result.free(rt);
     try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
 }
@@ -245,6 +407,160 @@ test "F2+F3 dual-dispatch: call expression via qjs_vm" {
     // Note: this will fail parsing if f is not defined, but
     // we're testing the VM dispatch path here.
     try std.testing.expect(result.isUndefined());
+}
+
+test "M1.3: nested FunctionDef child runs through fclosure and call" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function inner(){ return 42; } return inner(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef function expression captures parent var" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 41; return (function inner(){ return a + 1; })(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef capture observes parent write after closure creation" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a; var f = function inner(){ return a + 1; }; a = 41; return f(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef captured parent var survives returned closure" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 41; return function inner(){ return a + 1; }; })()()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef declaration captures var declared later" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function inner(){ return a + 1; } var a = 41; return inner(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: function-body var predeclare skips nested function bodies" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function ignored(){ var a = 1; } function inner(){ return a + 1; } var a = 41; return inner(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef captures parent argument" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(a){ return function inner(){ return a + 1; }; })(41)()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef captured argument observes parent write" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(a){ var f = function inner(){ return a + 1; }; a = 41; return f(); })(1)");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef captures grandparent var through ref chain" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 41; return (function middle(){ return function inner(){ return a + 1; }; })()(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef grandparent ref observes outer write" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 1; var f = (function middle(){ return function inner(){ return a + 1; }; })(); a = 41; return f(); })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef writes captured parent var" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 1; function inner(){ a = 41; } inner(); return a + 1; })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef writes captured parent argument" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(a){ function inner(){ a = 41; } inner(); return a + 1; })(1)");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef writes captured grandparent var through ref chain" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 1; var f = (function middle(){ return function inner(){ a = 41; }; })(); f(); return a + 1; })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
+}
+
+test "M1.3: nested FunctionDef declaration is callable before declaration" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ return inner(); function inner(){ return 42; } })()");
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
 }
 
 // =====================================================================

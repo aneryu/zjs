@@ -27,9 +27,7 @@ const Payload = union(enum) {
     float64: f64,
     short_big_int: i64,
     ref: *gc.Header,
-    // Temporary: raw pointer for FunctionBytecode before GC integration
-    // TODO: Integrate FunctionBytecode into GC system
-    ptr: ?*anyopaque,
+    obj: *gc.ObjectHeader,
 };
 
 pub const Value = struct {
@@ -68,10 +66,8 @@ pub const Value = struct {
         return .{ .tag = Tag.object, .payload = .{ .ref = header } };
     }
 
-    // Temporary: FunctionBytecode pointer wrapper before GC integration
-    // TODO: Integrate FunctionBytecode into GC system and use proper ref counting
-    pub fn functionBytecode(ptr: ?*anyopaque) Value {
-        return .{ .tag = Tag.function_bytecode, .payload = .{ .ptr = ptr } };
+    pub fn functionBytecode(header: *gc.ObjectHeader) Value {
+        return .{ .tag = Tag.function_bytecode, .payload = .{ .obj = header } };
     }
 
     pub fn nullValue() Value {
@@ -168,20 +164,20 @@ pub const Value = struct {
 
     pub fn asFunctionBytecode(self: Value) ?*anyopaque {
         return switch (self.payload) {
-            .ptr => |ptr| ptr,
+            .obj => |obj| @ptrCast(obj),
             else => null,
         };
     }
 
     pub fn dup(self: Value) Value {
         if (self.refHeader()) |header| gc.retain(header);
+        if (self.objectHeader()) |header| header.retain();
         return self;
     }
 
     pub fn free(self: Value, rt: anytype) void {
         if (self.refHeader()) |header| gc.release(rt, header);
-        // TODO: Handle FunctionBytecode cleanup when GC integration is complete
-        // For now, FunctionBytecode is managed separately via MemoryAccount
+        if (self.objectHeader()) |header| _ = rt.gc.releaseObject(header) catch {};
     }
 
     pub fn same(self: Value, other: Value) bool {
@@ -193,13 +189,20 @@ pub const Value = struct {
             .float64 => |value| other.payload == .float64 and other.payload.float64 == value,
             .short_big_int => |value| other.payload == .short_big_int and other.payload.short_big_int == value,
             .ref => |header| other.payload == .ref and other.payload.ref == header,
-            .ptr => |ptr| other.payload == .ptr and other.payload.ptr == ptr,
+            .obj => |header| other.payload == .obj and other.payload.obj == header,
         };
     }
 
     pub fn refHeader(self: Value) ?*gc.Header {
         return switch (self.payload) {
             .ref => |header| header,
+            else => null,
+        };
+    }
+
+    pub fn objectHeader(self: Value) ?*gc.ObjectHeader {
+        return switch (self.payload) {
+            .obj => |header| header,
             else => null,
         };
     }

@@ -8,6 +8,7 @@ pub const Frame = struct {
     this_value: Value = Value.undefinedValue(),
     locals: []Value = &.{},
     args: []Value = &.{},
+    var_refs: []Value = &.{},
     /// Per-slot TDZ flag mirroring QuickJS's `JS_UNINITIALIZED`
     /// sentinel: `true` means the slot is in the temporal dead
     /// zone; reads via `get_loc_check` / `put_loc_check` throw
@@ -24,11 +25,14 @@ pub const Frame = struct {
         self.this_value.free(rt);
         for (self.locals) |value| value.free(rt);
         for (self.args) |value| value.free(rt);
+        for (self.var_refs) |value| value.free(rt);
         if (self.locals.len != 0) account.free(Value, self.locals);
         if (self.args.len != 0) account.free(Value, self.args);
+        if (self.var_refs.len != 0) account.free(Value, self.var_refs);
         if (self.locals_uninit.len != 0) account.free(bool, self.locals_uninit);
         self.locals = &.{};
         self.args = &.{};
+        self.var_refs = &.{};
         self.locals_uninit = &.{};
     }
 

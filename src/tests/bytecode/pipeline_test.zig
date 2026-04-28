@@ -516,6 +516,98 @@ test "resolve_labels: drops label opcodes" {
     try std.testing.expectEqual(op.return_undef, bc.code[5]);
 }
 
+test "resolve_labels: rewrites absolute goto target to relative offset" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+
+    // push_i32 7 ; goto <absolute pc=11> ; drop ; return
+    var input = [_]u8{0} ** 12;
+    input[0] = op.push_i32;
+    std.mem.writeInt(i32, input[1..5], 7, .little);
+    input[5] = op.goto;
+    std.mem.writeInt(u32, input[6..10], 11, .little);
+    input[10] = op.drop;
+    input[11] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.init(&bc);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 12), bc.code.len);
+    try std.testing.expectEqual(op.goto, bc.code[5]);
+    try std.testing.expectEqual(@as(i32, 5), std.mem.readInt(i32, bc.code[6..10], .little));
+}
+
+test "F10.2: resolve_labels selects goto8 for near relative target" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    // goto <absolute pc=6> ; push_i32 1 ; return
+    var input = [_]u8{0} ** 11;
+    input[0] = op.goto;
+    std.mem.writeInt(u32, input[1..5], 10, .little);
+    input[5] = op.push_i32;
+    std.mem.writeInt(i32, input[6..10], 1, .little);
+    input[10] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
+    try std.testing.expectEqual(op.goto8, bc.code[0]);
+    try std.testing.expectEqual(@as(i8, 2), @as(i8, @bitCast(bc.code[1])));
+    try std.testing.expectEqual(op.push_1, bc.code[2]);
+    try std.testing.expectEqual(op.@"return", bc.code[3]);
+}
+
+test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{op.nop} ** 140;
+    input[0] = op.if_false;
+    std.mem.writeInt(u32, input[1..5], input.len - 1, .little);
+    input[input.len - 1] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, input.len), bc.code.len);
+    try std.testing.expectEqual(op.if_false, bc.code[0]);
+    try std.testing.expectEqual(@as(i32, 138), std.mem.readInt(i32, bc.code[1..5], .little));
+    try std.testing.expectEqual(op.@"return", bc.code[bc.code.len - 1]);
+}
+
 test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
@@ -783,4 +875,223 @@ test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
     try std.testing.expectEqual(op.get_loc8, bc.code[0]);
     try std.testing.expectEqual(@as(u8, 4), bc.code[1]);
     try std.testing.expectEqual(op.return_undef, bc.code[2]);
+}
+
+test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 6;
+    input[0] = op.push_i32;
+    std.mem.writeInt(i32, input[1..5], -42, .little);
+    input[5] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 3), bc.code.len);
+    try std.testing.expectEqual(op.push_i8, bc.code[0]);
+    try std.testing.expectEqual(@as(u8, @bitCast(@as(i8, -42))), bc.code[1]);
+    try std.testing.expectEqual(op.@"return", bc.code[2]);
+}
+
+test "F10.2: resolve_labels selects push_i16 outside signed 8-bit range" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 6;
+    input[0] = op.push_i32;
+    std.mem.writeInt(i32, input[1..5], 300, .little);
+    input[5] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
+    try std.testing.expectEqual(op.push_i16, bc.code[0]);
+    try std.testing.expectEqual(@as(i16, 300), std.mem.readInt(i16, bc.code[1..3], .little));
+    try std.testing.expectEqual(op.@"return", bc.code[3]);
+}
+
+test "F10.2: resolve_labels coalesces get_loc0 get_loc1" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    const input = [_]u8{ op.get_loc0, op.get_loc1, op.add, op.@"return" };
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 3), bc.code.len);
+    try std.testing.expectEqual(op.get_loc0_loc1, bc.code[0]);
+    try std.testing.expectEqual(op.add, bc.code[1]);
+    try std.testing.expectEqual(op.@"return", bc.code[2]);
+}
+
+test "F10.2: resolve_labels coalesces wide get_loc 0 and get_loc 1 after short selection" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 8;
+    input[0] = op.get_loc;
+    std.mem.writeInt(u16, input[1..3], 0, .little);
+    input[3] = op.get_loc;
+    std.mem.writeInt(u16, input[4..6], 1, .little);
+    input[6] = op.add;
+    input[7] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 3), bc.code.len);
+    try std.testing.expectEqual(op.get_loc0_loc1, bc.code[0]);
+    try std.testing.expectEqual(op.add, bc.code[1]);
+    try std.testing.expectEqual(op.@"return", bc.code[2]);
+}
+
+test "F10.2: resolve_labels shortens direct loc arg and var_ref slot ops" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 22;
+    var i: usize = 0;
+    input[i] = op.get_loc;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 4, .little);
+    i += 3;
+    input[i] = op.set_loc;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 2, .little);
+    i += 3;
+    input[i] = op.get_arg;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 3, .little);
+    i += 3;
+    input[i] = op.put_arg;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 4, .little);
+    i += 3;
+    input[i] = op.set_arg;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 1, .little);
+    i += 3;
+    input[i] = op.set_var_ref;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 3, .little);
+    i += 3;
+    input[i] = op.get_var_ref;
+    std.mem.writeInt(u16, input[i + 1 ..][0..2], 4, .little);
+    i += 3;
+    input[i] = op.@"return";
+    try bc.setCode(&input);
+
+    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_labels.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 13), bc.code.len);
+    try std.testing.expectEqual(op.get_loc8, bc.code[0]);
+    try std.testing.expectEqual(@as(u8, 4), bc.code[1]);
+    try std.testing.expectEqual(op.set_loc2, bc.code[2]);
+    try std.testing.expectEqual(op.get_arg3, bc.code[3]);
+    try std.testing.expectEqual(op.put_arg, bc.code[4]);
+    try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, bc.code[5..7], .little));
+    try std.testing.expectEqual(op.set_arg1, bc.code[7]);
+    try std.testing.expectEqual(op.set_var_ref3, bc.code[8]);
+    try std.testing.expectEqual(op.get_var_ref, bc.code[9]);
+    try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, bc.code[10..12], .little));
+    try std.testing.expectEqual(op.@"return", bc.code[12]);
+}
+
+// ---- M1.3 task1: createFunctionBytecode produces a usable structure ----
+
+test "createFunctionBytecode: copies metadata + bytecode + closure_var from FunctionDef" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("inner");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+
+    fd.is_strict_mode = true;
+    fd.has_simple_parameter_list = false;
+    fd.func_kind = .normal;
+
+    // Three-byte body: push_i32 42 (5 bytes) + return (1 byte) = 6 bytes
+    const op = bytecode.opcode.op;
+    var body = [_]u8{0} ** 6;
+    body[0] = op.push_i32;
+    std.mem.writeInt(i32, body[1..5], 42, .little);
+    body[5] = op.@"return";
+    try fd.appendByteCode(&body);
+
+    // Add a single var so we can verify metadata propagation
+    _ = try fd.appendVar(.{
+        .var_name = name,
+        .scope_level = 0,
+        .is_lexical = false,
+    });
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+    defer core.Value.functionBytecode(&fb.header).free(rt);
+
+    try std.testing.expect(fb.is_strict_mode);
+    try std.testing.expect(!fb.has_simple_parameter_list);
+    try std.testing.expectEqual(@as(usize, 6), fb.byte_code.len);
+    try std.testing.expectEqual(@as(i32, 6), fb.byte_code_len);
+    try std.testing.expectEqual(op.push_i32, fb.byte_code[0]);
+    try std.testing.expectEqual(op.@"return", fb.byte_code[5]);
+    try std.testing.expectEqual(@as(usize, 1), fb.vardefs.len);
+    try std.testing.expectEqual(name, fb.vardefs[0].var_name);
+    try std.testing.expectEqual(@as(u16, 1), fb.var_count);
 }

@@ -29,134 +29,87 @@ pub const Context = struct {
 /// 3. Allocates and populates a FunctionBytecode structure
 /// 4. Returns the FunctionBytecode
 ///
-/// The caller is responsible for storing the FunctionBytecode in
-/// the parent's cpool and for deinit when done.
-///
-/// Note: This is a simplified version that doesn't yet create proper
-/// Function objects for children in the cpool. That requires additional
-/// infrastructure (Function object wrappers, GC integration, etc.).
-pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) !*bytecode_function.FunctionBytecode {
-    // First, recursively process all child functions
-    // This mirrors quickjs.c:35452-35464
-    for (fd.child_list) |*child_fd| {
-        // Recursively create FunctionBytecode for child
-        const child_fb = try createFunctionBytecode(child_fd, rt);
+pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) anyerror![]bytecode_function.FunctionBytecode {
+    try installChildFunctionBytecodes(fd, rt);
 
-        // Store in parent's cpool at the child's parent_cpool_idx
-        const cpool_idx = child_fd.parent_cpool_idx;
-        if (cpool_idx >= 0 and cpool_idx < fd.cpool_count) {
-            // Wrap FunctionBytecode pointer in Value
-            // TODO: Use proper Function object wrapper when GC integration is complete
-            fd.cpool[@intCast(cpool_idx)] = Value.functionBytecode(@ptrCast(child_fb));
-        }
+    var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, fd.func_name);
+    defer lowered.deinit(rt);
+    lowered.opcode_format = .qjs;
+    try lowered.setCode(fd.byte_code);
+    for (fd.atom_operands) |atom_id| try lowered.retainAtomOperand(atom_id);
+    try runPhases(&lowered, fd);
+
+    // Allocate FunctionBytecode as a single-element slice. Caller is
+    // responsible for releasing the returned GC object.
+    const slice = try fd.memory.alloc(bytecode_function.FunctionBytecode, 1);
+    errdefer fd.memory.free(bytecode_function.FunctionBytecode, slice);
+    const fb = &slice[0];
+    fb.* = bytecode_function.FunctionBytecode.init(fd.memory, fd.atoms, fd.func_name);
+    try rt.gc.add(&fb.header);
+    fb.header.destroy_fn = bytecode_function.destroyFunctionBytecode;
+    fb.header.destroy_ctx = @ptrCast(rt);
+
+    // Copy flags and metadata
+    fb.is_strict_mode = fd.is_strict_mode;
+    fb.has_prototype = fd.has_prototype;
+    fb.has_simple_parameter_list = fd.has_simple_parameter_list;
+    fb.is_derived_class_constructor = fd.is_derived_class_constructor;
+    fb.need_home_object = fd.need_home_object;
+    fb.func_kind = fd.func_kind;
+    fb.new_target_allowed = fd.new_target_allowed;
+    fb.super_call_allowed = fd.super_call_allowed;
+    fb.super_allowed = fd.super_allowed;
+    fb.arguments_allowed = fd.arguments_allowed;
+    fb.backtrace_barrier = fd.backtrace_barrier;
+
+    // Copy lowered bytecode.
+    if (lowered.code.len > 0) {
+        fb.byte_code = try fd.memory.alloc(u8, lowered.code.len);
+        @memcpy(fb.byte_code, lowered.code);
+        fb.byte_code_len = @intCast(lowered.code.len);
     }
 
-    // Create a temporary Bytecode for pipeline processing
-    // We'll copy the byte_code from FunctionDef to Bytecode
-    var temp_bc = bytecode_function.Bytecode.init(fd.memory, fd.atoms, fd.func_name);
-    defer temp_bc.deinit(rt);
-
-    // Copy byte_code from FunctionDef to Bytecode
-    if (fd.byte_code.len > 0) {
-        try temp_bc.setCode(fd.byte_code);
-    }
-
-    // Copy cpool from FunctionDef to Bytecode (for now, just copy as-is)
-    if (fd.cpool_count > 0) {
-        for (fd.cpool) |v| {
-            _ = try temp_bc.addConstant(v);
-        }
-    }
-
-    // Run pipeline phases
-    // Phase 2: resolve_variables
-    var resolve_ctx = resolve_variables.Context.initWithFunctionDef(&temp_bc, fd);
-    try resolve_variables.run(&resolve_ctx);
-
-    // Phase 3a: resolve_labels
-    var labels_ctx = resolve_labels.Context.init(&temp_bc);
-    try resolve_labels.run(&labels_ctx);
-
-    // Phase 3b: pc2line (skip for now - requires source location data)
-    // Phase 3c: stack_size (skip for now - requires FunctionDef structure)
-
-    // Allocate FunctionBytecode
-    const fb = try fd.memory.alloc(bytecode_function.FunctionBytecode, 1);
-    errdefer fd.memory.free(bytecode_function.FunctionBytecode, fb);
-    fb[0] = bytecode_function.FunctionBytecode.init(fd.memory, fd.atoms, fd.func_name);
-
-    // Copy metadata from FunctionDef
-    fb[0].is_strict_mode = fd.is_strict_mode;
-    fb[0].has_prototype = fd.has_prototype;
-    fb[0].has_simple_parameter_list = fd.has_simple_parameter_list;
-    fb[0].is_derived_class_constructor = fd.is_derived_class_constructor;
-    fb[0].need_home_object = fd.need_home_object or (fd.home_object_var_idx >= 0);
-    fb[0].func_kind = fd.func_kind;
-    fb[0].new_target_allowed = fd.new_target_allowed;
-    fb[0].super_call_allowed = fd.super_call_allowed;
-    fb[0].super_allowed = fd.super_allowed;
-    fb[0].arguments_allowed = fd.arguments_allowed;
-    fb[0].backtrace_barrier = fd.backtrace_barrier;
-
-    // Copy byte_code (from temporary Bytecode after pipeline processing)
-    if (temp_bc.code.len > 0) {
-        const owned = try fd.memory.alloc(u8, temp_bc.code.len);
-        errdefer fd.memory.free(u8, owned);
-        @memcpy(owned, temp_bc.code);
-        fb[0].byte_code = owned;
-    }
-
-    // Copy metadata
-    fb[0].arg_count = @intCast(fd.arg_count);
-    fb[0].var_count = @intCast(fd.var_count);
-    fb[0].defined_arg_count = @intCast(fd.defined_arg_count);
-    fb[0].var_ref_count = @intCast(fd.var_ref_count);
-
-    // Copy vardefs (args + vars)
-    const total_vardefs = fd.arg_count + fd.var_count;
-    if (total_vardefs > 0) {
-        const owned = try fd.memory.alloc(function_def_mod.VarDef, @intCast(total_vardefs));
-        errdefer fd.memory.free(function_def_mod.VarDef, owned);
-        @memcpy(owned[0..@intCast(fd.arg_count)], fd.args);
-        @memcpy(owned[@intCast(fd.arg_count)..], fd.vars);
+    // Copy vardefs
+    if (fd.vars.len > 0) {
+        fb.vardefs = try fd.memory.alloc(function_def_mod.VarDef, fd.vars.len);
+        @memcpy(fb.vardefs, fd.vars);
         // Duplicate atoms
-        for (owned, 0..) |*v, i| {
-            owned[i].var_name = fd.atoms.dup(v.var_name);
+        for (fb.vardefs) |*v| {
+            v.var_name = fd.atoms.dup(v.var_name);
         }
-        fb[0].vardefs = owned;
     }
 
     // Copy closure_var
-    if (fd.closure_var_count > 0) {
-        const owned = try fd.memory.alloc(function_def_mod.ClosureVar, @intCast(fd.closure_var_count));
-        errdefer fd.memory.free(function_def_mod.ClosureVar, owned);
-        @memcpy(owned, fd.closure_var);
+    if (fd.closure_var.len > 0) {
+        fb.closure_var = try fd.memory.alloc(function_def_mod.ClosureVar, fd.closure_var.len);
+        @memcpy(fb.closure_var, fd.closure_var);
         // Duplicate atoms
-        for (owned, 0..) |*cv, i| {
-            owned[i].var_name = fd.atoms.dup(cv.var_name);
+        for (fb.closure_var) |*cv| {
+            cv.var_name = fd.atoms.dup(cv.var_name);
         }
-        fb[0].closure_var = owned;
-        fb[0].closure_var_count = @intCast(fd.closure_var_count);
     }
 
-    // Copy cpool (now contains child Function objects as wrapped Values)
-    if (fd.cpool_count > 0) {
-        const owned = try fd.memory.alloc(Value, @intCast(fd.cpool_count));
-        errdefer fd.memory.free(Value, owned);
-        @memcpy(owned, fd.cpool);
-        // Values are already wrapped (including child FunctionBytecode pointers)
-        // TODO: Proper ref counting when GC integration is complete
-        fb[0].cpool = owned;
-        fb[0].cpool_count = fd.cpool_count;
-    }
+    // Copy metadata counts
+    fb.arg_count = @intCast(fd.arg_count);
+    fb.var_count = @intCast(fd.var_count);
+    fb.defined_arg_count = @intCast(fd.defined_arg_count);
+    fb.var_ref_count = @intCast(fd.var_ref_count);
+    fb.closure_var_count = @intCast(fd.closure_var_count);
 
     // Copy source location
-    fb[0].line_num = fd.line_num;
-    fb[0].col_num = fd.col_num;
+    fb.line_num = fd.line_num;
+    fb.col_num = fd.col_num;
 
-    // pc2line and source are skipped for now
+    // Copy constants.
+    if (fd.cpool.len > 0) {
+        fb.cpool = try fd.memory.alloc(Value, fd.cpool.len);
+        fb.cpool_count = @intCast(fd.cpool.len);
+        for (fd.cpool, 0..) |value, idx| {
+            fb.cpool[idx] = value.dup();
+        }
+    }
 
-    return &fb[0];
+    return slice;
 }
 
 /// Run all pipeline phases on a Bytecode.
@@ -184,6 +137,29 @@ pub fn runWithFunctionDef(
     function: *bytecode_function.Bytecode,
     fd: ?*const function_def_mod.FunctionDef,
 ) !void {
+    try runPhases(function, fd);
+}
+
+/// Runtime-aware variant used when the parser produced FunctionDef child
+/// entries. It recursively materialises child FunctionBytecode objects and
+/// installs them into the executable Bytecode constant pool so `fclosure*`
+/// operands have real callees.
+pub fn runWithFunctionDefRuntime(
+    function: *bytecode_function.Bytecode,
+    fd: ?*function_def_mod.FunctionDef,
+    rt: anytype,
+) !void {
+    if (fd) |def| {
+        try installChildFunctionBytecodes(def, rt);
+        try syncFunctionDefCpool(function, def);
+    }
+    try runPhases(function, fd);
+}
+
+fn runPhases(
+    function: *bytecode_function.Bytecode,
+    fd: ?*const function_def_mod.FunctionDef,
+) !void {
     // Phase 2: resolve_variables (with optional FunctionDef).
     var resolve_ctx = if (fd) |def|
         resolve_variables.Context.initWithFunctionDef(function, def)
@@ -191,8 +167,11 @@ pub fn runWithFunctionDef(
         resolve_variables.Context.init(function);
     try resolve_variables.run(&resolve_ctx);
 
-    // Phase 3a: resolve_labels
-    var labels_ctx = resolve_labels.Context.init(function);
+    // Phase 3a: resolve_labels (with optional FunctionDef prologue metadata).
+    var labels_ctx = if (fd) |def|
+        resolve_labels.Context.initWithFunctionDef(function, def)
+    else
+        resolve_labels.Context.init(function);
     try resolve_labels.run(&labels_ctx);
 
     // Propagate locals count so the VM frame can size its `locals`
@@ -203,19 +182,36 @@ pub fn runWithFunctionDef(
         if (def.var_count >= 0) {
             function.var_count = @intCast(def.var_count);
         }
-
-        // Process child FunctionDefs recursively
-        // This mirrors QuickJS js_create_function's child_list walk
-        // at quickjs.c:35452-35464
-        if (def.child_list.len > 0) {
-            // Create FunctionBytecode for each child and store in cpool
-            // Note: This requires a runtime context for Value operations
-            // For now, we skip this in the Bytecode-based path
-            // The full FunctionDef-based path will use createFunctionBytecode
+        if (def.arg_count >= 0) {
+            function.arg_count = @intCast(def.arg_count);
         }
+
     }
 
     // Phase 3b (pc2line) and Phase 3c (stack_size) are skipped
     // because they require FunctionDef structure.
     // They will be added when FunctionDef is integrated.
+}
+
+fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype) anyerror!void {
+    for (fd.child_list) |*child| {
+        const cpool_idx = child.parent_cpool_idx;
+        if (cpool_idx < 0 or @as(usize, @intCast(cpool_idx)) >= fd.cpool.len) {
+            return error.InvalidBytecode;
+        }
+        const fb_slice = try createFunctionBytecode(child, rt);
+        const fb = &fb_slice[0];
+        const value = Value.functionBytecode(&fb.header);
+        const idx: usize = @intCast(cpool_idx);
+        fd.cpool[idx].free(rt);
+        fd.cpool[idx] = value;
+    }
+}
+
+fn syncFunctionDefCpool(function: *bytecode_function.Bytecode, fd: *const function_def_mod.FunctionDef) !void {
+    if (fd.cpool.len == 0) return;
+    if (function.constants.values.len != 0) return error.InvalidBytecode;
+    for (fd.cpool) |value| {
+        _ = try function.addConstant(value);
+    }
 }

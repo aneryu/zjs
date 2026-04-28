@@ -201,3 +201,13 @@ pub fn sizeOf(op_id: u8) u8 {
 pub fn formatOf(op_id: u8) Format {
     return opcode_format_table[op_id];
 }
+
+/// Baked opcode-name table for tooling. Indexed by opcode id; slots
+/// without a `DEF` entry contain the empty string.
+pub const opcode_name: [256][]const u8 = @import("opcodes_generated.zig").opcode_name;
+
+/// Returns the QuickJS opcode name for the given id, or "" if no
+/// `DEF` entry claims that id.
+pub fn nameOf(op_id: u8) []const u8 {
+    return opcode_name[op_id];
+}

@@ -89,6 +89,23 @@ pub fn build(b: *std.Build) void {
     const run_test262_step = b.step("run-test262", "Build and install run-test262");
     run_test262_step.dependOn(&install_run_test262.step);
 
+    // Add actual test262 execution step with regression baseline
+    const run_test262_exec = b.addRunArtifact(run_test262_exe);
+    run_test262_exec.step.dependOn(&install_run_test262.step);
+    run_test262_exec.addArg("-c");
+    run_test262_exec.addArg("quickjs/test262.conf");
+    run_test262_exec.addArg("-d");
+    run_test262_exec.addArg("quickjs/test262/test");
+    run_test262_exec.addArg("0");
+    run_test262_exec.addArg("100000");
+    run_test262_exec.addArg("-R");
+    run_test262_exec.addArg("reports/test262-latest");
+    // Enable regression gate by default (M0.3)
+    run_test262_exec.addArg("--regression-baseline");
+    run_test262_exec.addArg("docs/quickjs-redesign/baseline/2026-04-29/test262-by-dir.json");
+    const test262_gate_step = b.step("test262-gate", "Run test262 with regression gate");
+    test262_gate_step.dependOn(&run_test262_exec.step);
+
     const smoke_runner_exe = b.addExecutable(.{
         .name = "smoke-runner",
         .root_module = smoke_runner_mod,
@@ -104,6 +121,49 @@ pub fn build(b: *std.Build) void {
     run_microbench.step.dependOn(&install_qjs_fast.step);
     const microbench_step = b.step("microbench", "Run QuickJS microbench comparison against zjs");
     microbench_step.dependOn(&run_microbench.step);
+
+    // Bytecode disassembler (M1.4 comparison toolchain)
+    const dump_zjs_mod = b.createModule(.{
+        .root_source_file = b.path("tools/compare/dump-zjs-bytecode.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = engine_mod },
+        },
+    });
+    const dump_zjs_exe = b.addExecutable(.{
+        .name = "dump-zjs-bytecode",
+        .root_module = dump_zjs_mod,
+    });
+    const install_dump_zjs = b.addInstallArtifact(dump_zjs_exe, .{});
+    const dump_zjs_step = b.step("dump-zjs-bytecode", "Build the ZJS bytecode disassembler");
+    dump_zjs_step.dependOn(&install_dump_zjs.step);
+
+    const diff_bc_mod = b.createModule(.{
+        .root_source_file = b.path("tools/compare/diff-bc.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const diff_bc_exe = b.addExecutable(.{
+        .name = "diff-bc",
+        .root_module = diff_bc_mod,
+    });
+    const install_diff_bc = b.addInstallArtifact(diff_bc_exe, .{});
+
+    const run_f10_parity = b.addSystemCommand(&.{
+        "bash",
+        "tools/compare/run-f10-parity.sh",
+        "tests/test262-anchors/F10/sample.list",
+        "zig-out/bin/dump-zjs-bytecode",
+        "tools/compare/dump-quickjs-bytecode.sh",
+        "zig-out/bin/diff-bc",
+    });
+    run_f10_parity.step.dependOn(&install_dump_zjs.step);
+    run_f10_parity.step.dependOn(&install_diff_bc.step);
+    const f10_parity_step = b.step("f10-parity", "Compare ZJS and QuickJS opcode sequences for F10 anchors");
+    f10_parity_step.dependOn(&run_f10_parity.step);
 
     const quickjs_port_tests = b.addTest(.{
         .root_module = b.createModule(.{
