@@ -630,7 +630,7 @@ fn runWithArgs(
                 // Duplicate top two: [a b] -> [a b a b]
                 const b = try stack.pop();
                 defer b.free(ctx.runtime);
-                const a = stack.peek() orelse return throwUnsupported(ctx, opc);
+                const a = try stack.pop();
                 defer a.free(ctx.runtime);
                 try stack.push(a);
                 try stack.push(b);
