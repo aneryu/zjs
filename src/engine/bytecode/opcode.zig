@@ -168,3 +168,36 @@ fn parseFormat(text: []const u8) Format {
 /// Import auto-generated opcode constants from quickjs-opcode.h.
 /// Regenerate with: python3 tools/generate_opcodes.py > src/engine/bytecode/opcodes_generated.zig
 pub const op = @import("opcodes_generated.zig").op;
+
+/// Baked opcode-size table generated from `quickjs-opcode.h`. Index is
+/// the opcode id (u8); value is the total instruction size in bytes
+/// (opcode byte + operand bytes). Temp opcodes take priority over
+/// short opcodes in the 179..196 overlap range because the pipeline
+/// consumes Phase 1 bytecode before `resolve_labels` lowers temps
+/// away.
+pub const opcode_size: [256]u8 = @import("opcodes_generated.zig").opcode_size;
+
+/// Baked opcode-format table. Maps opcode id → `Format` enum tag,
+/// derived from `quickjs-opcode.h`. Callers should use `formatOf`
+/// which converts from the generated string form.
+pub const opcode_format_table: [256]Format = blk: {
+    @setEvalBranchQuota(200000);
+    const names = @import("opcodes_generated.zig").opcode_format_name;
+    var formats = [_]Format{.none} ** 256;
+    for (names, 0..) |name, i| {
+        formats[i] = std.meta.stringToEnum(Format, name) orelse .none;
+    }
+    break :blk formats;
+};
+
+/// Returns the total byte length (opcode + operands) for the given
+/// opcode id, or 0 if no opcode occupies that id.
+pub fn sizeOf(op_id: u8) u8 {
+    return opcode_size[op_id];
+}
+
+/// Returns the operand format for the given opcode id (temp takes
+/// precedence in the 179..196 overlap range).
+pub fn formatOf(op_id: u8) Format {
+    return opcode_format_table[op_id];
+}

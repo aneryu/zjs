@@ -282,3 +282,64 @@ pub const op = struct {
     pub const op_temp_end: u8 = 197;
 };
 
+// Total byte length (opcode + operands) indexed by opcode id.
+// Driven from `quickjs-opcode.h` so the pipeline stays in sync
+// without hand-maintained switches. Zero means no entry claims
+// that id (callers should treat such bytes as pass-through).
+pub const opcode_size: [256]u8 = .{
+    1, 5, 5, 5, 5, 5, 1, 1, 1, 1, 1, 1, 2, 3, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 6, 5, 3, 1, 1, 1, 5, 5, 5, 5, 1, 1, 6, 6, 6,
+    5, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 5, 5, 1, 1, 1,
+    1, 1, 2, 6, 2, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 5, 5, 5, 5, 5, 1, 1, 1,
+    1, 1, 10, 10, 10, 10, 10, 10, 7, 7, 7, 5, 1, 1, 1, 1,
+    2, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 2, 2, 2, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 2, 2,
+    1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 1, 1,
+    1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+// Operand format tag indexed by opcode id. Values are the
+// `bytecode.opcode.Format` enum names as written in
+// quickjs-opcode.h. Callers convert via `std.meta.stringToEnum`.
+pub const opcode_format_name: [256][]const u8 = .{
+    "none", "i32", "const", "const", "atom", "atom", "none", "none",
+    "none", "none", "none", "none", "u8", "u16", "none", "none",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+    "none", "npop", "npop", "npop", "npop", "npop", "npop", "u16",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+    "none", "atom_u8", "npop_u16", "u16", "none", "none", "none", "atom",
+    "atom", "atom", "atom", "none", "none", "atom_u8", "atom_u8", "atom_u8",
+    "atom", "atom", "atom", "none", "none", "none", "none", "none",
+    "none", "none", "none", "atom", "atom", "none", "none", "none",
+    "none", "none", "u8", "atom_u8", "u8", "atom_u8", "atom_u8", "loc",
+    "loc", "loc", "arg", "arg", "arg", "var_ref", "var_ref", "var_ref",
+    "loc", "loc", "loc", "loc", "var_ref", "var_ref", "var_ref", "loc",
+    "label", "label", "label", "label", "label", "none", "none", "none",
+    "none", "none", "atom_label_u8", "atom_label_u8", "atom_label_u8", "atom_label_u8", "atom_label_u8", "atom_label_u8",
+    "atom_u16", "atom_u16", "atom_u16", "atom", "none", "none", "none", "none",
+    "u8", "none", "none", "none", "none", "u8", "none", "none",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+    "none", "loc8", "loc8", "loc8", "none", "none", "none", "none",
+    "atom", "none", "none", "none", "none", "none", "none", "none",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+    "none", "i32", "none", "none_int", "none_int", "none_int", "none_int", "none_int",
+    "none_int", "none_int", "none_int", "none_int", "i8", "i16", "const8", "const8",
+    "none", "loc8", "loc8", "loc8", "none_loc", "none_loc", "none_loc", "none_loc",
+    "none_loc", "none_loc", "none_loc", "none_loc", "none_loc", "none_loc", "none_loc", "none_loc",
+    "none_loc", "none_arg", "none_arg", "none_arg", "none_arg", "none_arg", "none_arg", "none_arg",
+    "none_arg", "none_arg", "none_arg", "none_arg", "none_arg", "none_var_ref", "none_var_ref", "none_var_ref",
+    "none_var_ref", "none_var_ref", "none_var_ref", "none_var_ref", "none_var_ref", "none_var_ref", "none_var_ref", "none_var_ref",
+    "none_var_ref", "none", "label8", "label8", "label8", "label16", "npopx", "npopx",
+    "npopx", "npopx", "none", "none", "none", "none", "none", "none",
+    "none", "none", "none", "none", "none", "none", "none", "none",
+};
+

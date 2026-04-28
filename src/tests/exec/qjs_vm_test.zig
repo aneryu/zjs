@@ -27,6 +27,10 @@ fn parseAndRun(rt: *core.Runtime, ctx: *core.Context, src: []const u8) !core.Val
     // Verify parser tagged the bytecode as qjs format.
     try std.testing.expectEqual(engine.bytecode.OpcodeFormat.qjs, function.opcode_format);
 
+    // Run F10 pipeline to lower Phase 1 temp opcodes (emitted by
+    // default since `emit_phase1_temp = true`) to final opcodes.
+    try engine.bytecode.pipeline.finalize.run(&function);
+
     var vm = engine.exec.Vm.init(ctx);
     defer vm.deinit();
     return vm.run(&function);

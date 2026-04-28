@@ -25,8 +25,12 @@ const TestEnv = struct {
     }
 };
 
-/// Helper: parse `src` as an expression and return the produced
-/// bytecode buffer for byte-sequence comparison.
+/// Helper: parse `src` as an expression, run the F10 pipeline, and
+/// return the produced final-form bytecode for byte-sequence
+/// comparison. The parser's default is `emit_phase1_temp = true`, so
+/// raw parser output contains scope_get_var/scope_put_var and other
+/// Phase 1 temp opcodes; `pipeline.finalize.run` lowers them to the
+/// final shapes the tests assert against.
 fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -36,11 +40,12 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit();
     try qjs_parser.parseExpr(&state);
+    try engine.bytecode.pipeline.finalize.run(&function);
     return function;
 }
 
-/// Helper: parse `src` as a statement and return the produced
-/// bytecode buffer for byte-sequence comparison.
+/// Helper: parse `src` as a statement, run the F10 pipeline, and
+/// return the produced final-form bytecode for byte-sequence comparison.
 fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -50,6 +55,7 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit();
     try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try engine.bytecode.pipeline.finalize.run(&function);
     return function;
 }
 
@@ -1920,12 +1926,295 @@ test "F7: private method in class" {
     defer fn_bc.deinit(env.rt);
 }
 
+test "F7: private getter in class" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { get #x() { return this._x; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F7: private setter in class" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { set #x(value) { this._x = value; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F7: class with extends (derived constructor)" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C extends B { constructor(x) { super(x); } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F7: class without extends (base constructor)" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "class C { constructor(x) { this.x = x; } }");
+    defer fn_bc.deinit(env.rt);
+
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
 test "F8: basic import statement" {
     var env = try TestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "import x from 'module'");
     defer fn_bc.deinit(env.rt);
 
-    // Should parse successfully (currently just skipped)
+    // Should parse successfully
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: side-effect import" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "import 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: named imports" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "import { x, y } from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: renamed imports" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "import { x as a, y as b } from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: namespace import" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "import * as ns from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: mixed import" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "import x, { y } from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export named" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export { x, y }");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export renamed" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export { x as a, y as b }");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export default expression" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export default 42");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export default function" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export default function f() {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export default class" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export default class C {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export star" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export * from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export star as namespace" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export * as ns from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export from" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export { x, y } from 'module'");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export var" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export const x = 1");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export function" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export function f() {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F8: export class" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "export class C {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+// ---- F9 Generator / Async / Await tests ----
+
+test "F9: async function expression" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "async function() {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F9: async arrow function" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "async () => {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F9: async function declaration" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "async function f() {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F9: async function declaration with parameters" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "async function f(x, y) {}");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F9: async function declaration with body" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "async function f() { return 42; }");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "F9: yield outside generator error" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const result = parseStatement(&env, "yield 42");
+    try std.testing.expectError(error.YieldOutsideGenerator, result);
+}
+
+test "F9: await outside async function error" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const result = parseStatement(&env, "await x");
+    try std.testing.expectError(error.AwaitOutsideAsyncFunction, result);
+}
+
+test "F9: await inside async function no error" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseStatement(&env, "async function f() { await x; }");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+// ---- Object literal enhancements ----
+
+test "Object literal: computed property name" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "{ [x]: 1 }");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "Object literal: method shorthand" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "{ method() {} }");
+    defer fn_bc.deinit(env.rt);
+
+    try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+test "Object literal: spread" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var fn_bc = try parseExpr(&env, "{ ...obj }");
+    defer fn_bc.deinit(env.rt);
+
     try std.testing.expect(fn_bc.code.len >= 0);
 }

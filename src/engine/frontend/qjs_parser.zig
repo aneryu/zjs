@@ -43,6 +43,8 @@ pub const Error = lexer_mod.Error || error{
     InvalidNumberLiteral,
     InvalidIdentifier,
     InvalidAssignmentTarget,
+    YieldOutsideGenerator,
+    AwaitOutsideAsyncFunction,
 };
 
 /// Parse flags mirror the QuickJS `PF_*` macros (`quickjs.c:21358..21370`).
@@ -145,6 +147,27 @@ pub const ParseState = struct {
     last_was_super: bool = false,
     /// Whether we're in a generator function (F9).
     in_generator: bool = false,
+    /// Whether we're in an async function (F9).
+    in_async: bool = false,
+    /// Whether to emit Phase 1 temporary opcodes (F10 pipeline).
+    /// When true, emits scope_get_var/scope_put_var/scope_get_var_undef
+    /// instead of the final get_var/put_var/get_var_undef opcodes.
+    ///
+    /// **Default is `true`** as of the F10 interim pipeline landing.
+    /// Callers run `bytecode.pipeline.finalize.run` after parsing to
+    /// lower the temp opcodes to their final shapes. The pipeline:
+    ///   * shrinks scope_get_var (7 bytes) → get_var (5 bytes), and
+    ///     equivalents for scope_put_var / scope_get_var_undef;
+    ///   * drops enter_scope / leave_scope / OP_label entirely;
+    ///   * patches every absolute u32 jump operand using an
+    ///     old→new pc map so `&&`/`||`/`??`/`?:` keep working
+    ///     across the byte-offset shift.
+    ///
+    /// Setting this to `false` skips temp emission entirely (the
+    /// parser writes final-form opcodes directly), which is useful
+    /// for golden-byte tests that assert the lowered shape and want
+    /// to bypass the pipeline.
+    emit_phase1_temp: bool = true,
 
     pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!ParseState {
         // Mark bytecode as QuickJS-aligned format for dual-dispatch VM.
@@ -212,26 +235,68 @@ pub const ParseState = struct {
         try s.advance();
     }
 
+    /// Peek at the next token kind without consuming the current token.
+    /// Saves and restores lexer position so the cached token stays valid.
+    fn peekNextKind(s: *ParseState) tok.TokenKind {
+        const saved_pos = s.lex.pos;
+        const saved_line = s.lex.line;
+        const saved_col = s.lex.col;
+        const saved_mark_pos = s.lex.mark_pos;
+        const saved_mark_line = s.lex.mark_line;
+        const saved_mark_col = s.lex.mark_col;
+        const peek_token = s.lex.next() catch return tok.TOK_EOF;
+        defer {
+            s.lex.freeToken(@constCast(&peek_token));
+            s.lex.pos = saved_pos;
+            s.lex.line = saved_line;
+            s.lex.col = saved_col;
+            s.lex.mark_pos = saved_mark_pos;
+            s.lex.mark_line = saved_mark_line;
+            s.lex.mark_col = saved_mark_col;
+        }
+        return peek_token.val;
+    }
+
     /// Check if the for loop head is for-in or for-of by looking ahead
     /// for `for (var x in expr)` or `for (var x of expr)`
     fn checkForInOfHead(s: *ParseState) bool {
-        // Save current token position
-        const saved_token = s.token;
-        defer s.token = saved_token;
+        const saved_pos = s.lex.pos;
+        const saved_line = s.lex.line;
+        const saved_col = s.lex.col;
+        const saved_mark_pos = s.lex.mark_pos;
+        const saved_mark_line = s.lex.mark_line;
+        const saved_mark_col = s.lex.mark_col;
+        defer {
+            s.lex.pos = saved_pos;
+            s.lex.line = saved_line;
+            s.lex.col = saved_col;
+            s.lex.mark_pos = saved_mark_pos;
+            s.lex.mark_line = saved_mark_line;
+            s.lex.mark_col = saved_mark_col;
+        }
 
         // Skip var/let/const if present
         if (s.peekKind() == tok.TOK_VAR or s.peekKind() == tok.TOK_LET or s.peekKind() == tok.TOK_CONST) {
-            _ = s.lex.next() catch return false;
+            var peek_tok = s.lex.next() catch return false;
+            s.lex.freeToken(&peek_tok);
         }
 
         // Skip identifier
         if (s.peekKind() == tok.TOK_IDENT) {
-            _ = s.lex.next() catch return false;
+            var peek_tok = s.lex.next() catch return false;
+            s.lex.freeToken(&peek_tok);
         }
 
         // Check if next token is 'in' or 'of'
         const next_kind = s.peekKind();
         return next_kind == tok.TOK_IN or next_kind == tok.TOK_OF;
+    }
+
+    /// Check if the current token is an identifier with the given name
+    fn isIdent(s: *ParseState, name: []const u8) bool {
+        if (s.peekKind() != tok.TOK_IDENT) return false;
+        const ident_str = s.lex.atoms.name(s.token.payload.ident.atom) orelse return false;
+        return std.mem.eql(u8, ident_str, name);
     }
 
     // ---- emit primitives -------------------------------------------------
@@ -271,6 +336,42 @@ pub const ParseState = struct {
     fn emitOpAtom(self: *ParseState, op_id: u8, atom_id: Atom) Error!void {
         try self.function.retainAtomOperand(atom_id);
         try self.emitOpU32(op_id, atom_id);
+    }
+
+    // ---- Phase 1 temporary opcode helpers (F10) ----
+    // These emit scope_* opcodes that will be lowered by resolve_variables.
+
+    fn emitOpAtomU16(self: *ParseState, op_id: u8, atom_id: Atom, u16_val: u16) Error!void {
+        try self.function.retainAtomOperand(atom_id);
+        var bytes: [7]u8 = undefined;
+        bytes[0] = op_id;
+        std.mem.writeInt(u32, bytes[1..5], atom_id, .little);
+        std.mem.writeInt(u16, bytes[5..7], u16_val, .little);
+        try self.appendBytes(&bytes);
+    }
+
+    fn emitScopeGetVar(self: *ParseState, atom_id: Atom) Error!void {
+        if (self.emit_phase1_temp) {
+            try self.emitOpAtomU16(opcode.op.scope_get_var, atom_id, @intCast(self.scope_level));
+        } else {
+            try self.emitOpAtom(opcode.op.get_var, atom_id);
+        }
+    }
+
+    fn emitScopePutVar(self: *ParseState, atom_id: Atom) Error!void {
+        if (self.emit_phase1_temp) {
+            try self.emitOpAtomU16(opcode.op.scope_put_var, atom_id, @intCast(self.scope_level));
+        } else {
+            try self.emitOpAtom(opcode.op.put_var, atom_id);
+        }
+    }
+
+    fn emitScopeGetVarUndef(self: *ParseState, atom_id: Atom) Error!void {
+        if (self.emit_phase1_temp) {
+            try self.emitOpAtomU16(opcode.op.scope_get_var_undef, atom_id, @intCast(self.scope_level));
+        } else {
+            try self.emitOpAtom(opcode.op.get_var_undef, atom_id);
+        }
     }
 
     fn emitPushConst(self: *ParseState, value: Value) Error!void {
@@ -502,7 +603,7 @@ pub fn parseAssignExpr2(s: *ParseState, flags: ParseFlags) Error!void {
                 try s.truncateAtomOperands(pre_lhs_atom_len);
                 try parseAssignExpr2(s, flags);
                 try s.emitOp(opcode.op.dup);
-                try s.emitOpAtom(opcode.op.put_var, v.atom);
+                try s.emitScopePutVar(v.atom);
             },
             .dotted => |d| {
                 // Drop the speculative `get_field <atom>` (5 bytes plus
@@ -557,10 +658,11 @@ fn classifyLhs(
     saved_atom: ?Atom,
 ) LhsShape {
     const code = s.function.code;
-    // var_ref: exactly `get_var <atom>` was added.
+    // var_ref: exactly `get_var <atom>` (5 bytes) or `scope_get_var <atom> <u16>` (7 bytes) was added.
     if (saved_atom) |ident| {
-        if (code.len == pre_lhs_code_len + 5 and
-            code[pre_lhs_code_len] == opcode.op.get_var and
+        const is_final = code.len == pre_lhs_code_len + 5 and code[pre_lhs_code_len] == opcode.op.get_var;
+        const is_temp = code.len == pre_lhs_code_len + 7 and code[pre_lhs_code_len] == opcode.op.scope_get_var;
+        if ((is_final or is_temp) and
             s.function.atom_operands.len == pre_lhs_atom_len + 1 and
             s.function.atom_operands[pre_lhs_atom_len] == ident)
         {
@@ -589,7 +691,7 @@ fn emitPutLValueKeepTop(s: *ParseState, shape: LhsShape) Error!void {
     switch (shape) {
         .var_ref => |v| {
             try s.emitOp(opcode.op.dup);
-            try s.emitOpAtom(opcode.op.put_var, v.atom);
+            try s.emitScopePutVar(v.atom);
         },
         .dotted => |d| {
             try s.emitOp(opcode.op.insert2);
@@ -609,7 +711,7 @@ fn emitPutLValueKeepTop(s: *ParseState, shape: LhsShape) Error!void {
 fn emitPutLValueKeepSecond(s: *ParseState, shape: LhsShape) Error!void {
     switch (shape) {
         .var_ref => |v| {
-            try s.emitOpAtom(opcode.op.put_var, v.atom);
+            try s.emitScopePutVar(v.atom);
         },
         .dotted => |d| {
             try s.emitOp(opcode.op.perm3);
@@ -757,7 +859,7 @@ pub fn parseUnary(s: *ParseState, flags: ParseFlags) Error!void {
         if (s.peekKind() == tok.TOK_IDENT) {
             const ident = s.token.payload.ident.atom;
             try s.advance();
-            try s.emitOpAtom(opcode.op.get_var_undef, ident);
+            try s.emitScopeGetVarUndef(ident);
         } else {
             try parseUnary(s, .{ .pow_allowed = false, .in_accepted = flags.in_accepted });
         }
@@ -789,8 +891,7 @@ pub fn parseUnary(s: *ParseState, flags: ParseFlags) Error!void {
     // F9: Handle yield expressions in generator functions
     if (k == tok.TOK_YIELD) {
         if (!s.in_generator) {
-            // TODO: F9 proper error reporting for yield outside generator
-            // For now, just parse it as an identifier
+            return Error.YieldOutsideGenerator;
         }
         try s.advance();
         // Check for yield*
@@ -816,6 +917,17 @@ pub fn parseUnary(s: *ParseState, flags: ParseFlags) Error!void {
             }
             try s.emitOp(opcode.op.yield);
         }
+        return;
+    }
+    // F9: Handle await expressions in async functions
+    if (k == tok.TOK_AWAIT) {
+        if (!s.in_async) {
+            return Error.AwaitOutsideAsyncFunction;
+        }
+        try s.advance();
+        // Parse the awaited expression
+        try parseAssignExpr(s);
+        try s.emitOp(opcode.op.await);
         return;
     }
     try parsePostfixExpr(s, flags);
@@ -1342,15 +1454,39 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
             // Class expression
             try parseClass(s, false);
         },
+        tok.TOK_FUNCTION => {
+            // Function expression: function or async function
+            // Check for async function
+            const is_async = s.isIdent("async");
+            if (is_async) {
+                try s.advance();
+            }
+            const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
+            try parseFunctionExpr(s, func_kind);
+        },
         tok.TOK_IDENT => {
-            // Check if this is an arrow function: ident =>
+            // Check for async function (async is a contextual keyword)
+            if (s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION) {
+                try s.advance(); // consume async
+                const func_kind: ParseFunctionKind = .async;
+                try parseFunctionExpr(s, func_kind);
+                s.last_was_super = false;
+                return;
+            }
+            // Check if this is an arrow function: ident => or async ident =>
             // Use proper lexer state save/restore for the lookahead so we
             // don't desynchronize the lexer position from the cached token.
             if (checkIdentArrowHead(s)) {
-                return parseArrowFunction(s);
+                // Check for async arrow function
+                const is_async = s.isIdent("async");
+                const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
+                if (is_async) {
+                    try s.advance();
+                }
+                return parseArrowFunction(s, func_kind);
             }
             const ident = s.token.payload.ident.atom;
-            try s.emitOpAtom(opcode.op.get_var, ident);
+            try s.emitScopeGetVar(ident);
             try s.advance();
             s.last_was_super = false;
         },
@@ -1358,7 +1494,13 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
             if (k == @as(tok.TokenKind, @intCast('('))) {
                 // Check if this is an arrow function
                 if (checkArrowHead(s)) {
-                    return parseArrowFunction(s);
+                    // Check for async arrow function
+                    const is_async = s.isIdent("async");
+                    const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
+                    if (is_async) {
+                        try s.advance();
+                    }
+                    return parseArrowFunction(s, func_kind);
                 }
                 try s.advance();
                 try parseExpr2(s, flags);
@@ -1527,15 +1669,50 @@ fn parseObjectLiteral(s: *ParseState, flags: ParseFlags) Error!void {
 
 fn parseObjectProperty(s: *ParseState, flags: ParseFlags) Error!void {
     const k = s.peekKind();
+    
+    // Spread property: ...obj
+    if (k == tok.TOK_ELLIPSIS) {
+        try s.advance();
+        try parseAssignExpr2(s, flags);
+        // TODO: F10 Use proper spread opcode (copy_data_properties)
+        // For now, emit as regular property (placeholder)
+        try s.emitOp(opcode.op.drop);
+        return;
+    }
+    
+    // Computed property name: [expr]: value
+    if (k == @as(tok.TokenKind, @intCast('['))) {
+        try s.advance();
+        try parseAssignExpr2(s, flags);
+        try expectPunct(s, ']');
+        try expectPunct(s, ':');
+        try parseAssignExpr2(s, flags);
+        // TODO: F10 Use proper computed property opcode
+        // For now, emit as regular property (placeholder)
+        try s.emitOp(opcode.op.drop);
+        try s.emitOp(opcode.op.drop);
+        return;
+    }
+    
     if (k == tok.TOK_IDENT) {
         const name = s.token.payload.ident.atom;
         try s.advance();
+        
+        // Method shorthand: method() {}
+        if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
+            // Parse method parameters and body
+            try parseFunctionParamsAndBody(s, .method);
+            // TODO: F10 Register method property
+            try s.emitOp(opcode.op.drop);
+            return;
+        }
+        
         if (s.peekKind() == @as(tok.TokenKind, @intCast(':'))) {
             try s.advance();
             try parseAssignExpr2(s, flags);
         } else {
             // Shorthand `{ x }` — stack: obj, then push value of `x`.
-            try s.emitOpAtom(opcode.op.get_var, name);
+            try s.emitScopeGetVar(name);
         }
         try s.emitOpAtom(opcode.op.define_field, name);
         return;
@@ -1755,7 +1932,13 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             if (!decl_mask.func and !decl_mask.func_with_label) {
                 return Error.UnexpectedToken;
             }
-            try parseFunctionDecl(s, .normal);
+            // Check for async function
+            const is_async = s.isIdent("async");
+            if (is_async) {
+                try s.advance();
+            }
+            const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
+            try parseFunctionDecl(s, func_kind);
         },
         tok.TOK_CLASS => {
             if (!decl_mask.func) {
@@ -1763,47 +1946,33 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             }
             try parseClass(s, true);
         },
+        tok.TOK_IDENT => {
+            // Check for async function declaration (async is a contextual keyword)
+            if (s.isIdent("async") and s.peekNextKind() == tok.TOK_FUNCTION) {
+                if (!decl_mask.func and !decl_mask.func_with_label) {
+                    return Error.UnexpectedToken;
+                }
+                try s.advance(); // consume async
+                const func_kind: ParseFunctionKind = .async;
+                try parseFunctionDecl(s, func_kind);
+                return;
+            }
+            // Not async function: fall through to expression statement
+            try parseExpr(s);
+            try s.emitOp(opcode.op.drop);
+            _ = try s.expectSemicolon();
+        },
         tok.TOK_IMPORT => {
             if (!decl_mask.other) {
                 return Error.UnexpectedToken;
             }
-            // TODO: Implement full import parsing in F8
-            // For now, just skip the import statement
-            try s.advance();
-            while (s.peekKind() != tok.TOK_EOF and s.peekKind() != ';') {
-                try s.advance();
-            }
-            if (s.peekKind() == ';') try s.advance();
+            try parseImport(s);
         },
         tok.TOK_EXPORT => {
             if (!decl_mask.other) {
                 return Error.UnexpectedToken;
             }
-            // TODO: Implement full export parsing in F8
-            // For now, just skip the export statement as a placeholder
-            try s.advance();
-            // Check for export default
-            if (s.peekKind() == tok.TOK_DEFAULT) {
-                try s.advance();
-                // Skip the default expression until semicolon
-                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != ';') {
-                    try s.advance();
-                }
-            } else if (s.peekKind() == @as(tok.TokenKind, @intCast('{'))) {
-                // export { ... }
-                try s.advance();
-                // Skip until closing brace
-                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != '}') {
-                    try s.advance();
-                }
-                if (s.peekKind() == '}') try s.advance();
-            } else {
-                // Skip the rest of the export statement (export const, export function, etc.)
-                while (s.peekKind() != tok.TOK_EOF and s.peekKind() != ';') {
-                    try s.advance();
-                }
-            }
-            if (s.peekKind() == ';') try s.advance();
+            try parseExport(s);
         },
         tok.TOK_IF => {
             try s.advance();
@@ -2190,9 +2359,58 @@ fn parseFunctionDecl(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
     s.in_generator = is_generator;
     defer s.in_generator = was_generator;
 
-    // TODO: F9 async functions - need to detect async keyword before function
+    // Set async flag for await parsing
+    const was_async = s.in_async;
+    const is_async = func_kind == .async or func_kind == .async_generator;
+    s.in_async = is_async;
+    defer s.in_async = was_async;
 
-    try parseFunctionParamsAndBody(s, func_kind);
+    // Determine actual function kind based on async/generator combination
+    const actual_kind: ParseFunctionKind = if (is_generator)
+        if (func_kind == .async) .async_generator else .generator
+    else
+        func_kind;
+
+    try parseFunctionParamsAndBody(s, actual_kind);
+}
+
+/// Parse function expression
+/// Mirrors `js_parse_function_expr` in quickjs.c
+fn parseFunctionExpr(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
+    try s.advance();
+
+    // Check for generator: function*
+    const is_generator = s.peekKind() == '*';
+    if (is_generator) {
+        try s.advance();
+    }
+
+    // Parse function name (optional for expressions)
+    const has_name = s.peekKind() == tok.TOK_IDENT;
+    if (has_name) {
+        const name_atom = s.token.payload.ident.atom;
+        _ = name_atom; // TODO: Register function name in scope in F6/F10
+        try s.advance();
+    }
+
+    // Set generator flag for yield parsing
+    const was_generator = s.in_generator;
+    s.in_generator = is_generator;
+    defer s.in_generator = was_generator;
+
+    // Set async flag for await parsing
+    const was_async = s.in_async;
+    const is_async = func_kind == .async or func_kind == .async_generator;
+    s.in_async = is_async;
+    defer s.in_async = was_async;
+
+    // Determine actual function kind based on async/generator combination
+    const actual_kind: ParseFunctionKind = if (is_generator)
+        if (func_kind == .async) .async_generator else .generator
+    else
+        func_kind;
+
+    try parseFunctionParamsAndBody(s, actual_kind);
 }
 
 /// Parse function parameters and body
@@ -2259,8 +2477,14 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind) Erro
 
 /// Parse arrow function
 /// Mirrors arrow function parsing in quickjs.c
-fn parseArrowFunction(s: *ParseState) Error!void {
-    // TODO: Handle async arrow functions in F6 (needs TOK_ASYNC token)
+fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
+    // Set async flag for await parsing
+    const was_async = s.in_async;
+    const is_async = func_kind == .async or func_kind == .async_generator;
+    s.in_async = is_async;
+    defer s.in_async = was_async;
+
+    // TODO: F9 Use func_kind to emit different opcodes for async vs normal arrows
 
     // Parse parameters. Two valid head shapes:
     //   `ident => ...`    — single bare identifier parameter
@@ -2427,14 +2651,47 @@ fn parseClassElement(s: *ParseState) Error!void {
         try s.advance();
     }
 
+    // Check for getter/setter
+    const is_getter = s.isIdent("get");
+    const is_setter = s.isIdent("set");
+    if (is_getter or is_setter) {
+        try s.advance();
+        // Check if this is a private getter/setter (get #x() or set #x())
+        if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
+            try s.advance();
+            if (s.peekKind() != '(') {
+                return Error.UnexpectedToken;
+            }
+            // Parse parameters with proper function kind for private getter/setter
+            const kind: ParseFunctionKind = if (is_getter) .get else .set;
+            try parseFunctionParamsAndBody(s, kind);
+        } else {
+            // Regular getter/setter - parse property name (identifier, string, or number)
+            if (s.peekKind() == tok.TOK_IDENT) {
+                try s.advance();
+            } else if (s.peekKind() == tok.TOK_STRING) {
+                try s.advance();
+            } else if (s.peekKind() == tok.TOK_NUMBER) {
+                try s.advance();
+            } else {
+                return Error.UnexpectedToken;
+            }
+            if (s.peekKind() != '(') {
+                return Error.UnexpectedToken;
+            }
+            // Parse parameters with proper function kind for getter/setter
+            const kind: ParseFunctionKind = if (is_getter) .get else .set;
+            try parseFunctionParamsAndBody(s, kind);
+        }
+        return;
+    }
+
     // Check for private field (#x)
     if (s.peekKind() == tok.TOK_PRIVATE_NAME) {
-        // TODO: Implement private field parsing in F7
         try s.advance();
         if (s.peekKind() == '(') {
             // Private method
-            // TODO: Parse method parameters and body
-            try parseFunctionParamsAndBody(s, .normal);
+            try parseFunctionParamsAndBody(s, .method);
         } else if (s.peekKind() == '=') {
             // Private field with initializer
             try s.advance();
@@ -2443,49 +2700,25 @@ fn parseClassElement(s: *ParseState) Error!void {
         }
         // Optional semicolon after private field
         if (s.peekKind() == ';') try s.advance();
-        s.is_static = saved_static;
-        s.in_constructor = saved_in_constructor;
         return;
     }
 
     // Check for method or field
-    // TODO: Handle getter/setter in F7 (they are identifiers, not special tokens)
     if (s.peekKind() == tok.TOK_IDENT) {
         const prop_atom = s.token.payload.ident.atom;
         const is_constructor = !s.is_static and prop_atom == atom_module.ids.constructor;
-        // get and set atoms are at IDs 66 and 67 in the predefined atoms table
-        const is_getter = prop_atom == 66;
-        const is_setter = prop_atom == 67;
         try s.advance();
-
-        // Handle getter/setter: get prop() {} or set prop(val) {}
-        if (is_getter or is_setter) {
-            if (s.peekKind() != tok.TOK_IDENT) {
-                return Error.UnexpectedToken;
-            }
-            const method_name_atom = s.token.payload.ident.atom;
-            _ = method_name_atom; // TODO: Register property name
-            try s.advance();
-
-            if (s.peekKind() != '(') {
-                return Error.UnexpectedToken;
-            }
-            // TODO: Parse parameters with proper function kind for getter/setter
-            try parseFunctionParamsAndBody(s, .normal);
-            // Optional ASI semicolon after method
-            if (s.peekKind() == ';') try s.advance();
-            s.is_static = saved_static;
-            s.in_constructor = saved_in_constructor;
-            return;
-        }
 
         if (s.peekKind() == '(') {
             // Method or constructor
             if (is_constructor) {
                 s.in_constructor = true;
             }
-            // TODO: Parse parameters with proper function kind for constructor
-            try parseFunctionParamsAndBody(s, .normal);
+            // Parse parameters with proper function kind for constructor/method
+            const kind: ParseFunctionKind = if (is_constructor)
+                if (s.class_has_extends) .derived_class_constructor else .class_constructor
+            else .method;
+            try parseFunctionParamsAndBody(s, kind);
             if (is_constructor) {
                 s.in_constructor = saved_in_constructor;
             }
@@ -2565,4 +2798,269 @@ fn parseClass(s: *ParseState, is_decl: bool) Error!void {
     s.class_has_extends = saved_has_extends;
 
     // TODO: Emit class construction opcodes in F7/F10
+    // Placeholder: emit undefined to represent the class value
+    // F10 will replace this with OP_define_class and proper class construction
+    try s.emitOp(opcode.op.undefined);
+}
+
+// =====================================================================
+// Module parsing (F8)
+// =====================================================================
+
+/// Parse import statement
+/// Mirrors `js_parse_import` in quickjs.c:31312
+fn parseImport(s: *ParseState) Error!void {
+    try s.advance();
+
+    // Side-effect import: import 'module'
+    if (s.peekKind() == tok.TOK_STRING) {
+        try s.advance();
+        // TODO: F10+ Add to module import entries
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    // Default import: import x from 'module'
+    if (s.peekKind() == tok.TOK_IDENT) {
+        try s.advance();
+        // TODO: F10+ Add to module import entries
+
+        if (s.peekKind() != ',') {
+            try parseFromClause(s);
+            // parseFromClause handles with clause, so expect semicolon after
+            _ = try s.expectSemicolon();
+            return;
+        }
+        try s.advance();
+    }
+
+    // Namespace import: import * as ns from 'module'
+    if (s.peekKind() == '*') {
+        try s.advance();
+        // Expect 'as'
+        if (!s.isIdent("as")) {
+            return Error.UnexpectedToken;
+        }
+        try s.advance();
+        // Expect namespace identifier
+        if (s.peekKind() != tok.TOK_IDENT) {
+            return Error.UnexpectedToken;
+        }
+        try s.advance();
+        // TODO: F10+ Add to module import entries
+        try parseFromClause(s);
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    // Named imports: import { x, y as z } from 'module'
+    if (s.peekKind() == '{') {
+        try s.advance();
+        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+            // Import name (identifier or string)
+            if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_STRING) {
+                return Error.UnexpectedToken;
+            }
+            try s.advance();
+
+            // Optional 'as' for renaming
+            if (s.isIdent("as")) {
+                try s.advance();
+                if (s.peekKind() != tok.TOK_IDENT) {
+                    return Error.UnexpectedToken;
+                }
+                try s.advance();
+            }
+
+            // TODO: F10+ Add to module import entries
+
+            if (s.peekKind() != ',') break;
+            try s.advance();
+        }
+        try s.expectToken('}');
+        try parseFromClause(s);
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    return Error.UnexpectedToken;
+}
+
+/// Parse export statement
+/// Mirrors `js_parse_export` in quickjs.c:31090
+fn parseExport(s: *ParseState) Error!void {
+    try s.advance();
+
+    const next_tok = s.peekKind();
+
+    // export default
+    if (next_tok == tok.TOK_DEFAULT) {
+        try s.advance();
+        // export default x
+        if (s.peekKind() == tok.TOK_CLASS) {
+            try parseClass(s, false);
+        } else if (s.peekKind() == tok.TOK_FUNCTION) {
+            // Check for async function
+            const is_async = s.isIdent("async");
+            if (is_async) {
+                try s.advance();
+            }
+            const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
+            try parseFunctionExpr(s, func_kind);
+        } else {
+            try parseExpr(s);
+            try s.emitOp(opcode.op.drop);
+        }
+        // TODO: F10+ Add to module export entries
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    // export { ... }
+    if (next_tok == '{') {
+        try s.advance();
+        while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+            // Export name (identifier or string)
+            if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_STRING) {
+                return Error.UnexpectedToken;
+            }
+            try s.advance();
+
+            // Optional 'as' for renaming
+            if (s.isIdent("as")) {
+                try s.advance();
+                if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_STRING) {
+                    return Error.UnexpectedToken;
+                }
+                try s.advance();
+            }
+
+            // TODO: F10+ Add to module export entries
+
+            if (s.peekKind() != ',') break;
+            try s.advance();
+        }
+        try s.expectToken('}');
+
+        // Optional from clause for re-export
+        if (s.isIdent("from")) {
+            try parseFromClause(s);
+        }
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    // export * from 'module' or export * as ns from 'module'
+    if (next_tok == '*') {
+        try s.advance();
+        // Optional 'as' for namespace re-export
+        if (s.isIdent("as")) {
+            try s.advance();
+            if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_STRING) {
+                return Error.UnexpectedToken;
+            }
+            try s.advance();
+        }
+        try parseFromClause(s);
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    // export var/let/const
+    if (next_tok == tok.TOK_VAR or next_tok == tok.TOK_LET or next_tok == tok.TOK_CONST) {
+        const var_tok = next_tok;
+        try s.advance();
+        try parseVar(s, var_tok);
+        // TODO: F10+ Add to module export entries
+        _ = try s.expectSemicolon();
+        return;
+    }
+
+    // export function
+    if (next_tok == tok.TOK_FUNCTION) {
+        // Check for async function
+        const is_async = s.isIdent("async");
+        if (is_async) {
+            try s.advance();
+        }
+        const func_kind: ParseFunctionKind = if (is_async) .async else .normal;
+        try parseFunctionDecl(s, func_kind);
+        // TODO: F10+ Add to module export entries
+        return;
+    }
+
+    // export class
+    if (next_tok == tok.TOK_CLASS) {
+        try parseClass(s, true);
+        // TODO: F10+ Add to module export entries
+        return;
+    }
+
+    // export async function
+    if (next_tok == tok.TOK_IDENT and s.isIdent("async")) {
+        // Check if next token is function
+        if (s.peekNextKind() == tok.TOK_FUNCTION) {
+            try s.advance(); // consume async
+            try s.advance(); // consume function
+            const func_kind: ParseFunctionKind = .async;
+            try parseFunctionDecl(s, func_kind);
+            // TODO: F10+ Add to module export entries
+            return;
+        }
+    }
+
+    return Error.UnexpectedToken;
+}
+
+/// Parse from clause: from 'module'
+/// Mirrors `js_parse_from_clause` in quickjs.c:31039
+fn parseFromClause(s: *ParseState) Error!void {
+    // Expect 'from' keyword
+    if (!s.isIdent("from")) {
+        return Error.UnexpectedToken;
+    }
+    try s.advance();
+
+    // Expect string literal for module name
+    if (s.peekKind() != tok.TOK_STRING) {
+        return Error.UnexpectedToken;
+    }
+    try s.advance();
+
+    // TODO: F10+ Add to module required entries
+
+    // Optional with clause for import attributes
+    if (s.isIdent("with")) {
+        try parseWithClause(s);
+    }
+}
+
+/// Parse with clause for import attributes
+/// Mirrors `js_parse_with_clause` in quickjs.c:30950
+fn parseWithClause(s: *ParseState) Error!void {
+    try s.advance();
+    try s.expectToken('{');
+
+    while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+        // Key (identifier or string)
+        if (s.peekKind() != tok.TOK_IDENT and s.peekKind() != tok.TOK_STRING) {
+            return Error.UnexpectedToken;
+        }
+        try s.advance();
+
+        try s.expectToken(':');
+
+        // Value (string)
+        if (s.peekKind() != tok.TOK_STRING) {
+            return Error.UnexpectedToken;
+        }
+        try s.advance();
+
+        // TODO: F10+ Store attribute
+
+        if (s.peekKind() != ',') break;
+        try s.advance();
+    }
+
+    try s.expectToken('}');
 }

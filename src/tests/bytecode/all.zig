@@ -144,4 +144,5 @@ test "function bytecode owns code constants scopes module and debug metadata" {
 
 comptime {
     _ = @import("opcode_alignment_test.zig");
+    _ = @import("pipeline_test.zig");
 }
