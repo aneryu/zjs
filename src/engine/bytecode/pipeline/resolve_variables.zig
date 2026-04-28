@@ -92,6 +92,15 @@ fn isScopeVarOp(op_id: u8) bool {
         op_id == opcode.op.scope_put_var_init;
 }
 
+/// Returns true if the opcode is a scope_delete_var / scope_make_ref /
+/// scope_get_ref temporary. All three are 7-byte `atom_u16` forms,
+/// same layout as the basic scope_*_var family.
+fn isScopeRefOp(op_id: u8) bool {
+    return op_id == opcode.op.scope_make_ref or
+        op_id == opcode.op.scope_get_ref or
+        op_id == opcode.op.scope_delete_var;
+}
+
 /// Returns true if the opcode at `op_id` is a Phase 1 temporary
 /// private field opcode that `resolve_variables` needs to lower.
 fn isScopePrivateFieldOp(op_id: u8) bool {
@@ -584,6 +593,63 @@ pub fn run(ctx: *Context) !void {
                 output_atom_count += 1;
             }
             i += 7;
+        } else if (isScopeRefOp(op)) {
+            // scope_delete_var / scope_make_ref / scope_get_ref: 7-byte atom_u16.
+            if (i + 7 > func.code.len) return error.InvalidBytecode;
+            const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+            const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+            if (op == opcode.op.scope_delete_var) {
+                if (resolveScopeVar(ctx, atom_id, scope_level) != null or lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) {
+                    // Local / arg / closure var: delete returns false (1 byte).
+                    output_size += 1;
+                } else {
+                    // Global: OP_delete_var <atom> (5 bytes + 1 atom).
+                    output_size += 5;
+                    output_atom_count += 1;
+                }
+            } else if (op == opcode.op.scope_get_ref) {
+                if (lookupArg(ctx, atom_id)) |arg_idx| {
+                    // OP_undefined (1) + OP_get_arg/short (1-3).
+                    const form = selectShortArg(opcode.op.get_arg, arg_idx);
+                    output_size += 1 + form.size;
+                } else if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+                    // OP_undefined (1) + OP_get_loc/short (1-3).
+                    if (isLexicalLocal(ctx, loc_idx)) {
+                        output_size += 1 + 3; // undefined + get_loc_check
+                    } else {
+                        const form = selectShortLoc(opcode.op.get_loc, loc_idx);
+                        output_size += 1 + form.size;
+                    }
+                } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                    // OP_undefined (1) + OP_get_var_ref (1-3).
+                    const form = selectShortVarRef(opcode.op.get_var_ref, ref_idx);
+                    output_size += 1 + form.size;
+                } else {
+                    // Global: OP_undefined (1) + OP_get_var (5) + 1 atom.
+                    output_size += 1 + 5;
+                    output_atom_count += 1;
+                }
+            } else {
+                // scope_make_ref: simplified to undefined + get_loc or global.
+                if (lookupArg(ctx, atom_id)) |arg_idx| {
+                    const form = selectShortArg(opcode.op.get_arg, arg_idx);
+                    output_size += 1 + form.size;
+                } else if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+                    if (isLexicalLocal(ctx, loc_idx)) {
+                        output_size += 1 + 3;
+                    } else {
+                        const form = selectShortLoc(opcode.op.get_loc, loc_idx);
+                        output_size += 1 + form.size;
+                    }
+                } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                    const form = selectShortVarRef(opcode.op.get_var_ref, ref_idx);
+                    output_size += 1 + form.size;
+                } else {
+                    output_size += 1 + 5;
+                    output_atom_count += 1;
+                }
+            }
+            i += 7;
         } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
             i += 3;
         } else {
@@ -814,6 +880,70 @@ pub fn run(ctx: *Context) !void {
                 output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
                 out_idx += 5;
                 out_atom_idx += 1;
+                in_atom_idx += 1;
+            }
+            i += 7;
+        } else if (isScopeRefOp(op)) {
+            if (i + 7 > func.code.len) return error.InvalidBytecode;
+            const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
+            const scope_level = std.mem.readInt(i16, func.code[i + 5 ..][0..2], .little);
+            if (op == opcode.op.scope_delete_var) {
+                if (resolveScopeVar(ctx, atom_id, scope_level) != null or lookupArg(ctx, atom_id) != null or lookupClosureVar(ctx, atom_id) != null) {
+                    output[out_idx] = opcode.op.push_false;
+                    out_idx += 1;
+                } else {
+                    output[out_idx] = opcode.op.delete_var;
+                    std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
+                    output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
+                    out_idx += 5;
+                    out_atom_idx += 1;
+                }
+                in_atom_idx += 1;
+            } else {
+                // scope_get_ref / scope_make_ref: emit OP_undefined + get accessor.
+                output[out_idx] = opcode.op.@"undefined";
+                out_idx += 1;
+                if (lookupArg(ctx, atom_id)) |arg_idx| {
+                    const form = selectShortArg(opcode.op.get_arg, arg_idx);
+                    output[out_idx] = form.op_id;
+                    switch (form.operand_size) {
+                        0 => {},
+                        2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], arg_idx, .little),
+                        else => unreachable,
+                    }
+                    out_idx += form.size;
+                } else if (resolveScopeVar(ctx, atom_id, scope_level)) |loc_idx| {
+                    if (isLexicalLocal(ctx, loc_idx)) {
+                        output[out_idx] = opcode.op.get_loc_check;
+                        std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
+                        out_idx += 3;
+                    } else {
+                        const form = selectShortLoc(opcode.op.get_loc, loc_idx);
+                        output[out_idx] = form.op_id;
+                        switch (form.operand_size) {
+                            0 => {},
+                            1 => output[out_idx + 1] = @intCast(loc_idx),
+                            2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little),
+                            else => unreachable,
+                        }
+                        out_idx += form.size;
+                    }
+                } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
+                    const form = selectShortVarRef(opcode.op.get_var_ref, ref_idx);
+                    output[out_idx] = form.op_id;
+                    switch (form.operand_size) {
+                        0 => {},
+                        2 => std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], ref_idx, .little),
+                        else => unreachable,
+                    }
+                    out_idx += form.size;
+                } else {
+                    output[out_idx] = opcode.op.get_var;
+                    std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
+                    output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
+                    out_idx += 5;
+                    out_atom_idx += 1;
+                }
                 in_atom_idx += 1;
             }
             i += 7;

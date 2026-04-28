@@ -1066,7 +1066,8 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     fd.has_simple_parameter_list = false;
     fd.func_kind = .normal;
 
-    // Three-byte body: push_i32 42 (5 bytes) + return (1 byte) = 6 bytes
+    // Body: push_i32 42 (5 bytes) + return (1 byte) = 6 bytes input;
+    // after short-opcode lowering: push_i8 42 (2 bytes) + return (1 byte) = 3 bytes
     const op = bytecode.opcode.op;
     var body = [_]u8{0} ** 6;
     body[0] = op.push_i32;
@@ -1087,10 +1088,10 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
 
     try std.testing.expect(fb.is_strict_mode);
     try std.testing.expect(!fb.has_simple_parameter_list);
-    try std.testing.expectEqual(@as(usize, 6), fb.byte_code.len);
-    try std.testing.expectEqual(@as(i32, 6), fb.byte_code_len);
-    try std.testing.expectEqual(op.push_i32, fb.byte_code[0]);
-    try std.testing.expectEqual(op.@"return", fb.byte_code[5]);
+    try std.testing.expectEqual(@as(usize, 3), fb.byte_code.len);
+    try std.testing.expectEqual(@as(i32, 3), fb.byte_code_len);
+    try std.testing.expectEqual(op.push_i8, fb.byte_code[0]);
+    try std.testing.expectEqual(op.@"return", fb.byte_code[2]);
     try std.testing.expectEqual(@as(usize, 1), fb.vardefs.len);
     try std.testing.expectEqual(name, fb.vardefs[0].var_name);
     try std.testing.expectEqual(@as(u16, 1), fb.var_count);

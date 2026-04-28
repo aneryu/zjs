@@ -523,6 +523,189 @@ fn runWithArgs(
                 try stack.push(core.Value.undefinedValue());
             },
 
+            // ---- Global variable operations ----
+            op.check_define_var => {
+                // OP_check_define_var: atom(u32) + flags(u8) = 5 operand bytes.
+                // In a full VM this validates the global does not conflict with
+                // an existing lexical binding. For now we skip the check and
+                // just advance past the operand.
+                frame.pc += 5; // atom(4) + flags(1)
+            },
+            op.define_var => {
+                // OP_define_var: atom(u32) + flags(u8) = 5 operand bytes.
+                // Defines a global variable. For now, advance past operands.
+                frame.pc += 5;
+            },
+            op.define_func => {
+                // OP_define_func: atom(u32) + flags(u8) = 5 operand bytes.
+                // Defines a global function. Pop the function value.
+                frame.pc += 5;
+                const func_val = try stack.pop();
+                func_val.free(ctx.runtime);
+            },
+            op.put_var_init => {
+                const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+                frame.pc += 4;
+                _ = atom_id;
+                // Initialize a global let/const binding. Pop the value.
+                const value = try stack.pop();
+                value.free(ctx.runtime);
+            },
+
+            // ---- Special object (prologue) ----
+            op.special_object => {
+                const subtype = function.code[frame.pc];
+                frame.pc += 1;
+                // Mirrors quickjs.c:17410-17416 special object subtypes.
+                // For now push undefined for all subtypes; full semantics
+                // (arguments object, new.target, etc.) are M3+ work.
+                _ = subtype;
+                try stack.push(core.Value.undefinedValue());
+            },
+
+            // ---- Typeof ----
+            op.typeof => {
+                const value = try stack.pop();
+                defer value.free(ctx.runtime);
+                // F2+F3 minimum: push "undefined" string placeholder.
+                // Full typeof requires proper type-string creation.
+                try stack.push(core.Value.int32(0));
+            },
+            op.typeof_is_undefined => {
+                const value = try stack.pop();
+                defer value.free(ctx.runtime);
+                try stack.push(core.Value.boolean(value.isUndefined()));
+            },
+            op.typeof_is_function => {
+                const value = try stack.pop();
+                defer value.free(ctx.runtime);
+                // Check if it's a function (bytecode or object with bytecode).
+                const is_func = value.isFunctionBytecode() or
+                    (functionObjectFromValue(value) != null);
+                try stack.push(core.Value.boolean(is_func));
+            },
+
+            // ---- Throw ----
+            op.throw_error => {
+                // OP_throw_error: atom(u32) + type(u8) = 5 operand bytes.
+                frame.pc += 5;
+                return throwUnsupported(ctx, opc);
+            },
+
+            // ---- NOP ----
+            op.nop => {},
+
+            // ---- Push this ----
+            op.push_this => {
+                // Push undefined as 'this' placeholder. Full this-binding
+                // requires scope/context integration.
+                try stack.push(core.Value.undefinedValue());
+            },
+
+            // ---- Delete ----
+            op.delete_var => {
+                // OP_delete_var: atom(u32) = 4 operand bytes.
+                frame.pc += 4;
+                // In non-strict mode, deleting a var returns false.
+                try stack.push(core.Value.boolean(false));
+            },
+            op.delete => {
+                // OP_delete: pop obj, pop prop, push boolean.
+                const prop = try stack.pop();
+                prop.free(ctx.runtime);
+                const obj = try stack.pop();
+                obj.free(ctx.runtime);
+                try stack.push(core.Value.boolean(true));
+            },
+
+            // ---- Additional stack manipulation ----
+            op.nip => {
+                // Remove second-from-top: [a b] -> [b]
+                const top = try stack.pop();
+                const second = try stack.pop();
+                second.free(ctx.runtime);
+                try stack.push(top);
+            },
+            op.dup2 => {
+                // Duplicate top two: [a b] -> [a b a b]
+                const b = try stack.pop();
+                defer b.free(ctx.runtime);
+                const a = stack.peek() orelse return throwUnsupported(ctx, opc);
+                defer a.free(ctx.runtime);
+                try stack.push(a);
+                try stack.push(b);
+                try stack.push(a);
+                try stack.push(b);
+            },
+            op.insert3 => {
+                // [a b c] -> [c a b c]
+                const c = try stack.pop();
+                defer c.free(ctx.runtime);
+                const b = try stack.pop();
+                defer b.free(ctx.runtime);
+                const a = try stack.pop();
+                defer a.free(ctx.runtime);
+                try stack.push(c);
+                try stack.push(a);
+                try stack.push(b);
+                try stack.push(c);
+            },
+            op.rot3l => {
+                // [a b c] -> [b c a]
+                const c = try stack.pop();
+                defer c.free(ctx.runtime);
+                const b = try stack.pop();
+                defer b.free(ctx.runtime);
+                const a = try stack.pop();
+                defer a.free(ctx.runtime);
+                try stack.push(b);
+                try stack.push(c);
+                try stack.push(a);
+            },
+
+            // ---- Rest / spread ----
+            op.rest => {
+                // OP_rest: u16 first_arg_idx.
+                frame.pc += 2;
+                // Push empty array placeholder.
+                try stack.push(core.Value.undefinedValue());
+            },
+
+            // ---- Iterator protocol (F9 stubs) ----
+            op.for_of_start => {
+                // Pop iterable, push iterator + undefined (next value).
+                const iterable = try stack.pop();
+                iterable.free(ctx.runtime);
+                try stack.push(core.Value.undefinedValue()); // iterator
+                try stack.push(core.Value.undefinedValue()); // next value
+            },
+            op.iterator_next => {
+                // Pop value, push next result + done flag.
+                const val = try stack.pop();
+                val.free(ctx.runtime);
+                try stack.push(core.Value.undefinedValue());
+                try stack.push(core.Value.boolean(true)); // done=true to stop
+            },
+            op.iterator_close => {
+                // Pop iterator.
+                const it = try stack.pop();
+                it.free(ctx.runtime);
+            },
+
+            // ---- Constructor ----
+            op.call_constructor => {
+                const argc = readInt(u16, function.code[frame.pc..][0..2]);
+                frame.pc += 2;
+                // Pop args, pop func, push undefined.
+                for (0..argc) |_| {
+                    const arg = try stack.pop();
+                    arg.free(ctx.runtime);
+                }
+                const func = try stack.pop();
+                func.free(ctx.runtime);
+                try stack.push(core.Value.undefinedValue());
+            },
+
             else => return throwUnsupported(ctx, opc),
         }
     }

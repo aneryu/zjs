@@ -37,7 +37,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) an
     lowered.opcode_format = .qjs;
     try lowered.setCode(fd.byte_code);
     for (fd.atom_operands) |atom_id| try lowered.retainAtomOperand(atom_id);
-    try runPhases(&lowered, fd);
+    try runPhases(&lowered, fd, fd);
 
     // Allocate FunctionBytecode as a single-element slice. Caller is
     // responsible for releasing the returned GC object.
@@ -137,7 +137,8 @@ pub fn runWithFunctionDef(
     function: *bytecode_function.Bytecode,
     fd: ?*const function_def_mod.FunctionDef,
 ) !void {
-    try runPhases(function, fd);
+    // const FD: caller cannot mutate, pass through as-is.
+    try runPhases(function, fd, null);
 }
 
 /// Runtime-aware variant used when the parser produced FunctionDef child
@@ -153,12 +154,13 @@ pub fn runWithFunctionDefRuntime(
         try installChildFunctionBytecodes(def, rt);
         try syncFunctionDefCpool(function, def);
     }
-    try runPhases(function, fd);
+    try runPhases(function, fd, fd);
 }
 
 fn runPhases(
     function: *bytecode_function.Bytecode,
     fd: ?*const function_def_mod.FunctionDef,
+    fd_mut: ?*function_def_mod.FunctionDef,
 ) !void {
     // Phase 2: resolve_variables (with optional FunctionDef).
     var resolve_ctx = if (fd) |def|
@@ -166,6 +168,13 @@ fn runPhases(
     else
         resolve_variables.Context.init(function);
     try resolve_variables.run(&resolve_ctx);
+
+    // After resolve_variables, enable short opcodes for resolve_labels
+    // (mirrors quickjs.c:35101 where use_short_opcodes is set after
+    // the resolve_variables pass completes).
+    if (fd_mut) |def| {
+        def.use_short_opcodes = true;
+    }
 
     // Phase 3a: resolve_labels (with optional FunctionDef prologue metadata).
     var labels_ctx = if (fd) |def|
