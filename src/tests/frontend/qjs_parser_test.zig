@@ -29,8 +29,9 @@ const TestEnv = struct {
 /// return the produced final-form bytecode for byte-sequence
 /// comparison. The parser's default is `emit_phase1_temp = true`, so
 /// raw parser output contains scope_get_var/scope_put_var and other
-/// Phase 1 temp opcodes; `pipeline.finalize.run` lowers them to the
-/// final shapes the tests assert against.
+/// Phase 1 temp opcodes; `pipeline.finalize.runWithFunctionDef`
+/// lowers them to the final shapes the tests assert against
+/// (including get_loc/put_loc for vars in `function_def.vars`).
 fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -38,9 +39,9 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
-    defer state.deinit();
+    defer state.deinit(env.rt);
     try qjs_parser.parseExpr(&state);
-    try engine.bytecode.pipeline.finalize.run(&function);
+    try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
 
@@ -53,9 +54,9 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
-    defer state.deinit();
+    defer state.deinit(env.rt);
     try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try engine.bytecode.pipeline.finalize.run(&function);
+    try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
 
@@ -1585,10 +1586,12 @@ test "F5: var declaration with initializer" {
     var fn_bc = try parseStatement(&env, "var x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // Should have push_i32 1, drop
+    // F10.1c + F10.2: parser emits scope_put_var which the pipeline
+    // lowers to short-form put_loc0 (idx 0 → 1-byte). Expected:
+    //   push_i32 1 ; put_loc0   (5 + 1 = 6 bytes)
     try std.testing.expect(fn_bc.code.len > 0);
     try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+    try std.testing.expectEqual(op.put_loc0, fn_bc.code[fn_bc.code.len - 1]);
 }
 
 test "F5: let declaration" {
@@ -1597,10 +1600,14 @@ test "F5: let declaration" {
     var fn_bc = try parseStatement(&env, "let x;");
     defer fn_bc.deinit(env.rt);
 
-    // Should have undefined, drop
-    try std.testing.expect(fn_bc.code.len > 0);
-    try std.testing.expectEqual(op.undefined, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+    // F10.1c + TDZ: `let x;` now emits scope_put_var_init undefined,
+    // which the pipeline lowers (with TDZ prologue) to:
+    //   set_loc_uninitialized 0  (3 bytes - TDZ prologue)
+    //   undefined                 (1 byte)
+    //   put_loc_check_init 0      (3 bytes - clears TDZ flag)
+    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
+    try std.testing.expectEqual(op.undefined, fn_bc.code[3]);
+    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[4]);
 }
 
 test "F5: let declaration with initializer" {
@@ -1609,10 +1616,13 @@ test "F5: let declaration with initializer" {
     var fn_bc = try parseStatement(&env, "let x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // Should have push_i32 1, drop
-    try std.testing.expect(fn_bc.code.len > 0);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+    // F10.1c + TDZ: `let x = 1;` lowers to:
+    //   set_loc_uninitialized 0  (TDZ prologue)
+    //   push_i32 1
+    //   put_loc_check_init 0
+    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
+    try std.testing.expectEqual(op.push_i32, fn_bc.code[3]);
+    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[fn_bc.code.len - 3]);
 }
 
 test "F5: const declaration without initializer should fail" {
@@ -1627,10 +1637,10 @@ test "F5: const declaration with initializer" {
     var fn_bc = try parseStatement(&env, "const x = 1;");
     defer fn_bc.deinit(env.rt);
 
-    // Should have push_i32 1, drop
-    try std.testing.expect(fn_bc.code.len > 0);
-    try std.testing.expectEqual(op.push_i32, fn_bc.code[0]);
-    try std.testing.expectEqual(op.drop, fn_bc.code[fn_bc.code.len - 1]);
+    // F10.1c + TDZ: const lowers same as let with init.
+    try std.testing.expectEqual(op.set_loc_uninitialized, fn_bc.code[0]);
+    try std.testing.expectEqual(op.push_i32, fn_bc.code[3]);
+    try std.testing.expectEqual(op.put_loc_check_init, fn_bc.code[fn_bc.code.len - 3]);
 }
 
 test "F5: multiple var declarations" {
@@ -2217,4 +2227,202 @@ test "Object literal: spread" {
     defer fn_bc.deinit(env.rt);
 
     try std.testing.expect(fn_bc.code.len >= 0);
+}
+
+// =====================================================================
+// F10.1a — FunctionDef integration tests
+// =====================================================================
+//
+// Validates that the parser's `function_def` companion structure is
+// populated correctly from `var` / `let` / `const` declarations and
+// nested lexical scopes. These tests do NOT exercise bytecode emission
+// — they introspect `state.function_def` directly so the FunctionDef
+// data path can be validated independently of the pipeline.
+//
+// See PARSER_REWRITE_PLAN.md §F10.1 Outstanding for the full
+// FunctionDef-based pipeline that will consume this data.
+
+const function_def_mod = engine.bytecode.function_def;
+
+test "F10.1a FunctionDef: initial scope chain has scope 0 with parent -1" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    // Mirror `js_new_function_def` (`quickjs.c:31511`): scope 0 created
+    // with parent = -1, first = -1.
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.scopes.len);
+    try std.testing.expectEqual(@as(i32, -1), state.function_def.scopes[0].parent);
+    try std.testing.expectEqual(@as(i32, -1), state.function_def.scopes[0].first);
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.scope_level);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scope_count);
+}
+
+test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    // After parsing: scope_level back to 0, but a new scope was
+    // appended (push then pop, the structure is retained for §F10.1
+    // Outstanding closure analysis to walk later).
+    try std.testing.expectEqual(@as(i32, 0), state.scope_level);
+    try std.testing.expectEqual(@as(usize, 2), state.function_def.scopes.len);
+}
+
+test "F10.1a FunctionDef: nested blocks build parent chain" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let a; { let b; } }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    // After parsing: 3 scopes (initial 0 + outer block + inner block).
+    try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
+    // Scope 0 has parent -1, scope 1's parent is 0, scope 2's parent is 1.
+    try std.testing.expectEqual(@as(i32, -1), state.function_def.scopes[0].parent);
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.scopes[1].parent);
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.scopes[2].parent);
+    // After popping back, current scope level is 0 again.
+    try std.testing.expectEqual(@as(i32, 0), state.scope_level);
+}
+
+test "F10.1a FunctionDef: let registers as lexical, non-const" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const x_atom = try env.rt.internAtom("x");
+    defer env.rt.atoms.free(x_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "let x = 1;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
+    const v = state.function_def.vars[0];
+    try std.testing.expectEqual(@as(engine.core.atom.Atom, x_atom), v.var_name);
+    try std.testing.expectEqual(true, v.is_lexical);
+    try std.testing.expectEqual(false, v.is_const);
+    try std.testing.expectEqual(function_def_mod.VarKind.normal, v.var_kind);
+    // `let` at top level is at scope 0 (no enclosing block).
+    try std.testing.expectEqual(@as(i32, 0), v.scope_level);
+}
+
+test "F10.1a FunctionDef: const registers as lexical + const" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "const k = 42;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
+    try std.testing.expectEqual(true, state.function_def.vars[0].is_lexical);
+    try std.testing.expectEqual(true, state.function_def.vars[0].is_const);
+}
+
+test "F10.1a FunctionDef: var hoists to scope 0 even from nested block" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ var v = 1; }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
+    const v = state.function_def.vars[0];
+    try std.testing.expectEqual(false, v.is_lexical);
+    try std.testing.expectEqual(false, v.is_const);
+    // `var` hoists to the function scope (level 0) per QuickJS
+    // `add_func_var_def` semantics.
+    try std.testing.expectEqual(@as(i32, 0), v.scope_level);
+}
+
+test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let a; { let b; } }");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(usize, 2), state.function_def.vars.len);
+    // `a` is registered in the outer block scope (1), `b` in the
+    // inner block scope (2).
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.vars[0].scope_level);
+    try std.testing.expectEqual(@as(i32, 2), state.function_def.vars[1].scope_level);
+}
+
+test "F10.1a FunctionDef: findVar locates by name" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    defer function.deinit(env.rt);
+
+    const x_atom = try env.rt.internAtom("x");
+    defer env.rt.atoms.free(x_atom);
+    const y_atom = try env.rt.internAtom("y");
+    defer env.rt.atoms.free(y_atom);
+    const z_atom = try env.rt.internAtom("z");
+    defer env.rt.atoms.free(z_atom);
+
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "let x; let y;");
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+
+    try std.testing.expectEqual(@as(i32, 0), state.function_def.findVar(x_atom));
+    try std.testing.expectEqual(@as(i32, 1), state.function_def.findVar(y_atom));
+    try std.testing.expectEqual(@as(i32, -1), state.function_def.findVar(z_atom));
 }

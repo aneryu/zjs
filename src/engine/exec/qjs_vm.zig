@@ -30,6 +30,22 @@ pub fn run(
     var frame = frame_mod.Frame.init(function);
     defer frame.deinit(&ctx.runtime.memory, ctx.runtime);
 
+    // Pre-allocate locals[var_count] with `undefined`. The TDZ
+    // prologue emitted by `resolve_variables` sets
+    // `locals_uninit[idx] = true` for every lexical (let/const)
+    // slot via `set_loc_uninitialized`, so `get_loc_check` /
+    // `put_loc_check` throw `ReferenceError` until
+    // `put_loc_check_init` runs. `var` slots stay
+    // `locals_uninit = false` (no TDZ).
+    if (function.var_count > 0) {
+        const locals = try ctx.runtime.memory.alloc(core.Value, function.var_count);
+        @memset(locals, core.Value.undefinedValue());
+        frame.locals = locals;
+        const uninit = try ctx.runtime.memory.alloc(bool, function.var_count);
+        @memset(uninit, false);
+        frame.locals_uninit = uninit;
+    }
+
     while (frame.pc < function.code.len) {
         const opc = function.code[frame.pc];
         frame.pc += 1;
@@ -52,6 +68,73 @@ pub fn run(
             op.@"null" => try stack.push(core.Value.nullValue()),
             op.push_false => try stack.push(core.Value.boolean(false)),
             op.push_true => try stack.push(core.Value.boolean(true)),
+
+            // ---- Locals (F10.1b / F10.2 short-forms) ----
+            // get_loc / put_loc / set_loc lowered from scope_get_var /
+            // scope_put_var by `resolve_variables` when the atom
+            // resolves to a `VarDef` in the parser's `function_def`.
+            // `selectShortLoc` picks the shortest encoding:
+            //   - idx ∈ [0, 4)    → 1-byte short form (idx in opcode)
+            //   - idx ∈ [4, 256)  → 2-byte u8-form (`get_loc8`, ...)
+            //   - idx ∈ [256, 2^16) → 3-byte u16-form
+            op.get_loc => try execGetLoc(ctx, &frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+            op.put_loc => try execPutLoc(ctx, &frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+            op.set_loc => try execSetLoc(ctx, &frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+
+            op.get_loc8 => try execGetLoc(ctx, &frame, stack, function.code[frame.pc], 1, opc),
+            op.put_loc8 => try execPutLoc(ctx, &frame, stack, function.code[frame.pc], 1, opc),
+            op.set_loc8 => try execSetLoc(ctx, &frame, stack, function.code[frame.pc], 1, opc),
+
+            op.get_loc0 => try execGetLoc(ctx, &frame, stack, 0, 0, opc),
+            op.get_loc1 => try execGetLoc(ctx, &frame, stack, 1, 0, opc),
+            op.get_loc2 => try execGetLoc(ctx, &frame, stack, 2, 0, opc),
+            op.get_loc3 => try execGetLoc(ctx, &frame, stack, 3, 0, opc),
+            op.put_loc0 => try execPutLoc(ctx, &frame, stack, 0, 0, opc),
+            op.put_loc1 => try execPutLoc(ctx, &frame, stack, 1, 0, opc),
+            op.put_loc2 => try execPutLoc(ctx, &frame, stack, 2, 0, opc),
+            op.put_loc3 => try execPutLoc(ctx, &frame, stack, 3, 0, opc),
+            op.set_loc0 => try execSetLoc(ctx, &frame, stack, 0, 0, opc),
+            op.set_loc1 => try execSetLoc(ctx, &frame, stack, 1, 0, opc),
+            op.set_loc2 => try execSetLoc(ctx, &frame, stack, 2, 0, opc),
+            op.set_loc3 => try execSetLoc(ctx, &frame, stack, 3, 0, opc),
+
+            // ---- TDZ (Temporal Dead Zone) for let/const ----
+            // Emitted by resolve_variables for lexical locals:
+            //   set_loc_uninitialized: mark slot as in-TDZ (prologue).
+            //   get_loc_check: read; throw ReferenceError if in TDZ.
+            //   put_loc_check: write; throw ReferenceError if in TDZ.
+            //   put_loc_check_init: write + clear TDZ flag.
+            op.set_loc_uninitialized => {
+                const idx = readInt(u16, function.code[frame.pc..][0..2]);
+                frame.pc += 2;
+                if (idx >= frame.locals_uninit.len) return throwUnsupported(ctx, opc);
+                frame.locals_uninit[idx] = true;
+            },
+            op.get_loc_check => {
+                const idx = readInt(u16, function.code[frame.pc..][0..2]);
+                frame.pc += 2;
+                if (idx >= frame.locals.len) return throwUnsupported(ctx, opc);
+                if (frame.locals_uninit[idx]) return throwTdzReference(ctx);
+                try stack.push(frame.locals[idx].dup());
+            },
+            op.put_loc_check => {
+                const idx = readInt(u16, function.code[frame.pc..][0..2]);
+                frame.pc += 2;
+                if (idx >= frame.locals.len) return throwUnsupported(ctx, opc);
+                if (frame.locals_uninit[idx]) return throwTdzReference(ctx);
+                const value = try stack.pop();
+                frame.locals[idx].free(ctx.runtime);
+                frame.locals[idx] = value;
+            },
+            op.put_loc_check_init => {
+                const idx = readInt(u16, function.code[frame.pc..][0..2]);
+                frame.pc += 2;
+                if (idx >= frame.locals.len) return throwUnsupported(ctx, opc);
+                const value = try stack.pop();
+                frame.locals[idx].free(ctx.runtime);
+                frame.locals[idx] = value;
+                frame.locals_uninit[idx] = false;
+            },
             op.push_atom_value => {
                 const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
                 frame.pc += 4;
@@ -406,9 +489,132 @@ fn valueTruthy(value: core.Value) bool {
     return !(value.isUndefined() or value.isNull());
 }
 
+/// Shared helper for `get_loc` / `get_loc8` / `get_loc0..3`. `consume`
+/// is the operand byte width (0 for short, 1 for u8, 2 for u16); the
+/// caller has already decoded the index, so we only need to advance pc.
+fn execGetLoc(
+    ctx: *core.Context,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    idx: u16,
+    consume: u8,
+    opc: u8,
+) !void {
+    frame.pc += consume;
+    if (idx >= frame.locals.len) return throwUnsupported(ctx, opc);
+    try stack.push(frame.locals[idx].dup());
+}
+
+fn execPutLoc(
+    ctx: *core.Context,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    idx: u16,
+    consume: u8,
+    opc: u8,
+) !void {
+    frame.pc += consume;
+    if (idx >= frame.locals.len) return throwUnsupported(ctx, opc);
+    const value = try stack.pop();
+    frame.locals[idx].free(ctx.runtime);
+    frame.locals[idx] = value;
+}
+
+fn execSetLoc(
+    ctx: *core.Context,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    idx: u16,
+    consume: u8,
+    opc: u8,
+) !void {
+    frame.pc += consume;
+    if (idx >= frame.locals.len) return throwUnsupported(ctx, opc);
+    const value = stack.peek() orelse return throwUnsupported(ctx, opc);
+    frame.locals[idx].free(ctx.runtime);
+    frame.locals[idx] = value.dup();
+}
+
 fn throwUnsupported(ctx: *core.Context, opc: u8) error{UnsupportedOpcode} {
     _ = ctx.throwValue(core.Value.int32(opc));
     return error.UnsupportedOpcode;
+}
+
+/// Throw the canonical `ReferenceError` for a TDZ violation.
+/// Returns `error.ReferenceError` to align with the legacy VM
+/// convention (`exec/test262_helpers.raise(.reference)`).
+/// Creates a proper Error object with `name` and `message` properties.
+fn throwTdzReference(ctx: *core.Context) error{ReferenceError} {
+    const rt = ctx.runtime;
+    
+    // Create Error object
+    const error_obj = core.Object.create(rt, core.class.ids.error_, null) catch {
+        // Fallback to sentinel if object creation fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    defer error_obj.value().free(rt);
+    
+    // Set name property to "ReferenceError"
+    const name_str = core.string.String.createUtf8(rt, "ReferenceError") catch {
+        // Fallback to sentinel if string creation fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    defer {
+        const name_value = core.Value.string(&name_str.header);
+        name_value.free(rt);
+    }
+    
+    const name_atom = rt.internAtom("ReferenceError") catch {
+        // Fallback to sentinel if atom creation fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    defer rt.atoms.free(name_atom);
+    
+    const name_value = core.Value.string(&name_str.header);
+    error_obj.defineOwnProperty(rt, name_atom, core.Descriptor.data(name_value, true, false, true)) catch {
+        // Fallback to sentinel if property setting fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    
+    // Set message property to TDZ error message
+    const message_str = core.string.String.createUtf8(rt, "Cannot access 'x' before initialization") catch {
+        // Fallback to sentinel if string creation fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    defer {
+        const message_value = core.Value.string(&message_str.header);
+        message_value.free(rt);
+    }
+    
+    const message_atom = rt.internAtom("message") catch {
+        // Fallback to sentinel if atom creation fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    defer rt.atoms.free(message_atom);
+    
+    const message_value = core.Value.string(&message_str.header);
+    error_obj.defineOwnProperty(rt, message_atom, core.Descriptor.data(message_value, true, false, true)) catch {
+        // Fallback to sentinel if property setting fails
+        const reference_error_atom: u32 = 209;
+        _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+        return error.ReferenceError;
+    };
+    
+    // Throw the Error object
+    _ = ctx.throwValue(error_obj.value().dup());
+    return error.ReferenceError;
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

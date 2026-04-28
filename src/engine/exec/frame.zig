@@ -8,6 +8,13 @@ pub const Frame = struct {
     this_value: Value = Value.undefinedValue(),
     locals: []Value = &.{},
     args: []Value = &.{},
+    /// Per-slot TDZ flag mirroring QuickJS's `JS_UNINITIALIZED`
+    /// sentinel: `true` means the slot is in the temporal dead
+    /// zone; reads via `get_loc_check` / `put_loc_check` throw
+    /// `ReferenceError`, and `put_loc_check_init` clears the flag.
+    /// `set_loc_uninitialized` (emitted by the resolve_variables
+    /// prologue for every lexical local) sets it back to `true`.
+    locals_uninit: []bool = &.{},
 
     pub fn init(function: *const bytecode.Bytecode) Frame {
         return .{ .function = function };
@@ -19,8 +26,10 @@ pub const Frame = struct {
         for (self.args) |value| value.free(rt);
         if (self.locals.len != 0) account.free(Value, self.locals);
         if (self.args.len != 0) account.free(Value, self.args);
+        if (self.locals_uninit.len != 0) account.free(bool, self.locals_uninit);
         self.locals = &.{};
         self.args = &.{};
+        self.locals_uninit = &.{};
     }
 
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: Value) !void {

@@ -229,6 +229,78 @@ pub const FunctionDef = struct {
         };
     }
 
+    /// Append a `VarScope` to `scopes`. Mirrors `push_scope`
+    /// (`quickjs.c:23486`): the new scope records its parent index
+    /// and inherits an empty `first` (no vars yet). Returns the index
+    /// of the newly added scope (== new `scope_level`).
+    pub fn appendScope(self: *FunctionDef, parent: i32) !i32 {
+        const new_len = self.scopes.len + 1;
+        const next = try self.memory.alloc(VarScope, new_len);
+        errdefer self.memory.free(VarScope, next);
+        @memcpy(next[0..self.scopes.len], self.scopes);
+        next[self.scopes.len] = .{ .parent = parent, .first = -1 };
+        if (self.scopes.len != 0) self.memory.free(VarScope, self.scopes);
+        self.scopes = next;
+        self.scope_count += 1;
+        const idx: i32 = @intCast(self.scopes.len - 1);
+        return idx;
+    }
+
+    /// Append a `VarDef` to `vars`. Mirrors `add_var`
+    /// (`quickjs.c:23554`). The caller is responsible for setting
+    /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom
+    /// is duplicated; the caller keeps ownership of its copy.
+    /// Returns the index of the new var.
+    pub fn appendVar(self: *FunctionDef, var_def: VarDef) !i32 {
+        const new_len = self.vars.len + 1;
+        const next = try self.memory.alloc(VarDef, new_len);
+        errdefer self.memory.free(VarDef, next);
+        @memcpy(next[0..self.vars.len], self.vars);
+        next[self.vars.len] = var_def;
+        next[self.vars.len].var_name = self.atoms.dup(var_def.var_name);
+        if (self.vars.len != 0) self.memory.free(VarDef, self.vars);
+        self.vars = next;
+        self.var_count += 1;
+        const idx: i32 = @intCast(self.vars.len - 1);
+        return idx;
+    }
+
+    /// Mirror `add_scope_var` (`quickjs.c:23577`): add a var and
+    /// attach it to `scope_level`'s scope (updates `scope_first`).
+    pub fn addScopeVar(
+        self: *FunctionDef,
+        name: atom.Atom,
+        var_kind: VarKind,
+        scope_level: i32,
+        is_lexical: bool,
+        is_const: bool,
+    ) !i32 {
+        const idx = try self.appendVar(.{
+            .var_name = name,
+            .scope_level = scope_level,
+            .is_lexical = is_lexical,
+            .is_const = is_const,
+            .var_kind = var_kind,
+        });
+        if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < self.scopes.len) {
+            self.scopes[@intCast(scope_level)].first = idx;
+            self.scope_first = idx;
+        }
+        return idx;
+    }
+
+    /// Find a var by name, searching newest-first. Returns the var
+    /// index or `-1` if not found. Mirrors the htab-free path of
+    /// `find_var` (`quickjs.c:23378`).
+    pub fn findVar(self: *const FunctionDef, name: atom.Atom) i32 {
+        var i: usize = self.vars.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.vars[i].var_name == name) return @intCast(i);
+        }
+        return -1;
+    }
+
     pub fn deinit(self: *FunctionDef, rt: anytype) void {
         self.atoms.free(self.func_name);
         self.atoms.free(self.filename);

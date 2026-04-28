@@ -571,3 +571,216 @@ test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
     try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
     try std.testing.expectEqual(x_atom, bc.atom_operands[0]);
 }
+// ---- F10.1b: FunctionDef-driven local-slot lowering ----
+
+test "resolve_variables: scope_get_var → get_loc when var is local" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(x_atom, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    // Build bytecode: scope_get_var <x> <scope=0> ; return_undef
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], x_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(x_atom);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // F10.2 short-form: idx 0 → 1-byte `get_loc0` (no operand).
+    // Expected: get_loc0 ; return_undef (1 + 1 = 2 bytes)
+    try std.testing.expectEqual(@as(usize, 2), bc.code.len);
+    try std.testing.expectEqual(op.get_loc0, bc.code[0]);
+    try std.testing.expectEqual(op.return_undef, bc.code[1]);
+    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+}
+
+test "resolve_variables: scope_put_var → put_loc when var is local" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const y_atom = try rt.internAtom("y");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(y_atom);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Add 2 vars so y is at index 1.
+    const a_atom = try rt.internAtom("a");
+    defer rt.atoms.free(a_atom);
+    _ = try fd.addScopeVar(a_atom, .normal, 0, false, false);
+    _ = try fd.addScopeVar(y_atom, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_put_var;
+    std.mem.writeInt(u32, input[1..5], y_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(y_atom);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // F10.2 short-form: idx 1 → 1-byte `put_loc1` (no operand).
+    try std.testing.expectEqual(@as(usize, 2), bc.code.len);
+    try std.testing.expectEqual(op.put_loc1, bc.code[0]);
+    try std.testing.expectEqual(op.return_undef, bc.code[1]);
+}
+
+test "resolve_variables: unknown atom falls back to global get_var" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const x_atom = try rt.internAtom("x");
+    const z_atom = try rt.internAtom("z");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(x_atom);
+    defer rt.atoms.free(z_atom);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(x_atom, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+
+    // Reference `z` which is NOT in fd.vars → must fall back to get_var.
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], z_atom, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(z_atom);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // Expected: get_var <z> ; return_undef (5 + 1 = 6 bytes)
+    try std.testing.expectEqual(@as(usize, 6), bc.code.len);
+    try std.testing.expectEqual(op.get_var, bc.code[0]);
+    const resolved_atom = std.mem.readInt(u32, bc.code[1..5], .little);
+    try std.testing.expectEqual(z_atom, resolved_atom);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(z_atom, bc.atom_operands[0]);
+}
+
+// ---- F10.2: short-form selection (`put_short_code` mirror) ----
+
+test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+    // Build 4 vars. Index 0..3 should map to short forms.
+    var atoms_arr: [4]u32 = undefined;
+    inline for (.{ "v0", "v1", "v2", "v3" }, 0..) |n, i| {
+        atoms_arr[i] = try rt.internAtom(n);
+        _ = try fd.addScopeVar(atoms_arr[i], .normal, 0, false, false);
+    }
+    defer for (atoms_arr) |a| rt.atoms.free(a);
+
+    const op = bytecode.opcode.op;
+    const expected_ops = [_]u8{ op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3 };
+    inline for (atoms_arr, expected_ops, 0..) |a, expected, i| {
+        _ = i;
+        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+        defer bc.deinit(rt);
+
+        var input = [_]u8{0} ** 8;
+        input[0] = op.scope_get_var;
+        std.mem.writeInt(u32, input[1..5], a, .little);
+        std.mem.writeInt(u16, input[5..7], 0, .little);
+        input[7] = op.return_undef;
+        try bc.setCode(&input);
+        try bc.retainAtomOperand(a);
+
+        var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+        try pipeline.resolve_variables.run(&ctx);
+
+        // Expected: short_form ; return_undef (1 + 1 = 2 bytes).
+        try std.testing.expectEqual(@as(usize, 2), bc.code.len);
+        try std.testing.expectEqual(expected, bc.code[0]);
+    }
+}
+
+test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const name = try rt.internAtom("test");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    _ = try fd.appendScope(-1);
+
+    // Add 5 vars; the 5th (index 4) should select get_loc8.
+    var buf: [8]u8 = undefined;
+    var saved_atoms: [5]u32 = undefined;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const var_name = try std.fmt.bufPrint(&buf, "v{d}", .{i});
+        const a = try rt.internAtom(var_name);
+        saved_atoms[i] = a;
+        _ = try fd.addScopeVar(a, .normal, 0, false, false);
+    }
+    defer for (saved_atoms) |a| rt.atoms.free(a);
+
+    const op = bytecode.opcode.op;
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    const target = saved_atoms[4]; // index 4 → get_loc8
+    var input = [_]u8{0} ** 8;
+    input[0] = op.scope_get_var;
+    std.mem.writeInt(u32, input[1..5], target, .little);
+    std.mem.writeInt(u16, input[5..7], 0, .little);
+    input[7] = op.return_undef;
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(target);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    // Expected: get_loc8 4 ; return_undef (2 + 1 = 3 bytes).
+    try std.testing.expectEqual(@as(usize, 3), bc.code.len);
+    try std.testing.expectEqual(op.get_loc8, bc.code[0]);
+    try std.testing.expectEqual(@as(u8, 4), bc.code[1]);
+    try std.testing.expectEqual(op.return_undef, bc.code[2]);
+}

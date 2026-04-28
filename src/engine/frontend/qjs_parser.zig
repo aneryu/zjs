@@ -30,6 +30,7 @@ const memory = @import("../core/memory.zig");
 const Value = @import("../core/value.zig").Value;
 
 const bytecode_function = @import("../bytecode/function.zig");
+const function_def_mod = @import("../bytecode/function_def.zig");
 const opcode = @import("../bytecode/opcode.zig");
 
 const lexer_mod = @import("qjs_lexer.zig");
@@ -169,6 +170,29 @@ pub const ParseState = struct {
     /// to bypass the pipeline.
     emit_phase1_temp: bool = true,
 
+    /// QuickJS `eval_ret_idx` mirror (`quickjs.c:21480`). When ≥ 0,
+    /// the slot at this local index receives the result of every
+    /// expression statement (instead of the placeholder `drop`), and
+    /// the caller's `finalizeEvalReturn` retrieves it at script end.
+    /// `enableEvalReturn` allocates the slot using the `<ret>` atom
+    /// (id 82, `quickjs-atom.h:115`). `-1` means non-eval mode.
+    eval_ret_idx: i32 = -1,
+
+    /// QuickJS `JSFunctionDef` companion state (F10.1a). Populated
+    /// during parsing with scope chain (`pushScope`/`popScope`),
+    /// variable declarations (`addScopeVar`), and later closure/label
+    /// data. The interim pipeline does not consume this yet — the
+    /// full FunctionDef-based `resolve_variables` / `resolve_labels`
+    /// (PARSER_REWRITE_PLAN.md §F10.1/§F10.2 Outstanding) will read
+    /// from it to drive scope-chain walking, closure synthesis, TDZ,
+    /// and local-slot assignment.
+    ///
+    /// The parser still emits to `function.code` as before; this is a
+    /// parallel structure that mirrors `JSParseState.cur_func`
+    /// (`quickjs.c:21581`). Tests in `qjs_parser_test.zig` assert the
+    /// `vars` / `scopes` layout is populated correctly.
+    function_def: function_def_mod.FunctionDef,
+
     pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!ParseState {
         // Mark bytecode as QuickJS-aligned format for dual-dispatch VM.
         // See PARSER_REWRITE_PLAN.md §F2+F3 and bytecode/function.zig `OpcodeFormat`.
@@ -177,13 +201,111 @@ pub const ParseState = struct {
             .lex = lex,
             .function = function,
             .token = undefined,
+            .function_def = function_def_mod.FunctionDef.init(function.memory, function.atoms, function.name),
         };
+        // Mirror `js_new_function_def` (`quickjs.c:31511`): scope 0
+        // is the function's var/arg scope, parent = -1.
+        _ = state.function_def.appendScope(-1) catch return error.OutOfMemory;
         state.token = try lex.next();
         return state;
     }
 
-    pub fn deinit(self: *ParseState) void {
+    /// Release ParseState-owned resources. `rt` is forwarded to
+    /// `FunctionDef.deinit` so constants in `function_def.cpool` can
+    /// be released. `anytype` matches `Bytecode.deinit`'s signature
+    /// so callers pass their existing runtime pointer.
+    pub fn deinit(self: *ParseState, rt: anytype) void {
         self.lex.freeToken(&self.token);
+        self.function_def.deinit(rt);
+    }
+
+    /// Mirror `push_scope` (`quickjs.c:23486`): allocate a new
+    /// `VarScope` whose parent is the current scope, then switch
+    /// `scope_level` to it. Call on entry to a new lexical block.
+    pub fn pushScope(self: *ParseState) Error!void {
+        const parent = self.scope_level;
+        const new_scope = self.function_def.appendScope(parent) catch return error.OutOfMemory;
+        self.scope_level = new_scope;
+        self.function_def.scope_level = new_scope;
+    }
+
+    /// Mirror `pop_scope` (`quickjs.c:23532`): restore the parent
+    /// scope. Also updates `function_def.scope_first` to the outer
+    /// scope's first lexical var so subsequent lookups see the
+    /// correct chain.
+    pub fn popScope(self: *ParseState) void {
+        if (self.scope_level < 0) return;
+        const parent = self.function_def.scopes[@intCast(self.scope_level)].parent;
+        self.scope_level = parent;
+        self.function_def.scope_level = parent;
+        // Recompute scope_first for the new current scope (mirrors
+        // `get_first_lexical_var` at `quickjs.c:23521`).
+        var scope = parent;
+        self.function_def.scope_first = -1;
+        while (scope >= 0) {
+            const s_idx = self.function_def.scopes[@intCast(scope)].first;
+            if (s_idx >= 0) {
+                self.function_def.scope_first = s_idx;
+                break;
+            }
+            scope = self.function_def.scopes[@intCast(scope)].parent;
+        }
+    }
+
+    /// Register a variable declaration in `function_def.vars`.
+    /// Mirrors `add_scope_var` (`quickjs.c:23577`). `kind` selects
+    /// the `VarKind` (normal for `var`, normal + is_lexical for let,
+    /// normal + is_lexical + is_const for const). Returns the var
+    /// index. Currently informational only; the interim pipeline
+    /// ignores `function_def` and relies on global fallback for all
+    /// var references.
+    pub fn addScopeVar(
+        self: *ParseState,
+        name: Atom,
+        kind: function_def_mod.VarKind,
+        is_lexical: bool,
+        is_const: bool,
+    ) Error!i32 {
+        return self.function_def.addScopeVar(name, kind, self.scope_level, is_lexical, is_const) catch return error.OutOfMemory;
+    }
+
+    /// Atom id reserved for the eval-return slot, mirroring
+    /// `JS_ATOM__ret_` / `<ret>` (`quickjs-atom.h:115`). Used as the
+    /// var name for the synthetic local that captures every
+    /// expression-statement result in eval mode.
+    pub const eval_ret_atom: Atom = 82;
+
+    /// Switch the parser into eval mode and allocate the synthetic
+    /// `<ret>` local that holds the result of the last evaluated
+    /// expression. Mirrors `set_eval_ret_undefined` setup +
+    /// `add_var(JS_ATOM__ret_)` (`quickjs.c:28219`/`28834`). The
+    /// caller invokes this immediately after `ParseState.init` and
+    /// before parsing any statements.
+    ///
+    /// Effect:
+    /// 1. `is_eval` is set so `parseExprStatement` emits
+    ///    `scope_put_var <ret>` (lowered to `put_loc <idx>`)
+    ///    instead of `drop`.
+    /// 2. The `<ret>` slot is registered in `function_def.vars`
+    ///    (non-lexical so it bypasses TDZ).
+    /// 3. The slot is initialised to `undefined` so an empty script
+    ///    (no expressions) still returns a sensible value.
+    pub fn enableEvalReturn(self: *ParseState) Error!void {
+        self.is_eval = true;
+        const idx = try self.addScopeVar(eval_ret_atom, .normal, false, false);
+        self.eval_ret_idx = idx;
+        // Emit the initialiser:  undefined ; scope_put_var <ret>.
+        try self.emitOp(opcode.op.undefined);
+        try self.emitScopePutVar(eval_ret_atom);
+    }
+
+    /// Mirror the tail of `js_parse_program` (`quickjs.c:31459`):
+    /// after the last statement is parsed, emit
+    /// `scope_get_var <ret>` so the eval result sits on the stack
+    /// for `vm.run` to return. No-op when not in eval mode.
+    pub fn finalizeEvalReturn(self: *ParseState) Error!void {
+        if (self.eval_ret_idx < 0) return;
+        try self.emitScopeGetVar(eval_ret_atom);
     }
 
     /// Advance one token. Frees the payload of the consumed token.
@@ -371,6 +493,20 @@ pub const ParseState = struct {
             try self.emitOpAtomU16(opcode.op.scope_get_var_undef, atom_id, @intCast(self.scope_level));
         } else {
             try self.emitOpAtom(opcode.op.get_var_undef, atom_id);
+        }
+    }
+
+    /// Emit `scope_put_var_init` for `let` / `const` initialisers.
+    /// Mirrors `quickjs.c:282` (Phase 1 init form). The pipeline
+    /// lowers this to `put_loc` when the var resolves locally, or
+    /// to `put_var_init` when it's a top-level lexical global.
+    fn emitScopePutVarInit(self: *ParseState, atom_id: Atom) Error!void {
+        if (self.emit_phase1_temp) {
+            try self.emitOpAtomU16(opcode.op.scope_put_var_init, atom_id, @intCast(self.scope_level));
+        } else {
+            // Direct emission path (no pipeline): use the plain
+            // `put_var_init` 5-byte form.
+            try self.emitOpAtom(opcode.op.put_var_init, atom_id);
         }
     }
 
@@ -1859,14 +1995,22 @@ fn emitBackwardJump(s: *ParseState, op_id: u8, target: u32) Error!void {
 // =====================================================================
 
 /// Mirror `js_parse_block` (`quickjs.c:27827`).
+///
+/// Pushes a new lexical scope before parsing the block contents and
+/// pops it on exit, so `let` / `const` declarations get attached to
+/// the correct `VarScope` in `function_def.scopes`. The interim
+/// pipeline ignores `function_def`, but the full FunctionDef-based
+/// `resolve_variables` (§F10.1 Outstanding) will walk this chain.
 pub fn parseBlock(s: *ParseState) Error!void {
     try s.expectToken('{');
+    try s.pushScope();
     // Check for directive prologue (simplified)
     try parseDirectives(s);
     while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
         try parseStatementOrDecl(s, DeclMask{ .other = true });
     }
     try s.expectToken('}');
+    s.popScope();
 }
 
 /// Mirror `js_parse_directives` (`quickjs.c:35642`) - simplified version.
@@ -1957,9 +2101,15 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 try parseFunctionDecl(s, func_kind);
                 return;
             }
-            // Not async function: fall through to expression statement
+            // Not async function: fall through to expression statement.
+            // Like the `else` branch, eval mode redirects the value
+            // into `<ret>` instead of dropping it.
             try parseExpr(s);
-            try s.emitOp(opcode.op.drop);
+            if (s.eval_ret_idx >= 0) {
+                try s.emitScopePutVar(ParseState.eval_ret_atom);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
             _ = try s.expectSemicolon();
         },
         tok.TOK_IMPORT => {
@@ -2216,9 +2366,20 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             try s.advance();
         },
         else => {
-            // Expression statement
+            // Expression statement.
+            //
+            // Mirrors `quickjs.c:28960`: in eval mode, the last
+            // value is stored in `eval_ret_idx` so `eval()` can
+            // return it; otherwise it's dropped. `<ret>` is a
+            // non-lexical slot so the lowered bytecode is just
+            // `put_loc <idx>` (or short form), which the pipeline
+            // handles transparently.
             try parseExpr(s);
-            try s.emitOp(opcode.op.drop);
+            if (s.eval_ret_idx >= 0) {
+                try s.emitScopePutVar(ParseState.eval_ret_atom);
+            } else {
+                try s.emitOp(opcode.op.drop);
+            }
             _ = try s.expectSemicolon();
         },
     }
@@ -2231,34 +2392,66 @@ fn patchForwardJump(s: *ParseState, operand_offset: usize) Error!void {
 }
 
 /// Mirror `js_parse_var` (`quickjs.c:27847`) - simplified version for F5.
-/// Full scope management and destructuring deferred to F6/F10.
+///
+/// Registers each identifier in `function_def.vars` with the correct
+/// `VarKind` / `is_lexical` / `is_const` flags so the full
+/// FunctionDef-based pipeline (§F10.1 Outstanding) can assign local
+/// slots, emit TDZ checks, and synthesise closures. For `var`, the
+/// variable is attached at the function's var/arg scope (level 0)
+/// per QuickJS hoisting rules; for `let`/`const`, it attaches at the
+/// current lexical scope.
 fn parseVar(s: *ParseState, var_tok: tok.TokenKind) Error!void {
+    const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST;
+    const is_const = var_tok == tok.TOK_CONST;
     while (true) {
         if (s.peekKind() == tok.TOK_IDENT) {
             // Simple identifier binding
             const atom_id = s.token.payload.ident.atom;
             try s.advance();
 
-            // TODO: Full variable definition in F6/F10
-            // For now, just emit a placeholder
-            _ = atom_id;
+            // Register the declaration in `function_def.vars`. For
+            // `var`, QuickJS hoists to scope 0 (`add_func_var_def`
+            // / `add_arguments_var`); for `let`/`const` the current
+            // lexical scope is correct.
+            if (is_lexical) {
+                _ = try s.addScopeVar(atom_id, .normal, true, is_const);
+            } else {
+                // Hoist `var` to function scope (level 0).
+                const saved = s.scope_level;
+                s.scope_level = 0;
+                defer s.scope_level = saved;
+                _ = try s.addScopeVar(atom_id, .normal, false, false);
+            }
 
             // Check for initializer
             if (s.peekKind() == '=') {
                 try s.advance();
                 try parseExpr(s);
-                // TODO: Emit proper put_var opcode in F6/F10
-                try s.emitOp(opcode.op.drop);
+                // §F10.1c: emit the proper Phase-1 init opcode so the
+                // value is actually stored in the var's slot. The
+                // pipeline (`resolve_variables`) lowers these to
+                // `put_loc` when the var resolves locally, or to
+                // `put_var_init` / `put_var` for global lexical /
+                // hoisted-global cases.
+                if (is_lexical) {
+                    try s.emitScopePutVarInit(atom_id);
+                } else {
+                    try s.emitScopePutVar(atom_id);
+                }
             } else {
                 // const requires initializer
                 if (var_tok == tok.TOK_CONST) {
                     return Error.UnexpectedToken;
                 }
-                // let requires initialization to undefined
+                // `let x;` (no initializer) implicitly initialises to
+                // undefined. We emit `undefined; scope_put_var_init`
+                // so the slot is properly marked initialised — the
+                // pipeline lowers this to `put_loc_check_init` for
+                // lexical locals (clears TDZ flag) or `put_var_init`
+                // for global lexical vars.
                 if (var_tok == tok.TOK_LET) {
                     try s.emitOp(opcode.op.undefined);
-                    // TODO: Emit proper scope_put_var_init in F6/F10
-                    try s.emitOp(opcode.op.drop);
+                    try s.emitScopePutVarInit(atom_id);
                 }
             }
         } else if (s.peekKind() == '[' or s.peekKind() == '{') {
