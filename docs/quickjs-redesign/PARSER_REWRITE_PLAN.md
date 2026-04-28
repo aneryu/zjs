@@ -2216,18 +2216,42 @@ F10 (Scope chain, variable resolution, and local-slot lowering) is **complete** 
 
 - **ReferenceError alignment**: Renamed `error.TdzReference` → `error.ReferenceError` to align with legacy VM convention. (2 new direct-bytecode VM tests)
 
-**Total validation**: 434/434 tests passing, 45/45 smoke tests passing.
+- **JS_ThrowReferenceError** - Production-quality Error object: Implemented proper Error object creation using `Object.create(rt, core.class.ids.error_, null)`, `String.createUtf8` for name/message values, and `defineOwnProperty` for property setting. Error object has name="ReferenceError" and message="Cannot access 'x' before initialization" properties. Fallback to sentinel int32(209) if object creation fails. Modified in `qjs_vm.zig:543-618`.
+
+- **Nested function parsing infrastructure** (F10.1d): Implemented `cur_func_stack` field in ParseState, `pushFunction`/`popFunction`/`cur_func` methods, child FunctionDef creation in `parseFunctionParamsAndBody`, proper parent/scope inheritance, and scope management integration. Stack manages ownership of nested FunctionDef allocations. (1 new parser test)
+
+- **Bytecode dual-buffering** (F10.1e): Implemented `emit_to_function_def` flag in ParseState, `appendByteCode` method in FunctionDef, modified `appendBytes`/`truncateCode` to support FunctionDef.byte_code target. Nested functions now emit to separate byte_code buffers while root functions maintain backward compatibility with Bytecode.code. (1 new parser test)
+
+- **Function object creation infrastructure** (F10.1f): Implemented `FunctionBytecode` struct mirroring QuickJS `JSFunctionBytecode` (`quickjs.c:768`) with all essential fields (flags, byte_code, metadata, vardefs, closure_var, cpool). Implemented `createFunctionBytecode` function in finalize.zig that recursively walks child_list, runs all pipeline phases (resolve_variables, resolve_labels), and allocates/populates FunctionBytecode structures. Exported FunctionBytecode from bytecode root module. Infrastructure is complete and ready for Function object wrapper integration.
+
+- **Function object wrapper creation** (F10.1g): Implemented `Value.functionBytecode` constructor for wrapping FunctionBytecode pointers as Values. Added `ptr` payload variant to Value union for temporary FunctionBytecode pointer storage before GC integration. Updated `createFunctionBytecode` to store child functions in parent's cpool as wrapped Values at the child's `parent_cpool_idx`. Added helper methods `isFunctionBytecode`, `asFunctionBytecode` to Value. Note: Current implementation uses raw pointer wrapping without GC integration; proper GC integration with ObjectHeader and ref counting is deferred to future phases.
+
+**Total validation**: 436/436 tests passing, 45/45 smoke tests passing.
 
 ### Outstanding Work (deferred to future phases)
 
-The following items require nested function parsing infrastructure (parser cur_func stack, child FunctionDef creation, bytecode dual buffering) and are deferred:
+The following items require additional infrastructure (semantic analysis, variable capture analysis, GC integration) and are deferred to future phases:
 
-1. **Production-quality JS_ThrowReferenceError** (proper Error object with name/message properties): **COMPLETED** (2026-04-28). Implemented proper Error object creation using Object.create(class.ids.error_), String.createUtf8 for name/message values, and defineOwnProperty for property setting. Error object has name="ReferenceError" and message="Cannot access 'x' before initialization" properties. Fallback to sentinel int32(209) if object creation fails.
+1. **Function prologue** (special_object: home_object/this/arguments/new.target): Requires semantic analysis infrastructure to determine when special bindings are needed:
+   - **Parser changes**: Detect function context (method vs constructor vs arrow function) and set appropriate flags (has_home_object, new_target_allowed, etc.)
+   - **Variable allocation**: Allocate special variables (home_object_var_idx, this_var_idx, new_target_var_idx, arguments_var_idx, etc.) in FunctionDef based on context
+   - **Pipeline changes**: Add prologue emission in finalize.zig to generate OP_special_object instructions at function entry
+   - **Opcode handling**: Implement VM support for OP_special_object with subtypes (OP_SPECIAL_OBJECT_HOME_OBJECT, OP_SPECIAL_OBJECT_NEW_TARGET, etc.)
+   - Mirrors QuickJS `js_create_function` prologue emission at `quickjs.c:34232-34294`
 
-2. **Function prologue** (special_object: home_object/this/arguments/new.target): Requires nested function support to access parent scope and special bindings.
+2. **Closure variable synthesis** (nested functions, fclosure, var_ref): Requires variable capture analysis infrastructure:
+   - **Variable capture analysis**: Track which variables from parent scopes are referenced in nested functions
+   - **Closure variable allocation**: Create closure_var entries in FunctionDef for captured variables with proper closure_type (local, arg, ref, global_ref)
+   - **Opcode emission**: Generate fclosure/var_ref opcodes for accessing closure variables
+   - **Scope linkage**: Update scope linkage to handle closure variable resolution
+   - **Runtime support**: Implement VM support for closure variable access and lifetime management
+   - Mirrors QuickJS closure variable resolution at `quickjs.c:33622-33900`
 
-3. **js_create_function child_list walk + FunctionBytecode allocation**: Requires nested function parsing to populate child_list and allocate FunctionBytecode for nested functions.
+3. **GC integration for FunctionBytecode**: Current implementation uses raw pointer wrapping without proper GC integration:
+   - Add ObjectHeader to FunctionBytecode struct
+   - Register FunctionBytecode objects with GC registry
+   - Implement proper ref counting via Value.refHeader/release
+   - Add tracing for GC mark phase
+   - Replace raw pointer wrapping with proper GC-managed references
 
-4. **Closure variable synthesis** (nested functions, fclosure, var_ref): Requires nested function support and closure variable tracking across function boundaries.
-
-Items 2-4 are interdependent and represent a significant infrastructure investment beyond the current F10 scope. The current implementation provides a solid foundation for single-function execution with proper scoping, TDZ, eval-mode return values, and proper Error object creation.
+Items 1-3 represent the core closure/nested function support infrastructure and require significant semantic analysis and runtime support. The current implementation provides a solid foundation for single-function execution with proper scoping, TDZ, eval-mode return values, proper Error object creation, nested function parsing infrastructure, bytecode dual-buffering, FunctionBytecode creation, and basic Function object wrapper creation.

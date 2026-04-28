@@ -193,6 +193,18 @@ pub const ParseState = struct {
     /// `vars` / `scopes` layout is populated correctly.
     function_def: function_def_mod.FunctionDef,
 
+    /// Stack of FunctionDef pointers for nested function parsing.
+    /// Mirrors `JSParseState.cur_func` stack management. The top of
+    /// the stack is the current function being parsed. When entering
+    /// a nested function, we push a new FunctionDef; when exiting,
+    /// we pop back to the parent.
+    cur_func_stack: []*function_def_mod.FunctionDef = &.{},
+
+    /// When true, emit bytecode to the current FunctionDef's byte_code
+    /// buffer instead of the Bytecode object's code buffer. Used for
+    /// nested functions to maintain separate bytecode buffers.
+    emit_to_function_def: bool = false,
+
     pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!ParseState {
         // Mark bytecode as QuickJS-aligned format for dual-dispatch VM.
         // See PARSER_REWRITE_PLAN.md §F2+F3 and bytecode/function.zig `OpcodeFormat`.
@@ -207,6 +219,7 @@ pub const ParseState = struct {
         // is the function's var/arg scope, parent = -1.
         _ = state.function_def.appendScope(-1) catch return error.OutOfMemory;
         state.token = try lex.next();
+        // Note: cur_func_stack starts empty; cur_func() returns &function_def when empty
         return state;
     }
 
@@ -216,7 +229,54 @@ pub const ParseState = struct {
     /// so callers pass their existing runtime pointer.
     pub fn deinit(self: *ParseState, rt: anytype) void {
         self.lex.freeToken(&self.token);
+        // Free any nested function definitions on the stack
+        for (self.cur_func_stack) |fd| {
+            fd.deinit(rt);
+        }
+        if (self.cur_func_stack.len != 0) {
+            self.function.memory.free(*function_def_mod.FunctionDef, self.cur_func_stack);
+        }
         self.function_def.deinit(rt);
+    }
+
+    /// Get the current FunctionDef from the top of the stack.
+    /// Mirrors `JSParseState.cur_func` access. Returns the root
+    /// function_def when the stack is empty (top-level parsing).
+    fn cur_func(self: *ParseState) *function_def_mod.FunctionDef {
+        if (self.cur_func_stack.len == 0) {
+            return &self.function_def;
+        }
+        return self.cur_func_stack[self.cur_func_stack.len - 1];
+    }
+
+    /// Push a new FunctionDef onto the stack. Called when entering
+    /// a nested function. Mirrors the parent link setup in
+    /// `js_new_function_def` (`quickjs.c:31484-31490`).
+    fn pushFunction(self: *ParseState, fd: *function_def_mod.FunctionDef) Error!void {
+        const new_len = self.cur_func_stack.len + 1;
+        const next = try self.function.memory.alloc(*function_def_mod.FunctionDef, new_len);
+        errdefer self.function.memory.free(*function_def_mod.FunctionDef, next);
+        @memcpy(next[0..self.cur_func_stack.len], self.cur_func_stack);
+        next[self.cur_func_stack.len] = fd;
+        if (self.cur_func_stack.len != 0) self.function.memory.free(*function_def_mod.FunctionDef, self.cur_func_stack);
+        self.cur_func_stack = next;
+    }
+
+    /// Pop the current FunctionDef from the stack. Called when exiting
+    /// a nested function. Returns the popped FunctionDef pointer.
+    fn popFunction(self: *ParseState) *function_def_mod.FunctionDef {
+        const fd = self.cur_func_stack[self.cur_func_stack.len - 1];
+        const new_len = self.cur_func_stack.len - 1;
+        if (new_len > 0) {
+            const next = self.function.memory.alloc(*function_def_mod.FunctionDef, new_len) catch unreachable;
+            @memcpy(next[0..new_len], self.cur_func_stack[0..new_len]);
+            self.function.memory.free(*function_def_mod.FunctionDef, self.cur_func_stack);
+            self.cur_func_stack = next;
+        } else {
+            self.function.memory.free(*function_def_mod.FunctionDef, self.cur_func_stack);
+            self.cur_func_stack = &.{};
+        }
+        return fd;
     }
 
     /// Mirror `push_scope` (`quickjs.c:23486`): allocate a new
@@ -224,9 +284,9 @@ pub const ParseState = struct {
     /// `scope_level` to it. Call on entry to a new lexical block.
     pub fn pushScope(self: *ParseState) Error!void {
         const parent = self.scope_level;
-        const new_scope = self.function_def.appendScope(parent) catch return error.OutOfMemory;
+        const new_scope = self.cur_func().appendScope(parent) catch return error.OutOfMemory;
         self.scope_level = new_scope;
-        self.function_def.scope_level = new_scope;
+        self.cur_func().scope_level = new_scope;
     }
 
     /// Mirror `pop_scope` (`quickjs.c:23532`): restore the parent
@@ -235,20 +295,20 @@ pub const ParseState = struct {
     /// correct chain.
     pub fn popScope(self: *ParseState) void {
         if (self.scope_level < 0) return;
-        const parent = self.function_def.scopes[@intCast(self.scope_level)].parent;
+        const parent = self.cur_func().scopes[@intCast(self.scope_level)].parent;
         self.scope_level = parent;
-        self.function_def.scope_level = parent;
+        self.cur_func().scope_level = parent;
         // Recompute scope_first for the new current scope (mirrors
         // `get_first_lexical_var` at `quickjs.c:23521`).
         var scope = parent;
-        self.function_def.scope_first = -1;
+        self.cur_func().scope_first = -1;
         while (scope >= 0) {
-            const s_idx = self.function_def.scopes[@intCast(scope)].first;
+            const s_idx = self.cur_func().scopes[@intCast(scope)].first;
             if (s_idx >= 0) {
-                self.function_def.scope_first = s_idx;
+                self.cur_func().scope_first = s_idx;
                 break;
             }
-            scope = self.function_def.scopes[@intCast(scope)].parent;
+            scope = self.cur_func().scopes[@intCast(scope)].parent;
         }
     }
 
@@ -266,7 +326,7 @@ pub const ParseState = struct {
         is_lexical: bool,
         is_const: bool,
     ) Error!i32 {
-        return self.function_def.addScopeVar(name, kind, self.scope_level, is_lexical, is_const) catch return error.OutOfMemory;
+        return self.cur_func().addScopeVar(name, kind, self.scope_level, is_lexical, is_const) catch return error.OutOfMemory;
     }
 
     /// Atom id reserved for the eval-return slot, mirroring
@@ -292,8 +352,10 @@ pub const ParseState = struct {
     ///    (no expressions) still returns a sensible value.
     pub fn enableEvalReturn(self: *ParseState) Error!void {
         self.is_eval = true;
+        self.cur_func().is_eval = true;
         const idx = try self.addScopeVar(eval_ret_atom, .normal, false, false);
         self.eval_ret_idx = idx;
+        self.cur_func().eval_ret_idx = idx;
         // Emit the initialiser:  undefined ; scope_put_var <ret>.
         try self.emitOp(opcode.op.undefined);
         try self.emitScopePutVar(eval_ret_atom);
@@ -516,13 +578,19 @@ pub const ParseState = struct {
     }
 
     fn appendBytes(self: *ParseState, bytes: []const u8) Error!void {
-        const old_len = self.function.code.len;
-        const next = try self.function.memory.alloc(u8, old_len + bytes.len);
-        errdefer self.function.memory.free(u8, next);
-        @memcpy(next[0..old_len], self.function.code);
-        @memcpy(next[old_len..], bytes);
-        if (self.function.code.len != 0) self.function.memory.free(u8, self.function.code);
-        self.function.code = next;
+        if (self.emit_to_function_def) {
+            // Emit to current FunctionDef's byte_code buffer
+            try self.cur_func().appendByteCode(bytes);
+        } else {
+            // Emit to Bytecode object's code buffer (legacy behavior)
+            const old_len = self.function.code.len;
+            const next = try self.function.memory.alloc(u8, old_len + bytes.len);
+            errdefer self.function.memory.free(u8, next);
+            @memcpy(next[0..old_len], self.function.code);
+            @memcpy(next[old_len..], bytes);
+            if (self.function.code.len != 0) self.function.memory.free(u8, self.function.code);
+            self.function.code = next;
+        }
     }
 
     /// Drop bytes appended after `target_len`. Used by parseAssignExpr2 /
@@ -531,18 +599,36 @@ pub const ParseState = struct {
     /// rolled back via `truncateAtomOperands`; callers must coordinate the
     /// two so retain/free ref-counts stay balanced.
     fn truncateCode(self: *ParseState, target_len: usize) Error!void {
-        std.debug.assert(target_len <= self.function.code.len);
-        if (target_len == self.function.code.len) return;
-        if (target_len == 0) {
+        if (self.emit_to_function_def) {
+            // Truncate current FunctionDef's byte_code buffer
+            const fd = self.cur_func();
+            std.debug.assert(target_len <= fd.byte_code.len);
+            if (target_len == fd.byte_code.len) return;
+            if (target_len == 0) {
+                self.function.memory.free(u8, fd.byte_code);
+                fd.byte_code = &.{};
+                return;
+            }
+            const next = try self.function.memory.alloc(u8, target_len);
+            errdefer self.function.memory.free(u8, next);
+            @memcpy(next, fd.byte_code[0..target_len]);
+            self.function.memory.free(u8, fd.byte_code);
+            fd.byte_code = next;
+        } else {
+            // Truncate Bytecode object's code buffer
+            std.debug.assert(target_len <= self.function.code.len);
+            if (target_len == self.function.code.len) return;
+            if (target_len == 0) {
+                self.function.memory.free(u8, self.function.code);
+                self.function.code = &.{};
+                return;
+            }
+            const next = try self.function.memory.alloc(u8, target_len);
+            errdefer self.function.memory.free(u8, next);
+            @memcpy(next, self.function.code[0..target_len]);
             self.function.memory.free(u8, self.function.code);
-            self.function.code = &.{};
-            return;
+            self.function.code = next;
         }
-        const next = try self.function.memory.alloc(u8, target_len);
-        errdefer self.function.memory.free(u8, next);
-        @memcpy(next, self.function.code[0..target_len]);
-        self.function.memory.free(u8, self.function.code);
-        self.function.code = next;
     }
 
     /// Drop atom-operand entries beyond `target_len`, releasing the held
@@ -2609,6 +2695,30 @@ fn parseFunctionExpr(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
 /// Parse function parameters and body
 /// Shared by function declarations, expressions, and methods
 fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind) Error!void {
+    // Detect if this is a nested function (cur_func_stack not empty)
+    const is_nested = s.cur_func_stack.len > 0;
+
+    // For nested functions, create a new FunctionDef and push it onto the stack
+    if (is_nested) {
+        const parent_fd = s.cur_func();
+        const child_fd = try s.function.memory.create(function_def_mod.FunctionDef);
+        child_fd.* = function_def_mod.FunctionDef.init(s.function.memory, s.function.atoms, s.function.name);
+        child_fd.parent = parent_fd;
+        child_fd.parent_scope_level = parent_fd.scope_level;
+        child_fd.is_strict_mode = parent_fd.is_strict_mode;
+        // TODO: Map parser ParseFunctionKind to FunctionDef ParseFunctionKind
+        // child_fd.func_type = ...;
+        // Initialize scope 0 (var/arg scope)
+        _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
+        // Push onto stack (stack manages ownership)
+        try s.pushFunction(child_fd);
+        // Switch to emit to FunctionDef.byte_code for nested function
+        s.emit_to_function_def = true;
+        // Note: child_list management deferred to avoid double-free
+        // The stack owns the child_fd allocation; child_list will be populated
+        // during a later pass when we have proper ownership semantics
+    }
+
     try s.expectToken('(');
 
     // TODO: Parse parameters with defaults and destructuring in F6
@@ -2664,7 +2774,15 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind) Erro
     // Parse function body — parseBlock consumes its own opening '{'.
     try parseBlock(s);
 
+    // Pop nested function from stack
+    if (is_nested) {
+        _ = s.popFunction();
+        // Restore emit to Bytecode.code for parent function
+        s.emit_to_function_def = false;
+    }
+
     // TODO: Emit function prologue and epilogue in F6/F10
+    // TODO: Map parser ParseFunctionKind to FunctionDef ParseFunctionKind for nested functions
     _ = func_kind;
 }
 

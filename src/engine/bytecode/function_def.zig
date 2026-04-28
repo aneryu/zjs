@@ -265,6 +265,21 @@ pub const FunctionDef = struct {
         return idx;
     }
 
+    /// Append a child FunctionDef to `child_list`. Mirrors
+    /// `list_add_tail(&fd->link, &parent->child_list)` in
+    /// `js_new_function_def` (`quickjs.c:31487`). The child is
+    /// moved into the parent's child_list; the caller should not
+    /// access the child directly after this call.
+    pub fn addChild(self: *FunctionDef, child: FunctionDef) !void {
+        const new_len = self.child_list.len + 1;
+        const next = try self.memory.alloc(FunctionDef, new_len);
+        errdefer self.memory.free(FunctionDef, next);
+        @memcpy(next[0..self.child_list.len], self.child_list);
+        next[self.child_list.len] = child;
+        if (self.child_list.len != 0) self.memory.free(FunctionDef, self.child_list);
+        self.child_list = next;
+    }
+
     /// Mirror `add_scope_var` (`quickjs.c:23577`): add a var and
     /// attach it to `scope_level`'s scope (updates `scope_first`).
     pub fn addScopeVar(
@@ -299,6 +314,18 @@ pub const FunctionDef = struct {
             if (self.vars[i].var_name == name) return @intCast(i);
         }
         return -1;
+    }
+
+    /// Append bytes to the byte_code buffer. Used for nested function
+    /// bytecode emission during parsing.
+    pub fn appendByteCode(self: *FunctionDef, bytes: []const u8) !void {
+        const old_len = self.byte_code.len;
+        const next = try self.memory.alloc(u8, old_len + bytes.len);
+        errdefer self.memory.free(u8, next);
+        @memcpy(next[0..old_len], self.byte_code);
+        @memcpy(next[old_len..], bytes);
+        if (self.byte_code.len != 0) self.memory.free(u8, self.byte_code);
+        self.byte_code = next;
     }
 
     pub fn deinit(self: *FunctionDef, rt: anytype) void {

@@ -27,6 +27,9 @@ const Payload = union(enum) {
     float64: f64,
     short_big_int: i64,
     ref: *gc.Header,
+    // Temporary: raw pointer for FunctionBytecode before GC integration
+    // TODO: Integrate FunctionBytecode into GC system
+    ptr: ?*anyopaque,
 };
 
 pub const Value = struct {
@@ -63,6 +66,12 @@ pub const Value = struct {
 
     pub fn object(header: *gc.Header) Value {
         return .{ .tag = Tag.object, .payload = .{ .ref = header } };
+    }
+
+    // Temporary: FunctionBytecode pointer wrapper before GC integration
+    // TODO: Integrate FunctionBytecode into GC system and use proper ref counting
+    pub fn functionBytecode(ptr: ?*anyopaque) Value {
+        return .{ .tag = Tag.function_bytecode, .payload = .{ .ptr = ptr } };
     }
 
     pub fn nullValue() Value {
@@ -125,6 +134,10 @@ pub const Value = struct {
         return self.tag == Tag.module;
     }
 
+    pub fn isFunctionBytecode(self: Value) bool {
+        return self.tag == Tag.function_bytecode;
+    }
+
     pub fn asInt32(self: Value) ?i32 {
         return switch (self.payload) {
             .int32 => |v| v,
@@ -153,6 +166,13 @@ pub const Value = struct {
         };
     }
 
+    pub fn asFunctionBytecode(self: Value) ?*anyopaque {
+        return switch (self.payload) {
+            .ptr => |ptr| ptr,
+            else => null,
+        };
+    }
+
     pub fn dup(self: Value) Value {
         if (self.refHeader()) |header| gc.retain(header);
         return self;
@@ -160,6 +180,8 @@ pub const Value = struct {
 
     pub fn free(self: Value, rt: anytype) void {
         if (self.refHeader()) |header| gc.release(rt, header);
+        // TODO: Handle FunctionBytecode cleanup when GC integration is complete
+        // For now, FunctionBytecode is managed separately via MemoryAccount
     }
 
     pub fn same(self: Value, other: Value) bool {
@@ -171,6 +193,7 @@ pub const Value = struct {
             .float64 => |value| other.payload == .float64 and other.payload.float64 == value,
             .short_big_int => |value| other.payload == .short_big_int and other.payload.short_big_int == value,
             .ref => |header| other.payload == .ref and other.payload.ref == header,
+            .ptr => |ptr| other.payload == .ptr and other.payload.ptr == ptr,
         };
     }
 

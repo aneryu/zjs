@@ -13,3 +13,4 @@ pub const function_def = @import("function_def.zig");
 
 pub const Bytecode = function.Bytecode;
 pub const OpcodeFormat = function.OpcodeFormat;
+pub const FunctionBytecode = function.FunctionBytecode;
