@@ -96,6 +96,7 @@ pub fn build(b: *std.Build) void {
     const install_qjs = b.addInstallArtifact(qjs_exe, .{});
     const qjs_step = b.step("qjs", "Build and install zjs");
     qjs_step.dependOn(&install_qjs.step);
+    b.installArtifact(qjs_exe);
     const qjs_test262_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/qjs.zig"),
         .target = target,
