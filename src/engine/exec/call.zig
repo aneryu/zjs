@@ -66,7 +66,7 @@ pub const stderr = @extern(*std.c.FILE, .{ .name = if (builtin.os.tag == .macos)
 
 extern "c" fn snprintf(buffer: [*]u8, size: usize, format: [*:0]const u8, ...) c_int;
 extern "c" fn strerror(errnum: c_int) [*:0]u8;
-extern "c" fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
@@ -5708,7 +5708,7 @@ fn hostCallOsOpen(call: HostCall) HostError!core.Value {
         0o666;
     const path_z = try call.ctx.runtime.memory.allocator.dupeZ(u8, path);
     defer call.ctx.runtime.memory.allocator.free(path_z);
-    const fd = open(path_z.ptr, flags, @intCast(mode));
+    const fd = open(path_z.ptr, flags, @as(c_uint, @intCast(mode)));
     return core.Value.int32(if (fd < 0) -currentErrno() else fd);
 }
 

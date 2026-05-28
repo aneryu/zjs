@@ -81,6 +81,7 @@ pub const Engine = struct {
     runtime: *core.Runtime,
     context: *core.Context,
     job_queue: exec.jobs.Queue,
+    output: ?*std.Io.Writer = null,
 
     pub fn init(allocator: std.mem.Allocator) !Engine {
         return initWithTrace(allocator, null);
@@ -101,6 +102,7 @@ pub const Engine = struct {
             .runtime = rt,
             .context = ctx,
             .job_queue = exec.jobs.Queue.init(&rt.memory),
+            .output = null,
         };
     }
 
@@ -234,6 +236,161 @@ pub const Engine = struct {
         runtime_strict: bool,
     ) RuntimeError!core.Value {
         return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, timing, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
+    }
+
+    pub const HostHooks = struct {
+        ptr: *anyopaque,
+        resolveModule: *const fn (*anyopaque, []const u8, ?[]const u8, std.mem.Allocator) anyerror!ResolvedModule,
+        loadModule: *const fn (*anyopaque, ResolvedModule, std.mem.Allocator) anyerror!LoadedModule,
+
+        pub const ResolvedModule = struct {
+            specifier: []const u8,
+            path: []const u8,
+            kind: enum { esm, commonjs, json, wasm, builtin },
+        };
+
+        pub const LoadedModule = struct {
+            source: []const u8,
+            path: []const u8,
+            kind: enum { esm, commonjs, json, wasm, builtin },
+            owned: bool = false,
+        };
+    };
+
+    pub fn evalFileModuleGraphWithHostHooks(
+        self: *Engine,
+        source_text: []const u8,
+        output: *std.Io.Writer,
+        filename: []const u8,
+        host_hooks: HostHooks,
+        allocator: std.mem.Allocator,
+    ) !core.Value {
+        self.output = output;
+        var module_postorder = std.ArrayList([]const u8).empty;
+        defer {
+            for (module_postorder.items) |path| allocator.free(path);
+            module_postorder.deinit(allocator);
+        }
+        try preloadFileModuleGraphWithHostHooks(allocator, self.runtime, host_hooks, source_text, filename, &module_postorder);
+        
+        const root_module_name = try self.runtime.internAtom(filename);
+        defer self.runtime.atoms.free(root_module_name);
+        if (self.runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
+        self.runtime.modules.linkModule(self.runtime, root_module_name) catch |err| return moduleResolutionError(err);
+        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        for (module_postorder.items) |path| {
+            var module_source: []const u8 = undefined;
+            const is_root = std.mem.eql(u8, path, filename);
+            var loaded_owned = false;
+            
+            if (is_root) {
+                module_source = source_text;
+            } else {
+                const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
+                defer allocator.free(resolved.specifier);
+                defer allocator.free(resolved.path);
+                
+                const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
+                module_source = loaded.source;
+                loaded_owned = loaded.owned;
+                defer allocator.free(loaded.path);
+            }
+            
+            var compiled = try frontend.parser.parse(self.runtime, module_source, .{ .mode = .module, .filename = path });
+            if (loaded_owned) allocator.free(module_source);
+            defer compiled.deinit();
+            if (compiled.syntax_error != null) return error.SyntaxError;
+            const module_name = try self.runtime.internAtom(path);
+            defer self.runtime.atoms.free(module_name);
+            try exec.module.initializeModuleFunctionDeclarations(self.context, global, module_name, &compiled.function);
+        }
+        
+        var continuations = std.ArrayList(ModuleContinuation).empty;
+        defer freeModuleContinuations(self.runtime, allocator, &continuations);
+        
+        for (module_postorder.items) |path| {
+            if (std.mem.eql(u8, path, filename)) continue;
+            try self.drainModuleContinuationsForDependencies(output, allocator, &continuations, path);
+            
+            const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
+            defer allocator.free(resolved.specifier);
+            defer allocator.free(resolved.path);
+            
+            const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
+            defer if (loaded.owned) allocator.free(loaded.source);
+            defer allocator.free(loaded.path);
+            
+            const dep_step = try self.evalPreloadedFileModuleStep(loaded.source, output, path, null, null);
+            try self.handleModuleEvalStep(allocator, &continuations, dep_step, loaded.source, path, false);
+            self.runJobs();
+            if (self.context.hasUnhandledRejection() or self.context.hasException()) return error.UnhandledPromiseRejection;
+        }
+        
+        try self.drainModuleContinuationsForDependencies(output, allocator, &continuations, filename);
+        const root_step = try self.evalPreloadedFileModuleStep(source_text, output, filename, null, null);
+        try self.handleModuleEvalStep(allocator, &continuations, root_step, source_text, filename, true);
+        return self.drainModuleContinuations(output, allocator, &continuations);
+    }
+
+    fn preloadFileModuleGraphWithHostHooks(
+        allocator: std.mem.Allocator,
+        runtime: *core.Runtime,
+        host_hooks: HostHooks,
+        root_source: []const u8,
+        root_path: []const u8,
+        postorder: *std.ArrayList([]const u8),
+    ) !void {
+        var seen = std.ArrayList([]const u8).empty;
+        defer {
+            for (seen.items) |path| allocator.free(path);
+            seen.deinit(allocator);
+        }
+        try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, host_hooks, root_source, root_path, &seen, postorder);
+    }
+
+    fn preloadFileModuleGraphWithHostHooksInner(
+        allocator: std.mem.Allocator,
+        runtime: *core.Runtime,
+        host_hooks: HostHooks,
+        source_text: []const u8,
+        path: []const u8,
+        seen: *std.ArrayList([]const u8),
+        postorder: *std.ArrayList([]const u8),
+    ) !void {
+        for (seen.items) |existing| {
+            if (std.mem.eql(u8, existing, path)) return;
+        }
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
+        try seen.append(allocator, owned_path);
+
+        const module_name = try runtime.internAtom(path);
+        defer runtime.atoms.free(module_name);
+
+        var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
+        defer parsed.deinit();
+        if (parsed.syntax_error != null) return error.SyntaxError;
+
+        _ = try exec.module.instantiateParsedRecordWithReferrer(runtime, module_name, &parsed.function, path);
+
+        const record = parsed.function.module_record orelse return;
+        for (record.requests) |request| {
+            const specifier = runtime.atoms.name(request.module_name) orelse return error.InvalidAtom;
+            
+            const resolved = try host_hooks.resolveModule(host_hooks.ptr, specifier, path, allocator);
+            defer allocator.free(resolved.specifier);
+            defer allocator.free(resolved.path);
+
+            const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
+            defer if (loaded.owned) allocator.free(loaded.source);
+            defer allocator.free(loaded.path);
+
+            try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, host_hooks, loaded.source, loaded.path, seen, postorder);
+        }
+
+        const order_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(order_path);
+        try postorder.append(allocator, order_path);
     }
 
     pub fn evalFileModuleGraphWithOutput(
@@ -440,6 +597,7 @@ pub const Engine = struct {
         parse_strict: bool,
         runtime_strict: bool,
     ) !core.Value {
+        self.output = output;
         const parse_start = monotonicNanos();
         var compiled = try frontend.parser.parse(self.runtime, source_text, .{
             .mode = mode,
@@ -490,7 +648,7 @@ pub const Engine = struct {
             const jobs_start = monotonicNanos();
             try exec.qjs_vm.drainPendingPromiseJobs(self.context, output, global);
             if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
-            if (mode == .script) {
+            if (mode == .script and !std.mem.eql(u8, filename, "<repl>")) {
                 result.free(self.runtime);
                 return core.Value.undefinedValue();
             }
@@ -510,7 +668,7 @@ pub const Engine = struct {
             const jobs_start = monotonicNanos();
             try exec.qjs_vm.drainPendingPromiseJobs(self.context, output, global);
             if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
-            if (mode == .script) {
+            if (mode == .script and !std.mem.eql(u8, filename, "<repl>")) {
                 result.free(self.runtime);
                 return core.Value.undefinedValue();
             }
@@ -793,6 +951,9 @@ pub const Engine = struct {
 
     pub fn runJobs(self: *Engine) void {
         self.job_queue.runAll();
+        if (exec.qjs_vm.ensureContextGlobal(self.context)) |global| {
+            exec.qjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch {};
+        } else |_| {}
     }
 
     pub fn exposeStdOsGlobals(self: *Engine) !void {

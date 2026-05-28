@@ -151,6 +151,7 @@ pub fn preloadMissingFileModuleGraphWithOrder(
 
 pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {
     if (nativeModuleKindForSpecifier(specifier)) |kind| return allocator.dupe(u8, nativeModuleName(kind));
+    if (std.mem.startsWith(u8, specifier, "node:")) return allocator.dupe(u8, specifier);
     if (std.fs.path.isAbsolute(specifier)) return std.fs.path.resolve(allocator, &.{specifier});
     if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
         return error.ModuleNotFound;
@@ -982,6 +983,7 @@ fn resolvedRequestAtom(runtime: *core.Runtime, request_atom: core.Atom, referrer
     const referrer = referrer_path orelse return runtime.atoms.dup(request_atom);
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
     if (nativeModuleKindForSpecifier(specifier)) |kind| return runtime.internAtom(nativeModuleName(kind));
+    if (std.mem.startsWith(u8, specifier, "node:")) return runtime.atoms.dup(request_atom);
     if (std.fs.path.isAbsolute(specifier)) {
         const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{specifier});
         defer runtime.memory.allocator.free(resolved);
