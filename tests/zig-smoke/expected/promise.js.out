@@ -1,0 +1,11 @@
+object
+function then() {
+    [native code]
+}
+function catch() {
+    [native code]
+}
+[object Promise]
+[object Promise]
+[object Promise]
+[object Promise]

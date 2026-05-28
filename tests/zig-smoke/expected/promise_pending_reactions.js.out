@@ -1,0 +1,9 @@
+after resolve
+after reject
+after pass
+first ok
+second ok
+caught boom
+chain ok!
+recovered handled
+pass through

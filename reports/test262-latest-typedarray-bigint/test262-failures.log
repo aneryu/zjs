@@ -1,0 +1,2 @@
+quickjs/test262/test/built-ins/TypedArray/prototype/set/BigInt/bigint-tobigint64.js	Test262Error	Test262Error
+quickjs/test262/test/built-ins/TypedArray/prototype/set/BigInt/bigint-tobiguint64.js	Test262Error	Test262Error

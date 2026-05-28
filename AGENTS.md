@@ -1,166 +1,144 @@
-# Agent Notes
+# AGENTS.md
 
-This project is a Zig implementation of a Bun-like JavaScript and TypeScript
-runtime. Keep work scoped to that runtime goal: fast CLI startup, JS/TS
-execution, module loading, host APIs, and developer-facing tooling.
+## No shortcuts / No cheating
 
-`fun` uses `zjs` (`https://github.com/aneryu/zjs`) as the JavaScript and
-TypeScript language engine. `fun` is the product shell and host runtime around
-that engine.
+Do real work. Do not make the code only look correct.
 
-## Local Commands
+When implementing code:
 
-- `zig build` / `zig build fun` — builds the `fun` executable (primary target).
-- `zig build zjs` — builds the zjs CLI from the `third_party/zjs` subtree (after `git subtree add`).
-- `zig build run -- --help` runs the CLI through the build graph.
-- `zig build test` (and the finer `test-js`, `test-runtime`, `test-tooling`) run tests.
-- `zig fmt build.zig src` formats Zig sources.
-- `zig build docs-check` validates module layout + docs references (extended for the subtree tree).
+- Do not use ugly hacks just to pass tests.
+- Do not hardcode answers unless the task clearly asks for constants.
+- Do not skip, delete, weaken, or rewrite tests to make them pass.
+- Do not hide errors with empty `catch`, broad mocks, `any`, `@ts-ignore`, or
+  `eslint-disable` unless there is a strong reason.
+- Do not replace real logic with fake logic.
+- Do not ignore edge cases that are already implied by the code or tests.
+- Do not change public APIs unless the task requires it.
+- Do not remove validation, security checks, or error handling to make code
+  simpler.
+- Do not claim the task is done without checking the relevant build, test, or
+  typecheck when possible.
 
-The repository currently targets Zig `0.16.0`. See `docs/fun_zjs_subtree_architecture.md` §16 for the full recommended step matrix.
+Prefer:
 
-## Architecture (Subtree + Layered Facade)
+- Simple code over clever code.
+- Correct code over fast-looking code.
+- Small focused changes over large unrelated rewrites.
+- Fixing the root cause over patching symptoms.
+- Clear errors over silently ignoring failures.
 
-`fun` uses `zjs` (https://github.com/aneryu/zjs) as the JavaScript and TypeScript
-language engine. `fun` is the product shell and host runtime around that engine.
+If the proper solution is hard, do the hard work.
+If you cannot finish it, explain what is missing instead of faking completion.
+If a solution only works for the current test case but not the real problem, it
+is considered wrong.
 
-The authoritative structure is defined in `docs/fun_zjs_subtree_architecture.md`.
-Key points (do not deviate without updating that document and this file):
+## Project Purpose
 
-- `src/main.zig` stays thin: argument parsing, process I/O, and command dispatch only.
-- `src/root.zig` is the public module facade (Bun `bun.zig` role).
-- `third_party/zjs/` is the **complete** zjs repository brought in via `git subtree`
-  (full history, no squash in the first import). It is real source, not a read-only
-  vendor. You may edit it and `git subtree push` changes back.
-- `src/js/` is the **stable facade** that the rest of `fun` imports. It never exposes
-  raw `zjs` internal paths to `runtime/*` (except through the narrow `internal.zig`
-  for `vm/` only).
-- `src/runtime/vm/` is the **唯一深耦合层** (sole deep-coupling layer). Only code
-  under `src/runtime/vm/` (and test/bench/js) may directly understand zjs `Engine`,
-  `Value`, `Context`, job queue, or host hook details.
-- `src/runtime/` (outside vm) owns the event loop, module loader, Web/Node/Fun APIs,
-  and scheduler. These layers talk to the engine **only** through `src/js` or the
-  `vm/` bridge.
-- `src/tooling/` owns CLI, resolver, bundler, package manager, test runner, etc.
-  (the old flat `src/{cli,resolver,...}` directories have been migrated here).
-- `src/primitives/`, `src/diagnostics/`, and `src/platform/` are the lowest layers
-  (std + no fun runtime/tooling dependencies).
-- `src/js_parser/` and `src/transpiler/` are now under `src/tooling/transpiler/`
-  and remain thin adapters. Real TS/JS work lives in `zjs`.
-- Tooling (`bundler`, `package_manager`, `test_runner`, `repl`, watcher, etc.)
-  stay explicit placeholders until they have tests and real behavior.
+This repository is a **QuickJS C -> Zig** rewrite. QuickJS remains the semantic
+reference, and the Zig implementation should continuously improve JavaScript
+semantic compatibility, tooling usability, and validation coverage.
 
-**Dependency direction rules** (binding — see also `fun_zjs_subtree_architecture.md` §4):
+## Source Of Truth
 
-```
-src/primitives          -> std only
-third_party/zjs/src/engine -> zjs internals + std/libc; NEVER fun/*
-src/js                  -> third_party/zjs/src/engine + primitives + diagnostics
-src/runtime/vm          -> src/js (+ internal.zig for zjs details)
-src/runtime/{modules,api,scheduler} -> src/runtime/vm + platform + primitives
-src/tooling             -> primitives + diagnostics + platform + runtime (or js facade)
-src/tooling/cli         -> runtime + tooling
-```
+- `GUIDE.md`: project engineering guide. Part A is the C → Zig 0.16 migration
+  spec (types, ownership, errors, C interop, style, safety). Part B is the
+  validation and tracking workflow.
+- Root `test262.conf`, the `test262/` submodule, and fixture snapshots under
+  `tests/fixtures/`: active local validation inputs.
 
-**Forbidden** (enforced by review + import guard):
-- Any `third_party/zjs/*` import outside `src/js/`, `src/runtime/vm/`, `tests/js/`,
-  `benches/js/`, `src/tooling/cli/zjs.zig`, `src/tooling/js_validation/`.
-- `runtime/*` (except vm) or `tooling/*` reaching into raw zjs engine modules.
-- `primitives/*` reaching into js/runtime/tooling.
+Prior phase plans, percentage-gate plans, snapshot ledgers, one-off analyses,
+and detailed error catalogs were removed from the active tree and remain
+available only through git history.
 
-`docs/README.md` is the entry point. Start there.
-`docs/fun_zjs_subtree_architecture.md` (especially §3, §4, §7, §9, §17, §19–20) is
-now the primary architecture reference.
-`docs/roadmap.md` holds the status matrix and must be updated on structural changes.
-`docs/zjs-integration.md` remains the embedding API contract (what fun needs from zjs).
+## Repository Layout
 
-Do not claim Bun/Node compatibility until covered by local tests.
+- `src/engine/root.zig`: public engine entrypoint.
+- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+  properties, arrays, and core ownership.
+- `src/engine/frontend/`: lexer, parser, source positions, and frontend parsing.
+- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata, and
+  emitter.
+- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
+- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
+- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/cli/`: `zjs` and test262 CLI entrypoints.
+- `src/tools/`: smoke runner, test262 runner, and other tools.
+- `src/tests/`: Zig unit and integration test entrypoints.
+- `tests/zig-smoke/`: JavaScript smoke scripts, manifest, and golden output.
+- `test262/`: test262 checkout used by the local gate.
+- `tests/fixtures/`: fixture snapshots used by opcode and runner tests.
 
-## Subtree + Layering Rules (from fun_zjs_subtree_architecture.md)
+## Common Commands
 
-The following tables are copied verbatim from the authoritative document and are
-the review checklist for every PR that touches module boundaries.
+### Build
 
-### Allowed dependency direction
+- `zig build qjs --summary all`
+- `zig build run-test262 --summary all`
 
-```
-src/primitives
-  -> std only
+### Regression
 
-third_party/zjs/src/engine
-  -> zjs 自己的内部模块
-  -> std / libc where needed
-  -> 不依赖 fun runtime
-  -> 不依赖 fun tooling
+- `zig build test --summary all` (defaults to ReleaseSafe exec shards, fast warm runs)
+- `zig build test-debug --summary all` for slow Debug test runs with heavy allocator tracking.
+- `zig build test-oom --summary all` for sampled exec OOM fail-index coverage.
+- `zig build test-oom-exhaustive --summary all` for very slow full exec OOM
+  fail-index audits.
+- `zig build smoke --summary all`
+- `git diff --check`
 
-src/js
-  -> third_party/zjs/src/engine
-  -> primitives
-  -> diagnostics
+### test262
 
-src/runtime/vm
-  -> src/js
-  -> 必要时通过 src/js/internal.zig 访问 zjs internal
-  -> 不允许 runtime 其他目录直接 import zjs internal
+Run a targeted slice based on the changed area. For runner, parser, execution, or
+semantic compatibility changes, prefer the relevant `-d` / `-f` / index range
+command. Use the full local gate when final confirmation is needed:
 
-src/runtime/modules
-src/runtime/api
-src/runtime/scheduler
-  -> src/runtime/vm
-  -> platform
-  -> primitives
-  -> diagnostics
-  -> 不直接 import third_party/zjs
-
-src/tooling
-  -> primitives
-  -> diagnostics
-  -> platform
-  -> runtime when needed
-  -> js facade when needed
-
-src/tooling/cli
-  -> runtime
-  -> tooling
+```bash
+zig build test262-gate --summary all
+./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-### Prohibited dependency direction
+## CLI Contract
 
-```
-third_party/zjs/* -> src/runtime/*
-third_party/zjs/* -> src/tooling/*
-third_party/zjs/* -> src/js/*
+`zjs` supports:
 
-src/runtime/modules/* -> third_party/zjs/src/engine/*
-src/runtime/api/*     -> third_party/zjs/src/engine/*
-src/tooling/cli/*     -> third_party/zjs/src/engine/*
+- `zjs -e "<script>"`
+- `zjs <file.js>`
 
-src/primitives/* -> src/js/*
-src/primitives/* -> src/runtime/*
-src/primitives/* -> src/tooling/*
-```
+Missing or invalid arguments should print usage and exit non-zero.
 
-Only `src/runtime/vm/` is allowed to know zjs internal details. All other runtime
-modules must go through abstractions provided by `vm` (native function registration,
-JS value read/write, promise creation, exceptions, globals, etc.).
+## Change Discipline
 
-Add an explicit `//!` comment at the top of every new file under the directories
-above stating which layer it belongs to and which document section governs it.
+- Reproduce before changing: run the relevant failing script, slice, or test.
+- Make the smallest necessary change in the existing subsystem.
+- Do not delete, move, skip, weaken, or widen excludes to manufacture a pass.
+- Fix one problem class at a time; do not mix unrelated semantic domains.
+- Compare semantic fixes against QuickJS reference behavior and record key
+  evidence.
+- After changes, run at least `zig build test --summary all` and
+  `zig build smoke --summary all`.
+- Runner or test262 changes require the relevant runner fixture or target slice.
+- Keep non-trivial validation evidence close to the relevant code change,
+  commit message, issue, or PR. Do not add broad status ledgers back to the
+  active tree without an explicit request.
 
-## Testing Expectations
+## Where To Look
 
-- Add focused Zig tests for every parser, resolver, loader, or runtime behavior
-  added.
-- Use fixture-style integration tests once file execution starts working.
-- For ECMAScript semantics, prefer test262-compatible behavior and keep any
-  known deviations documented.
-- Run `zig build test`, `zig fmt build.zig src`, and `zig build docs-check` before handing off code changes.
-- When adding code under the new layout, also verify that the import guard (section 20 of the subtree architecture doc) would not flag the new file.
+- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
+  `src/engine/core/`.
+- Lexer, parser, and early errors: `src/engine/frontend/`.
+- Bytecode emission, scopes, and module metadata: `src/engine/bytecode/`.
+- Execution semantics, calls, exceptions, eval, and job queue:
+  `src/engine/exec/`.
+- Built-in object behavior: `src/engine/builtins/`.
+- RegExp, Unicode, BigInt, and number formatting: `src/engine/libs/`.
+- CLI behavior: `src/cli/`.
+- Smoke and test262 runner behavior: `src/tools/`.
 
-## Implementation Style
+## Pre-Commit Checklist
 
-- Follow Zig stdlib patterns used by Zig `0.16.0`.
-- Pass allocators explicitly and make ownership clear at API boundaries.
-- Keep diagnostics deterministic and easy to snapshot in tests.
-- Avoid hidden global runtime state unless it is deliberately part of the VM or
-  module cache design.
+- The relevant failing case was reproduced and understood.
+- The change is limited to the minimum necessary files.
+- Related docs, tracking notes, or matrices are updated.
+- `zig build test --summary all` passes.
+- `zig build smoke --summary all` passes.
+- `git diff --check` passes.
+- No noisy logs, temporary debug output, or unrelated build noise were added.

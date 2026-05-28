@@ -1,70 +1,127 @@
-# fun
+# zjs
 
-`fun` is a Bun-like JavaScript and TypeScript runtime written in Zig. It uses
-Bun's all-in-one developer experience as the product reference and uses
-[`zjs`](https://github.com/aneryu/zjs) as the language engine.
+`zjs` is a source-aligned Zig rewrite of QuickJS. QuickJS remains the semantic
+reference, while this repository keeps the active validation profile in the
+root `test262` checkout and fixture snapshots under `tests/fixtures/`.
 
-The repository is currently at the scaffold stage. The CLI entry points and
-host-side ownership boundaries exist, but module loading, `zjs` embedding, host
-APIs, package management, bundling, and execution are intentionally not
-implemented yet.
+This is a technical alpha. It is useful for QuickJS parity work, engine
+experiments, and validation tooling, but it is not a drop-in replacement for
+QuickJS, Node.js, or Deno.
 
-Current planning status:
+## Status
 
-- The architecture contract is settled: `fun` owns the product shell and host
-  runtime, while `zjs` owns JavaScript and TypeScript language semantics.
-- The active design work is the `zjs` embedding boundary needed before
-  file execution and the REPL become real execution paths.
-- The accepted runtime MVP command contract is `fun` for REPL and
-  `fun <file> [...args]` for file execution. `fun eval`, `fun run`, and
-  explicit `fun repl` are not MVP commands.
-- Package manager, bundler, and test runner work remain deferred until basic
-  execution and module loading are validated.
-
-## Current Commands
+The active local test262 gate is expected to pass with an empty known-error
+file:
 
 ```sh
-zig build
-zig build run -- --help
-zig build test
-zig build docs-check   # documentation discipline gate
+zig build test262-gate --summary all
 ```
 
-The generated binary is installed at `zig-out/bin/fun`.
+The gate uses `test262.conf` and writes the latest bucket/failure
+reports under `reports/test262-latest/`. Skips and excludes in that config are
+part of the current compatibility boundary.
 
-## Initial Runtime Shape
+## Requirements
 
-- `src/main.zig` owns the thin process entry point and I/O setup.
-- `src/root.zig` exposes the importable runtime facade.
-- `src/cli` owns command parsing and command-facing diagnostics.
-- `src/core` owns shared runtime primitives such as source file classification.
-- `src/resolver` and `src/loader` own host-side module resolution and loading.
-- `src/runtime` is intended to become the `zjs` embedding adapter and host API
-  bridge.
-- `src/js_parser` and `src/transpiler` are temporary adapter/helper boundaries;
-  JavaScript and TypeScript parsing/lowering should live in `zjs`.
-- `src/repl` is the MVP interactive shell boundary; it is still a placeholder
-  in the scaffold.
-- `src/bundler`, `src/package_manager`, and `src/test_runner` are Bun-inspired
-  tooling boundaries that remain deferred placeholders.
-- `build.zig` builds both the executable and importable `fun` module.
+- Zig 0.16.0
+- A POSIX-like shell for helper scripts
 
-See `docs/README.md` for the full documentation index, recommended reading
-order, and maintenance rules. Key documents:
-- `docs/architecture.md` — Bun v1.3.14 reference mapping and current layout
-- `docs/roadmap.md` — milestones, tradeoffs, and the live "Current Implementation Status" matrix
-- `docs/zjs-integration.md` — the `fun` ↔ `zjs` embedding contract (design baseline)
-- `docs/runtime-mvp.md` — the narrow accepted MVP scope and acceptance criteria
+## Build
 
-## Direction
+```sh
+zig build qjs --summary all
+zig build run-test262 --summary all
+```
 
-The runtime should grow in small, validated layers:
+The main CLI is installed as `zig-out/bin/zjs`; the test262 runner is installed
+as `zig-out/bin/run-test262`.
 
-1. CLI command model and diagnostics.
-2. `zjs` embedding API design and dependency mode.
-3. REPL and direct file command contract: `fun` and `fun <file> [...args]`.
-4. Structured diagnostics, local-file loading, and relative ESM resolution.
-5. Execution through `zjs` for REPL input and simple `.js` files.
-6. TypeScript execution through the `zjs` frontend, with future type warm-up.
-7. Compatibility test suites such as focused fixtures, selected Bun/Node tests,
-   and test262 through `zjs`.
+Useful build steps:
+
+```sh
+zig build test --summary all
+zig build test-fast --summary all
+zig build test-oom --summary all
+zig build test-oom-exhaustive --summary all
+zig build leak-check-engine --summary all
+zig build smoke --summary all
+zig build engine-production-gate --summary all
+```
+
+`-Dzjs_enable_ic=false` disables shape-keyed inline caches for diagnosis.
+
+## CLI
+
+```sh
+zig-out/bin/zjs -e "console.log(1 + 2)"
+zig-out/bin/zjs path/to/file.js
+zig-out/bin/zjs --leak-check -e "let x = { ok: true }"
+zig-out/bin/zjs --perf-json path/to/file.js 2> perf.json
+```
+
+Missing or invalid arguments print usage and exit non-zero.
+
+## Compatibility
+
+Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
+and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
+
+The engine-only Production v1 roadmap and contract are tracked in
+[docs/production-grade-plan.md](docs/production-grade-plan.md),
+[docs/engine-api-v1.md](docs/engine-api-v1.md),
+[docs/compatibility-v1.md](docs/compatibility-v1.md), and
+[docs/release-checklist.md](docs/release-checklist.md).
+
+The full direct test262 invocation is:
+
+```sh
+./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
+```
+
+For parser, runner, execution, or semantic changes, run a focused test262 slice
+before the full gate.
+
+## Performance
+
+The checked-in performance reports under `reports/perf/` are historical
+artifacts from the previous local QuickJS comparison toolchain.
+
+- 72 compatible cases, 1 unsupported case, 0 skipped cases.
+- Geometric mean `zjs/qjs` ratio: `1.0158`, roughly parity with the local C
+  QuickJS baseline for this external-process benchmark.
+- 24 cases currently favor `zjs`, 41 favor C QuickJS, and 7 are near ties.
+
+Wins in that report include `global_read_loop`, `regexp_test_cached`,
+`array_map_callback`, and `map_string_keys`. Slower areas in that report
+include dense array write/read, integer sums, monomorphic/prototype property
+reads, URI decoding, and some function-call loops.
+
+See [docs/perf/README.md](docs/perf/README.md) for historical performance
+context. The current repeatable diagnostic benchmark entry is:
+
+```sh
+zig build perf-benchmark --summary all
+```
+
+## Repository Layout
+
+- `src/engine/root.zig`: public engine entrypoint.
+- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+  properties, arrays, GC, and core ownership.
+- `src/engine/frontend/`: lexer, parser, source positions, and frontend
+  parsing.
+- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata,
+  inline-cache slots, and pipeline passes.
+- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, modules,
+  promises, and job queue.
+- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
+- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/cli/`: `zjs` and test262 CLI entrypoints.
+- `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
+- `src/tests/`: Zig unit and integration test entrypoints.
+- `tests/zig-smoke/`: JavaScript smoke fixtures and golden output.
+- `test262/`: local test262 checkout used by the gate.
+- `tests/fixtures/`: vendored fixture snapshots used by opcode and runner
+  tests.
+
+See [GUIDE.md](GUIDE.md) for engineering rules and validation workflow details.

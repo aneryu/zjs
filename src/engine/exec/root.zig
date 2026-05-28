@@ -1,0 +1,73 @@
+const std = @import("std");
+
+const bytecode = @import("../bytecode/root.zig");
+const core = @import("../core/root.zig");
+const globals_mod = @import("globals.zig");
+const stack_mod = @import("stack.zig");
+
+pub const subsystem_name = "exec";
+
+pub const qjs_vm = @import("qjs_vm.zig");
+pub const frame = @import("frame.zig");
+pub const stack = @import("stack.zig");
+pub const call = @import("call.zig");
+pub const construct = @import("construct.zig");
+pub const property_ops = @import("property_ops.zig");
+pub const exceptions = @import("exceptions.zig");
+pub const iterator = @import("iterator.zig");
+pub const eval = @import("eval.zig");
+pub const module = @import("module.zig");
+pub const promise = @import("promise.zig");
+pub const jobs = @import("jobs.zig");
+pub const value_ops = @import("value_ops.zig");
+pub const globals = @import("globals.zig");
+pub const closure = @import("closure.zig");
+pub const test262_helpers = @import("test262_helpers.zig");
+
+pub const Vm = struct {
+    ctx: *core.Context,
+    stack: stack_mod.Stack,
+    output: ?*std.Io.Writer = null,
+    globals: []globals_mod.Slot = &.{},
+    global_object: ?*core.Object = null,
+
+    pub fn init(ctx: *core.Context) Vm {
+        return .{
+            .ctx = ctx,
+            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
+        };
+    }
+
+    pub fn initWithOutput(ctx: *core.Context, output: *std.Io.Writer) Vm {
+        return .{
+            .ctx = ctx,
+            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
+            .output = output,
+        };
+    }
+
+    pub fn deinit(self: *Vm) void {
+        const owned_globals = self.globals;
+        self.globals = &.{};
+        for (owned_globals) |*slot| {
+            const value = slot.value;
+            slot.value = core.Value.undefinedValue();
+            value.free(self.ctx.runtime);
+        }
+        if (owned_globals.len != 0) self.ctx.runtime.memory.free(globals_mod.Slot, owned_globals);
+        const old_global = self.global_object;
+        self.global_object = null;
+        if (old_global) |global| global.value().free(self.ctx.runtime);
+        self.stack.deinit(self.ctx.runtime);
+    }
+
+    pub fn run(self: *Vm, function: *const bytecode.Bytecode) !core.Value {
+        try self.stack.reserveAdditional(function.stack_size);
+        return qjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
+    }
+
+    pub fn runWithVarRefs(self: *Vm, function: *const bytecode.Bytecode, var_refs: []const core.Value) !core.Value {
+        try self.stack.reserveAdditional(function.stack_size);
+        return qjs_vm.runWithOutputAndVarRefs(self.ctx, &self.stack, function, self.output, var_refs);
+    }
+};

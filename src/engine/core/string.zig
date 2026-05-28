@@ -1,0 +1,669 @@
+const gc = @import("gc.zig");
+const Runtime = @import("runtime.zig").Runtime;
+const Value = @import("value.zig").Value;
+
+pub const StringError = error{
+    InvalidUtf8,
+};
+
+pub const Data = union(enum) {
+    latin1: []u8,
+    utf16: []u16,
+    slice: struct {
+        parent: *String,
+        start: usize,
+        len: usize,
+    },
+
+    pub fn len(self: Data) usize {
+        return switch (self) {
+            .latin1 => |bytes| bytes.len,
+            .utf16 => |units| units.len,
+            .slice => |s| s.len,
+        };
+    }
+    pub fn isWide(self: Data) bool {
+        return switch (self) {
+            .latin1 => false,
+            .utf16 => true,
+            .slice => |s| s.parent.data.isWide(),
+        };
+    }
+};
+
+pub const String = struct {
+    header: gc.Header,
+    data: Data,
+    capacity: usize,
+    hash: u32,
+    atom_id: ?u32 = null,
+
+    /// Returns an owned runtime string. The runtime releases it through
+    /// reference counting when all `Value` handles are freed.
+    pub fn createAscii(rt: *Runtime, bytes: []const u8) !*String {
+        return createLatin1(rt, bytes);
+    }
+
+    /// Returns an owned runtime string decoded from UTF-8 into QuickJS-style
+    /// 8-bit or 16-bit code-unit storage.
+    pub fn createUtf8(rt: *Runtime, bytes: []const u8) !*String {
+        const plan = try scanUtf8(bytes);
+        if (!plan.wide) {
+            const self = try createUninitialized(rt, .latin1, plan.units);
+            errdefer destroyUninitialized(rt, self);
+            _ = try decodeUtf8(bytes, self.data.latin1, null);
+            self.hash = hashLatin1(self.data.latin1, 0);
+            return self;
+        }
+
+        const self = try createUninitialized(rt, .utf16, plan.units);
+        errdefer destroyUninitialized(rt, self);
+        _ = try decodeUtf8(bytes, null, self.data.utf16);
+        self.hash = hashUtf16(self.data.utf16, 0);
+        return self;
+    }
+
+    /// Returns an owned runtime string. Caller transfers the returned value to
+    /// `Value.free` or another owner.
+    pub fn createUtf16(rt: *Runtime, units: []const u16) !*String {
+        var needs_wide = false;
+        for (units) |unit| {
+            if (unit > 0xff) {
+                needs_wide = true;
+                break;
+            }
+        }
+
+        if (!needs_wide) {
+            const self = try createUninitialized(rt, .latin1, units.len);
+            errdefer destroyUninitialized(rt, self);
+            for (units, 0..) |unit, i| self.data.latin1[i] = @intCast(unit);
+            self.hash = hashLatin1(self.data.latin1, 0);
+            return self;
+        }
+
+        const self = try createUninitialized(rt, .utf16, units.len);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.utf16, units);
+        self.hash = hashUtf16(self.data.utf16, 0);
+        return self;
+    }
+
+    pub fn createUtf16Owned(rt: *Runtime, units: []u16, capacity: usize) !*String {
+        std.debug.assert(capacity >= units.len);
+        var needs_wide = false;
+        for (units) |unit| {
+            if (unit > 0xff) {
+                needs_wide = true;
+                break;
+            }
+        }
+
+        if (!needs_wide) {
+            const bytes = try rt.memory.alloc(u8, units.len);
+            errdefer rt.memory.free(u8, bytes);
+            for (units, 0..) |unit, i| bytes[i] = @intCast(unit);
+            const self = try rt.memory.create(String);
+            self.* = .{
+                .header = .{ .kind = .string },
+                .data = .{ .latin1 = bytes },
+                .capacity = bytes.len,
+                .hash = hashLatin1(bytes, 0),
+            };
+            rt.memory.free(u16, units.ptr[0..capacity]);
+            return self;
+        }
+
+        const self = try rt.memory.create(String);
+        self.* = .{
+            .header = .{ .kind = .string },
+            .data = .{ .utf16 = units },
+            .capacity = capacity,
+            .hash = hashUtf16(units, 0),
+        };
+        return self;
+    }
+
+    pub fn createUtf16Pair(rt: *Runtime, first: u16, second: u16) !*String {
+        if (first <= 0xff and second <= 0xff) {
+            const self = try createUninitialized(rt, .latin1, 2);
+            errdefer destroyUninitialized(rt, self);
+            self.data.latin1[0] = @intCast(first);
+            self.data.latin1[1] = @intCast(second);
+            self.hash = (@as(u32, @intCast(first)) *% 263) +% @as(u32, @intCast(second));
+            return self;
+        }
+
+        const self = try createUninitialized(rt, .utf16, 2);
+        errdefer destroyUninitialized(rt, self);
+        self.data.utf16[0] = first;
+        self.data.utf16[1] = second;
+        self.hash = (@as(u32, @intCast(first)) *% 263) +% @as(u32, @intCast(second));
+        return self;
+    }
+
+    pub fn createAtomBacked(rt: *Runtime, atom_id: u32) !*String {
+        const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
+        const self = try createUtf8(rt, name);
+        self.atom_id = rt.atoms.dup(atom_id);
+        return self;
+    }
+
+    /// Concatenate two latin1 string buffers into a single freshly allocated
+    /// latin1 string. The runtime owns the result.
+    ///
+    /// Used by the `+` operator string fast path so we skip the per-call
+    /// `ArrayList(u8)` intermediate (and its `deinit`).
+    pub fn createLatin1Concat(rt: *Runtime, a: []const u8, b: []const u8) !*String {
+        return createLatin1ConcatWithSeed(rt, a, b, hashLatin1(a, 0));
+    }
+
+    pub fn createLatin1ConcatWithSeed(rt: *Runtime, a: []const u8, b: []const u8, seed: u32) !*String {
+        const total = a.len + b.len;
+        const self = try createUninitialized(rt, .latin1, total);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.latin1[0..a.len], a);
+        @memcpy(self.data.latin1[a.len..], b);
+        self.hash = hashLatin1(b, seed);
+        return self;
+    }
+
+    pub fn createLatin1RepeatedConcatWithSeed(rt: *Runtime, a: []const u8, suffix: []const u8, repeat_count: usize, seed: u32) !*String {
+        const append_len = try std.math.mul(usize, suffix.len, repeat_count);
+        const total = try std.math.add(usize, a.len, append_len);
+        const self = try createUninitialized(rt, .latin1, total);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.latin1[0..a.len], a);
+        if (suffix.len == 1) {
+            @memset(self.data.latin1[a.len..total], suffix[0]);
+        } else {
+            var offset = a.len;
+            var remaining = repeat_count;
+            while (remaining != 0) : (remaining -= 1) {
+                @memcpy(self.data.latin1[offset..][0..suffix.len], suffix);
+                offset += suffix.len;
+            }
+        }
+        self.hash = seed;
+        var remaining = repeat_count;
+        while (remaining != 0) : (remaining -= 1) {
+            self.hash = hashLatin1(suffix, self.hash);
+        }
+        return self;
+    }
+
+    /// Concatenate two utf16 unit buffers into a single freshly allocated
+    /// utf16 string. The runtime owns the result.
+    pub fn createUtf16Concat(rt: *Runtime, a: []const u16, b: []const u16) !*String {
+        return createUtf16ConcatWithSeed(rt, a, b, hashUtf16(a, 0));
+    }
+
+    pub fn createUtf16ConcatWithSeed(rt: *Runtime, a: []const u16, b: []const u16, seed: u32) !*String {
+        const total = a.len + b.len;
+        const self = try createUninitialized(rt, .utf16, total);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.utf16[0..a.len], a);
+        @memcpy(self.data.utf16[a.len..], b);
+        self.hash = hashUtf16(b, seed);
+        return self;
+    }
+
+    pub fn createLatin1(rt: *Runtime, bytes: []const u8) !*String {
+        const self = try rt.memory.create(String);
+        errdefer rt.memory.destroy(String, self);
+
+        const owned = try rt.memory.alloc(u8, bytes.len);
+        errdefer rt.memory.free(u8, owned);
+        @memcpy(owned, bytes);
+
+        self.* = .{
+            .header = .{ .kind = .string },
+            .data = .{ .latin1 = owned },
+            .capacity = bytes.len,
+            .hash = hashLatin1(bytes, 0),
+        };
+        return self;
+    }
+
+    pub fn value(self: *String) Value {
+        return Value.string(&self.header);
+    }
+
+    pub fn len(self: String) usize {
+        return self.data.len();
+    }
+
+    pub fn isWide(self: String) bool {
+        return self.data.isWide();
+    }
+
+    pub fn eqlBytes(self: String, bytes: []const u8) bool {
+        return switch (self.resolveData()) {
+            .latin1 => |latin1| std.mem.eql(u8, latin1, bytes),
+            .utf16 => |utf16| eqlUtf16Latin1(utf16, bytes),
+        };
+    }
+
+    pub fn eqlString(self: String, other: String) bool {
+        return compare(self, other) == 0;
+    }
+
+    pub fn compare(self: String, other: String) i32 {
+        const shared_len = @min(self.len(), other.len());
+        var i: usize = 0;
+        while (i < shared_len) : (i += 1) {
+            const a = self.codeUnitAt(i);
+            const b = other.codeUnitAt(i);
+            if (a < b) return -1;
+            if (a > b) return 1;
+        }
+        if (self.len() < other.len()) return -1;
+        if (self.len() > other.len()) return 1;
+        return 0;
+    }
+
+    pub const ResolvedData = union(enum) {
+        latin1: []const u8,
+        utf16: []const u16,
+
+        pub fn len(self: ResolvedData) usize {
+            return switch (self) {
+                .latin1 => |bytes| bytes.len,
+                .utf16 => |units| units.len,
+            };
+        }
+    };
+
+    pub fn resolveData(self: *const String) ResolvedData {
+        if (self.data != .slice) {
+            return switch (self.data) {
+                .latin1 => |latin1| .{ .latin1 = latin1 },
+                .utf16 => |utf16| .{ .utf16 = utf16 },
+                else => unreachable,
+            };
+        }
+        var cursor = self;
+        var offset: usize = 0;
+        const total_len = self.data.len();
+        while (cursor.data == .slice) {
+            const s = cursor.data.slice;
+            offset += s.start;
+            cursor = s.parent;
+        }
+        return switch (cursor.data) {
+            .latin1 => |bytes| .{ .latin1 = bytes[offset .. offset + total_len] },
+            .utf16 => |units| .{ .utf16 = units[offset .. offset + total_len] },
+            else => unreachable,
+        };
+    }
+
+    pub fn borrowLatin1(self: *const String) ?[]const u8 {
+        const resolved = self.resolveData();
+        return if (resolved == .latin1) resolved.latin1 else null;
+    }
+
+    pub fn codeUnitAt(self: String, index: usize) u16 {
+        const resolved = self.resolveData();
+        return switch (resolved) {
+            .latin1 => |bytes| bytes[index],
+            .utf16 => |units| units[index],
+        };
+    }
+
+    pub fn createSlice(rt: *Runtime, parent: *String, start: usize, slice_len: usize) !*String {
+        if (slice_len == 0) return try createAscii(rt, "");
+        const self = try rt.memory.create(String);
+        errdefer rt.memory.destroy(String, self);
+        self.header = .{ .kind = .string };
+        self.hash = 0;
+        self.atom_id = null;
+        self.capacity = 0;
+        self.data = .{ .slice = .{ .parent = parent, .start = start, .len = slice_len } };
+        gc.retain(&parent.header);
+        self.hash = switch (self.resolveData()) {
+            .latin1 => |bytes| hashLatin1(bytes, 0),
+            .utf16 => |units| hashUtf16(units, 0),
+        };
+        return self;
+    }
+
+    pub fn appendLatin1InPlace(self: *String, rt: *Runtime, suffix: []const u8) !bool {
+        if (self.atom_id != null) return false;
+        if (suffix.len == 0) return true;
+        const bytes = switch (self.data) {
+            .latin1 => |bytes| bytes,
+            .utf16 => return false,
+            .slice => return false,
+        };
+        const old_len = bytes.len;
+        const new_len = old_len + suffix.len;
+        if (new_len <= self.capacity) {
+            const expanded = bytes.ptr[0..new_len];
+            @memcpy(expanded[old_len..new_len], suffix);
+            self.data = .{ .latin1 = expanded };
+            self.hash = hashLatin1(suffix, self.hash);
+            return true;
+        }
+
+        var next_capacity = if (self.capacity == 0) @as(usize, 16) else self.capacity;
+        while (next_capacity < new_len) {
+            next_capacity = next_capacity * 2;
+        }
+        const expanded = try rt.memory.alloc(u8, next_capacity);
+        errdefer rt.memory.free(u8, expanded);
+        @memcpy(expanded[0..old_len], bytes);
+        @memcpy(expanded[old_len..new_len], suffix);
+        const old_bytes = bytes.ptr[0..self.capacity];
+        self.data = .{ .latin1 = expanded[0..new_len] };
+        self.capacity = next_capacity;
+        self.hash = hashLatin1(suffix, self.hash);
+        rt.memory.free(u8, old_bytes);
+        return true;
+    }
+
+    pub fn appendUtf16InPlace(self: *String, rt: *Runtime, suffix: []const u16) !bool {
+        if (self.atom_id != null) return false;
+        if (suffix.len == 0) return true;
+        const units = switch (self.data) {
+            .latin1 => return false,
+            .utf16 => |units| units,
+            .slice => return false,
+        };
+        const old_len = units.len;
+        const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
+        if (new_len <= self.capacity) {
+            const expanded = units.ptr[0..new_len];
+            @memcpy(expanded[old_len..new_len], suffix);
+            self.data = .{ .utf16 = expanded };
+            self.hash = hashUtf16(suffix, self.hash);
+            return true;
+        }
+
+        const next_capacity = nextStringCapacity(self.capacity, new_len);
+        const expanded = try rt.memory.alloc(u16, next_capacity);
+        errdefer rt.memory.free(u16, expanded);
+        @memcpy(expanded[0..old_len], units);
+        @memcpy(expanded[old_len..new_len], suffix);
+        const old_units = units.ptr[0..self.capacity];
+        self.data = .{ .utf16 = expanded[0..new_len] };
+        self.capacity = next_capacity;
+        self.hash = hashUtf16(suffix, self.hash);
+        rt.memory.free(u16, old_units);
+        return true;
+    }
+
+    pub fn appendLatin1ToUtf16InPlace(self: *String, rt: *Runtime, suffix: []const u8) !bool {
+        if (self.atom_id != null) return false;
+        if (suffix.len == 0) return true;
+        const units = switch (self.data) {
+            .latin1 => return false,
+            .utf16 => |units| units,
+            .slice => return false,
+        };
+        const old_len = units.len;
+        const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
+        if (new_len <= self.capacity) {
+            const expanded = units.ptr[0..new_len];
+            for (suffix, old_len..) |byte, index| expanded[index] = byte;
+            self.data = .{ .utf16 = expanded };
+            self.hash = hashLatin1(suffix, self.hash);
+            return true;
+        }
+
+        const next_capacity = nextStringCapacity(self.capacity, new_len);
+        const expanded = try rt.memory.alloc(u16, next_capacity);
+        errdefer rt.memory.free(u16, expanded);
+        @memcpy(expanded[0..old_len], units);
+        for (suffix, old_len..) |byte, index| expanded[index] = byte;
+        const old_units = units.ptr[0..self.capacity];
+        self.data = .{ .utf16 = expanded[0..new_len] };
+        self.capacity = next_capacity;
+        self.hash = hashLatin1(suffix, self.hash);
+        rt.memory.free(u16, old_units);
+        return true;
+    }
+
+    pub fn appendUtf16WidenInPlace(self: *String, rt: *Runtime, suffix: []const u16) !bool {
+        if (self.atom_id != null) return false;
+        if (suffix.len == 0) return true;
+        const bytes = switch (self.data) {
+            .latin1 => |bytes| bytes,
+            .utf16 => return false,
+            .slice => return false,
+        };
+        const old_len = bytes.len;
+        const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
+        const next_capacity = nextStringCapacity(self.capacity, new_len);
+        const expanded = try rt.memory.alloc(u16, next_capacity);
+        errdefer rt.memory.free(u16, expanded);
+        for (bytes, 0..) |byte, index| expanded[index] = byte;
+        @memcpy(expanded[old_len..new_len], suffix);
+        const old_bytes = bytes.ptr[0..self.capacity];
+        self.data = .{ .utf16 = expanded[0..new_len] };
+        self.capacity = next_capacity;
+        self.hash = hashUtf16(suffix, self.hash);
+        rt.memory.free(u8, old_bytes);
+        return true;
+    }
+
+    pub fn appendLatin1RepeatedInPlace(self: *String, rt: *Runtime, suffix: []const u8, repeat_count: usize) !bool {
+        if (self.atom_id != null) return false;
+        if (repeat_count == 0 or suffix.len == 0) return true;
+        const bytes = switch (self.data) {
+            .latin1 => |bytes| bytes,
+            .utf16 => return false,
+            .slice => return false,
+        };
+
+        const append_len_result = @mulWithOverflow(suffix.len, repeat_count);
+        if (append_len_result[1] != 0) return false;
+        const append_len = append_len_result[0];
+        const old_len = bytes.len;
+        const new_len_result = @addWithOverflow(old_len, append_len);
+        if (new_len_result[1] != 0) return false;
+        const new_len = new_len_result[0];
+
+        var expanded: []u8 = undefined;
+        var old_bytes: []u8 = &.{};
+        var next_capacity = self.capacity;
+        if (new_len <= self.capacity) {
+            expanded = bytes.ptr[0..new_len];
+        } else {
+            next_capacity = if (self.capacity == 0) @as(usize, 16) else self.capacity;
+            while (next_capacity < new_len) {
+                const doubled = @mulWithOverflow(next_capacity, 2);
+                next_capacity = if (doubled[1] == 0 and doubled[0] > next_capacity) doubled[0] else new_len;
+            }
+            expanded = try rt.memory.alloc(u8, next_capacity);
+            errdefer rt.memory.free(u8, expanded);
+            @memcpy(expanded[0..old_len], bytes);
+            old_bytes = bytes.ptr[0..self.capacity];
+        }
+
+        if (suffix.len == 1) {
+            @memset(expanded[old_len..new_len], suffix[0]);
+        } else {
+            var offset = old_len;
+            var remaining = repeat_count;
+            while (remaining != 0) : (remaining -= 1) {
+                @memcpy(expanded[offset..][0..suffix.len], suffix);
+                offset += suffix.len;
+            }
+        }
+        self.data = .{ .latin1 = expanded[0..new_len] };
+        self.capacity = next_capacity;
+        var remaining = repeat_count;
+        while (remaining != 0) : (remaining -= 1) {
+            self.hash = hashLatin1(suffix, self.hash);
+        }
+        if (old_bytes.len != 0) rt.memory.free(u8, old_bytes);
+        return true;
+    }
+
+    pub fn destroyFromHeader(rt: *Runtime, header: *gc.Header) void {
+        const self: *String = @fieldParentPtr("header", header);
+        if (self.atom_id) |atom_id| rt.atoms.free(atom_id);
+        destroyUninitialized(rt, self);
+    }
+
+    fn createUninitialized(rt: *Runtime, comptime tag: std.meta.Tag(Data), unit_count: usize) !*String {
+        const self = try rt.memory.create(String);
+        errdefer rt.memory.destroy(String, self);
+        self.header = .{ .kind = .string };
+        self.hash = 0;
+        self.atom_id = null;
+        self.capacity = unit_count;
+        switch (tag) {
+            .latin1 => self.data = .{ .latin1 = try rt.memory.alloc(u8, unit_count) },
+            .utf16 => self.data = .{ .utf16 = try rt.memory.alloc(u16, unit_count) },
+            .slice => unreachable,
+        }
+        return self;
+    }
+
+    fn destroyUninitialized(rt: *Runtime, self: *String) void {
+        switch (self.data) {
+            .latin1 => |bytes| rt.memory.free(u8, bytes.ptr[0..self.capacity]),
+            .utf16 => |units| rt.memory.free(u16, units.ptr[0..self.capacity]),
+            .slice => |s| Value.string(&s.parent.header).free(rt),
+        }
+        rt.memory.destroy(String, self);
+    }
+};
+
+fn checkedAddLength(a: usize, b: usize) ?usize {
+    const result = @addWithOverflow(a, b);
+    return if (result[1] == 0) result[0] else null;
+}
+
+fn nextStringCapacity(current: usize, needed: usize) usize {
+    var capacity = if (current == 0) @as(usize, 16) else current;
+    while (capacity < needed) {
+        const doubled = @mulWithOverflow(capacity, 2);
+        capacity = if (doubled[1] == 0 and doubled[0] > capacity) doubled[0] else needed;
+    }
+    return capacity;
+}
+
+pub fn hashBytes(bytes: []const u8) u32 {
+    return hashLatin1(bytes, 0);
+}
+
+pub fn hashLatin1(bytes: []const u8, seed: u32) u32 {
+    var h = seed;
+    for (bytes) |byte| h = h *% 263 +% byte;
+    return h;
+}
+
+pub fn hashUtf16(units: []const u16, seed: u32) u32 {
+    var h = seed;
+    for (units) |unit| h = h *% 263 +% unit;
+    return h;
+}
+
+fn eqlUtf16Latin1(units: []const u16, bytes: []const u8) bool {
+    if (units.len != bytes.len) return false;
+    for (units, bytes) |unit, byte| {
+        if (unit != byte) return false;
+    }
+    return true;
+}
+
+const Utf8Plan = struct {
+    units: usize,
+    wide: bool,
+};
+
+fn scanUtf8(bytes: []const u8) StringError!Utf8Plan {
+    var i: usize = 0;
+    var units: usize = 0;
+    var wide = false;
+    while (i < bytes.len) {
+        const decoded = try decodeOne(bytes, i);
+        i = decoded.next;
+        if (decoded.codepoint <= 0xff) {
+            units += 1;
+        } else if (decoded.codepoint <= 0xffff) {
+            wide = true;
+            units += 1;
+        } else {
+            wide = true;
+            units += 2;
+        }
+    }
+    return .{ .units = units, .wide = wide };
+}
+
+fn decodeUtf8(bytes: []const u8, latin1: ?[]u8, utf16: ?[]u16) StringError!usize {
+    var in_i: usize = 0;
+    var out_i: usize = 0;
+    while (in_i < bytes.len) {
+        const decoded = try decodeOne(bytes, in_i);
+        in_i = decoded.next;
+
+        if (latin1) |out| {
+            if (decoded.codepoint > 0xff) return error.InvalidUtf8;
+            out[out_i] = @intCast(decoded.codepoint);
+            out_i += 1;
+        } else if (utf16) |out| {
+            if (decoded.codepoint <= 0xffff) {
+                out[out_i] = @intCast(decoded.codepoint);
+                out_i += 1;
+            } else {
+                const cp = decoded.codepoint - 0x10000;
+                out[out_i] = @intCast(0xd800 + (cp >> 10));
+                out[out_i + 1] = @intCast(0xdc00 + (cp & 0x3ff));
+                out_i += 2;
+            }
+        }
+    }
+    return out_i;
+}
+
+const Decoded = struct {
+    codepoint: u21,
+    next: usize,
+};
+
+fn decodeOne(bytes: []const u8, index: usize) StringError!Decoded {
+    const b0 = bytes[index];
+    if (b0 < 0x80) return .{ .codepoint = b0, .next = index + 1 };
+
+    if (b0 & 0xe0 == 0xc0) {
+        if (index + 1 >= bytes.len) return error.InvalidUtf8;
+        const b1 = bytes[index + 1];
+        if (b1 & 0xc0 != 0x80) return error.InvalidUtf8;
+        const cp: u21 = (@as(u21, b0 & 0x1f) << 6) | (b1 & 0x3f);
+        if (cp < 0x80) return error.InvalidUtf8;
+        return .{ .codepoint = cp, .next = index + 2 };
+    }
+
+    if (b0 & 0xf0 == 0xe0) {
+        if (index + 2 >= bytes.len) return error.InvalidUtf8;
+        const b1 = bytes[index + 1];
+        const b2 = bytes[index + 2];
+        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80) return error.InvalidUtf8;
+        const cp: u21 = (@as(u21, b0 & 0x0f) << 12) | (@as(u21, b1 & 0x3f) << 6) | (b2 & 0x3f);
+        // The lexer uses WTF-8/CESU-8-style three-byte sequences as an
+        // internal transport for lone surrogate escapes (`"\uD800"`).
+        // JavaScript strings are UTF-16 code-unit sequences, so preserve
+        // that code unit here instead of rejecting it as external UTF-8.
+        if (cp < 0x800) return error.InvalidUtf8;
+        return .{ .codepoint = cp, .next = index + 3 };
+    }
+
+    if (b0 & 0xf8 == 0xf0) {
+        if (index + 3 >= bytes.len) return error.InvalidUtf8;
+        const b1 = bytes[index + 1];
+        const b2 = bytes[index + 2];
+        const b3 = bytes[index + 3];
+        if (b1 & 0xc0 != 0x80 or b2 & 0xc0 != 0x80 or b3 & 0xc0 != 0x80) return error.InvalidUtf8;
+        const cp: u21 = (@as(u21, b0 & 0x07) << 18) | (@as(u21, b1 & 0x3f) << 12) | (@as(u21, b2 & 0x3f) << 6) | (b3 & 0x3f);
+        if (cp < 0x10000 or cp > 0x10ffff) return error.InvalidUtf8;
+        return .{ .codepoint = cp, .next = index + 4 };
+    }
+
+    return error.InvalidUtf8;
+}
+
+const std = @import("std");

@@ -1,0 +1,3 @@
+[
+  { "dir": "built-ins/FinalizationRegistry", "passed": 47, "failed": 0, "known_failed": 0 }
+]
