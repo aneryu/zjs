@@ -60,9 +60,15 @@ extern "c" fn fgetc(stream: *std.c.FILE) c_int;
 extern "c" fn fputc(c: c_int, stream: *std.c.FILE) c_int;
 const builtin = @import("builtin");
 
-pub const stdin = @extern(*std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stdinp" else "stdin" });
-pub const stdout = @extern(*std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stdoutp" else "stdout" });
-pub const stderr = @extern(*std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stderrp" else "stderr" });
+pub fn stdin() *std.c.FILE {
+    return @extern(**std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stdinp" else "stdin" }).*;
+}
+pub fn stdout() *std.c.FILE {
+    return @extern(**std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stdoutp" else "stdout" }).*;
+}
+pub fn stderr() *std.c.FILE {
+    return @extern(**std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stderrp" else "stderr" }).*;
+}
 
 extern "c" fn snprintf(buffer: [*]u8, size: usize, format: [*:0]const u8, ...) c_int;
 extern "c" fn strerror(errnum: c_int) [*:0]u8;
@@ -5455,8 +5461,8 @@ fn hostCallStdPuts(call: HostCall) HostError!core.Value {
             try writer.writeAll(text);
             try writer.flush();
         } else {
-            _ = std.c.fwrite(text.ptr, 1, text.len, stdout);
-            _ = fflush(stdout);
+            _ = std.c.fwrite(text.ptr, 1, text.len, stdout());
+            _ = fflush(stdout());
         }
     }
     return core.Value.undefinedValue();
@@ -5470,8 +5476,8 @@ fn hostCallStdPrintf(call: HostCall) HostError!core.Value {
         try writer.flush();
         return core.Value.int32(@intCast(bytes.len));
     }
-    const written = std.c.fwrite(bytes.ptr, 1, bytes.len, stdout);
-    _ = fflush(stdout);
+    const written = std.c.fwrite(bytes.ptr, 1, bytes.len, stdout());
+    _ = fflush(stdout());
     return core.Value.int32(@intCast(written));
 }
 
@@ -5549,7 +5555,7 @@ fn hostCallStdFilePuts(call: HostCall) HostError!core.Value {
     for (call.args) |arg| {
         const text = try hostStringFromValue(call.ctx.runtime, arg);
         defer call.ctx.runtime.memory.allocator.free(text);
-        if (file_object.stdFileIsStdio() and file == stdout and call.output != null) {
+        if (file_object.stdFileIsStdio() and file == stdout() and call.output != null) {
             try call.output.?.writeAll(text);
         } else {
             _ = std.c.fwrite(text.ptr, 1, text.len, file);
@@ -5563,7 +5569,7 @@ fn hostCallStdFilePrintf(call: HostCall) HostError!core.Value {
     const file = file_object.stdFile().?;
     const bytes = try formatPrintfBytes(call);
     defer call.ctx.runtime.memory.allocator.free(bytes);
-    if (file_object.stdFileIsStdio() and file == stdout and call.output != null) {
+    if (file_object.stdFileIsStdio() and file == stdout() and call.output != null) {
         try call.output.?.writeAll(bytes);
         return core.Value.int32(@intCast(bytes.len));
     }

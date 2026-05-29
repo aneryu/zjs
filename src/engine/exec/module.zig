@@ -789,9 +789,9 @@ fn initializeNativeStdModule(ctx: *core.Context, record: *core.module.ModuleReco
     try initializeNativeStdIntValue(ctx, record, "SEEK_CUR", std.c.SEEK.CUR);
     try initializeNativeStdIntValue(ctx, record, "SEEK_END", std.c.SEEK.END);
     try initializeNativeStdErrorValue(ctx, record);
-    try initializeNativeStdFileValue(ctx, record, "in", call_mod.stdin, false, true);
-    try initializeNativeStdFileValue(ctx, record, "out", call_mod.stdout, false, true);
-    try initializeNativeStdFileValue(ctx, record, "err", call_mod.stderr, false, true);
+    try initializeNativeStdFileValue(ctx, record, "in", call_mod.stdin(), false, true);
+    try initializeNativeStdFileValue(ctx, record, "out", call_mod.stdout(), false, true);
+    try initializeNativeStdFileValue(ctx, record, "err", call_mod.stderr(), false, true);
     return true;
 }
 
