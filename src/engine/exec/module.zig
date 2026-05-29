@@ -990,7 +990,7 @@ fn resolvedRequestAtom(runtime: *core.Runtime, request_atom: core.Atom, referrer
         return runtime.internAtom(resolved);
     }
     if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
-        return error.ModuleNotFound;
+        return runtime.atoms.dup(request_atom);
     }
     const base = std.fs.path.dirname(referrer) orelse ".";
     const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{ base, specifier });

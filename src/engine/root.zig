@@ -369,7 +369,7 @@ pub const Engine = struct {
         errdefer allocator.free(owned_path);
         try seen.append(allocator, owned_path);
 
-        const module_name = try runtime.internAtom(path);
+                const module_name = try runtime.internAtom(path);
         defer runtime.atoms.free(module_name);
 
         var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
@@ -385,6 +385,50 @@ pub const Engine = struct {
             const resolved = try host_hooks.resolveModule(host_hooks.ptr, specifier, path, allocator);
             defer allocator.free(resolved.specifier);
             defer allocator.free(resolved.path);
+
+            const resolved_atom = try runtime.internAtom(resolved.path);
+            defer runtime.atoms.free(resolved_atom);
+
+            const specifier_atom = request.module_name;
+            if (specifier_atom != resolved_atom) {
+                if (runtime.modules.find(module_name)) |p_record| {
+                    // 1. requested_modules
+                    for (p_record.requested_modules) |*req| {
+                        if (req.* == specifier_atom) {
+                            runtime.atoms.free(req.*);
+                            req.* = runtime.atoms.dup(resolved_atom);
+                        }
+                    }
+                    // 2. imports
+                    for (p_record.imports) |*imp| {
+                        if (imp.module_name == specifier_atom) {
+                            runtime.atoms.free(imp.module_name);
+                            imp.module_name = runtime.atoms.dup(resolved_atom);
+                        }
+                    }
+                    // 3. indirect_exports
+                    for (p_record.indirect_exports) |*ind| {
+                        if (ind.module_name == specifier_atom) {
+                            runtime.atoms.free(ind.module_name);
+                            ind.module_name = runtime.atoms.dup(resolved_atom);
+                        }
+                    }
+                    // 4. star_exports
+                    for (p_record.star_exports) |*star| {
+                        if (star.module_name == specifier_atom) {
+                            runtime.atoms.free(star.module_name);
+                            star.module_name = runtime.atoms.dup(resolved_atom);
+                        }
+                    }
+                    // 5. import_attributes
+                    for (p_record.import_attributes) |*attr| {
+                        if (attr.module_name == specifier_atom) {
+                            runtime.atoms.free(attr.module_name);
+                            attr.module_name = runtime.atoms.dup(resolved_atom);
+                        }
+                    }
+                }
+            }
 
             const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
             defer if (loaded.owned) allocator.free(loaded.source);
