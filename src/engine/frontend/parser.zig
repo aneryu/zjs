@@ -7,6 +7,7 @@ const qjs_lexer = @import("qjs_lexer.zig");
 const qjs_parser = @import("qjs_parser.zig");
 const qjs_token = @import("qjs_token.zig");
 const source_pos = @import("source_pos.zig");
+const ts_strip = @import("ts_strip.zig");
 
 pub const Mode = enum {
     script,
@@ -15,6 +16,7 @@ pub const Mode = enum {
     eval_indirect,
 };
 
+pub const SourceKind = ts_strip.SourceKind;
 pub const Feature = qjs_parser.Feature;
 
 pub const ParsePath = enum {
@@ -44,6 +46,7 @@ pub const Result = struct {
 pub const Options = struct {
     mode: Mode = .script,
     filename: []const u8 = "<input>",
+    source_kind: SourceKind = .auto,
     strict: bool = false,
     return_completion: bool = false,
     eval_global_var_bindings: bool = false,
@@ -56,9 +59,16 @@ pub const Options = struct {
 };
 
 pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
+    var stripped_source: ?[]u8 = null;
+    defer if (stripped_source) |buffer| rt.memory.allocator.free(buffer);
+    const parse_source: []const u8 = if (ts_strip.shouldStrip(options.source_kind, options.filename)) blk: {
+        stripped_source = try ts_strip.strip(rt.memory.allocator, source);
+        break :blk stripped_source.?;
+    } else source;
+
     const filename_atom = try rt.internAtom(options.filename);
     defer rt.atoms.free(filename_atom);
-    const effective_strict = options.strict or sourceHasOnlyStrictFlag(source) or sourceHasUseStrictDirective(source);
+    const effective_strict = options.strict or sourceHasOnlyStrictFlag(parse_source) or sourceHasUseStrictDirective(parse_source);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
     var function_owned = true;
@@ -78,10 +88,10 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     function_owned = false;
     errdefer result.deinit();
 
-    compileQjsProgram(rt, filename_atom, source, options, &result.function, &result.features) catch |err| switch (err) {
+    compileQjsProgram(rt, filename_atom, parse_source, options, &result.function, &result.features) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
-            try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
+            try setFallbackSyntaxError(&result, rt, filename_atom, parse_source, @errorName(err));
             return result;
         },
     };

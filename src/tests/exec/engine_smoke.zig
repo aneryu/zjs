@@ -21,6 +21,72 @@ test "Engine eval executes test262 helpers through generic call paths" {
     try std.testing.expectError(error.Test262Error, js.eval("throw new Test262Error('boom');"));
 }
 
+test "Engine eval strips TypeScript source kind before execution" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\type Label = string;
+        \\interface Box { value: number }
+        \\const value: number = 41;
+        \\function add(input: number): number { return input + 1; }
+        \\assert.sameValue(add(value), 42 as number);
+    , .{ .source_kind = .typescript });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine eval strips TypeScript method annotations" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\class C { m(x: number): number { return x; } }
+        \\const object = { m(x: number): number { return x + 1; } };
+        \\assert.sameValue(new C().m(41), 41);
+        \\assert.sameValue(object.m(41), 42);
+    , .{ .source_kind = .typescript });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine eval preserves as and satisfies runtime property names in TypeScript files" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\const obj = { as: 1, satisfies: 2 };
+        \\assert.sameValue(obj.as + obj.satisfies, 3);
+    , .{ .source_kind = .typescript });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Engine eval rejects TypeScript parameter properties" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    try std.testing.expectError(
+        error.SyntaxError,
+        js.evalWithOptions(
+            "class Box { constructor(public value: number) {} }",
+            .{ .source_kind = .typescript },
+        ),
+    );
+}
+
+test "Engine eval strips TypeScript automatically for ts filenames" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.evalWithOptions(
+        \\const value: number = 42;
+        \\assert.sameValue(value, 42);
+    , .{ .filename = "sample.ts" });
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine defineScriptArgs OOM releases pending global array once" {
     var saw_oom = false;
     var saw_success = false;

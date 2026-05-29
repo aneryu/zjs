@@ -28,6 +28,7 @@ pub const EngineOptions = struct {
 pub const EvalOptions = struct {
     mode: frontend.parser.Mode = .script,
     filename: []const u8 = "<eval>",
+    source_kind: frontend.parser.SourceKind = .auto,
     output: ?*std.Io.Writer = null,
     parse_strict: bool = false,
     runtime_strict: bool = false,
@@ -147,6 +148,7 @@ pub const Engine = struct {
             options.output,
             options.mode,
             options.filename,
+            options.source_kind,
             options.timing,
             options.parse_strict,
             options.runtime_strict,
@@ -189,7 +191,7 @@ pub const Engine = struct {
         filename: []const u8,
         strict: bool,
     ) RuntimeError!core.Value {
-        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, null, strict, strict) catch |err| return @errorCast(moduleResolutionError(err));
+        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, null, strict, strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeRuntimeStrict(
@@ -200,7 +202,7 @@ pub const Engine = struct {
         filename: []const u8,
         runtime_strict: bool,
     ) RuntimeError!core.Value {
-        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, null, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
+        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, null, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeTimed(
@@ -223,7 +225,7 @@ pub const Engine = struct {
         timing: *EvalTiming,
         strict: bool,
     ) RuntimeError!core.Value {
-        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, timing, strict, strict) catch |err| return @errorCast(moduleResolutionError(err));
+        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, timing, strict, strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeTimedRuntimeStrict(
@@ -235,7 +237,7 @@ pub const Engine = struct {
         timing: *EvalTiming,
         runtime_strict: bool,
     ) RuntimeError!core.Value {
-        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, timing, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
+        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, timing, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub const HostHooks = struct {
@@ -272,7 +274,7 @@ pub const Engine = struct {
             module_postorder.deinit(allocator);
         }
         try preloadFileModuleGraphWithHostHooks(allocator, self.runtime, host_hooks, source_text, filename, &module_postorder);
-        
+
         const root_module_name = try self.runtime.internAtom(filename);
         defer self.runtime.atoms.free(root_module_name);
         if (self.runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
@@ -282,20 +284,20 @@ pub const Engine = struct {
             var module_source: []const u8 = undefined;
             const is_root = std.mem.eql(u8, path, filename);
             var loaded_owned = false;
-            
+
             if (is_root) {
                 module_source = source_text;
             } else {
                 const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
                 defer allocator.free(resolved.specifier);
                 defer allocator.free(resolved.path);
-                
+
                 const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
                 module_source = loaded.source;
                 loaded_owned = loaded.owned;
                 defer allocator.free(loaded.path);
             }
-            
+
             var compiled = try frontend.parser.parse(self.runtime, module_source, .{ .mode = .module, .filename = path });
             if (loaded_owned) allocator.free(module_source);
             defer compiled.deinit();
@@ -304,28 +306,28 @@ pub const Engine = struct {
             defer self.runtime.atoms.free(module_name);
             try exec.module.initializeModuleFunctionDeclarations(self.context, global, module_name, &compiled.function);
         }
-        
+
         var continuations = std.ArrayList(ModuleContinuation).empty;
         defer freeModuleContinuations(self.runtime, allocator, &continuations);
-        
+
         for (module_postorder.items) |path| {
             if (std.mem.eql(u8, path, filename)) continue;
             try self.drainModuleContinuationsForDependencies(output, allocator, &continuations, path);
-            
+
             const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
             defer allocator.free(resolved.specifier);
             defer allocator.free(resolved.path);
-            
+
             const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
             defer if (loaded.owned) allocator.free(loaded.source);
             defer allocator.free(loaded.path);
-            
+
             const dep_step = try self.evalPreloadedFileModuleStep(loaded.source, output, path, null, null);
             try self.handleModuleEvalStep(allocator, &continuations, dep_step, loaded.source, path, false);
             self.runJobs();
             if (self.context.hasUnhandledRejection() or self.context.hasException()) return error.UnhandledPromiseRejection;
         }
-        
+
         try self.drainModuleContinuationsForDependencies(output, allocator, &continuations, filename);
         const root_step = try self.evalPreloadedFileModuleStep(source_text, output, filename, null, null);
         try self.handleModuleEvalStep(allocator, &continuations, root_step, source_text, filename, true);
@@ -376,7 +378,7 @@ pub const Engine = struct {
         const record = parsed.function.module_record orelse return;
         for (record.requests) |request| {
             const specifier = runtime.atoms.name(request.module_name) orelse return error.InvalidAtom;
-            
+
             const resolved = try host_hooks.resolveModule(host_hooks.ptr, specifier, path, allocator);
             defer allocator.free(resolved.specifier);
             defer allocator.free(resolved.path);
@@ -584,7 +586,7 @@ pub const Engine = struct {
         filename: []const u8,
         timing: ?*EvalTiming,
     ) !core.Value {
-        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, timing, false, false);
+        return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, timing, false, false);
     }
 
     fn evalModeWithOutputNamedTimedOptions(
@@ -593,6 +595,7 @@ pub const Engine = struct {
         output: ?*std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
+        source_kind: frontend.parser.SourceKind,
         timing: ?*EvalTiming,
         parse_strict: bool,
         runtime_strict: bool,
@@ -602,6 +605,7 @@ pub const Engine = struct {
         var compiled = try frontend.parser.parse(self.runtime, source_text, .{
             .mode = mode,
             .filename = filename,
+            .source_kind = source_kind,
             .strict = parse_strict,
         });
         if (timing) |t| t.parse_ns += elapsedNanosSince(parse_start);
