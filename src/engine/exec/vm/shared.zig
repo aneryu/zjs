@@ -46780,7 +46780,29 @@ fn runNextOsRwHandler(ctx: *core.Context, output: ?*std.Io.Writer, global: *core
         count += 1;
     }
     if (count == 0) return false;
-    const ready = libc.poll(pollfds.ptr, @intCast(count), 0);
+    var timeout_ms: c_int = 0;
+    const has_pending_jobs = (ctx.peekPendingPromiseJobSequence() != null or ctx.runtime.peekPendingFinalizationJobSequence() != null);
+    if (!has_pending_jobs) {
+        if (ctx.os_timers.len == 0) {
+            timeout_ms = -1;
+        } else {
+            const now = nowMs();
+            var next_delay: u64 = std.math.maxInt(u64);
+            for (ctx.os_timers) |timer| {
+                if (timer.timeout_ms > now) {
+                    next_delay = @min(next_delay, timer.timeout_ms - now);
+                } else {
+                    next_delay = 0;
+                }
+            }
+            if (next_delay == std.math.maxInt(u64)) {
+                timeout_ms = -1;
+            } else {
+                timeout_ms = @intCast(@min(next_delay, @as(u64, @intCast(std.math.maxInt(c_int)))));
+            }
+        }
+    }
+    const ready = libc.poll(pollfds.ptr, @intCast(count), timeout_ms);
     if (ready <= 0) return false;
     for (pollfds[0..count]) |pollfd| {
         if (pollfd.revents == 0) continue;

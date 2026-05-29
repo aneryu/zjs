@@ -5453,8 +5453,10 @@ fn hostCallStdPuts(call: HostCall) HostError!core.Value {
         defer call.ctx.runtime.memory.allocator.free(text);
         if (call.output) |writer| {
             try writer.writeAll(text);
+            try writer.flush();
         } else {
             _ = std.c.fwrite(text.ptr, 1, text.len, stdout);
+            _ = fflush(stdout);
         }
     }
     return core.Value.undefinedValue();
@@ -5465,9 +5467,11 @@ fn hostCallStdPrintf(call: HostCall) HostError!core.Value {
     defer call.ctx.runtime.memory.allocator.free(bytes);
     if (call.output) |writer| {
         try writer.writeAll(bytes);
+        try writer.flush();
         return core.Value.int32(@intCast(bytes.len));
     }
     const written = std.c.fwrite(bytes.ptr, 1, bytes.len, stdout);
+    _ = fflush(stdout);
     return core.Value.int32(@intCast(written));
 }
 
@@ -6103,10 +6107,25 @@ fn hostCallOsTtyGetWinSize(call: HostCall) HostError!core.Value {
     return core.Value.nullValue();
 }
 
+threadlocal var original_termios: ?libc.struct_termios = null;
+
 fn hostCallOsTtySetRaw(call: HostCall) HostError!core.Value {
     const fd = try hostInt32Arg(call.ctx.runtime, call.args, 0);
+    const enable = if (call.args.len >= 2) (call.args[1].asBool() orelse true) else true;
+
+    if (!enable) {
+        if (original_termios) |orig| {
+            _ = libc.tcsetattr(fd, libc.TCSANOW, &orig);
+            original_termios = null;
+        }
+        return core.Value.undefinedValue();
+    }
+
     var tty = std.mem.zeroes(libc.struct_termios);
     _ = libc.tcgetattr(fd, &tty);
+    if (original_termios == null) {
+        original_termios = tty;
+    }
     tty.c_iflag &= ~@as(@TypeOf(tty.c_iflag), libc.IGNBRK | libc.BRKINT | libc.PARMRK | libc.ISTRIP | libc.INLCR | libc.IGNCR | libc.ICRNL | libc.IXON);
     tty.c_oflag |= @as(@TypeOf(tty.c_oflag), libc.OPOST);
     tty.c_lflag &= ~@as(@TypeOf(tty.c_lflag), libc.ECHO | libc.ECHONL | libc.ICANON | libc.IEXTEN);
@@ -7922,12 +7941,11 @@ fn printString(writer: *std.Io.Writer, value: core.Value) !void {
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try writer.writeAll(bytes),
         .utf16 => |units| {
-            for (units) |unit| {
-                if (unit <= 0x7f) {
-                    try writer.writeByte(@intCast(unit));
-                } else {
-                    try writer.print("\\u{x}", .{unit});
-                }
+            var it = std.unicode.Utf16LeIterator.init(units);
+            while (it.nextCodepoint() catch null) |codepoint| {
+                var utf8_buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch continue;
+                try writer.writeAll(utf8_buf[0..len]);
             }
         },
     }
