@@ -1,3 +1,7 @@
+const std = @import("std");
+const Object = @import("object.zig").Object;
+const Value = @import("value.zig").Value;
+
 pub const ids = struct {
     pub const output = 1;
     pub const test262_same_value = 2;
@@ -19,4 +23,23 @@ pub const ids = struct {
     pub const test262_agent_monotonic_now = 38;
     pub const std_gc = 44;
     pub const test262_agent_set_timeout = 110;
+    pub const external_host = 119;
+};
+
+pub const ExternalCall = struct {
+    ctx: *anyopaque,
+    output: ?*std.Io.Writer,
+    global: ?*Object,
+    func_obj: *Object,
+    this_value: Value,
+    args: []const Value,
+};
+
+pub const ExternalCallFn = *const fn (ptr: *anyopaque, call: ExternalCall) anyerror!Value;
+pub const ExternalFinalizer = *const fn (ptr: *anyopaque) void;
+
+pub const ExternalRecord = struct {
+    ptr: *anyopaque,
+    call: ExternalCallFn,
+    finalizer: ?ExternalFinalizer = null,
 };

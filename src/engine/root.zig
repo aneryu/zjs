@@ -63,6 +63,9 @@ pub const ValueHandle = struct {
 };
 
 pub const EvalResult = ValueHandle;
+pub const ExternalHostCall = core.host_function.ExternalCall;
+pub const ExternalHostCallFn = core.host_function.ExternalCallFn;
+pub const ExternalHostFinalizer = core.host_function.ExternalFinalizer;
 
 pub const ExceptionInfo = struct {
     value: ValueHandle,
@@ -968,6 +971,47 @@ pub const Engine = struct {
 
     pub fn defineScriptArgs(self: *Engine, args: []const []const u8) !void {
         try self.defineStringArrayGlobal("scriptArgs", args);
+    }
+
+    pub fn createExternalHostFunctionValue(
+        self: *Engine,
+        name: []const u8,
+        length: i32,
+        ptr: *anyopaque,
+        call: ExternalHostCallFn,
+        finalizer: ?ExternalHostFinalizer,
+    ) !core.Value {
+        const id = try self.runtime.registerExternalHostFunction(.{
+            .ptr = ptr,
+            .call = call,
+            .finalizer = finalizer,
+        });
+        const function_value = try builtins.function.nativeFunction(self.runtime, name, length);
+        errdefer function_value.free(self.runtime);
+
+        const function_object = try exec.property_ops.expectObject(function_value);
+        function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+        function_object.externalHostFunctionIdSlot().* = id;
+        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        try function_object.setFunctionRealmGlobalPtr(self.runtime, global);
+        return function_value;
+    }
+
+    pub fn defineGlobalExternalHostFunction(
+        self: *Engine,
+        name: []const u8,
+        length: i32,
+        ptr: *anyopaque,
+        call: ExternalHostCallFn,
+        finalizer: ?ExternalHostFinalizer,
+    ) !void {
+        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const function_value = try self.createExternalHostFunctionValue(name, length, ptr, call, finalizer);
+        defer function_value.free(self.runtime);
+
+        const property_name = try self.runtime.internAtom(name);
+        defer self.runtime.atoms.free(property_name);
+        try global.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, true, false, true));
     }
 
     pub fn defineArgvGlobals(self: *Engine, argv0: []const u8, exec_argv: []const []const u8) !void {

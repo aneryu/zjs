@@ -453,6 +453,7 @@ const HostFunction = enum(i32) {
     using_add_async_resource = 116,
     using_dispose_async_stack = 117,
     using_dispose_async_stack_for_throw = 118,
+    external_host = core.host_function.ids.external_host,
 };
 
 const HostCallFlags = struct {
@@ -480,6 +481,7 @@ const HostFunctionRecord = struct {
 const max_host_function_id = @max(
     @intFromEnum(HostFunction.using_dispose_async_stack_for_throw),
     @intFromEnum(HostFunction.test262_agent_set_timeout),
+    @intFromEnum(HostFunction.external_host),
 );
 
 const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = records: {
@@ -602,6 +604,7 @@ const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = rec
     records[@intFromEnum(HostFunction.using_add_async_resource)] = .{ .length = 2, .call = hostCallUsingAddAsyncResource };
     records[@intFromEnum(HostFunction.using_dispose_async_stack)] = .{ .length = 1, .call = hostCallUsingDisposeAsyncStack };
     records[@intFromEnum(HostFunction.using_dispose_async_stack_for_throw)] = .{ .length = 2, .call = hostCallUsingDisposeAsyncStackForThrow };
+    records[@intFromEnum(HostFunction.external_host)] = .{ .length = 0, .call = hostCallExternalHostFunction };
     break :records records;
 };
 
@@ -637,6 +640,27 @@ fn callHostFunction(
     });
 }
 
+fn hostCallExternalHostFunction(call: HostCall) HostError!core.Value {
+    const id = call.func_obj.externalHostFunctionId();
+    const record = call.ctx.runtime.externalHostFunction(id) orelse return error.TypeError;
+    return record.call(record.ptr, .{
+        .ctx = call.ctx,
+        .output = call.output,
+        .global = call.global,
+        .func_obj = call.func_obj,
+        .this_value = call.this_value,
+        .args = call.args,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ProcessExit => error.ProcessExit,
+        error.ReferenceError => error.ReferenceError,
+        error.RangeError => error.RangeError,
+        error.SyntaxError => error.SyntaxError,
+        error.TypeError => error.TypeError,
+        else => error.TypeError,
+    };
+}
+
 pub fn callHostFunctionObjectForVm(
     ctx: *core.Context,
     output: ?*std.Io.Writer,
@@ -661,6 +685,7 @@ fn hostFunctionCanDispatchFromVmWithoutGlobals(kind: i32) bool {
         @intFromEnum(HostFunction.std_exit)...@intFromEnum(HostFunction.os_mkstemp),
         @intFromEnum(HostFunction.dstr_require_iterator),
         @intFromEnum(HostFunction.using_create_disposable_stack)...@intFromEnum(HostFunction.using_dispose_async_stack_for_throw),
+        @intFromEnum(HostFunction.external_host),
         => true,
         else => false,
     };

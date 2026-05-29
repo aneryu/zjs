@@ -4,6 +4,7 @@ const memory = @import("memory.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
 const gc = @import("gc.zig");
+const host_function = @import("host_function.zig");
 const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const shape = @import("shape.zig");
@@ -173,6 +174,8 @@ pub const Runtime = struct {
     cli_argv0: []const u8 = "",
     cli_exec_argv: []const []const u8 = &.{},
     cli_script_args: []const []const u8 = &.{},
+    external_host_functions: []host_function.ExternalRecord = &.{},
+    external_host_functions_capacity: usize = 0,
 
     /// Returns an owned runtime. Caller must release it with `destroy`.
     pub fn create(allocator: std.mem.Allocator) !*Runtime {
@@ -248,6 +251,8 @@ pub const Runtime = struct {
         rt.cli_argv0 = "";
         rt.cli_exec_argv = &.{};
         rt.cli_script_args = &.{};
+        rt.external_host_functions = &.{};
+        rt.external_host_functions_capacity = 0;
         rt.memory.profile_alloc_count = null;
         rt.memory.trigger_gc_fn = Runtime.triggerGCOnAllocation;
         rt.memory.trigger_gc_ctx = rt;
@@ -307,6 +312,7 @@ pub const Runtime = struct {
         }
         self.clearExternalSymbolRoots();
         self.clearExternalValueRoots();
+        self.clearExternalHostFunctions();
         self.modules.deinit(self);
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
@@ -325,6 +331,7 @@ pub const Runtime = struct {
         const context_value_roots: []*ValueRootFrame = if (self.context_value_roots_capacity != 0) self.context_value_roots.ptr[0..self.context_value_roots_capacity] else self.context_value_roots[0..0];
         const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
         const external_value_roots: []Value = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
+        const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
         self.borrowed_reference_holders = &.{};
         self.borrowed_reference_holders_capacity = 0;
         self.context_value_roots = &.{};
@@ -333,10 +340,13 @@ pub const Runtime = struct {
         self.external_symbol_roots_capacity = 0;
         self.external_value_roots = &.{};
         self.external_value_roots_capacity = 0;
+        self.external_host_functions = &.{};
+        self.external_host_functions_capacity = 0;
         if (borrowed_reference_holders.len != 0) self.memory.free(*Object, borrowed_reference_holders);
         if (context_value_roots.len != 0) self.memory.free(*ValueRootFrame, context_value_roots);
         if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
         if (external_value_roots.len != 0) self.memory.free(Value, external_value_roots);
+        if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
         std.debug.assert(!self.memory.hasOutstandingAllocations() or self.memory.allocation_count == 1);
 
         var account = self.memory;
@@ -511,6 +521,30 @@ pub const Runtime = struct {
         self.external_value_roots = &.{};
         self.external_value_roots_capacity = 0;
         if (capacity != 0) self.memory.free(Value, roots.ptr[0..capacity]);
+    }
+
+    pub fn registerExternalHostFunction(self: *Runtime, record: host_function.ExternalRecord) !u32 {
+        try appendRuntimeExternalHostFunction(&self.memory, &self.external_host_functions, &self.external_host_functions_capacity, record);
+        return @intCast(self.external_host_functions.len);
+    }
+
+    pub fn externalHostFunction(self: *Runtime, id: u32) ?host_function.ExternalRecord {
+        if (id == 0) return null;
+        const index: usize = @intCast(id - 1);
+        if (index >= self.external_host_functions.len) return null;
+        return self.external_host_functions[index];
+    }
+
+    pub fn clearExternalHostFunctions(self: *Runtime) void {
+        const records = self.external_host_functions;
+        const capacity = self.external_host_functions_capacity;
+        self.external_host_functions = &.{};
+        self.external_host_functions_capacity = 0;
+
+        for (records) |record| {
+            if (record.finalizer) |finalizer| finalizer(record.ptr);
+        }
+        if (capacity != 0) self.memory.free(host_function.ExternalRecord, records.ptr[0..capacity]);
     }
 
     pub fn runObjectCycleRemoval(self: *Runtime) usize {
@@ -1070,6 +1104,28 @@ fn appendRuntimeValue(account: *memory.MemoryAccount, slice: *[]Value, capacity:
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
         if (old_capacity != 0) account.free(Value, old);
+    }
+    const len = slice.*.len;
+    slice.* = slice.*.ptr[0 .. len + 1];
+    slice.*[len] = item;
+}
+
+fn appendRuntimeExternalHostFunction(
+    account: *memory.MemoryAccount,
+    slice: *[]host_function.ExternalRecord,
+    capacity: *usize,
+    item: host_function.ExternalRecord,
+) !void {
+    if (slice.*.len == capacity.*) {
+        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
+        const next = try account.alloc(host_function.ExternalRecord, next_capacity);
+        errdefer account.free(host_function.ExternalRecord, next);
+        @memcpy(next[0..slice.*.len], slice.*);
+        const old_capacity = capacity.*;
+        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
+        slice.* = next[0..slice.*.len];
+        capacity.* = next_capacity;
+        if (old_capacity != 0) account.free(host_function.ExternalRecord, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];

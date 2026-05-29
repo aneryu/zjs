@@ -712,6 +712,7 @@ pub const FunctionPayload = struct {
     source: ?Value = null,
     host_function_kind: i32 = 0,
     native_function_id: i32 = 0,
+    external_host_function_id: u32 = 0,
     native_dispatch_name: atom.Atom = atom.null_atom,
     array_builtin_marker: ArrayBuiltinMarker = .none,
     typed_array_builtin_marker: TypedArrayBuiltinMarker = .none,
@@ -2745,6 +2746,17 @@ pub const Object = struct {
 
     pub fn nativeFunctionId(self: *const Object) i32 {
         if (self.functionPayloadConst()) |payload| return payload.native_function_id;
+        return 0;
+    }
+
+    pub fn externalHostFunctionIdSlot(self: *Object) *u32 {
+        if (self.functionPayload()) |payload| return &payload.external_host_function_id;
+        std.debug.assert(self.class_payload_kind == .function);
+        unreachable;
+    }
+
+    pub fn externalHostFunctionId(self: *const Object) u32 {
+        if (self.functionPayloadConst()) |payload| return payload.external_host_function_id;
         return 0;
     }
 
