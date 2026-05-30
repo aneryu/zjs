@@ -255,6 +255,13 @@ pub fn callValueWithThisGlobalsAndGlobal(
         const record = hostFunctionRecordFromId(object.hostFunctionKindSlot().*) orelse return error.TypeError;
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
     }
+    if (object.class_id == core.class.ids.bytecode_function or
+        object.class_id == core.class.ids.generator_function or
+        object.class_id == core.class.ids.async_function or
+        object.class_id == core.class.ids.async_generator_function)
+    {
+        return shared_vm.callValueOrBytecode(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
+    }
     if (object.class_id == core.class.ids.c_closure) {
         const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
         if (closure_kind == 51) {
