@@ -840,7 +840,7 @@ fn binaryBigInt(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.V
         }
     }
 
-    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and a.refHeader().?.ref_count == 1) {
+    if (op == bytecode.opcode.op.add and a.isBigInt() and a.refHeader() != null and a.refHeader().?.rc == 1) {
         const header = a.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
         const rhs = try bigIntFromValueBorrowed(rt, b);
@@ -1004,7 +1004,7 @@ fn stringAddStringInt(rt: *core.Runtime, string_value: core.Value, int_value: i3
 
         if (position == .suffix) {
             if (string_value.refHeader()) |header| {
-                if (header.ref_count == 1 and string.atom_id == null) {
+                if (header.rc == 1 and string.atom_id == null) {
                     if (try string.appendLatin1InPlace(rt, digits)) {
                         return string_value.dup();
                     }
@@ -1060,7 +1060,7 @@ fn stringAddStrings(rt: *core.Runtime, a: core.Value, b: core.Value) !core.Value
     if (a_len == 0) return b.dup();
     if (b_len == 0) return a.dup();
     if (a.refHeader()) |header| {
-        if (header.ref_count == 1 and try appendStringInPlace(rt, a_string, b_string)) {
+        if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
             return a.dup();
         }
     }
@@ -1110,7 +1110,7 @@ fn appendStringInPlace(rt: *core.Runtime, lhs_string: *core.string.String, rhs_s
 
 pub fn tryAppendStringInPlace(rt: *core.Runtime, lhs: core.Value, rhs: core.Value, max_ref_count: usize) !bool {
     const lhs_header = lhs.refHeader() orelse return false;
-    if (lhs_header.ref_count > max_ref_count) return false;
+    if (lhs_header.rc > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
     const rhs_string = stringObject(rhs) orelse return false;
     return try appendStringInPlace(rt, lhs_string, rhs_string);
@@ -1122,7 +1122,7 @@ pub fn tryAppendLatin1StringInPlace(rt: *core.Runtime, lhs: core.Value, rhs: cor
 
 pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.Runtime, lhs: core.Value, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
     const lhs_header = lhs.refHeader() orelse return false;
-    if (lhs_header.ref_count > max_ref_count) return false;
+    if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
     if (rt.atoms.kind(atom_id) != .string) return false;
     const suffix = rt.atoms.name(atom_id) orelse return false;

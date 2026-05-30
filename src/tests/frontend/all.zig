@@ -100,6 +100,9 @@ fn expectAtomOperandName(rt: *core.Runtime, function: *const engine.bytecode.Byt
 fn expectNoLiveDynamicAtom(rt: *core.Runtime, kind: core.atom.AtomKind, bytes: []const u8) !void {
     for (rt.atoms.entries) |entry| {
         if (!entry.isLive() or entry.kind != kind) continue;
+        if (std.mem.eql(u8, entry.bytes, bytes)) {
+            std.debug.print("\n=== LEAKED ATOM FOUND: '{s}' kind={s} ref_count={d} ===\n", .{ entry.bytes, @tagName(entry.kind), entry.ref_count });
+        }
         try std.testing.expect(!std.mem.eql(u8, entry.bytes, bytes));
     }
 }
@@ -322,7 +325,7 @@ test "parser class private element OOM releases retained atom" {
     var saw_success = false;
 
     var fail_offset: usize = 0;
-    while (fail_offset < 160) : (fail_offset += 1) {
+    while (fail_offset < 300) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         const rt = try core.Runtime.create(failing.allocator());
 
@@ -337,7 +340,11 @@ test "parser class private element OOM releases retained atom" {
         } else |err| switch (err) {
             error.OutOfMemory => {
                 saw_oom = true;
-                try expectNoLiveDynamicAtom(rt, .private, "#secret");
+                expectNoLiveDynamicAtom(rt, .private, "#secret") catch |err2| {
+                    std.debug.print("\n=== LEAK DETECTED AT fail_offset={d} ===\n", .{fail_offset});
+                    rt.destroy();
+                    return err2;
+                };
             },
             else => |unexpected| {
                 rt.destroy();

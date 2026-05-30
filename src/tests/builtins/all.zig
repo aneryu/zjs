@@ -332,7 +332,7 @@ test "Array sort OOM releases pending sort entry value" {
         const retained = try core.Object.create(rt, core.class.ids.object, null);
         try array.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(retained.value(), true, true, true));
         array.length = 1;
-        const retained_refs = retained.header.ref_count;
+        const retained_refs = retained.header.rc;
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = builtins.array.methodCall(rt, array_value, sort_method, &.{});
@@ -355,7 +355,7 @@ test "Array sort OOM releases pending sort entry value" {
             },
         };
 
-        const observed_refs = retained.header.ref_count;
+        const observed_refs = retained.header.rc;
         array_value.free(rt);
         retained.value().free(rt);
         rt.destroy();
@@ -1188,7 +1188,7 @@ test "Map set rolls back inserted entry when size update fails" {
 
     const retained = try core.Object.create(rt, core.class.ids.object, null);
     defer retained.value().free(rt);
-    const retained_refs = retained.header.ref_count;
+    const retained_refs = retained.header.rc;
     const old_len = map_object.collectionEntries().len;
     const old_active = map_object.collectionActiveCount();
 
@@ -1206,7 +1206,7 @@ test "Map set rolls back inserted entry when size update fails" {
         map_object.clearCollectionIndex(rt);
     }
 
-    try std.testing.expectEqual(retained_refs, retained.header.ref_count);
+    try std.testing.expectEqual(retained_refs, retained.header.rc);
     try std.testing.expectEqual(old_len, observed_len);
     try std.testing.expectEqual(old_active, observed_active);
 }
@@ -1227,7 +1227,7 @@ test "Map delete rolls back removed entry when size update fails" {
     try fillOwnPropertyStorage(rt, map_object);
     try std.testing.expect(map_object.deleteProperty(rt, core.atom.predefinedId("size", .string).?));
 
-    const retained_refs = retained.header.ref_count;
+    const retained_refs = retained.header.rc;
     const old_len = map_object.collectionEntries().len;
     const old_active = map_object.collectionActiveCount();
 
@@ -1238,7 +1238,7 @@ test "Map delete rolls back removed entry when size update fails" {
     const has_result = try builtins.collection.methodCall(rt, map_value, 3, &.{core.Value.int32(1)});
     defer has_result.free(rt);
     try std.testing.expectEqual(@as(?bool, true), has_result.asBool());
-    try std.testing.expectEqual(retained_refs, retained.header.ref_count);
+    try std.testing.expectEqual(retained_refs, retained.header.rc);
     try std.testing.expectEqual(old_len, map_object.collectionEntries().len);
     try std.testing.expectEqual(old_active, map_object.collectionActiveCount());
 }
@@ -1267,7 +1267,7 @@ test "Map clear rolls back removed entries when size update fails" {
         try fillOwnPropertyStorage(rt, map_object);
         try std.testing.expect(map_object.deleteProperty(rt, core.atom.predefinedId("size", .string).?));
 
-        const retained_refs = retained.header.ref_count;
+        const retained_refs = retained.header.rc;
         const old_len = map_object.collectionEntries().len;
         const old_active = map_object.collectionActiveCount();
 
@@ -1285,7 +1285,7 @@ test "Map clear rolls back removed entries when size update fails" {
                 const has_result = try builtins.collection.methodCall(rt, map_value, 3, &.{core.Value.int32(1)});
                 defer has_result.free(rt);
                 try std.testing.expectEqual(@as(?bool, true), has_result.asBool());
-                try std.testing.expectEqual(retained_refs, retained.header.ref_count);
+                try std.testing.expectEqual(retained_refs, retained.header.rc);
                 try std.testing.expectEqual(old_len, map_object.collectionEntries().len);
                 try std.testing.expectEqual(old_active, map_object.collectionActiveCount());
             },
@@ -1312,7 +1312,7 @@ test "WeakMap set releases duplicated value when holder registration fails" {
     const retained = try core.Object.create(rt, core.class.ids.object, null);
     defer retained.value().free(rt);
 
-    const retained_refs = retained.header.ref_count;
+    const retained_refs = retained.header.rc;
     try std.testing.expect(!rt.borrowedReferenceHolderRegistered(weakmap));
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -1321,7 +1321,7 @@ test "WeakMap set releases duplicated value when holder registration fails" {
 
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
     try std.testing.expect(!rt.borrowedReferenceHolderRegistered(weakmap));
-    try std.testing.expectEqual(retained_refs, retained.header.ref_count);
+    try std.testing.expectEqual(retained_refs, retained.header.rc);
 }
 
 test "WeakMap set preserves entries when weak entry growth fails" {
@@ -1354,7 +1354,7 @@ test "WeakMap set preserves entries when weak entry growth fails" {
 
     const retained = try core.Object.create(rt, core.class.ids.object, null);
     defer retained.value().free(rt);
-    const retained_refs = retained.header.ref_count;
+    const retained_refs = retained.header.rc;
     const old_len = weakmap.weakCollectionEntries().len;
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -1363,7 +1363,7 @@ test "WeakMap set preserves entries when weak entry growth fails" {
 
     try std.testing.expectEqual(old_len, weakmap.weakCollectionEntries().len);
     try std.testing.expect(rt.borrowedReferenceHolderRegistered(weakmap));
-    try std.testing.expectEqual(retained_refs, retained.header.ref_count);
+    try std.testing.expectEqual(retained_refs, retained.header.rc);
     const missing = try builtins.collection.methodCall(rt, weakmap_value, 3, &.{keys[4]});
     defer missing.free(rt);
     try std.testing.expectEqual(@as(?bool, false), missing.asBool());

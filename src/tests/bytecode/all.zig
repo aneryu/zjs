@@ -91,10 +91,10 @@ test "constant pool retains and releases values" {
     const value = text.value();
     const index = try pool.append(value);
     try std.testing.expectEqual(@as(u32, 0), index);
-    try std.testing.expectEqual(@as(usize, 2), text.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 2), text.header.rc);
 
     const loaded = pool.get(0).?;
-    try std.testing.expectEqual(@as(usize, 3), text.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 3), text.header.rc);
     loaded.free(rt);
     value.free(rt);
 }
@@ -110,7 +110,7 @@ test "constant pool appendOwned transfers refcounted values" {
     const value = text.value();
     _ = try pool.appendOwned(value);
 
-    try std.testing.expectEqual(@as(usize, 1), text.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), text.header.rc);
 }
 
 test "constant pool retains owned unique symbol atoms until release" {

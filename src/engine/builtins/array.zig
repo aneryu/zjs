@@ -451,8 +451,6 @@ test "array iteratorResult roots direct function bytecode value while creating r
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -498,8 +496,6 @@ test "array splice roots direct function bytecode insert values while creating r
     const first_fb = &first_slice[0];
     first_fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&first_fb.header);
-    first_fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    first_fb.header.destroy_ctx = @ptrCast(rt);
 
     const first_symbol = try rt.atoms.newValueSymbol("gc-array-splice-first-bytecode-symbol");
     first_fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -510,8 +506,6 @@ test "array splice roots direct function bytecode insert values while creating r
     const second_fb = &second_slice[0];
     second_fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&second_fb.header);
-    second_fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    second_fb.header.destroy_ctx = @ptrCast(rt);
 
     const second_symbol = try rt.atoms.newValueSymbol("gc-array-splice-second-bytecode-symbol");
     second_fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -570,8 +564,6 @@ test "array constructWithPrototype roots direct function bytecode elements while
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -619,8 +611,6 @@ test "array concat roots direct function bytecode argument while creating output
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);

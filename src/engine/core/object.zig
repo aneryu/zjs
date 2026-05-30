@@ -836,6 +836,7 @@ pub const ModuleNamespacePayload = struct {
 
 pub const Object = struct {
     header: gc.GCObjectHeader,
+    gc: gc.GcNode = .{},
     class_id: class.ClassId,
     class_payload: class.Payload = .none,
     class_payload_kind: class.PayloadKind = .none,
@@ -1010,7 +1011,7 @@ pub const Object = struct {
         }
         if (prototype) |proto| gc.retain(&proto.header);
         self.* = .{
-            .header = .{ .kind = .object, .gc_obj_type = .object },
+            .header = .{ .kind = .object },
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
@@ -1153,7 +1154,7 @@ pub const Object = struct {
     }
 
     pub fn destroyFromHeader(rt: *Runtime, header: *gc.Header) void {
-        const self: *Object = @fieldParentPtr("header", header);
+        const self: *Object = @alignCast(@fieldParentPtr("header", header));
         rt.unregisterObject(self);
         clearBorrowedReferencesForDestroyedObject(rt, self);
         self.closeStdFile();
@@ -1269,7 +1270,7 @@ pub const Object = struct {
         var index: usize = 0;
         while (index < rt.borrowed_reference_holders.len) {
             const current = rt.borrowed_reference_holders[index];
-            if (current.header.ref_count == 0) {
+            if (current.header.rc == 0) {
                 index += 1;
                 continue;
             }
@@ -4349,8 +4350,8 @@ pub const Object = struct {
         while (iterator.next()) |address| {
             const current: *Object = @ptrFromInt(address.*);
             const internal_refs = incoming.get(address.*) orelse return false;
-            if (internal_refs > current.header.ref_count) return false;
-            const external_refs = current.header.ref_count - internal_refs;
+            if (internal_refs > current.header.rc) return false;
+            const external_refs = current.header.rc - internal_refs;
             if (external_refs != 0) scanPreservedObjects(rt, &visited, &preserved, &symbol_roots, current) catch return false;
         }
         scanPreservedWeakAndFinalizationEdges(rt, &visited, &preserved, &symbol_roots) catch return false;
@@ -4380,7 +4381,7 @@ pub const Object = struct {
         iterator = free_set.keyIterator();
         while (iterator.next()) |address| {
             const current: *Object = @ptrFromInt(address.*);
-            current.header.ref_count = 0;
+            current.header.rc = 0;
         }
 
         iterator = free_set.keyIterator();
@@ -4396,13 +4397,13 @@ pub const Object = struct {
     }
 
     fn traceChildren(rt: *Runtime, header: *gc.Header, visitor: anytype) void {
-        switch (header.gc_obj_type) {
+        switch (header.kind) {
             .object => {
-                const obj: *Object = @fieldParentPtr("header", header);
+                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                 obj.traceChildEdges(rt, visitor) catch {};
             },
             .function_bytecode => {
-                const fb: *bytecode_function.FunctionBytecode = @fieldParentPtr("header", header);
+                const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
                 if (fb.class_fields_init) |*stored| visitor.visitValue(stored);
                 for (fb.cpool) |*stored| visitor.visitValue(stored);
             },
@@ -4447,8 +4448,8 @@ pub const Object = struct {
 
         fn visitHeader(self: DecrefVisitor, h: *gc.Header) void {
             _ = self;
-            if (h.ref_count == 0) return;
-            h.ref_count -= 1;
+            if (h.rc == 0) return;
+            h.rc -= 1;
         }
     };
 
@@ -4488,9 +4489,9 @@ pub const Object = struct {
         }
 
         fn visitHeader(self: ScanIncrefVisitor, h: *gc.Header) void {
-            h.ref_count += 1;
-            if (h.mark == 1) {
-                h.mark = 0;
+            h.rc += 1;
+            if (h.flags.mark) {
+                h.flags.mark = false;
                 traceChildren(self.rt, h, self);
             }
         }
@@ -4533,9 +4534,35 @@ pub const Object = struct {
 
         fn visitHeader(self: ScanRestoreVisitor, h: *gc.Header) void {
             _ = self;
-            h.ref_count += 1;
+            h.rc += 1;
         }
     };
+
+    fn unlinkNodeFromList(head: *?*gc.GcNode, tail: *?*gc.GcNode, node: *gc.GcNode) void {
+        if (node.prev) |prev| {
+            prev.next = node.next;
+        } else {
+            head.* = node.next;
+        }
+        if (node.next) |next| {
+            next.prev = node.prev;
+        } else {
+            tail.* = node.prev;
+        }
+        node.prev = null;
+        node.next = null;
+    }
+
+    fn linkNodeToList(head: *?*gc.GcNode, tail: *?*gc.GcNode, node: *gc.GcNode) void {
+        node.prev = tail.*;
+        node.next = null;
+        if (tail.*) |t| {
+            t.next = node;
+        } else {
+            head.* = node;
+        }
+        tail.* = node;
+    }
 
     pub fn destroyRuntimeCyclesWithValueRoots(rt: *Runtime, roots: ?*const runtime_mod.ValueRootFrame) ObjectGraphError!usize {
         rt.gc.stats.collections += 1;
@@ -4543,50 +4570,52 @@ pub const Object = struct {
         // Phase 1: gc_decref
         {
             var current = rt.gc.gc_obj_list_head;
-            while (current) |h| {
-                h.mark = 1;
-                current = h.gc_next;
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                h.flags.mark = true;
             }
 
             current = rt.gc.gc_obj_list_head;
-            while (current) |h| {
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
                 traceChildren(rt, h, DecrefVisitor{ .rt = rt });
-                current = h.gc_next;
             }
         }
 
         // Phase 2: gc_scan
         {
             var current = rt.gc.gc_obj_list_head;
-            while (current) |h| {
-                if (h.ref_count > 0 and h.mark == 1) {
-                    h.mark = 0;
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.rc > 0 and h.flags.mark) {
+                    h.flags.mark = false;
                     traceChildren(rt, h, ScanIncrefVisitor{ .rt = rt });
                 }
-                current = h.gc_next;
             }
         }
 
         // Phase 3: move dead cycles to tmp_head
-        var tmp_head: ?*gc.Header = null;
-        var tmp_tail: ?*gc.Header = null;
+        var tmp_head: ?*gc.GcNode = null;
+        var tmp_tail: ?*gc.GcNode = null;
         defer {
             var current = tmp_head;
-            while (current) |h| {
-                const next = h.gc_next;
-                rt.gc.unlinkFrom(&tmp_head, &tmp_tail, h);
-                rt.gc.linkTo(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, h);
-                h.mark = 0;
+            while (current) |node| {
+                const next = node.next;
+                const h = gc.headerFromGcNode(node);
+                unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
+                h.flags.mark = false;
                 current = next;
             }
         }
         {
             var current = rt.gc.gc_obj_list_head;
-            while (current) |h| {
-                const next = h.gc_next;
-                if (h.mark == 1) {
-                    rt.gc.unlinkFrom(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, h);
-                    rt.gc.linkTo(&tmp_head, &tmp_tail, h);
+            while (current) |node| {
+                const next = node.next;
+                const h = gc.headerFromGcNode(node);
+                if (h.flags.mark) {
+                    unlinkNodeFromList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
+                    linkNodeToList(&tmp_head, &tmp_tail, node);
                 }
                 current = next;
             }
@@ -4595,9 +4624,9 @@ pub const Object = struct {
         // Phase 3b: restore refcounts of all objects in tmp_head (to be deleted)
         {
             var current = tmp_head;
-            while (current) |h| {
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
                 traceChildren(rt, h, ScanRestoreVisitor{ .rt = rt });
-                current = h.gc_next;
             }
         }
 
@@ -4611,25 +4640,25 @@ pub const Object = struct {
         // Populate visited and preserved from live list
         {
             var current = rt.gc.gc_obj_list_head;
-            while (current) |h| {
-                if (h.gc_obj_type == .object) {
-                    const obj: *Object = @fieldParentPtr("header", h);
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try visited.put(@intFromPtr(obj), {});
                     try preserved.put(@intFromPtr(obj), {});
                 }
-                current = h.gc_next;
             }
         }
         // Populate visited and free_set from garbage list
         {
             var current = tmp_head;
-            while (current) |h| {
-                if (h.gc_obj_type == .object) {
-                    const obj: *Object = @fieldParentPtr("header", h);
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try visited.put(@intFromPtr(obj), {});
                     try free_set.put(@intFromPtr(obj), {});
                 }
-                current = h.gc_next;
             }
         }
 
@@ -4793,21 +4822,22 @@ pub const Object = struct {
         // Move newly-preserved objects and bytecodes back to live list
         {
             var current = tmp_head;
-            while (current) |h| {
-                const next = h.gc_next;
-                if (h.gc_obj_type == .object) {
-                    const obj: *Object = @fieldParentPtr("header", h);
+            while (current) |node| {
+                const next = node.next;
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     if (preserved.contains(@intFromPtr(obj))) {
-                        rt.gc.unlinkFrom(&tmp_head, &tmp_tail, h);
-                        rt.gc.linkTo(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, h);
-                        h.mark = 0;
+                        unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                        linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
+                        h.flags.mark = false;
                     }
-                } else if (h.gc_obj_type == .function_bytecode) {
-                    const fb: *bytecode_function.FunctionBytecode = @fieldParentPtr("header", h);
+                } else if (h.kind == .function_bytecode) {
+                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     if (preserved_bytecodes.contains(@intFromPtr(fb))) {
-                        rt.gc.unlinkFrom(&tmp_head, &tmp_tail, h);
-                        rt.gc.linkTo(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, h);
-                        h.mark = 0;
+                        unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                        linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
+                        h.flags.mark = false;
                     }
                 }
                 current = next;
@@ -4818,12 +4848,12 @@ pub const Object = struct {
         free_set.clearRetainingCapacity();
         {
             var current = tmp_head;
-            while (current) |h| {
-                if (h.gc_obj_type == .object) {
-                    const obj: *Object = @fieldParentPtr("header", h);
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                     try free_set.put(@intFromPtr(obj), {});
                 }
-                current = h.gc_next;
             }
         }
 
@@ -4831,12 +4861,12 @@ pub const Object = struct {
         defer free_internal_bytecodes.deinit();
         {
             var current = tmp_head;
-            while (current) |h| {
-                if (h.gc_obj_type == .function_bytecode) {
-                    const fb: *bytecode_function.FunctionBytecode = @fieldParentPtr("header", h);
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .function_bytecode) {
+                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     try free_internal_bytecodes.put(@intFromPtr(fb), {});
                 }
-                current = h.gc_next;
             }
         }
 
@@ -4846,14 +4876,14 @@ pub const Object = struct {
             var iterator = preserved.keyIterator();
             while (iterator.next()) |address| {
                 const current: *Object = @ptrFromInt(address.*);
-                current.header.ref_count += 1;
+                current.header.rc += 1;
             }
         }
         {
             var iterator = preserved_bytecodes.keyIterator();
             while (iterator.next()) |address| {
                 const fb: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
-                fb.header.ref_count += 1;
+                fb.header.rc += 1;
             }
         }
 
@@ -4865,9 +4895,9 @@ pub const Object = struct {
             var iterator = preserved.keyIterator();
             while (iterator.next()) |address| {
                 const current: *Object = @ptrFromInt(address.*);
-                current.header.ref_count -= 1;
-                if (current.header.ref_count == 0) {
-                    current.header.ref_count = 1;
+                current.header.rc -= 1;
+                if (current.header.rc == 0) {
+                    current.header.rc = 1;
                     gc.release(rt, &current.header);
                 }
             }
@@ -4876,10 +4906,10 @@ pub const Object = struct {
             var iterator = preserved_bytecodes.keyIterator();
             while (iterator.next()) |address| {
                 const fb: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
-                fb.header.ref_count -= 1;
-                if (fb.header.ref_count == 0) {
-                    fb.header.ref_count = 1;
-                    _ = rt.gc.releaseObject(&fb.header);
+                fb.header.rc -= 1;
+                if (fb.header.rc == 0) {
+                    fb.header.rc = 1;
+                    gc.release(rt, &fb.header);
                 }
             }
         }
@@ -4887,31 +4917,33 @@ pub const Object = struct {
         var garbage_count: usize = 0;
         {
             var current = tmp_head;
-            while (current) |h| {
-                if (h.gc_obj_type == .object) garbage_count += 1;
-                current = h.gc_next;
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object) garbage_count += 1;
             }
         }
+
+        const old_phase = rt.gc.phase;
+        rt.gc.phase = .remove_cycles;
+        defer rt.gc.phase = old_phase;
+
         if (garbage_count == 0) {
             var current = tmp_head;
-            while (current) |h| {
-                if (h.gc_obj_type == .function_bytecode) {
-                    const fb: *bytecode_function.FunctionBytecode = @fieldParentPtr("header", h);
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .function_bytecode) {
+                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     clearFunctionBytecodeReferencesToVisited(rt, fb, &free_set, &free_internal_bytecodes);
                 }
-                current = h.gc_next;
             }
 
             current = tmp_head;
-            while (current) |h| {
-                const next = h.gc_next;
-                if (h.gc_obj_type == .function_bytecode) {
-                    rt.gc.unlinkFrom(&tmp_head, &tmp_tail, h);
-                    if (h.destroy_fn) |destroy_fn| {
-                        if (h.destroy_ctx) |ctx| {
-                            destroy_fn(h, ctx);
-                        }
-                    }
+            while (current) |node| {
+                const next = node.next;
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .function_bytecode) {
+                    unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                    bytecode_function.destroyFromHeader(rt, h);
                 }
                 current = next;
             }
@@ -4919,33 +4951,29 @@ pub const Object = struct {
         }
 
         var current_garbage = tmp_head;
-        while (current_garbage) |h| {
-            if (h.gc_obj_type == .object) {
-                const obj: *Object = @fieldParentPtr("header", h);
+        while (current_garbage) |node| : (current_garbage = node.next) {
+            const h = gc.headerFromGcNode(node);
+            if (h.kind == .object) {
+                const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 try obj.clearReferencesToVisited(rt, &free_set, &free_internal_bytecodes);
-            } else if (h.gc_obj_type == .function_bytecode) {
-                const fb: *bytecode_function.FunctionBytecode = @fieldParentPtr("header", h);
+            } else if (h.kind == .function_bytecode) {
+                const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 clearFunctionBytecodeReferencesToVisited(rt, fb, &free_set, &free_internal_bytecodes);
             }
-            current_garbage = h.gc_next;
         }
 
         const freed = garbage_count;
         rt.gc.stats.freed_objects += freed;
 
         current_garbage = tmp_head;
-        while (current_garbage) |h| {
-            const next = h.gc_next;
-            rt.gc.unlinkFrom(&tmp_head, &tmp_tail, h);
-            if (h.gc_obj_type == .object) {
-                const obj: *Object = @fieldParentPtr("header", h);
-                destroyFromHeader(rt, &obj.header);
-            } else if (h.gc_obj_type == .function_bytecode) {
-                if (h.destroy_fn) |destroy_fn| {
-                    if (h.destroy_ctx) |ctx| {
-                        destroy_fn(h, ctx);
-                    }
-                }
+        while (current_garbage) |node| {
+            const next = node.next;
+            const h = gc.headerFromGcNode(node);
+            unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+            if (h.kind == .object) {
+                destroyFromHeader(rt, h);
+            } else if (h.kind == .function_bytecode) {
+                bytecode_function.destroyFromHeader(rt, h);
             }
             current_garbage = next;
         }
@@ -4958,17 +4986,10 @@ pub const Object = struct {
         defer candidates.deinit();
 
         var current = rt.gc.gc_obj_list_head;
-        while (current) |header| {
-            if (header.destroy_fn == null or header.destroy_ctx == null) {
-                current = header.gc_next;
-                continue;
-            }
-            const function_bytecode = functionBytecodeFromGcHeader(header) orelse {
-                current = header.gc_next;
-                continue;
-            };
+        while (current) |node| : (current = node.next) {
+            const h = gc.headerFromGcNode(node);
+            const function_bytecode = functionBytecodeFromGcHeader(h) orelse continue;
             candidates.put(@intFromPtr(function_bytecode), {}) catch return;
-            current = header.gc_next;
         }
         if (candidates.count() == 0) return;
 
@@ -4992,7 +5013,7 @@ pub const Object = struct {
             while (iterator.next()) |address| {
                 const function_bytecode: *const bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
                 const internal_refs = countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
-                const ref_count = function_bytecode.header.ref_count;
+                const ref_count = function_bytecode.header.rc;
                 if (ref_count == internal_refs or (ref_count != 0 and ref_count - 1 == internal_refs)) continue;
 
                 _ = candidates.remove(address.*);
@@ -5013,10 +5034,14 @@ pub const Object = struct {
 
     fn releaseFunctionBytecodeGuards(rt: *Runtime, candidates: *const ObjectVisitSet) void {
         var current = rt.gc.gc_obj_list_tail;
-        while (current) |header| {
-            const prev = header.gc_prev;
-            if (candidates.contains(@intFromPtr(header))) {
-                _ = rt.gc.releaseObject(header);
+        while (current) |node| {
+            const prev = node.prev;
+            const h = gc.headerFromGcNode(node);
+            const fb_ptr = if (h.kind == .function_bytecode) @as(*bytecode_function.FunctionBytecode, @alignCast(@fieldParentPtr("header", h))) else null;
+            if (fb_ptr) |fb| {
+                if (candidates.contains(@intFromPtr(fb))) {
+                    gc.release(rt, h);
+                }
             }
             current = prev;
         }
@@ -5095,7 +5120,7 @@ pub const Object = struct {
     }
 
     fn collectReachableObjects(rt: *Runtime, visited: *ObjectVisitSet, current: *Object) ObjectGraphError!void {
-        if (current.header.ref_count == 0) return;
+        if (current.header.rc == 0) return;
         const visit = try visited.getOrPut(@intFromPtr(current));
         if (visit.found_existing) return;
         try current.collectDirectChildObjects(rt, visited);
@@ -5759,10 +5784,11 @@ pub const Object = struct {
         symbol_roots: *SymbolRootSet,
     ) ObjectGraphError!void {
         var current_node = rt.gc.gc_obj_list_head;
-        while (current_node) |header| {
-            const next = header.gc_next;
-            if (header.gc_obj_type == .object) {
-                const current: *Object = @fieldParentPtr("header", header);
+        while (current_node) |node| {
+            const next = node.next;
+            const header = gc.headerFromGcNode(node);
+            if (header.kind == .object) {
+                const current: *Object = @alignCast(@fieldParentPtr("header", header));
                 if (preserved.contains(@intFromPtr(current))) {
                     const finalization_payload = current.finalizationRegistryPayload() orelse {
                         current.pruneBorrowedReferenceHolderIfEmpty(rt);
@@ -5883,11 +5909,12 @@ pub const Object = struct {
     fn liveObjectFromWeakIdentity(rt: *Runtime, key_identity: usize) ?*Object {
         if ((key_identity & 1) != 0) return null;
         var current = rt.gc.gc_obj_list_head;
-        while (current) |header| {
-            const next = header.gc_next;
-            if (header.ref_count > 0 and header.gc_obj_type == .object) {
+        while (current) |node| {
+            const next = node.next;
+            const header = gc.headerFromGcNode(node);
+            if (header.rc > 0 and header.kind == .object) {
                 if ((@intFromPtr(header) & ~@as(usize, 1)) == key_identity) {
-                    const obj: *Object = @fieldParentPtr("header", header);
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                     return obj;
                 }
             }
@@ -6109,8 +6136,9 @@ pub const Object = struct {
         while (changed) {
             changed = false;
             var current_node = rt.gc.gc_obj_list_head;
-            while (current_node) |header| {
-                const next = header.gc_next;
+            while (current_node) |node| {
+                const next = node.next;
+                const header = gc.headerFromGcNode(node);
                 const function_bytecode = functionBytecodeFromGcHeader(header) orelse {
                     current_node = next;
                     continue;
@@ -6149,7 +6177,7 @@ pub const Object = struct {
                 const internal_refs =
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, internal_bytecodes);
-                if (internal_refs == function_bytecode.header.ref_count) continue;
+                if (internal_refs == function_bytecode.header.rc) continue;
 
                 _ = internal_bytecodes.remove(address.*);
                 removed = true;
@@ -6160,8 +6188,8 @@ pub const Object = struct {
     }
 
     fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const bytecode_function.FunctionBytecode {
-        if (header.gc_obj_type != .function_bytecode) return null;
-        return @fieldParentPtr("header", header);
+        if (header.kind != .function_bytecode) return null;
+        return @alignCast(@fieldParentPtr("header", header));
     }
 
     fn countFunctionBytecodeRefsFromVisitedObjects(

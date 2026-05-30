@@ -2191,6 +2191,7 @@ pub fn parseAssignExpr(s: *ParseState) Error!void {
 /// and compound-assignment lowering for identifiers, member targets,
 /// destructuring, and arrow cover forms.
 pub fn parseAssignExpr2(s: *ParseState, flags: ParseFlags) Error!void {
+    // std.debug.print("parseAssignExpr2: s.token.val={d} ('{c}')\n", .{ s.token.val, @as(u8, @intCast(if (s.token.val >= 0 and s.token.val <= 255) s.token.val else ' ' )) });
     s.assign_expr_depth += 1;
     const current_assign_depth = s.assign_expr_depth;
     if (s.last_coalesce_expr_depth == current_assign_depth) {
@@ -6816,8 +6817,23 @@ fn blockDirectUsingDeclarationKind(s: *ParseState) ?UsingStackKind {
 
     var depth: usize = 0;
     var result: ?UsingStackKind = null;
+    var previous_token_kind: ?tok.TokenKind = null;
     while (s.peekKind() != tok.TOK_EOF) {
         const kind = s.peekKind();
+        if (kind == tok.TOK_TEMPLATE) {
+            skipTemplateInPredeclareScan(s, s.token) catch return result;
+            s.advance() catch return result;
+            previous_token_kind = tok.TOK_TEMPLATE;
+            continue;
+        }
+        if (kind == '/') {
+            if (skipRegexpInPredeclareScan(s, previous_token_kind) catch return result) {
+                s.advance() catch return result;
+                previous_token_kind = tok.TOK_REGEXP;
+                continue;
+            }
+        }
+
         if (kind == @as(tok.TokenKind, @intCast('{'))) {
             depth += 1;
         } else if (kind == @as(tok.TokenKind, @intCast('}'))) {
@@ -6833,6 +6849,7 @@ fn blockDirectUsingDeclarationKind(s: *ParseState) ?UsingStackKind {
             }
         }
         s.advance() catch return result;
+        previous_token_kind = kind;
     }
     return result;
 }
@@ -14119,6 +14136,17 @@ fn collectClassPrivateBoundNames(s: *ParseState, bound_start: usize) Error!void 
         }
 
         switch (k) {
+            @as(tok.TokenKind, @intCast('/')) => {
+                if (try skipRegexpInPredeclareScan(s, prev_kind)) {
+                    prev_kind = tok.TOK_REGEXP;
+                    continue;
+                }
+            },
+            tok.TOK_TEMPLATE => {
+                try skipTemplateInPredeclareScan(s, scan_token);
+                prev_kind = tok.TOK_TEMPLATE;
+                continue;
+            },
             @as(tok.TokenKind, @intCast('{')) => brace_depth += 1,
             @as(tok.TokenKind, @intCast('}')) => {
                 brace_depth -= 1;

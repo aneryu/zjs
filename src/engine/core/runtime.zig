@@ -1066,8 +1066,8 @@ pub const Runtime = struct {
 fn objectFromLastRefValue(value: Value) ?*Object {
     const header = value.refHeader() orelse return null;
     if (header.kind != .object) return null;
-    if (header.ref_count != 1) return null;
-    return @fieldParentPtr("header", header);
+    if (header.rc != 1) return null;
+    return @alignCast(@fieldParentPtr("header", header));
 }
 
 fn valueMayContainNestedSymbolRoots(value: Value) bool {

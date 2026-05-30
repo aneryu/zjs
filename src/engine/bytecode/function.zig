@@ -236,7 +236,7 @@ pub const Bytecode = struct {
     fn deinitIcSlots(self: *Bytecode, rt: ?*runtime.Runtime) void {
         const ic_slots = self.ic_slots;
         self.ic_slots = &.{};
-        if (ic_slots.len != 0) {
+        if (ic_slots.len != 0 and @intFromPtr(ic_slots.ptr) != 0) {
             if (rt) |runtime_ptr| {
                 for (ic_slots) |*slot| slot.deinit(&runtime_ptr.shapes);
             }
@@ -244,12 +244,12 @@ pub const Bytecode = struct {
         }
         const ic_site_ids = self.ic_site_ids;
         self.ic_site_ids = &.{};
-        if (ic_site_ids.len != 0) {
+        if (ic_site_ids.len != 0 and @intFromPtr(ic_site_ids.ptr) != 0) {
             self.memory.free(usize, ic_site_ids);
         }
         const ic_sites = self.ic_sites;
         self.ic_sites = &.{};
-        if (ic_sites.len != 0) {
+        if (ic_sites.len != 0 and @intFromPtr(ic_sites.ptr) != 0) {
             self.memory.free(IcSite, ic_sites);
         }
     }
@@ -431,6 +431,7 @@ pub const Bytecode = struct {
 /// allocation - registered as deviation D2 in parser-deviation-matrix.md.
 pub const FunctionBytecode = struct {
     header: gc.GCObjectHeader,
+    gc: gc.GcNode = .{},
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
 
@@ -507,7 +508,6 @@ pub const FunctionBytecode = struct {
         return .{
             .header = .{
                 .kind = .function_bytecode,
-                .gc_obj_type = .function_bytecode,
             },
             .memory = account,
             .atoms = atoms,
@@ -654,7 +654,7 @@ pub const FunctionBytecode = struct {
     fn deinitIcSlots(self: *FunctionBytecode, rt: ?*runtime.Runtime) void {
         const ic_slots = self.ic_slots;
         self.ic_slots = &.{};
-        if (ic_slots.len != 0) {
+        if (ic_slots.len != 0 and @intFromPtr(ic_slots.ptr) != 0) {
             if (rt) |runtime_ptr| {
                 for (ic_slots) |*slot| slot.deinit(&runtime_ptr.shapes);
             }
@@ -662,12 +662,12 @@ pub const FunctionBytecode = struct {
         }
         const ic_site_ids = self.ic_site_ids;
         self.ic_site_ids = &.{};
-        if (ic_site_ids.len != 0) {
+        if (ic_site_ids.len != 0 and @intFromPtr(ic_site_ids.ptr) != 0) {
             self.memory.free(usize, ic_site_ids);
         }
         const ic_sites = self.ic_sites;
         self.ic_sites = &.{};
-        if (ic_sites.len != 0) {
+        if (ic_sites.len != 0 and @intFromPtr(ic_sites.ptr) != 0) {
             self.memory.free(IcSite, ic_sites);
         }
     }
@@ -778,7 +778,11 @@ fn findIcSite(sites: []const IcSite, site_pc: usize) ?IcSite {
 
 pub fn destroyFunctionBytecode(header: *gc.ObjectHeader, destroy_ctx: ?*anyopaque) void {
     const rt: *runtime.Runtime = @ptrCast(@alignCast(destroy_ctx orelse return));
-    const fb: *FunctionBytecode = @fieldParentPtr("header", header);
-    fb.deinit(rt);
-    rt.memory.free(FunctionBytecode, fb[0..1]);
+    destroyFromHeader(rt, header);
+}
+
+pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
+    const self: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+    self.deinit(rt);
+    rt.memory.free(FunctionBytecode, self[0..1]);
 }

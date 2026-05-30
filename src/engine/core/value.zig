@@ -141,11 +141,11 @@ pub const Value = extern struct {
         return self.tag == Tag.function_bytecode;
     }
 
-    pub fn requiresRefCount(self: Value) bool {
-        return switch (self.tag) {
-            Tag.big_int, Tag.string, Tag.string_rope, Tag.module, Tag.object, Tag.function_bytecode => true,
-            else => false,
-        };
+    pub inline fn requiresRefCount(self: Value) bool {
+        switch (self.tag) {
+            Tag.big_int, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
+            else => return false,
+        }
     }
 
     pub fn asInt32(self: Value) ?i32 {
@@ -209,7 +209,7 @@ pub const Value = extern struct {
         }
         if (rt.opcode_profile) |prof| prof.recordValueFree();
         if (self.refHeader()) |header| gc.release(rt, header);
-        if (self.objectHeader()) |header| _ = rt.gc.releaseObject(header);
+        if (self.objectHeader()) |header| gc.release(rt, header);
     }
 
     pub fn same(self: Value, other: Value) bool {

@@ -78,9 +78,32 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry) void {
-        while (self.shapes.len != 0) {
-            self.release(self.shapes[self.shapes.len - 1]);
+        for (self.shapes) |shape| {
+            const transitions: []Transition = if (shape.transitions_capacity != 0) shape.transitions.ptr[0..shape.transitions_capacity] else shape.transitions[0..0];
+            const transition_atom = shape.transition_atom;
+            const props = shape.props;
+            const prop_count = shape.prop_count;
+            const hash_buckets = shape.hash_buckets;
+
+            shape.transitions = &.{};
+            shape.transitions_capacity = 0;
+            shape.transition_atom = atom.null_atom;
+            shape.props = &.{};
+            shape.prop_count = 0;
+            shape.deleted_prop_count = 0;
+            shape.hash_buckets = &.{};
+            shape.prop_hash_mask = no_property_hash;
+
+            if (transitions.len != 0) self.memory.free(Transition, transitions);
+            if (transition_atom != atom.null_atom) self.atoms.free(transition_atom);
+            for (props[0..prop_count]) |prop| {
+                if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
+            }
+            if (hash_buckets.len != 0) self.memory.free(u32, hash_buckets);
+            self.memory.free(Property, props);
+            self.memory.destroy(Shape, shape);
         }
+
         const buckets = self.shape_hash_buckets;
         const shapes: []*Shape = if (self.shapes_capacity != 0) self.shapes.ptr[0..self.shapes_capacity] else self.shapes[0..0];
         self.shape_hash_buckets = &.{};

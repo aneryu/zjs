@@ -388,8 +388,6 @@ test "closure iteratorResult roots direct function bytecode value while creating
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -434,8 +432,6 @@ fn createTestFunctionBytecodeValue(rt: *core.Runtime, symbol_name: []const u8) !
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
     fb.cpool = try rt.memory.alloc(core.Value, 1);

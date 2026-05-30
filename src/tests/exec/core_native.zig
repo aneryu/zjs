@@ -66,11 +66,11 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, rt, 0, object.value());
     object.value().free(rt);
 
-    try std.testing.expectEqual(@as(usize, 1), object.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
     const current = frame.locals[0];
     try frame.setLocal(&rt.memory, rt, 0, current);
 
-    try std.testing.expectEqual(@as(usize, 1), object.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
     try std.testing.expectEqual(&object.header, frame.locals[0].refHeader().?);
 }
 
@@ -612,7 +612,7 @@ test "globals setExistingByName handles self-assignment without dropping object"
     try engine.exec.globals.setExistingByName(rt, globals[0..], "self", globals[0].value);
 
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
-    try std.testing.expectEqual(@as(usize, 1), object.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
     try std.testing.expectEqual(&object.header, globals[0].value.refHeader().?);
 }
 

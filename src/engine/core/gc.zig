@@ -1,22 +1,30 @@
+//! Z-GE (Garbage Engine) Core Implementation
+//! Governing Layer: third_party/zjs/src/engine/core/gc.zig
+//! Following Z-GE Architecture Contract v1.0
+
 const std = @import("std");
+const builtin = @import("builtin");
 const memory = @import("memory.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
+const bytecode_function = @import("../bytecode/function.zig");
 
-pub const RefKind = enum {
-    string,
-    object,
-    big_int,
-    function_bytecode,
+/// 6.2 BlockHeader / GcKind definition
+pub const RefKind = enum(u8) {
+    string = 0,
+    object = 1,
+    big_int = 2,
+    function_bytecode = 3,
 };
 
-pub const ObjectKind = enum {
-    object,
-    function_bytecode,
-    module,
-    shape,
-    string,
+pub const GcKind = RefKind;
+pub const ObjectKind = enum(u8) {
+    object = 0,
+    function_bytecode = 1,
+    module = 2,
+    shape = 3,
+    string = 4,
 };
 
 pub const Phase = enum {
@@ -24,43 +32,83 @@ pub const Phase = enum {
     decref,
     remove_cycles,
     deinit,
+    cycle,
 };
 
-pub const Header = struct {
-    kind: RefKind,
-    ref_count: usize = 1,
+pub const BlockFlags = packed struct(u8) {
+    mark: bool = false,
+    in_cycle_list: bool = false,
+    finalizing: bool = false,
+    immortal: bool = false,
+    reserved: u4 = 0,
+};
 
-    gc_next: ?*Header = null,
-    gc_prev: ?*Header = null,
-    mark: u8 = 0, // 0 = unmarked/live, 1 = decref'd, etc.
-    gc_obj_type: ObjectKind = .object,
-    destroy_fn: ?*const fn (header: *Header, ctx: ?*anyopaque) void = null,
-    destroy_ctx: ?*anyopaque = null,
+/// Z-GE v1.0 8-byte BlockHeader
+pub const BlockHeader = extern struct {
+    size_class: u16 align(8) = 0,
+    kind: GcKind,
+    flags: BlockFlags = .{},
+    rc: i32 = 1,
 
-    pub fn retain(self: *Header) void {
-        std.debug.assert(self.ref_count > 0);
-        self.ref_count += 1;
+    comptime {
+        std.debug.assert(@sizeOf(BlockHeader) == 8);
+    }
+
+    pub fn retain(self: *BlockHeader) void {
+        std.debug.assert(self.rc > 0);
+        self.rc += 1;
     }
 };
 
+pub const Header = BlockHeader;
 pub const GCObjectHeader = Header;
 pub const ObjectHeader = Header;
 
-pub const Registry = struct {
-    pub const Stats = struct {
-        collections: usize = 0,
-        freed_objects: usize = 0,
-        freed_bytecodes: usize = 0,
-    };
+/// 11.2 GcNode definition
+pub const GcColor = enum(u8) {
+    white = 0,
+    gray = 1,
+    black = 2,
+};
 
+pub const GcNode = extern struct {
+    prev: ?*GcNode = null,
+    next: ?*GcNode = null,
+    tmp_rc: i32 = 0,
+    color: GcColor = .white,
+    _pad: [3]u8 = .{ 0, 0, 0 },
+
+    pub fn init() GcNode {
+        return .{};
+    }
+};
+
+/// 19. GE Stats
+pub const GeStats = struct {
+    rc_inc: usize = 0,
+    rc_dec: usize = 0,
+    zero_ref_drains: usize = 0,
+
+    cycle_gc_count: usize = 0,
+    cycle_gc_time_ns: u64 = 0,
+    cycles_collected: usize = 0,
+
+    allocated_bytes: usize = 0,
+    peak_allocated_bytes: usize = 0,
+    collections: usize = 0,
+    freed_objects: usize = 0,
+};
+
+/// Z-GE Registry
+pub const Registry = struct {
     memory: *memory.MemoryAccount,
 
-    // Unified double-linked intrusive list of all GC-tracked objects
-    gc_obj_list_head: ?*GCObjectHeader = null,
-    gc_obj_list_tail: ?*GCObjectHeader = null,
+    // GcNode 链表头与尾，仅串联可能参与循环检测的 GcCandidate (如 Object, FunctionBytecode)
+    gc_obj_list_head: ?*GcNode = null,
+    gc_obj_list_tail: ?*GcNode = null,
 
     phase: Phase = .none,
-    stats: Stats = .{},
+    stats: GeStats = .{},
 
     pub fn init(account: *memory.MemoryAccount) Registry {
         return .{
@@ -70,141 +118,169 @@ pub const Registry = struct {
 
     pub fn deinit(self: *Registry, rt: anytype) void {
         self.phase = .deinit;
-        while (self.gc_obj_list_tail) |header| {
-            self.unlinkFrom(&self.gc_obj_list_head, &self.gc_obj_list_tail, header);
-            if (header.destroy_fn) |destroy_fn| {
-                if (header.destroy_ctx) |ctx| {
-                    destroy_fn(header, ctx);
-                }
-            } else {
-                switch (header.kind) {
-                    .string => string.String.destroyFromHeader(rt, header),
-                    .object => object.Object.destroyFromHeader(rt, header),
-                    .big_int => bigint.BigInt.destroyFromHeader(rt, header),
-                    .function_bytecode => unreachable,
-                }
+
+        // 释放可能存活的所有 Candidate 对象
+        while (self.gc_obj_list_tail) |node| {
+            self.unlinkNode(node);
+            const h = headerFromGcNode(node);
+            h.flags.finalizing = true;
+            if (h.kind == .object) {
+                object.Object.destroyFromHeader(rt, h);
+            } else if (h.kind == .function_bytecode) {
+                bytecode_function.destroyFromHeader(rt, h);
             }
         }
+
         self.gc_obj_list_head = null;
         self.gc_obj_list_tail = null;
         self.phase = .none;
     }
 
-    pub fn linkTo(self: *Registry, head_ptr: *?*GCObjectHeader, tail_ptr: *?*GCObjectHeader, header: *GCObjectHeader) void {
+    pub fn add(self: *Registry, h: *GCObjectHeader) !void {
+        h.rc = 1;
+        h.flags = .{};
+
+        if (h.kind == .object) {
+            const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
+            obj.gc._pad[0] = @intFromEnum(h.kind);
+            self.linkNode(&obj.gc);
+        } else if (h.kind == .function_bytecode) {
+            const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+            fb.gc._pad[0] = @intFromEnum(h.kind);
+            self.linkNode(&fb.gc);
+        }
+    }
+
+    pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
+        if (h.kind == .object) {
+            const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
+            self.unlinkNode(&obj.gc);
+        } else if (h.kind == .function_bytecode) {
+            const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+            self.unlinkNode(&fb.gc);
+        }
+    }
+
+    pub fn retainObject(self: *Registry, h: *GCObjectHeader) void {
         _ = self;
-        header.gc_prev = tail_ptr.*;
-        header.gc_next = null;
-        if (tail_ptr.*) |tail| {
-            tail.gc_next = header;
+        h.retain();
+    }
+
+    pub fn releaseObject(self: *Registry, h: *GCObjectHeader) bool {
+        std.debug.assert(h.rc > 0);
+        h.rc -= 1;
+        self.stats.rc_dec += 1;
+
+        if (h.rc == 0) {
+            self.unlinkObject(h);
+            return true;
+        }
+        return false;
+    }
+
+    pub fn linkNode(self: *Registry, node: *GcNode) void {
+        node.prev = self.gc_obj_list_tail;
+        node.next = null;
+        if (self.gc_obj_list_tail) |tail| {
+            tail.next = node;
         } else {
-            head_ptr.* = header;
+            self.gc_obj_list_head = node;
         }
-        tail_ptr.* = header;
+        self.gc_obj_list_tail = node;
+        node.color = .white;
     }
 
-    pub fn unlinkFrom(self: *Registry, head_ptr: *?*GCObjectHeader, tail_ptr: *?*GCObjectHeader, header: *GCObjectHeader) void {
-        _ = self;
-        if (header.gc_prev) |prev| {
-            prev.gc_next = header.gc_next;
+    pub fn unlinkNode(self: *Registry, node: *GcNode) void {
+        if (self.gc_obj_list_head != node and node.prev == null) return;
+
+        if (node.prev) |prev| {
+            prev.next = node.next;
         } else {
-            head_ptr.* = header.gc_next;
+            self.gc_obj_list_head = node.next;
         }
-        if (header.gc_next) |next| {
-            next.gc_prev = header.gc_prev;
+        if (node.next) |next| {
+            next.prev = node.prev;
         } else {
-            tail_ptr.* = header.gc_prev;
+            self.gc_obj_list_tail = node.prev;
         }
-        header.gc_prev = null;
-        header.gc_next = null;
-    }
-
-    pub fn add(self: *Registry, header: *GCObjectHeader) !void {
-        header.ref_count = 1;
-        header.mark = 0;
-        header.destroy_fn = null;
-        header.destroy_ctx = null;
-        self.linkTo(&self.gc_obj_list_head, &self.gc_obj_list_tail, header);
-    }
-
-    pub fn unlinkObject(self: *Registry, header: *GCObjectHeader) void {
-        if (header.mark == 0) {
-            if (header.gc_prev != null or header.gc_next != null or self.gc_obj_list_head == header) {
-                self.unlinkFrom(&self.gc_obj_list_head, &self.gc_obj_list_tail, header);
-            }
-        }
-    }
-
-    pub fn retainObject(_: *Registry, header: *GCObjectHeader) void {
-        header.retain();
-    }
-
-    pub fn releaseObject(self: *Registry, header: *GCObjectHeader) bool {
-        std.debug.assert(header.ref_count > 0);
-        header.ref_count -= 1;
-        if (header.ref_count != 0) return false;
-
-        if (header.mark == 0) {
-            self.unlinkFrom(&self.gc_obj_list_head, &self.gc_obj_list_tail, header);
-            if (header.destroy_fn) |destroy_fn| {
-                if (header.destroy_ctx) |ctx| {
-                    destroy_fn(header, ctx);
-                }
-                return true;
-            }
-        }
-        return true;
-    }
-
-    pub fn releaseCallbackOwnedObjects(self: *Registry) void {
-        while (true) {
-            var current = self.gc_obj_list_tail;
-            var released = false;
-            while (current) |header| {
-                const prev = header.gc_prev;
-                if (header.destroy_fn) |destroy_fn| {
-                    if (header.destroy_ctx) |ctx| {
-                        if (header.ref_count == 1) {
-                            self.unlinkFrom(&self.gc_obj_list_head, &self.gc_obj_list_tail, header);
-                            destroy_fn(header, ctx);
-                            released = true;
-                            break;
-                        }
-                    }
-                }
-                current = prev;
-            }
-            if (!released) return;
-        }
+        node.prev = null;
+        node.next = null;
     }
 
     pub fn liveCount(self: Registry) usize {
         var count: usize = 0;
         var current = self.gc_obj_list_head;
-        while (current) |header| {
+        while (current) |node| {
             count += 1;
-            current = header.gc_next;
+            current = node.next;
         }
         return count;
     }
+
+    pub fn releaseCallbackOwnedObjects(self: *Registry) void {
+        _ = self;
+    }
 };
 
+/// 6.3 Header 反查与转换辅助
+pub inline fn headerFromPayload(ptr: *anyopaque) *BlockHeader {
+    const addr = @intFromPtr(ptr);
+    return @ptrFromInt(addr - @sizeOf(BlockHeader));
+}
+
+pub inline fn checkedHeaderFromPayload(rt: anytype, ptr: *anyopaque) *BlockHeader {
+    _ = rt;
+    const h = headerFromPayload(ptr);
+    if (builtin.mode == .Debug) {
+        std.debug.assert(h.rc >= 0);
+    }
+    return h;
+}
+
+pub inline fn payloadFromHeader(h: *BlockHeader) *anyopaque {
+    const addr = @intFromPtr(h);
+    return @ptrFromInt(addr + @sizeOf(BlockHeader));
+}
+
+pub inline fn objectFromGcNode(node: *GcNode) *object.Object {
+    return @alignCast(@fieldParentPtr("gc", node));
+}
+
+pub inline fn headerFromGcNode(node: *GcNode) *BlockHeader {
+    const kind: RefKind = @enumFromInt(node._pad[0]);
+    switch (kind) {
+        .object => {
+            const obj: *object.Object = @alignCast(@fieldParentPtr("gc", node));
+            return &obj.header;
+        },
+        .function_bytecode => {
+            const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("gc", node));
+            return &fb.header;
+        },
+        else => unreachable,
+    }
+}
+
+/// 9.1 统一的非原子 retain/release/dup/free 路径
 pub fn retain(header: *Header) void {
-    header.ref_count += 1;
+    header.retain();
 }
 
 pub fn release(rt: anytype, header: *Header) void {
-    std.debug.assert(header.ref_count > 0);
-    header.ref_count -= 1;
-    if (header.ref_count != 0) return;
+    std.debug.assert(header.rc > 0);
+    header.rc -= 1;
+    rt.gc.stats.rc_dec += 1;
 
-    if (header.mark == 0) {
+    if (header.rc == 0) {
         if (rt.gc.phase == .deinit and header.kind == .object) return;
         rt.gc.unlinkObject(header);
+
+        // 10.1 静态 kind switch 派发销毁
         switch (header.kind) {
             .string => string.String.destroyFromHeader(rt, header),
             .object => object.Object.destroyFromHeader(rt, header),
             .big_int => bigint.BigInt.destroyFromHeader(rt, header),
-            .function_bytecode => unreachable,
+            .function_bytecode => bytecode_function.destroyFromHeader(rt, header),
         }
     }
 }

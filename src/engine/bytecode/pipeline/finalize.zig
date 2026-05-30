@@ -72,8 +72,6 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
 
     try rt.gc.add(&fb.header);
     registered = true;
-    fb.header.destroy_fn = bytecode_function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     // Copy flags and metadata
     fb.is_strict_mode = fd.is_strict_mode;

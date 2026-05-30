@@ -465,7 +465,7 @@ test "FunctionDef: cpool transfers refcounted owned values" {
     const text = try core.string.String.createAscii(rt, "function-def-owned");
     _ = try fd.appendCpoolOwned(text.value());
 
-    try std.testing.expectEqual(@as(usize, 1), text.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), text.header.rc);
 }
 
 test "FunctionDef: cpool retains unique symbol atoms until release" {

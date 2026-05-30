@@ -660,8 +660,6 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-job-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -738,8 +736,6 @@ test "GC keeps rooted function bytecode symbol constants" {
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-bytecode-symbol-constant");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -2123,12 +2119,12 @@ test "failed new property definition rolls back retained entry" {
     try std.testing.expectEqual(@as(usize, 4), object.property_capacity);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
 
-    const retained_refs = retained.header.ref_count;
+    const retained_refs = retained.header.rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, d, core.Descriptor.data(retained.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(retained_refs, retained.header.ref_count);
+    try std.testing.expectEqual(retained_refs, retained.header.rc);
     try std.testing.expectEqual(@as(usize, 3), object.properties.len);
     try std.testing.expectEqual(@as(usize, 3), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(d));
@@ -2148,7 +2144,7 @@ test "global lexical env property alias releases global strong reference" {
     const env_key = try rt.internAtom("env");
     defer rt.atoms.free(env_key);
     try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), true, true, true));
-    try std.testing.expectEqual(@as(usize, 2), env.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 2), env.header.rc);
 
     global.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
@@ -2249,14 +2245,14 @@ test "failed property replacement preserves existing entry" {
     try std.testing.expectEqual(@as(usize, 1), object.properties.len);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
-    const old_refs = old_value.header.ref_count;
-    const replacement_refs = replacement.header.ref_count;
+    const old_refs = old_value.header.rc;
+    const replacement_refs = replacement.header.rc;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true)));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_refs, old_value.header.ref_count);
-    try std.testing.expectEqual(replacement_refs, replacement.header.ref_count);
+    try std.testing.expectEqual(old_refs, old_value.header.rc);
+    try std.testing.expectEqual(replacement_refs, replacement.header.rc);
     try std.testing.expectEqual(@as(usize, 1), object.properties.len);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
@@ -2277,21 +2273,21 @@ test "object data property self-assignment keeps stored object alive" {
 
     try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), true, true, true));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
 
     const own_value = holder.properties[0].slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 
     const property_value = holder.properties[0].slot.data;
     try holder.setProperty(rt, key, property_value);
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 
     const simple_value = holder.properties[0].slot.data;
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, key, simple_value));
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 }
 
@@ -2307,12 +2303,12 @@ test "json parse data property self-assignment keeps stored object alive" {
 
     try holder.defineJsonParseDataProperty(rt, key, stored.value());
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
 
     const current = holder.properties[0].slot.data;
     try holder.defineJsonParseDataProperty(rt, key, current);
 
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
     try std.testing.expectEqual(&stored.header, holder.properties[0].slot.data.refHeader().?);
 }
 
@@ -2327,12 +2323,12 @@ test "dense array element self-assignment keeps stored object alive" {
 
     try std.testing.expect(try array.appendDenseArrayIndex(rt, 0, index, stored.value()));
     stored.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
 
     const current = array.arrayElements()[0].?;
     try array.setProperty(rt, index, current);
 
-    try std.testing.expectEqual(@as(usize, 1), stored.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), stored.header.rc);
     try std.testing.expectEqual(&stored.header, array.arrayElements()[0].?.refHeader().?);
 }
 
@@ -2382,14 +2378,14 @@ test "failed prototype replacement preserves prototype and refcounts" {
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expect(first.getPrototype() == null);
 
-    const proto_refs = proto.header.ref_count;
+    const proto_refs = proto.header.rc;
     const shape_refs = shared_shape.ref_count;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, first.setPrototype(rt, proto));
     rt.setMemoryLimit(null);
 
     try std.testing.expect(first.getPrototype() == null);
-    try std.testing.expectEqual(proto_refs, proto.header.ref_count);
+    try std.testing.expectEqual(proto_refs, proto.header.rc);
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expectEqual(shape_refs, shared_shape.ref_count);
@@ -2568,10 +2564,10 @@ test "reference dup and free retain until final release" {
     const str = try core.string.String.createAscii(rt, "abc");
     const value = str.value();
     const duped = value.dup();
-    try std.testing.expectEqual(@as(usize, 2), str.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 2), str.header.rc);
 
     value.free(rt);
-    try std.testing.expectEqual(@as(usize, 1), str.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), str.header.rc);
     duped.free(rt);
 }
 
@@ -2601,32 +2597,32 @@ test "gc registry tracks live objects and intrusive list state" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const header = try rt.memory.create(core.gc.Header);
-    defer rt.memory.destroy(core.gc.Header, header);
-    header.* = .{ .kind = .object, .gc_obj_type = .object };
-    try rt.gc.add(header);
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
 
-    rt.gc.unlinkObject(header);
+    rt.gc.unlinkObject(&obj.header);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    
+    // Clean up manually since we unlinked it
+    core.Object.destroyFromHeader(rt, &obj.header);
 }
 
 test "gc object release does not allocate after refcount reaches zero" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const header = try rt.memory.create(core.gc.Header);
-    defer rt.memory.destroy(core.gc.Header, header);
-    header.* = .{ .kind = .object, .gc_obj_type = .object };
-    try rt.gc.add(header);
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    const did_release = rt.gc.releaseObject(header);
+    const did_release = rt.gc.releaseObject(&obj.header);
     rt.setMemoryLimit(null);
 
     try std.testing.expect(did_release);
-    try std.testing.expectEqual(@as(usize, 0), header.ref_count);
+    try std.testing.expectEqual(@as(i32, 0), obj.header.rc);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    
+    // Clean up manually since we released/unlinked it
+    core.Object.destroyFromHeader(rt, &obj.header);
 }
 
 test "closed object property cycle is released by runtime cycle removal" {
@@ -2745,8 +2741,6 @@ test "function bytecode constant object cycle is released by runtime cycle remov
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, name);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     fb.cpool = try rt.memory.alloc(core.Value, 1);
     fb.cpool[0] = captured.value().dup();
     fb.cpool_count = 1;
@@ -2770,8 +2764,6 @@ test "runtime destroy releases callback bytecode before object registries" {
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     fb.cpool = try rt.memory.alloc(core.Value, 1);
     fb.cpool[0] = captured.value().dup();
     fb.cpool_count = 1;
@@ -2788,15 +2780,11 @@ test "runtime destroy releases nested callback bytecode in owner order" {
     const child = &child_slice[0];
     child.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&child.header);
-    child.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    child.header.destroy_ctx = @ptrCast(rt);
 
     const parent_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const parent = &parent_slice[0];
     parent.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&parent.header);
-    parent.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    parent.header.destroy_ctx = @ptrCast(rt);
     parent.cpool = try rt.memory.alloc(core.Value, 1);
     parent.cpool[0] = core.Value.functionBytecode(&child.header);
     parent.cpool_count = 1;
@@ -2811,15 +2799,11 @@ test "runtime destroy revisits callback bytecode after parent release" {
     const child = &child_slice[0];
     child.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&child.header);
-    child.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    child.header.destroy_ctx = @ptrCast(rt);
 
     const parent_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const parent = &parent_slice[0];
     parent.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&parent.header);
-    parent.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    parent.header.destroy_ctx = @ptrCast(rt);
     parent.cpool = try rt.memory.alloc(core.Value, 1);
     parent.cpool[0] = core.Value.functionBytecode(&child.header).dup();
     parent.cpool_count = 1;
@@ -2834,15 +2818,11 @@ test "runtime destroy releases cyclic callback bytecode constants" {
     const left = &left_slice[0];
     left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&left.header);
-    left.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    left.header.destroy_ctx = @ptrCast(rt);
 
     const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const right = &right_slice[0];
     right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&right.header);
-    right.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    right.header.destroy_ctx = @ptrCast(rt);
 
     left.cpool = try rt.memory.alloc(core.Value, 1);
     left.cpool[0] = core.Value.functionBytecode(&right.header).dup();
@@ -2861,15 +2841,11 @@ test "runtime destroy releases callback bytecode constants with transferred owne
     const left = &left_slice[0];
     left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&left.header);
-    left.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    left.header.destroy_ctx = @ptrCast(rt);
 
     const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const right = &right_slice[0];
     right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&right.header);
-    right.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    right.header.destroy_ctx = @ptrCast(rt);
 
     left.cpool = try rt.memory.alloc(core.Value, 1);
     left.cpool[0] = core.Value.functionBytecode(&right.header);
@@ -2888,15 +2864,11 @@ test "runtime destroy releases callback bytecode class fields init with transfer
     const left = &left_slice[0];
     left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&left.header);
-    left.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    left.header.destroy_ctx = @ptrCast(rt);
 
     const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const right = &right_slice[0];
     right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&right.header);
-    right.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    right.header.destroy_ctx = @ptrCast(rt);
 
     left.class_fields_init = core.Value.functionBytecode(&right.header);
     right.class_fields_init = core.Value.functionBytecode(&left.header);
@@ -2912,15 +2884,11 @@ test "bytecode-only callback constant cycle is released by runtime cycle removal
     const left = &left_slice[0];
     left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&left.header);
-    left.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    left.header.destroy_ctx = @ptrCast(rt);
 
     const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const right = &right_slice[0];
     right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&right.header);
-    right.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    right.header.destroy_ctx = @ptrCast(rt);
 
     left.cpool = try rt.memory.alloc(core.Value, 1);
     left.cpool[0] = core.Value.functionBytecode(&right.header);
@@ -2941,15 +2909,11 @@ test "bytecode-only class fields init cycle is released by runtime cycle removal
     const left = &left_slice[0];
     left.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&left.header);
-    left.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    left.header.destroy_ctx = @ptrCast(rt);
 
     const right_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const right = &right_slice[0];
     right.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&right.header);
-    right.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    right.header.destroy_ctx = @ptrCast(rt);
 
     left.class_fields_init = core.Value.functionBytecode(&right.header);
     right.class_fields_init = core.Value.functionBytecode(&left.header);
@@ -2976,8 +2940,6 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, name);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     fb.cpool = try rt.memory.alloc(core.Value, 1);
     fb.cpool[0] = captured.value().dup();
     fb.cpool_count = 1;
@@ -3013,15 +2975,11 @@ test "nested function bytecode constant object cycle is released by runtime cycl
     const outer = &outer_slice[0];
     outer.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, outer_name);
     try rt.gc.add(&outer.header);
-    outer.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    outer.header.destroy_ctx = @ptrCast(rt);
 
     const inner_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const inner = &inner_slice[0];
     inner.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, inner_name);
     try rt.gc.add(&inner.header);
-    inner.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    inner.header.destroy_ctx = @ptrCast(rt);
 
     outer.cpool = try rt.memory.alloc(core.Value, 1);
     outer.cpool[0] = core.Value.functionBytecode(&inner.header);
@@ -3057,15 +3015,11 @@ test "cyclic internal function bytecode references are released by runtime cycle
     const outer = &outer_slice[0];
     outer.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, outer_name);
     try rt.gc.add(&outer.header);
-    outer.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    outer.header.destroy_ctx = @ptrCast(rt);
 
     const inner_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
     const inner = &inner_slice[0];
     inner.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, inner_name);
     try rt.gc.add(&inner.header);
-    inner.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    inner.header.destroy_ctx = @ptrCast(rt);
 
     outer.cpool = try rt.memory.alloc(core.Value, 1);
     outer.cpool[0] = core.Value.functionBytecode(&inner.header);
@@ -3107,8 +3061,6 @@ test "class payload function bytecode constant object cycle is released by runti
     const fb = &fb_slice[0];
     fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, name);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = engine.bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     fb.cpool = try rt.memory.alloc(core.Value, 1);
     fb.cpool[0] = captured.value().dup();
     fb.cpool_count = 1;
@@ -3144,9 +3096,9 @@ test "realm cached prototypes are strong cycle-collected references" {
     try function_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
     try promise_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
 
-    try std.testing.expectEqual(@as(usize, 3), global.header.ref_count);
-    try std.testing.expectEqual(@as(usize, 2), function_proto.header.ref_count);
-    try std.testing.expectEqual(@as(usize, 2), promise_proto.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 3), global.header.rc);
+    try std.testing.expectEqual(@as(i32, 2), function_proto.header.rc);
+    try std.testing.expectEqual(@as(i32, 2), promise_proto.header.rc);
 
     global.value().free(rt);
     function_proto.value().free(rt);
@@ -3616,7 +3568,7 @@ test "dead weak collection key entry is swept when target is destroyed" {
 
     key.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 1), value.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), value.header.rc);
 
     value.value().free(rt);
 
@@ -3640,7 +3592,7 @@ test "dead weak collection key entry is swept without freeing live value" {
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 1), value.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), value.header.rc);
 }
 
 test "live weak collection key preserves stored value" {
@@ -4053,7 +4005,7 @@ test "finalization registry dead target releases held value when target is destr
 
     target.value().free(rt);
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 1), held.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), held.header.rc);
 
     held.value().free(rt);
 
@@ -4158,7 +4110,7 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     left.value().free(rt);
     right.value().free(rt);
     try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 1), external.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), external.header.rc);
     external.value().free(rt);
 }
 
@@ -4273,7 +4225,7 @@ test "function records own native bytecode and bound payloads" {
     try std.testing.expectEqual(core.function.FunctionKind.generator, bytecode.function_kind);
     try std.testing.expectEqual(@as(usize, 2), bytecode.payload.bytecode.bytecode.len);
     try std.testing.expectEqual(@as(usize, 1), bytecode.payload.bytecode.constants.len);
-    try std.testing.expectEqual(@as(usize, 2), constant_string.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 2), constant_string.header.rc);
     constant_value.free(rt);
     bytecode.destroy(rt);
 
@@ -4288,7 +4240,7 @@ test "function records own native bytecode and bound payloads" {
         false,
     );
     try std.testing.expectEqual(core.function.Kind.bound, bound.kind);
-    try std.testing.expectEqual(@as(usize, 2), bound_string.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 2), bound_string.header.rc);
     bound_arg.free(rt);
     bound.destroy(rt);
 }

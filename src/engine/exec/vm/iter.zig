@@ -266,8 +266,6 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-async-from-sync-next-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -1118,8 +1116,6 @@ test "qjsIteratorConcatCall roots direct function bytecode iterator method while
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-concat-method-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -1718,8 +1714,6 @@ test "qjsIteratorZipStoreIndex roots direct function bytecode value while defini
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-zip-store-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -2313,8 +2307,6 @@ test "qjsIteratorCreateHelper roots direct function bytecode callback while crea
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-helper-callback-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);

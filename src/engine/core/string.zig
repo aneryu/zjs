@@ -501,7 +501,7 @@ pub const String = struct {
     }
 
     pub fn destroyFromHeader(rt: *Runtime, header: *gc.Header) void {
-        const self: *String = @fieldParentPtr("header", header);
+        const self: *String = @alignCast(@fieldParentPtr("header", header));
         if (self.atom_id) |atom_id| rt.atoms.free(atom_id);
         destroyUninitialized(rt, self);
     }
