@@ -611,7 +611,10 @@ fn preloadFileModuleGraphInnerMode(
 
     var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
-    if (parsed.syntax_error != null) return error.SyntaxError;
+    if (parsed.syntax_error) |err| {
+        if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+        return error.SyntaxError;
+    }
 
     _ = try instantiateParsedRecordWithReferrer(runtime, module_name, &parsed.function, path);
 

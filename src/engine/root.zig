@@ -304,7 +304,10 @@ pub const Engine = struct {
             var compiled = try frontend.parser.parse(self.runtime, module_source, .{ .mode = .module, .filename = path });
             if (loaded_owned) allocator.free(module_source);
             defer compiled.deinit();
-            if (compiled.syntax_error != null) return error.SyntaxError;
+            if (compiled.syntax_error) |err| {
+                if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+                return error.SyntaxError;
+            }
             const module_name = try self.runtime.internAtom(path);
             defer self.runtime.atoms.free(module_name);
             try exec.module.initializeModuleFunctionDeclarations(self.context, global, module_name, &compiled.function);
@@ -369,12 +372,15 @@ pub const Engine = struct {
         errdefer allocator.free(owned_path);
         try seen.append(allocator, owned_path);
 
-                const module_name = try runtime.internAtom(path);
+        const module_name = try runtime.internAtom(path);
         defer runtime.atoms.free(module_name);
 
         var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
         defer parsed.deinit();
-        if (parsed.syntax_error != null) return error.SyntaxError;
+        if (parsed.syntax_error) |err| {
+            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in preloadFileModuleGraphWithHostHooksInner {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+            return error.SyntaxError;
+        }
 
         _ = try exec.module.instantiateParsedRecordWithReferrer(runtime, module_name, &parsed.function, path);
 
@@ -657,8 +663,9 @@ pub const Engine = struct {
         });
         if (timing) |t| t.parse_ns += elapsedNanosSince(parse_start);
         defer compiled.deinit();
-        if (compiled.syntax_error != null) {
+        if (compiled.syntax_error) |err| {
             if (mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return core.Value.undefinedValue();
+            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ filename, err.position.line, err.position.column, err.message });
             return error.SyntaxError;
         }
         if (runtime_strict and mode == .script) forceRuntimeStrict(&compiled.function);
@@ -676,7 +683,10 @@ pub const Engine = struct {
             const referrer_path: ?[]const u8 = if (std.mem.eql(u8, filename, "<eval>")) null else filename;
             _ = try exec.module.instantiateParsedRecordWithReferrer(self.runtime, module_name, &compiled.function, referrer_path);
             if (self.runtime.modules.find(module_name)) |record| record.import_meta_main = true;
-            self.runtime.modules.linkModule(self.runtime, module_name) catch |err| return moduleResolutionError(err);
+            self.runtime.modules.linkModule(self.runtime, module_name) catch |err| {
+                if (!@import("builtin").is_test) std.debug.print("LINK ERROR for module {s}: {s}\n", .{ filename, @errorName(err) });
+                return moduleResolutionError(err);
+            };
             try self.initializeNativeSyntheticModules();
         }
         var module_var_refs: []core.Value = &.{};
@@ -807,12 +817,18 @@ pub const Engine = struct {
 
         var compiled = try frontend.parser.parse(self.runtime, source_text, .{ .mode = .module, .filename = filename });
         defer compiled.deinit();
-        if (compiled.syntax_error != null) return error.SyntaxError;
+        if (compiled.syntax_error) |err| {
+            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in evalPreloadedFileModuleStep {s}:{d}:{d} - {s}\n", .{ filename, err.position.line, err.position.column, err.message });
+            return error.SyntaxError;
+        }
 
         const module_name = try self.runtime.internAtom(filename);
         defer self.runtime.atoms.free(module_name);
         if (self.runtime.modules.find(module_name) == null) return error.ModuleNotFound;
-        self.runtime.modules.linkModule(self.runtime, module_name) catch |err| return moduleResolutionError(err);
+        self.runtime.modules.linkModule(self.runtime, module_name) catch |err| {
+            if (!@import("builtin").is_test) std.debug.print("LINK ERROR in evalPreloadedFileModuleStep for module {s}: {s}\n", .{ filename, @errorName(err) });
+            return moduleResolutionError(err);
+        };
 
         const module_var_refs = try exec.module.buildModuleVarRefs(self.context, module_name, &compiled.function);
         defer exec.module.freeModuleVarRefs(self.runtime, module_var_refs);

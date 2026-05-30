@@ -2050,8 +2050,6 @@ test "direct eval capture OOM releases retained eval-local atoms" {
         fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, child_name);
         fb.has_prototype = true;
         try rt.gc.add(&fb.header);
-        fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-        fb.header.destroy_ctx = @ptrCast(rt);
         fb.byte_code = try rt.memory.alloc(u8, 1);
         fb.byte_code[0] = op.eval;
         fb.byte_code_len = 1;
@@ -2152,8 +2150,6 @@ test "closure capture OOM after transfer releases captures once" {
             .var_name = rt.atoms.dup(captured_name),
         };
         try rt.gc.add(&fb.header);
-        fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-        fb.header.destroy_ctx = @ptrCast(rt);
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = createBytecodeFunctionObject(
@@ -2291,8 +2287,6 @@ test "bytecode call eval-var merge OOM releases copied names once" {
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, function_name);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     fb.byte_code = try rt.memory.alloc(u8, 1);
     fb.byte_code[0] = op.return_undef;
     fb.byte_code_len = 1;
@@ -31926,8 +31920,6 @@ test "qjsConstructFinalizationRegistryWithPrototype roots function bytecode clea
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -33027,12 +33019,12 @@ test "qjsPromiseSettleValue handles result self-assignment" {
 
     promise.promiseResultSlot().* = result.value().dup();
     result.value().free(rt);
-    try std.testing.expectEqual(@as(usize, 1), result.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), result.header.rc);
 
     const current = promise.promiseResult().?;
     try qjsPromiseSettleValue(ctx, global, promise, current, false);
 
-    try std.testing.expectEqual(@as(usize, 1), result.header.ref_count);
+    try std.testing.expectEqual(@as(i32, 1), result.header.rc);
     try std.testing.expectEqual(&result.header, promise.promiseResult().?.refHeader().?);
 }
 
@@ -33210,8 +33202,6 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -33731,8 +33721,6 @@ test "qjsPromiseCombinatorState roots direct function bytecode resolve while cre
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -40205,8 +40193,6 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -42945,7 +42931,10 @@ fn qjsWorkerInitializePreloadedModuleFunctionDeclarations(
 
         var compiled = try frontend.parser.parse(ctx.runtime, module_source, .{ .mode = .module, .filename = path });
         defer compiled.deinit();
-        if (compiled.syntax_error != null) return error.SyntaxError;
+        if (compiled.syntax_error) |err| {
+            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in qjsWorkerInitializePreloadedModuleFunctionDeclarations {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+            return error.SyntaxError;
+        }
         const module_name = try ctx.runtime.internAtom(path);
         defer ctx.runtime.atoms.free(module_name);
         try module_mod.initializeModuleFunctionDeclarations(ctx, global, module_name, &compiled.function);
@@ -42986,7 +42975,10 @@ fn qjsWorkerEvalPreloadedFileModuleStep(
 
     var compiled = try frontend.parser.parse(ctx.runtime, source_text, .{ .mode = .module, .filename = filename });
     defer compiled.deinit();
-    if (compiled.syntax_error != null) return error.SyntaxError;
+    if (compiled.syntax_error) |err| {
+        if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ filename, err.position.line, err.position.column, err.message });
+        return error.SyntaxError;
+    }
 
     const module_name = try ctx.runtime.internAtom(filename);
     defer ctx.runtime.atoms.free(module_name);
@@ -43222,6 +43214,9 @@ fn qjsWorkerFreeModuleEvalStep(rt: *core.Runtime, step: WorkerModuleEvalStep) vo
 }
 
 fn qjsWorkerModuleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
+    if (err == error.MissingExport or err == error.AmbiguousExport) {
+        std.debug.print("LINK ERROR in qjsWorkerModuleResolutionError: {s}\n", .{@errorName(err)});
+    }
     return switch (err) {
         error.MissingExport, error.AmbiguousExport => error.SyntaxError,
         else => err,
@@ -45793,8 +45788,6 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -46588,8 +46581,6 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -46862,8 +46853,6 @@ test "enqueuePendingMicrotask rolls back pending job length on root registration
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     const callback = core.Value.functionBytecode(&fb.header);
     defer callback.free(rt);
 
@@ -46894,8 +46883,6 @@ test "enqueueOsTimer rolls back timer length on root registration OOM" {
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
     const callback = core.Value.functionBytecode(&fb.header);
     defer callback.free(rt);
 
@@ -46924,8 +46911,6 @@ test "runNextOsTimer roots one-shot function bytecode callback after dequeue" {
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     fb.func_kind = .generator;
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -47038,8 +47023,6 @@ test "createIteratorResult roots direct function bytecode value while creating r
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -47307,8 +47290,6 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-create-array-from-args-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
@@ -50540,8 +50521,6 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
-    fb.header.destroy_fn = bytecode.function.destroyFunctionBytecode;
-    fb.header.destroy_ctx = @ptrCast(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
     fb.cpool = try rt.memory.alloc(core.Value, 1);
