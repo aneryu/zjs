@@ -27,14 +27,16 @@ The CLI intentionally has two lifecycle modes:
 In-process tests and embedding-style paths should still deinitialize normally
 and should not rely on process exit for cleanup.
 
-## Garbage Collection
+## GC Limitations
 
-`zjs` primarily uses reference counting for JavaScript value ownership. Cycle
-collection, finalization behavior, weak references, and graph traversal are
-implemented in the engine and covered by focused tests, but this area remains
-high-risk. Changes that touch GC, weak edges, finalizers, descriptors, or
-object graphs need focused leak/lifetime tests plus the relevant smoke or
-test262 slice.
+- Reference counts are non-atomic. A runtime and its values are thread-affine.
+- The collector is non-moving. Embedders must still treat raw object pointers as
+  runtime-owned and must not keep them without a `PersistentValue` or documented
+  native payload ownership.
+- GC safe points are explicit. New VM or host APIs that allocate must root
+  temporaries before polling GC.
+- Changes that touch weak edges, finalizers, descriptors, or object graphs need
+  focused leak/lifetime tests plus the relevant smoke or test262 slice.
 
 ## Standard Library and Host APIs
 

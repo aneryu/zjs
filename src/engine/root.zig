@@ -63,6 +63,7 @@ pub const ValueHandle = struct {
 };
 
 pub const EvalResult = ValueHandle;
+pub const PersistentValue = core.runtime.PersistentValue;
 pub const ExternalHostCall = core.host_function.ExternalCall;
 pub const ExternalHostCallFn = core.host_function.ExternalCallFn;
 pub const ExternalHostFinalizer = core.host_function.ExternalFinalizer;
@@ -161,6 +162,12 @@ pub const Engine = struct {
     pub fn evalHandleWithOptions(self: *Engine, source_text: []const u8, options: EvalOptions) RuntimeError!ValueHandle {
         const value = try self.evalWithOptions(source_text, options);
         return ValueHandle.init(self.runtime, value);
+    }
+
+    /// Create an owned persistent handle for a host-held value. The caller must
+    /// destroy the returned handle before deinitializing the engine.
+    pub fn createPersistentValue(self: *Engine, value: core.Value) !PersistentValue {
+        return self.runtime.createPersistentValue(value);
     }
 
     pub fn evalWithOutput(self: *Engine, source_text: []const u8, output: *std.Io.Writer) RuntimeError!core.Value {

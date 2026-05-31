@@ -83,6 +83,29 @@ pub const GcNode = extern struct {
     }
 };
 
+pub const FailureKind = enum(u8) {
+    none = 0,
+    out_of_memory = 1,
+    payload_mark_failed = 2,
+};
+
+pub const CollectionError = error{
+    OutOfMemory,
+    PayloadMarkFailed,
+};
+
+pub const CollectionResult = struct {
+    freed_objects: usize = 0,
+    freed_bytecodes: usize = 0,
+    duration_ns: u64 = 0,
+};
+
+pub const InvariantError = error{
+    CorruptGcList,
+    NegativeRefCount,
+    MarkBitLeftSet,
+};
+
 /// 19. GE Stats
 pub const GeStats = struct {
     rc_inc: usize = 0,
@@ -92,6 +115,9 @@ pub const GeStats = struct {
     cycle_gc_count: usize = 0,
     cycle_gc_time_ns: u64 = 0,
     cycles_collected: usize = 0,
+    failed_collections: usize = 0,
+    last_failure: FailureKind = .none,
+    last_collection_time_ns: u64 = 0,
 
     allocated_bytes: usize = 0,
     peak_allocated_bytes: usize = 0,
@@ -200,6 +226,46 @@ pub const Registry = struct {
         return false;
     }
 
+    pub fn recordFailure(self: *Registry, err: CollectionError) void {
+        self.stats.failed_collections += 1;
+        self.stats.last_failure = switch (err) {
+            error.OutOfMemory => .out_of_memory,
+            error.PayloadMarkFailed => .payload_mark_failed,
+        };
+    }
+
+    pub fn recordSuccess(self: *Registry, result: CollectionResult) void {
+        self.stats.last_failure = .none;
+        self.stats.last_collection_time_ns = result.duration_ns;
+        self.stats.cycle_gc_count +|= 1;
+        self.stats.cycle_gc_time_ns +|= result.duration_ns;
+        self.stats.freed_objects +|= result.freed_objects;
+        self.stats.cycles_collected +|= result.freed_objects;
+    }
+
+    pub fn verifyIntrusiveList(self: *Registry) InvariantError!void {
+        var tortoise = self.gc_obj_list_head;
+        var hare = self.gc_obj_list_head;
+        while (hare) |hare_node| {
+            hare = hare_node.next orelse break;
+            hare = hare.?.next;
+            tortoise = tortoise.?.next;
+            if (hare != null and tortoise == hare) return error.CorruptGcList;
+        }
+
+        var previous: ?*GcNode = null;
+        var current = self.gc_obj_list_head;
+        while (current) |node| {
+            if (node.prev != previous) return error.CorruptGcList;
+            const h = headerFromGcNode(node);
+            if (h.rc < 0) return error.NegativeRefCount;
+            if (h.flags.mark and self.phase == .none) return error.MarkBitLeftSet;
+            previous = node;
+            current = node.next;
+        }
+        if (previous != self.gc_obj_list_tail) return error.CorruptGcList;
+    }
+
     pub fn linkNode(self: *Registry, node: *GcNode) void {
         node.prev = self.gc_obj_list_tail;
         node.next = null;
@@ -237,10 +303,6 @@ pub const Registry = struct {
             current = node.next;
         }
         return count;
-    }
-
-    pub fn releaseCallbackOwnedObjects(self: *Registry) void {
-        _ = self;
     }
 };
 

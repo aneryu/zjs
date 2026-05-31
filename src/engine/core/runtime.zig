@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const memory = @import("memory.zig");
 const atom = @import("atom.zig");
@@ -15,6 +16,11 @@ const profile = @import("profile.zig");
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
+
+pub const GCPollMode = enum {
+    normal,
+    urgent,
+};
 
 pub const ValueRootSlice = union(enum) {
     mutable: *const []Value,
@@ -62,6 +68,20 @@ pub const FinalizationJob = struct {
     fn unregisterSymbolRoots(self: FinalizationJob, rt: *Runtime) void {
         if ((self.symbol_root_mask & 0b01) != 0) rt.unregisterExternalValueSymbolRoot(self.callback);
         if ((self.symbol_root_mask & 0b10) != 0) rt.unregisterExternalValueSymbolRoot(self.held_value);
+    }
+};
+
+pub const PersistentValue = struct {
+    value: Value = Value.undefinedValue(),
+    symbol_rooted: bool = false,
+
+    pub fn get(self: PersistentValue) Value {
+        return self.value;
+    }
+
+    pub fn destroy(self: PersistentValue, rt: *Runtime) void {
+        if (self.symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.value);
+        self.value.free(rt);
     }
 };
 
@@ -318,7 +338,6 @@ pub const Runtime = struct {
         self.drainDeferredWeakValueFrees();
         self.clearPendingFinalizationJobs();
         Object.releaseCallbackOwnedFunctionBytecodeCycles(self);
-        self.gc.releaseCallbackOwnedObjects();
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
         self.clearBorrowedWeakCleanupIdentities();
@@ -357,8 +376,7 @@ pub const Runtime = struct {
     pub fn registerObject(self: *Runtime, object: *Object) !void {
         try self.gc.add(&object.header);
         if (self.gc_pending or self.memory.allocated_bytes > self.malloc_gc_threshold) {
-            self.gc_pending = false;
-            self.maybeRunObjectCycleRemoval();
+            _ = self.pollGC(self.active_value_roots, .normal) catch {};
         }
     }
 
@@ -451,6 +469,17 @@ pub const Runtime = struct {
         if (!valueMayContainNestedSymbolRoots(value)) return false;
         try appendRuntimeValue(&self.memory, &self.external_value_roots, &self.external_value_roots_capacity, value);
         return true;
+    }
+
+    pub fn createPersistentValue(self: *Runtime, value: Value) !PersistentValue {
+        const retained = value.dup();
+        errdefer retained.free(self);
+        const symbol_rooted = try self.registerExternalValueSymbolRoot(retained);
+        errdefer if (symbol_rooted) self.unregisterExternalValueSymbolRoot(retained);
+        return .{
+            .value = retained,
+            .symbol_rooted = symbol_rooted,
+        };
     }
 
     pub fn unregisterExternalSymbolRoot(self: *Runtime, atom_id: atom.Atom) void {
@@ -552,12 +581,67 @@ pub const Runtime = struct {
     }
 
     pub fn runObjectCycleRemovalWithValueRoots(self: *Runtime, roots: ?*const ValueRootFrame) usize {
-        if (self.gc_running) return 0;
+        const result = self.tryRunObjectCycleRemovalWithValueRoots(roots) catch return 0;
+        return result.freed_objects;
+    }
+
+    pub fn tryRunObjectCycleRemoval(self: *Runtime) gc.CollectionError!gc.CollectionResult {
+        return self.tryRunObjectCycleRemovalWithValueRoots(self.active_value_roots);
+    }
+
+    pub fn tryRunObjectCycleRemovalWithValueRoots(
+        self: *Runtime,
+        roots: ?*const ValueRootFrame,
+    ) gc.CollectionError!gc.CollectionResult {
+        if (self.gc_running) return .{};
+        if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
+        defer if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         self.gc_running = true;
         defer self.gc_running = false;
-        const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch 0;
+
+        const start_ns = profile.nowNanos();
+        const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
+            const mapped: gc.CollectionError = switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.PayloadMarkFailed => error.PayloadMarkFailed,
+            };
+            self.gc.recordFailure(mapped);
+            self.gc_pending = true;
+            return mapped;
+        };
+
+        const result = gc.CollectionResult{
+            .freed_objects = freed,
+            .duration_ns = blk: {
+                const end_ns = profile.nowNanos();
+                break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
+            },
+        };
+        self.gc.recordSuccess(result);
         self.resetGCThreshold();
-        return freed;
+        return result;
+    }
+
+    pub fn pollGC(
+        self: *Runtime,
+        roots: ?*const ValueRootFrame,
+        mode: GCPollMode,
+    ) gc.CollectionError!gc.CollectionResult {
+        if (self.gc_running) return .{};
+        const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
+        if (mode == .normal and !self.gc_pending and !over_threshold) return .{};
+        self.gc_pending = false;
+        return self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
+    }
+
+    pub fn requestGCForTest(self: *Runtime) void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        self.gc_pending = true;
+    }
+
+    pub fn gcPendingForTest(self: Runtime) bool {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.gc_pending;
     }
 
     pub fn setGCThreshold(self: *Runtime, threshold: usize) void {
@@ -804,6 +888,11 @@ pub const Runtime = struct {
         if (capacity != 0) {
             self.memory.free(FinalizationJob, jobs.ptr[0..capacity]);
         }
+    }
+
+    pub fn pendingFinalizationJobCountForTest(self: Runtime) usize {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.pending_finalization_jobs.len;
     }
 
     fn ensurePendingFinalizationJobCapacity(self: *Runtime, min_capacity: usize) !void {

@@ -2607,6 +2607,43 @@ test "gc registry tracks live objects and intrusive list state" {
     core.Object.destroyFromHeader(rt, &obj.header);
 }
 
+test "gc registry debug verifier accepts linked and unlinked list states" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try rt.gc.verifyIntrusiveList();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    try rt.gc.verifyIntrusiveList();
+
+    obj.value().free(rt);
+    try rt.gc.verifyIntrusiveList();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+}
+
+test "object traceChildEdgesFallible propagates visitor errors" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    const child = try core.Object.create(rt, core.class.ids.object, null);
+    defer child.value().free(rt);
+    const key = try rt.internAtom("trace-error-child");
+    defer rt.atoms.free(key);
+
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+
+    const Visitor = struct {
+        pub fn visitValue(_: *@This(), _: *core.Value) !void {
+            return error.OutOfMemory;
+        }
+    };
+
+    var visitor = Visitor{};
+    try std.testing.expectError(error.OutOfMemory, obj.traceChildEdgesFallible(rt, &visitor));
+}
+
 test "gc object release does not allocate after refcount reaches zero" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2642,6 +2679,74 @@ test "closed object property cycle is released by runtime cycle removal" {
     left.value().free(rt);
     right.value().free(rt);
     try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+}
+
+test "fallible GC API reports reclaimed objects and no failure" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.Object.create(rt, core.class.ids.object, null);
+    const right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("gc-result-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("gc-result-right");
+    defer rt.atoms.free(right_key);
+
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+
+    const before_collections = rt.gc.stats.collections;
+    const result = try rt.tryRunObjectCycleRemoval();
+
+    try std.testing.expectEqual(@as(usize, 2), result.freed_objects);
+    try std.testing.expectEqual(before_collections + 1, rt.gc.stats.collections);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.stats.failed_collections);
+    try std.testing.expectEqual(core.gc.FailureKind.none, rt.gc.stats.last_failure);
+}
+
+test "pollGC runs pending collection and clears pending flag" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.Object.create(rt, core.class.ids.object, null);
+    const right = try core.Object.create(rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("poll-left");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("poll-right");
+    defer rt.atoms.free(right_key);
+
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    left.value().free(rt);
+    right.value().free(rt);
+
+    rt.requestGCForTest();
+    const result = try rt.pollGC(null, .normal);
+    try std.testing.expectEqual(@as(usize, 2), result.freed_objects);
+    try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "persistent value handle keeps object and nested symbols alive" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const key = try rt.atoms.newValueSymbol("persistent-handle-symbol-key");
+    const value = object.value();
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.boolean(true), true, true, true));
+
+    const handle = try rt.createPersistentValue(value);
+    value.free(rt);
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(key) != null);
+    try std.testing.expect(rt.gc.liveCount() != 0);
+
+    handle.destroy(rt);
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(key) == null);
 }
 
 test "function home object cycle is released by runtime cycle removal" {
@@ -4030,6 +4135,128 @@ test "finalization registry live target preserves held value" {
 
     registry.value().free(rt);
     target.value().free(rt);
+}
+
+test "finalization cleanup enqueue OOM leaves cell pending for retry" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
+    defer cleanup.value().free(rt);
+    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
+    var registry_value = registry.value();
+    defer registry_value.free(rt);
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const self_key = try rt.internAtom("gc-finalization-retry-self");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
+    try registry.appendFinalizationRegistryCell(
+        rt,
+        target_value,
+        core.Value.int32(1234),
+        core.Value.undefinedValue(),
+    );
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    target_value.free(rt);
+    target_value = core.Value.undefinedValue();
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+
+    const limit = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(limit);
+    try std.testing.expectError(error.OutOfMemory, rt.tryRunObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
+
+    rt.setMemoryLimit(null);
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
+
+    rt.clearPendingFinalizationJobs();
+}
+
+test "finalization cleanup enqueue OOM from destroyed target persists pending cell" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
+    defer cleanup.value().free(rt);
+    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
+    var registry_value = registry.value();
+    defer registry_value.free(rt);
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    try registry.appendFinalizationRegistryCell(
+        rt,
+        target.value(),
+        core.Value.int32(4321),
+        core.Value.undefinedValue(),
+    );
+
+    const limit = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(limit);
+    target.value().free(rt);
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
+
+    rt.clearPendingFinalizationJobs();
+}
+
+test "finalization registry unregister preserves pending cleanup cell" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
+    defer cleanup.value().free(rt);
+    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
+    var registry_value = registry.value();
+    defer registry_value.free(rt);
+    const token = try core.Object.create(rt, core.class.ids.object, null);
+    defer token.value().free(rt);
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const self_key = try rt.internAtom("gc-finalization-unregister-pending-self");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
+    try registry.appendFinalizationRegistryCell(
+        rt,
+        target_value,
+        core.Value.int32(5678),
+        token.value(),
+    );
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    target_value.free(rt);
+    target_value = core.Value.undefinedValue();
+
+    const limit = rt.memory.allocated_bytes;
+    rt.setMemoryLimit(limit);
+    try std.testing.expectError(error.OutOfMemory, rt.tryRunObjectCycleRemoval());
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
+    try std.testing.expect(!registry.unregisterFinalizationRegistryCells(rt, token.value()));
+    try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
+    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
+
+    rt.clearPendingFinalizationJobs();
 }
 
 test "object allocation threshold triggers runtime cycle removal" {

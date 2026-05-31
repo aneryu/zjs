@@ -14,6 +14,7 @@ const Runtime = runtime_mod.Runtime;
 const Value = @import("value.zig").Value;
 const bytecode_function = @import("../bytecode/function.zig");
 const std = @import("std");
+const builtin = @import("builtin");
 
 extern "c" fn pclose(stream: *std.c.FILE) c_int;
 
@@ -71,11 +72,29 @@ pub const WeakCollectionEntry = struct {
     }
 };
 
+pub const FinalizationRegistryCellState = enum(u8) {
+    active,
+    pending_enqueue,
+    queued,
+};
+
 pub const FinalizationRegistryCell = struct {
     target_identity: ?usize = null,
     held_value: Value = Value.undefinedValue(),
     unregister_token: Value = Value.undefinedValue(),
-    active: bool = true,
+    state: FinalizationRegistryCellState = .active,
+
+    pub fn isActive(self: FinalizationRegistryCell) bool {
+        return self.state == .active;
+    }
+
+    pub fn isPending(self: FinalizationRegistryCell) bool {
+        return self.state == .pending_enqueue;
+    }
+
+    pub fn keepsHeldValuesAlive(self: FinalizationRegistryCell) bool {
+        return self.state == .active or self.state == .pending_enqueue;
+    }
 
     pub fn destroy(self: FinalizationRegistryCell, rt: *Runtime) void {
         self.held_value.free(rt);
@@ -1419,7 +1438,7 @@ pub const Object = struct {
         var read_index: usize = 0;
         var write_index: usize = 0;
         while (read_index < finalization_payload.cells.len) : (read_index += 1) {
-            const cell = finalization_payload.cells[read_index];
+            var cell = finalization_payload.cells[read_index];
             const target_identity = cell.target_identity orelse {
                 if (write_index != read_index) finalization_payload.cells[write_index] = cell;
                 write_index += 1;
@@ -1431,7 +1450,22 @@ pub const Object = struct {
                 continue;
             }
 
-            if (cell.active) enqueueFinalizationCleanup(rt, finalization_payload.cleanup_callback, cell.held_value);
+            if (cell.isActive()) {
+                cell.state = .pending_enqueue;
+                enqueueFinalizationCleanup(rt, finalization_payload.cleanup_callback, cell.held_value) catch |err| switch (err) {
+                    error.OutOfMemory => {
+                        finalization_payload.cells[write_index] = cell;
+                        write_index += 1;
+                        continue;
+                    },
+                    error.PayloadMarkFailed => unreachable,
+                };
+                cell.state = .queued;
+            } else if (cell.isPending()) {
+                if (write_index != read_index) finalization_payload.cells[write_index] = cell;
+                write_index += 1;
+                continue;
+            }
             cell.destroy(rt);
         }
         finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
@@ -1763,6 +1797,16 @@ pub const Object = struct {
         return &.{};
     }
 
+    pub fn pendingFinalizationCellCountForTest(self: *const Object) usize {
+        if (!builtin.is_test) @compileError("test-only helper");
+        const payload = self.finalizationRegistryPayloadConst() orelse return 0;
+        var count: usize = 0;
+        for (payload.cells) |cell| {
+            if (cell.isPending()) count += 1;
+        }
+        return count;
+    }
+
     pub fn unregisterFinalizationRegistryCells(self: *Object, rt: *Runtime, token: Value) bool {
         std.debug.assert(self.class_id == class.ids.finalization_registry);
         const token_stable = token.dup();
@@ -1773,7 +1817,7 @@ pub const Object = struct {
         var index: usize = 0;
         while (index < entries.*.len) {
             const entry = &entries.*[index];
-            if (!entry.active) {
+            if (!entry.isActive()) {
                 index += 1;
                 continue;
             }
@@ -4276,95 +4320,15 @@ pub const Object = struct {
         rt.memory.destroy(ModuleNamespacePayload, payload);
     }
 
-    fn destroyIfOnlyClosedReachableGraph(rt: *Runtime, header: *gc.Header) bool {
-        const self: *Object = @fieldParentPtr("header", header);
-        var visited = ObjectVisitSet.init(rt.memory.allocator);
-        defer visited.deinit();
-        collectReachableObjects(rt, &visited, self) catch return false;
-        if (visited.count() <= 1) return false;
-
-        var incoming = ObjectIncomingMap.init(rt.memory.allocator);
-        defer incoming.deinit();
-        var internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
-        defer internal_bytecodes.deinit();
-        collectInternalFunctionBytecodes(rt, &visited, &internal_bytecodes) catch return false;
-        var processed_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
-        defer processed_bytecodes.deinit();
-
-        var iterator = visited.keyIterator();
-        while (iterator.next()) |address| {
-            incoming.put(address.*, 0) catch return false;
-        }
-
-        iterator = visited.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
-            current.accumulateIncomingReferences(rt, &visited, &incoming, &internal_bytecodes, &processed_bytecodes) catch return false;
-        }
-
-        var preserved = ObjectVisitSet.init(rt.memory.allocator);
-        defer preserved.deinit();
-        var symbol_roots = SymbolRootSet.init(rt.memory.allocator);
-        defer symbol_roots.deinit();
-        seedSymbolRootsFromRuntimeHeldValues(rt, &symbol_roots) catch return false;
-        seedSymbolRootsFromValueRoots(rt, rt.active_value_roots, &symbol_roots) catch return false;
-        seedSymbolRootsFromPendingFinalizationJobs(rt, &symbol_roots) catch return false;
-
-        iterator = visited.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
-            const internal_refs = incoming.get(address.*) orelse return false;
-            if (internal_refs > current.header.rc) return false;
-            const external_refs = current.header.rc - internal_refs;
-            if (external_refs != 0) scanPreservedObjects(rt, &visited, &preserved, &symbol_roots, current) catch return false;
-        }
-        scanPreservedWeakAndFinalizationEdges(rt, &visited, &preserved, &symbol_roots) catch return false;
-
-        if (preserved.contains(@intFromPtr(self))) return false;
-
-        var free_set = ObjectVisitSet.init(rt.memory.allocator);
-        defer free_set.deinit();
-        iterator = visited.keyIterator();
-        while (iterator.next()) |address| {
-            if (!preserved.contains(address.*)) free_set.put(address.*, {}) catch return false;
-        }
-        var free_internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
-        defer free_internal_bytecodes.deinit();
-        collectInternalFunctionBytecodes(rt, &free_set, &free_internal_bytecodes) catch return false;
-        retainFunctionBytecodeGuards(&free_internal_bytecodes);
-        defer releaseFunctionBytecodeGuards(rt, &free_internal_bytecodes);
-        sweepDeadWeakEntries(rt, &visited, &preserved, &symbol_roots, &free_set, &free_internal_bytecodes);
-        if (free_set.count() == 0) return false;
-
-        iterator = free_set.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
-            current.clearReferencesToVisited(rt, &free_set, &free_internal_bytecodes) catch return false;
-        }
-
-        iterator = free_set.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
-            current.header.rc = 0;
-        }
-
-        iterator = free_set.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
-            destroyFromHeader(rt, &current.header);
-        }
-        return true;
-    }
-
     pub fn destroyRuntimeCycles(rt: *Runtime) usize {
-        return destroyRuntimeCyclesWithValueRoots(rt, null) catch 0;
+        return rt.runObjectCycleRemoval();
     }
 
     fn traceChildren(rt: *Runtime, header: *gc.Header, visitor: anytype) void {
         switch (header.kind) {
             .object => {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                obj.traceChildEdges(rt, visitor) catch {};
+                obj.traceChildEdgesNoFail(rt, visitor);
             },
             .function_bytecode => {
                 const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
@@ -4765,7 +4729,7 @@ pub const Object = struct {
                     .object_worklist = object_worklist,
                     .bytecode_worklist = bytecode_worklist,
                 };
-                try obj.traceChildEdges(rt, &visitor);
+                try obj.traceChildEdgesFallible(rt, &visitor);
             }
 
             while (bytecode_worklist.items.len > 0) {
@@ -4927,7 +4891,6 @@ pub const Object = struct {
         }
 
         const freed = garbage_count;
-        rt.gc.stats.freed_objects += freed;
 
         current_garbage = tmp_head;
         while (current_garbage) |node| {
@@ -5136,7 +5099,7 @@ pub const Object = struct {
         };
     }
 
-    pub inline fn traceChildEdges(self: *Object, rt: *Runtime, visitor: anytype) !void {
+    pub inline fn traceChildEdgesFallible(self: *Object, rt: *Runtime, visitor: anytype) !void {
         const Helper = struct {
             inline fn callVisitObject(vis: anytype, obj_ptr: anytype) !void {
                 const VisType = @TypeOf(vis);
@@ -5398,6 +5361,14 @@ pub const Object = struct {
         }
     }
 
+    pub inline fn traceChildEdges(self: *Object, rt: *Runtime, visitor: anytype) !void {
+        return self.traceChildEdgesFallible(rt, visitor);
+    }
+
+    pub inline fn traceChildEdgesNoFail(self: *Object, rt: *Runtime, visitor: anytype) void {
+        self.traceChildEdgesFallible(rt, visitor) catch unreachable;
+    }
+
     fn collectDirectChildObjects(self: *Object, rt: *Runtime, visited: *ObjectVisitSet) ObjectGraphError!void {
         const CollectVisitor = struct {
             rt: *Runtime,
@@ -5425,14 +5396,14 @@ pub const Object = struct {
             }
 
             pub fn visitFinalizationCell(cv: *@This(), entry: *FinalizationRegistryCell) !void {
-                if (entry.active) {
+                if (entry.keepsHeldValuesAlive()) {
                     try collectValueObject(cv.rt, cv.visited, entry.held_value);
                     try collectValueObject(cv.rt, cv.visited, entry.unregister_token);
                 }
             }
         };
         var visitor = CollectVisitor{ .rt = rt, .visited = visited };
-        try self.traceChildEdges(rt, &visitor);
+        try self.traceChildEdgesFallible(rt, &visitor);
     }
 
     fn collectValueObject(rt: *Runtime, visited: *ObjectVisitSet, stored: Value) ObjectGraphError!void {
@@ -5576,14 +5547,14 @@ pub const Object = struct {
             }
 
             pub fn visitFinalizationCell(sv: *@This(), entry: *FinalizationRegistryCell) !void {
-                if (entry.active) {
+                if (entry.keepsHeldValuesAlive()) {
                     try scanSymbolRootValue(sv.rt, sv.symbol_roots, sv.visited, entry.held_value);
                     try scanSymbolRootValue(sv.rt, sv.symbol_roots, sv.visited, entry.unregister_token);
                 }
             }
         };
         var visitor = ScanSymbolRootVisitor{ .rt = rt, .symbol_roots = symbol_roots, .visited = visited };
-        try self.traceChildEdges(rt, &visitor);
+        try self.traceChildEdgesFallible(rt, &visitor);
     }
 
     fn scanSymbolRootFunctionBytecode(
@@ -5662,7 +5633,7 @@ pub const Object = struct {
             .preserved = preserved,
             .symbol_roots = symbol_roots,
         };
-        try self.traceChildEdges(rt, &visitor);
+        try self.traceChildEdgesFallible(rt, &visitor);
     }
 
     fn scanPreservedValueObject(
@@ -5713,7 +5684,7 @@ pub const Object = struct {
                     if (preserved.count() != before or symbol_roots.count() != before_symbols) changed = true;
                 }
                 for (current.finalizationRegistryCells()) |entry| {
-                    if (!entry.active) continue;
+                    if (!entry.isActive()) continue;
                     const target_identity = entry.target_identity orelse continue;
                     if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) continue;
                     const before = preserved.count();
@@ -5762,15 +5733,22 @@ pub const Object = struct {
                     var cell_index: usize = 0;
                     while (cell_index < finalization_payload.cells.len) : (cell_index += 1) {
                         const cell = &finalization_payload.cells[cell_index];
-                        if (!cell.active) continue;
+                        if (!cell.isActive() and !cell.isPending()) continue;
                         const target_identity = cell.target_identity orelse continue;
-                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) continue;
+                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                            cell.state = .active;
+                            continue;
+                        }
 
+                        cell.state = .pending_enqueue;
                         try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.held_value);
                         try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.unregister_token);
-                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) continue;
-                        enqueueFinalizationCleanup(rt, finalization_payload.cleanup_callback, cell.held_value);
-                        cell.active = false;
+                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                            cell.state = .active;
+                            continue;
+                        }
+                        try enqueueFinalizationCleanup(rt, finalization_payload.cleanup_callback, cell.held_value);
+                        cell.state = .queued;
                     }
                 }
             }
@@ -5821,7 +5799,11 @@ pub const Object = struct {
             index = 0;
             while (index < finalization_payload.cells.len) {
                 const target_identity = finalization_payload.cells[index].target_identity;
-                if (finalization_payload.cells[index].active and target_identity != null and
+                if (finalization_payload.cells[index].isPending()) {
+                    index += 1;
+                    continue;
+                }
+                if (finalization_payload.cells[index].isActive() and target_identity != null and
                     weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity.?))
                 {
                     index += 1;
@@ -5840,13 +5822,9 @@ pub const Object = struct {
         }
     }
 
-    fn enqueueFinalizationCleanup(rt: *Runtime, cleanup_callback: ?Value, held_value: Value) void {
+    fn enqueueFinalizationCleanup(rt: *Runtime, cleanup_callback: ?Value, held_value: Value) ObjectGraphError!void {
         const callback = cleanup_callback orelse return;
-        rt.enqueueFinalizationJob(callback, held_value) catch |err| switch (err) {
-            // GC cannot surface an allocation failure through the JS call that
-            // triggered it, so preserve heap consistency and drop this cleanup.
-            error.OutOfMemory => {},
-        };
+        try rt.enqueueFinalizationJob(callback, held_value);
     }
 
     fn weakEntryKeyIsPreserved(
@@ -5923,7 +5901,7 @@ pub const Object = struct {
             }
 
             pub fn visitFinalizationCell(av: *@This(), entry: *FinalizationRegistryCell) !void {
-                if (entry.active) {
+                if (entry.keepsHeldValuesAlive()) {
                     try accumulateValueIncoming(entry.held_value, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
                     try accumulateValueIncoming(entry.unregister_token, av.visited, av.incoming, av.internal_bytecodes, av.processed_bytecodes);
                 }
@@ -5935,7 +5913,7 @@ pub const Object = struct {
             .internal_bytecodes = internal_bytecodes,
             .processed_bytecodes = processed_bytecodes,
         };
-        try self.traceChildEdges(rt, &visitor);
+        try self.traceChildEdgesFallible(rt, &visitor);
     }
 
     fn accumulateValueIncoming(
@@ -6013,7 +5991,7 @@ pub const Object = struct {
                 clearValueReferenceToVisited(cv.rt, &entry.unregister_token, cv.visited, cv.internal_bytecodes);
             }
         };
-        try self.traceChildEdges(rt, ClearReferencesVisitor{
+        try self.traceChildEdgesFallible(rt, ClearReferencesVisitor{
             .rt = rt,
             .visited = visited,
             .internal_bytecodes = internal_bytecodes,
@@ -6238,7 +6216,7 @@ pub const Object = struct {
         for (self.weakCollectionEntries()) |entry| count += countFunctionBytecodeValueRef(entry.value, function_bytecode);
         count += countOptionalFunctionBytecodeRef(self.finalizationRegistryCleanupCallback(), function_bytecode);
         for (self.finalizationRegistryCells()) |entry| {
-            if (!entry.active) continue;
+            if (!entry.keepsHeldValuesAlive()) continue;
             count += countFunctionBytecodeValueRef(entry.held_value, function_bytecode);
             count += countFunctionBytecodeValueRef(entry.unregister_token, function_bytecode);
         }

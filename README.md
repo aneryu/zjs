@@ -42,6 +42,7 @@ zig build test-fast --summary all
 zig build test-oom --summary all
 zig build test-oom-exhaustive --summary all
 zig build leak-check-engine --summary all
+zig build gc-stress --summary all
 zig build smoke --summary all
 zig build engine-production-gate --summary all
 ```
@@ -78,6 +79,24 @@ The full direct test262 invocation is:
 
 For parser, runner, execution, or semantic changes, run a focused test262 slice
 before the full gate.
+
+## Garbage Collection And Host Ownership
+
+zjs uses non-atomic reference counting for immediate lifetime management and a
+cycle-removal pass for `Object` and `FunctionBytecode` graphs. The runtime is
+single-threaded; JS values must not be shared across threads.
+
+Every host-owned `Value` must either remain inside an active `ValueRootFrame`
+for the duration of a call or be stored in a `PersistentValue` handle. A
+`PersistentValue` duplicates the value, registers nested symbol roots, and must
+be destroyed before `Runtime.destroy`.
+
+GC may run only at audited safe points where VM temporaries are rooted.
+Low-level allocation marks GC as pending but does not directly collect.
+
+FinalizationRegistry cleanup jobs are best-effort but not silently dropped on
+allocation failure. If cleanup job enqueueing fails, the registry cell remains
+pending and is retried by a later GC pass.
 
 ## Performance
 

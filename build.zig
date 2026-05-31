@@ -209,6 +209,22 @@ pub fn build(b: *std.Build) void {
     const test_core_step = b.step("test-core", "Run core runtime foundation tests");
     test_core_step.dependOn(&run_core_tests.step);
 
+    const gc_stress_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/gc_stress.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "quickjs_zig_engine", .module = engine_mod },
+            },
+        }),
+    });
+
+    const run_gc_stress_tests = b.addRunArtifact(gc_stress_tests);
+    const gc_stress_step = b.step("gc-stress", "Run deterministic GC stress tests");
+    gc_stress_step.dependOn(&run_gc_stress_tests.step);
+
     const bytecode_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/bytecode/all.zig"),
@@ -477,6 +493,7 @@ pub fn build(b: *std.Build) void {
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
     engine_production_gate_step.dependOn(test_fast_step);
+    engine_production_gate_step.dependOn(gc_stress_step);
     engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(test262_gate_step);
 }

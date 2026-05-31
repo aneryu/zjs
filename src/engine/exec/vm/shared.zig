@@ -46693,6 +46693,7 @@ pub fn drainPendingPromiseJobs(
 
                 const result = try callValueOrBytecode(ctx, output, global, core.Value.undefinedValue(), cleanup_job.callback, &.{cleanup_job.held_value}, null, null);
                 result.free(ctx.runtime);
+                try pollGCSafePoint(ctx);
                 continue;
             }
 
@@ -46703,22 +46704,32 @@ pub fn drainPendingPromiseJobs(
                 if (isCallableValue(job)) {
                     const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
                     result.free(ctx.runtime);
+                    try pollGCSafePoint(ctx);
                 }
                 continue;
             };
             if (promise.class_id == core.class.ids.promise) {
                 try settlePendingPromiseReaction(ctx, output, global, promise);
+                try pollGCSafePoint(ctx);
                 continue;
             }
             if (isCallableValue(job)) {
                 const result = try callValueOrBytecode(ctx, output, global, global.value(), job, &.{}, null, null);
                 result.free(ctx.runtime);
+                try pollGCSafePoint(ctx);
             }
         }
         if (try call_mod.runNextOsSignalHandler(ctx, output, global)) continue;
         if (try runNextOsRwHandler(ctx, output, global)) continue;
         if (!try runNextOsTimer(ctx, output, global)) break;
     }
+}
+
+fn pollGCSafePoint(ctx: *core.Context) !void {
+    _ = ctx.runtime.pollGC(ctx.runtime.active_value_roots, .normal) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.PayloadMarkFailed => return error.OutOfMemory,
+    };
 }
 
 pub fn enqueueOsTimer(ctx: *core.Context, id: i64, callback: core.Value, delay_ms: u64, repeats: bool) !void {
