@@ -7804,7 +7804,10 @@ fn canUseInstalledGlobalDataIc(
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
-    return global.global_lexical_env == null;
+    if (global.global_lexical_env) |env| {
+        if (env.hasOwnProperty(atom_id)) return false;
+    }
+    return true;
 }
 
 fn canUseFastGlobalUndefinedLookup(
@@ -8378,7 +8381,7 @@ fn cacheableNamedDataObject(rt: *core.Runtime, object: *core.Object, atom_id: co
     if (object.proxyTarget() != null or object.exotic != null) return false;
     if (object.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
-    } else if (object.class_id != core.class.ids.object and !object.is_global) return false;
+    } else if (object.class_id != core.class.ids.object and !object.is_global and object.class_id < core.class.ids.init_count) return false;
     return true;
 }
 
@@ -8514,6 +8517,19 @@ fn tryFuseLocalAddWithValue(
         if (lhs.asShortBigInt()) |lhs_bigint| {
             if (rhs.asShortBigInt()) |rhs_bigint| {
                 if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |fast| break :blk fast;
+            }
+        }
+        if (lhs.isString() and rhs.isString()) {
+            const has_global_sync_mirror =
+                sync_global_lexical_locals and
+                frame.global_lexical_sync_checked and
+                (if (store) |local_store| local_store.idx < frame.global_lexical_sync_slots.len and frame.global_lexical_sync_slots[local_store.idx] else false);
+            const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
+
+            if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, max_ref_count)) {
+                break :blk lhs.dup();
+            } else {
+                break :blk try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
             }
         }
         if (!lhs.isNumber() or !rhs.isNumber()) return false;

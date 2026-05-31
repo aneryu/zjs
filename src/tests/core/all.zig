@@ -2602,7 +2602,7 @@ test "gc registry tracks live objects and intrusive list state" {
 
     rt.gc.unlinkObject(&obj.header);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    
+
     // Clean up manually since we unlinked it
     core.Object.destroyFromHeader(rt, &obj.header);
 }
@@ -2620,7 +2620,7 @@ test "gc object release does not allocate after refcount reaches zero" {
     try std.testing.expect(did_release);
     try std.testing.expectEqual(@as(i32, 0), obj.header.rc);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-    
+
     // Clean up manually since we released/unlinked it
     core.Object.destroyFromHeader(rt, &obj.header);
 }

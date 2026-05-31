@@ -9524,6 +9524,23 @@ fn toMathNumber(ctx: *core.Context, output: ?*std.Io.Writer, global: *core.Objec
 }
 
 fn qjsMathMinMax(ctx: *core.Context, output: ?*std.Io.Writer, global: *core.Object, args: []const core.Value, is_max: bool) !f64 {
+    if (args.len == 2) {
+        const a_val = args[0];
+        const b_val = args[1];
+        if (a_val.tag == core.Tag.int and b_val.tag == core.Tag.int) {
+            const a_i32 = a_val.asInt32().?;
+            const b_i32 = b_val.asInt32().?;
+            if (a_i32 == 0 and b_i32 == 0) return 0.0;
+            return @floatFromInt(if (is_max) (if (a_i32 > b_i32) a_i32 else b_i32) else (if (a_i32 < b_i32) a_i32 else b_i32));
+        }
+        if (a_val.isNumber() and b_val.isNumber()) {
+            const a = qjsPrimitiveMathNumber(a_val).?;
+            const b = qjsPrimitiveMathNumber(b_val).?;
+            if (std.math.isNan(a)) return a;
+            if (std.math.isNan(b)) return b;
+            return if (is_max) qjsFmax(a, b) else qjsFmin(a, b);
+        }
+    }
     if (args.len == 0) return if (is_max) -std.math.inf(f64) else std.math.inf(f64);
     if (qjsMathMinMaxPrimitiveFast(args, is_max)) |fast| return fast;
     var result = try toMathNumber(ctx, output, global, args[0]);
@@ -40992,6 +41009,7 @@ pub fn defineGlobalLexicalValue(rt: *core.Runtime, global: *core.Object, atom_id
     const env = try globalLexicalEnv(rt, global);
     if (!env.hasOwnProperty(atom_id)) {
         try env.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, !is_const, false, false));
+        global.shape_ref.version +%= 1;
     }
 }
 
@@ -43749,11 +43767,25 @@ pub fn atomNamesEqual(rt: *core.Runtime, a: core.Atom, b: core.Atom) bool {
 pub fn putDenseArrayElementFast(rt: *core.Runtime, object_value: core.Value, key: core.Value, value: core.Value) !bool {
     const object = property_ops.expectObject(object_value) catch return false;
     if (!object.is_array) return false;
+    if (key.asInt32()) |index_i32| {
+        if (index_i32 >= 0 and index_i32 <= core.array.max_array_index and index_i32 <= core.atom.max_int_atom) {
+            const index: u32 = @intCast(index_i32);
+            const atom_id = core.atom.atomFromUInt32(index);
+            if (index < object.length) {
+                if (try object.writeDenseArrayIndex(rt, index, atom_id, value)) return true;
+            }
+            return try object.appendDenseArrayIndex(rt, index, atom_id, value);
+        }
+        return false;
+    }
     const number = value_ops.numberValue(key) orelse return false;
     if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > core.array.max_array_index or @trunc(number) != number) return false;
     const index: u32 = @intFromFloat(number);
     if (index > core.atom.max_int_atom) return false;
     const atom_id = core.atom.atomFromUInt32(index);
+    if (index < object.length) {
+        if (try object.writeDenseArrayIndex(rt, index, atom_id, value)) return true;
+    }
     return try object.appendDenseArrayIndex(rt, index, atom_id, value);
 }
 

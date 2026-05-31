@@ -3819,18 +3819,12 @@ pub const Object = struct {
 
     fn ordinaryPayload(self: *Object) ?*OrdinaryPayload {
         if (self.class_payload_kind != .ordinary) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn ordinaryPayloadConst(self: *const Object) ?*const OrdinaryPayload {
         if (self.class_payload_kind != .ordinary) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn destroyOrdinaryPayload(self: *Object, rt: *Runtime) void {
@@ -4011,18 +4005,12 @@ pub const Object = struct {
 
     fn typedArrayPayload(self: *Object) ?*TypedArrayPayload {
         if (self.class_payload_kind != .typed_array) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn typedArrayPayloadConst(self: *const Object) ?*const TypedArrayPayload {
         if (self.class_payload_kind != .typed_array) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn destroyTypedArrayPayload(self: *Object, rt: *Runtime) void {
@@ -4155,18 +4143,12 @@ pub const Object = struct {
 
     fn varRefPayload(self: *Object) ?*VarRefPayload {
         if (self.class_payload_kind != .var_ref) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn varRefPayloadConst(self: *const Object) ?*const VarRefPayload {
         if (self.class_payload_kind != .var_ref) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn destroyVarRefPayload(self: *Object, rt: *Runtime) void {
@@ -4179,18 +4161,12 @@ pub const Object = struct {
 
     fn arrayPayload(self: *Object) ?*ArrayPayload {
         if (self.class_payload_kind != .array) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn arrayPayloadConst(self: *const Object) ?*const ArrayPayload {
         if (self.class_payload_kind != .array) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn destroyArrayPayload(self: *Object, rt: *Runtime) void {
@@ -4203,18 +4179,12 @@ pub const Object = struct {
 
     fn promisePayload(self: *Object) ?*PromisePayload {
         if (self.class_payload_kind != .promise) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn promisePayloadConst(self: *const Object) ?*const PromisePayload {
         if (self.class_payload_kind != .promise) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn destroyPromisePayload(self: *Object, rt: *Runtime) void {
@@ -4251,18 +4221,12 @@ pub const Object = struct {
 
     fn functionPayload(self: *Object) ?*FunctionPayload {
         if (self.class_payload_kind != .function) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn functionPayloadConst(self: *const Object) ?*const FunctionPayload {
         if (self.class_payload_kind != .function) return null;
-        return switch (self.class_payload) {
-            .external => |ptr| @ptrCast(@alignCast(ptr)),
-            else => null,
-        };
+        return @ptrCast(@alignCast(self.class_payload.external));
     }
 
     fn destroyFunctionPayload(self: *Object, rt: *Runtime) void {
@@ -4630,12 +4594,12 @@ pub const Object = struct {
             }
         }
 
-        var visited = ObjectVisitSet.init(rt.memory.allocator);
-        defer visited.deinit();
-        var preserved = ObjectVisitSet.init(rt.memory.allocator);
-        defer preserved.deinit();
-        var free_set = ObjectVisitSet.init(rt.memory.allocator);
-        defer free_set.deinit();
+        var visited = &rt.gc.visited;
+        visited.clearRetainingCapacity();
+        var preserved = &rt.gc.preserved;
+        preserved.clearRetainingCapacity();
+        var free_set = &rt.gc.free_set;
+        free_set.clearRetainingCapacity();
 
         // Populate visited and preserved from live list
         {
@@ -4668,7 +4632,7 @@ pub const Object = struct {
         try seedSymbolRootsFromValueRoots(rt, roots, &symbol_roots);
         try seedSymbolRootsFromPendingFinalizationJobs(rt, &symbol_roots);
 
-        try scanPreservedWeakAndFinalizationEdges(rt, &visited, &preserved, &symbol_roots);
+        try scanPreservedWeakAndFinalizationEdges(rt, visited, preserved, &symbol_roots);
 
         const ResurrectHelper = struct {
             pub fn scanAndPreserveValue(
@@ -4687,7 +4651,7 @@ pub const Object = struct {
                     if (visited_set.contains(addr)) {
                         const entry = try preserved_set.getOrPut(addr);
                         if (!entry.found_existing) {
-                            try object_worklist.append(runtime.memory.allocator, obj);
+                            try object_worklist.append(runtime.memory.persistent_allocator, obj);
                         }
                     }
                 } else if (functionBytecodeFromValue(val)) |const_fb| {
@@ -4695,7 +4659,7 @@ pub const Object = struct {
                     const addr = @intFromPtr(fb);
                     const entry = try preserved_bytecodes.getOrPut(addr);
                     if (!entry.found_existing) {
-                        try bytecode_worklist.append(runtime.memory.allocator, fb);
+                        try bytecode_worklist.append(runtime.memory.persistent_allocator, fb);
                     }
                 }
             }
@@ -4736,7 +4700,7 @@ pub const Object = struct {
                     if (self.visited_set.contains(addr)) {
                         const entry = try self.preserved_set.getOrPut(addr);
                         if (!entry.found_existing) {
-                            try self.object_worklist.append(self.rt.memory.allocator, obj);
+                            try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
                         }
                     }
                 }
@@ -4770,21 +4734,21 @@ pub const Object = struct {
             }
         };
 
-        var preserved_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
-        defer preserved_bytecodes.deinit();
+        var preserved_bytecodes = &rt.gc.preserved_bytecodes;
+        preserved_bytecodes.clearRetainingCapacity();
 
-        var object_worklist = std.ArrayList(*Object).empty;
-        defer object_worklist.deinit(rt.memory.allocator);
+        var object_worklist = &rt.gc.object_worklist;
+        object_worklist.clearRetainingCapacity();
 
-        var bytecode_worklist = std.ArrayList(*bytecode_function.FunctionBytecode).empty;
-        defer bytecode_worklist.deinit(rt.memory.allocator);
+        var bytecode_worklist = &rt.gc.bytecode_worklist;
+        bytecode_worklist.clearRetainingCapacity();
 
         // Initialize object worklist with all objects currently in preserved
         {
             var iterator = preserved.keyIterator();
             while (iterator.next()) |address| {
                 const obj: *Object = @ptrFromInt(address.*);
-                try object_worklist.append(rt.memory.allocator, obj);
+                try object_worklist.append(rt.memory.persistent_allocator, obj);
             }
         }
 
@@ -4794,12 +4758,12 @@ pub const Object = struct {
                 const obj = object_worklist.pop().?;
                 var visitor = ObjectResurrectVisitor{
                     .rt = rt,
-                    .visited_set = &visited,
-                    .preserved_set = &preserved,
-                    .preserved_bytecodes = &preserved_bytecodes,
+                    .visited_set = visited,
+                    .preserved_set = preserved,
+                    .preserved_bytecodes = preserved_bytecodes,
                     .symbol_roots_set = &symbol_roots,
-                    .object_worklist = &object_worklist,
-                    .bytecode_worklist = &bytecode_worklist,
+                    .object_worklist = object_worklist,
+                    .bytecode_worklist = bytecode_worklist,
                 };
                 try obj.traceChildEdges(rt, &visitor);
             }
@@ -4808,12 +4772,12 @@ pub const Object = struct {
                 const fb = bytecode_worklist.pop().?;
                 try ResurrectHelper.scanBytecodeChildObjectsAndBytecodes(
                     rt,
-                    &visited,
-                    &preserved,
-                    &preserved_bytecodes,
+                    visited,
+                    preserved,
+                    preserved_bytecodes,
                     &symbol_roots,
-                    &object_worklist,
-                    &bytecode_worklist,
+                    object_worklist,
+                    bytecode_worklist,
                     fb,
                 );
             }
@@ -4887,7 +4851,7 @@ pub const Object = struct {
             }
         }
 
-        sweepDeadWeakEntries(rt, &visited, &preserved, &symbol_roots, &free_set, &free_internal_bytecodes);
+        sweepDeadWeakEntries(rt, visited, preserved, &symbol_roots, free_set, &free_internal_bytecodes);
         _ = rt.atoms.sweepUnrootedUniqueSymbols(&symbol_roots);
 
         // Decrement protected ref counts back to normal and release any that reached 0.
@@ -4933,7 +4897,7 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                    clearFunctionBytecodeReferencesToVisited(rt, fb, &free_set, &free_internal_bytecodes);
+                    clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
                 }
             }
 
@@ -4955,10 +4919,10 @@ pub const Object = struct {
             const h = gc.headerFromGcNode(node);
             if (h.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                try obj.clearReferencesToVisited(rt, &free_set, &free_internal_bytecodes);
+                try obj.clearReferencesToVisited(rt, free_set, &free_internal_bytecodes);
             } else if (h.kind == .function_bytecode) {
                 const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                clearFunctionBytecodeReferencesToVisited(rt, fb, &free_set, &free_internal_bytecodes);
+                clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
             }
         }
 
@@ -6392,7 +6356,7 @@ pub const Object = struct {
         return if (header == &function_bytecode.header) 1 else 0;
     }
 
-    pub fn getPrototype(self: Object) ?*Object {
+    pub fn getPrototype(self: *const Object) ?*Object {
         return self.prototype;
     }
 
@@ -6425,7 +6389,7 @@ pub const Object = struct {
         self.extensible = false;
     }
 
-    pub fn isExtensible(self: Object) bool {
+    pub fn isExtensible(self: *const Object) bool {
         return self.extensible;
     }
 
@@ -6437,10 +6401,10 @@ pub const Object = struct {
         return self.immutable_prototype;
     }
 
-    pub fn getOwnProperty(self: Object, atom_id: atom.Atom) ?descriptor.Descriptor {
+    pub fn getOwnProperty(self: *const Object, atom_id: atom.Atom) ?descriptor.Descriptor {
         if (self.exotic) |methods| {
             if (methods.get_own_property) |hook| {
-                if (hook(@constCast(&self), atom_id)) |desc| return desc;
+                if (hook(@constCast(self), atom_id)) |desc| return desc;
             }
         }
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
@@ -6468,7 +6432,7 @@ pub const Object = struct {
                 // the placeholder stays `.auto_init`, so expose the
                 // fallback value directly instead of passing the placeholder
                 // to `fromEntry`.
-                const transient = materializeAutoInit(@constCast(&self), index, entry.slot.auto_init);
+                const transient = materializeAutoInit(@constCast(self), index, entry.slot.auto_init);
                 const after_materialize = self.properties[index];
                 if (after_materialize.slot == .auto_init) {
                     return descriptor.Descriptor.data(
@@ -6489,19 +6453,19 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn hasOwnProperty(self: Object, atom_id: atom.Atom) bool {
+    pub fn hasOwnProperty(self: *const Object, atom_id: atom.Atom) bool {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return true;
         return self.findProperty(atom_id) != null or self.denseArrayElement(atom_id) != null;
     }
 
-    pub fn hasProperty(self: Object, atom_id: atom.Atom) bool {
+    pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {
         profile.recordPropLookup(self.is_global);
         if (self.hasOwnProperty(atom_id)) return true;
         if (self.prototype) |proto| return proto.hasProperty(atom_id);
         return false;
     }
 
-    pub fn getProperty(self: Object, atom_id: atom.Atom) Value {
+    pub fn getProperty(self: *const Object, atom_id: atom.Atom) Value {
         profile.recordPropLookup(self.is_global);
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
         if (self.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.length);
@@ -6520,7 +6484,7 @@ pub const Object = struct {
                 // gives us a writable handle without changing every
                 // caller. Matches QuickJS's `JS_AutoInitProperty` which
                 // also mutates the property record in place on read.
-                .auto_init => |info| materializeAutoInit(@constCast(&self), index, info),
+                .auto_init => |info| materializeAutoInit(@constCast(self), index, info),
                 .deleted => Value.undefinedValue(),
             };
         }
@@ -7160,12 +7124,12 @@ pub const Object = struct {
         return namespace_value;
     }
 
-    pub fn getOwnDataPropertyValue(self: Object, atom_id: atom.Atom) ?Value {
+    pub fn getOwnDataPropertyValue(self: *const Object, atom_id: atom.Atom) ?Value {
         if (self.getOwnDataPropertyLookup(atom_id)) |lookup| return lookup.value;
         return null;
     }
 
-    pub fn getOwnDataObjectBorrowed(self: Object, atom_id: atom.Atom) ?*Object {
+    pub fn getOwnDataObjectBorrowed(self: *const Object, atom_id: atom.Atom) ?*Object {
         if (self.exotic != null) return null;
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
@@ -7178,7 +7142,7 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn getOwnDataPropertyLookup(self: Object, atom_id: atom.Atom) ?DataPropertyLookup {
+    pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.exotic != null) return null;
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
@@ -7191,7 +7155,7 @@ pub const Object = struct {
         return null;
     }
 
-    pub fn getOwnDataPropertyValueAt(self: Object, index: usize, atom_id: atom.Atom) ?Value {
+    pub fn getOwnDataPropertyValueAt(self: *const Object, index: usize, atom_id: atom.Atom) ?Value {
         if (self.exotic != null or index >= self.properties.len) return null;
         const entry = self.properties[index];
         if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return null;
@@ -7201,7 +7165,7 @@ pub const Object = struct {
         };
     }
 
-    pub fn getDenseArrayElementValue(self: Object, index: u32) ?Value {
+    pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?Value {
         if (!self.is_array or self.arrayElementStorageMode() != .dense) return null;
         const element_index: usize = @intCast(index);
         const elements = self.arrayElements();
@@ -7759,6 +7723,21 @@ pub const Object = struct {
                 .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
             } },
         });
+    }
+
+    pub fn writeDenseArrayIndex(self: *Object, rt: *Runtime, index: u32, atom_id: atom.Atom, new_value: Value) !bool {
+        if (!self.is_array or !self.length_writable) return false;
+        if (self.arrayElementStorageMode() != .dense) return false;
+        const elements = self.arrayElements();
+        if (index >= elements.len) return false;
+        if (self.prototype) |proto| {
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto) and proto.hasProperty(atom_id)) return false;
+        }
+
+        const old_value = elements[@intCast(index)];
+        self.arrayElementsSlot().*[@intCast(index)] = new_value.dup();
+        if (old_value) |old| old.free(rt);
+        return true;
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *Runtime, index: u32, atom_id: atom.Atom, new_value: Value) !bool {
@@ -8405,7 +8384,7 @@ pub const Object = struct {
         }
     }
 
-    fn denseArrayElement(self: Object, atom_id: atom.Atom) ?Value {
+    fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?Value {
         if (!self.is_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
         const index: usize = @intCast(atom.atomToUInt32(atom_id));
@@ -8413,7 +8392,7 @@ pub const Object = struct {
         return self.arrayElements()[index];
     }
 
-    fn hasDenseArrayElement(self: Object, index: u32) bool {
+    fn hasDenseArrayElement(self: *const Object, index: u32) bool {
         const element_index: usize = @intCast(index);
         if (element_index >= self.arrayElements().len) return false;
         return self.arrayElements()[element_index] != null;
@@ -8573,7 +8552,7 @@ pub const Object = struct {
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
-    fn findProperty(self: Object, atom_id: atom.Atom) ?usize {
+    fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
         if (self.shape_ref.hasPropertyHash()) {
             var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
             var steps: usize = 0;

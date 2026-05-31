@@ -32,10 +32,12 @@ pub const Result = struct {
     features: std.EnumSet(Feature) = .initEmpty(),
     syntax_error: ?source_pos.SyntaxError = null,
     direct_eval: bool = false,
+    arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *Result) void {
         if (self.syntax_error) |*err| err.deinit();
         self.function.deinit(self.runtime);
+        self.arena.deinit();
     }
 
     pub fn hasFeature(self: Result, feature: Feature) bool {
@@ -59,6 +61,13 @@ pub const Options = struct {
 };
 
 pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
+    var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
+    errdefer arena.deinit();
+
+    const original_allocator = rt.memory.allocator;
+    rt.memory.allocator = arena.allocator();
+    defer rt.memory.allocator = original_allocator;
+
     var stripped_source: ?[]u8 = null;
     defer if (stripped_source) |buffer| rt.memory.allocator.free(buffer);
     const parse_source: []const u8 = if (ts_strip.shouldStrip(options.source_kind, options.filename)) blk: {
@@ -79,22 +88,34 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     function.flags.is_module = options.mode == .module;
     function.flags.is_indirect_eval = options.mode == .eval_indirect;
 
+    var features = std.EnumSet(Feature).initEmpty();
+
+    compileQjsProgram(rt, filename_atom, parse_source, options, &function, &features) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            var result = Result{
+                .runtime = rt,
+                .function = function,
+                .mode = options.mode,
+                .direct_eval = options.mode == .eval_direct,
+                .arena = undefined,
+            };
+            function_owned = false;
+            try setFallbackSyntaxError(&result, rt, filename_atom, parse_source, @errorName(err));
+            result.arena = arena;
+            return result;
+        },
+    };
+
     var result = Result{
         .runtime = rt,
         .function = function,
         .mode = options.mode,
         .direct_eval = options.mode == .eval_direct,
+        .features = features,
+        .arena = arena,
     };
     function_owned = false;
-    errdefer result.deinit();
-
-    compileQjsProgram(rt, filename_atom, parse_source, options, &result.function, &result.features) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => {
-            try setFallbackSyntaxError(&result, rt, filename_atom, parse_source, @errorName(err));
-            return result;
-        },
-    };
     result.parse_path = .quickjs_parser;
     return result;
 }

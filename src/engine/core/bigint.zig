@@ -8,13 +8,13 @@ pub const BigInt = struct {
     value: libs.bignum.BigInt,
 
     pub fn create(rt: *Runtime, value: i128) !*BigInt {
-        var big = try libs.bignum.BigInt.fromIntAlloc(rt.memory.allocator, value);
+        var big = try libs.bignum.BigInt.fromIntAlloc(rt.memory.persistent_allocator, value);
         errdefer big.deinit();
         return createFromOwned(rt, big);
     }
 
     pub fn createFromBigInt(rt: *Runtime, value: libs.bignum.BigInt) !*BigInt {
-        var cloned = try value.cloneWithAllocator(rt.memory.allocator);
+        var cloned = try value.cloneWithAllocator(rt.memory.persistent_allocator);
         errdefer cloned.deinit();
         return createFromOwned(rt, cloned);
     }

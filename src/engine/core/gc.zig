@@ -110,9 +110,23 @@ pub const Registry = struct {
     phase: Phase = .none,
     stats: GeStats = .{},
 
+    // Reusable structures for cycle detection
+    visited: std.AutoHashMap(usize, void),
+    preserved: std.AutoHashMap(usize, void),
+    free_set: std.AutoHashMap(usize, void),
+    preserved_bytecodes: std.AutoHashMap(usize, void),
+    object_worklist: std.ArrayList(*object.Object),
+    bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode),
+
     pub fn init(account: *memory.MemoryAccount) Registry {
         return .{
             .memory = account,
+            .visited = std.AutoHashMap(usize, void).init(account.persistent_allocator),
+            .preserved = std.AutoHashMap(usize, void).init(account.persistent_allocator),
+            .free_set = std.AutoHashMap(usize, void).init(account.persistent_allocator),
+            .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
+            .object_worklist = std.ArrayList(*object.Object).empty,
+            .bytecode_worklist = std.ArrayList(*bytecode_function.FunctionBytecode).empty,
         };
     }
 
@@ -133,6 +147,14 @@ pub const Registry = struct {
 
         self.gc_obj_list_head = null;
         self.gc_obj_list_tail = null;
+
+        self.visited.deinit();
+        self.preserved.deinit();
+        self.free_set.deinit();
+        self.preserved_bytecodes.deinit();
+        self.object_worklist.deinit(self.memory.persistent_allocator);
+        self.bytecode_worklist.deinit(self.memory.persistent_allocator);
+
         self.phase = .none;
     }
 

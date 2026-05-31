@@ -1854,7 +1854,7 @@ pub const ParseState = struct {
         } else text;
         defer if (parse_text.ptr != text.ptr) self.function.memory.allocator.free(parse_text);
 
-        var parsed = libs_bignum.parseAutoAlloc(self.function.memory.allocator, parse_text) catch return Error.InvalidNumberLiteral;
+        var parsed = libs_bignum.parseAutoAlloc(self.function.memory.persistent_allocator, parse_text) catch return Error.InvalidNumberLiteral;
         errdefer parsed.deinit();
         if (negate and !parsed.isZero()) parsed.negative = !parsed.negative;
 
@@ -1863,7 +1863,7 @@ pub const ParseState = struct {
             .header = .{ .kind = .big_int },
             .value = parsed,
         };
-        parsed = .{ .allocator = self.function.memory.allocator };
+        parsed = .{ .allocator = self.function.memory.persistent_allocator };
         try self.emitPushConstOwned(big.valueRef());
     }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const MemoryAccount = struct {
     allocator: std.mem.Allocator,
+    persistent_allocator: std.mem.Allocator,
     allocated_bytes: usize = 0,
     allocation_count: usize = 0,
     peak_allocated_bytes: usize = 0,
@@ -18,11 +19,11 @@ pub const MemoryAccount = struct {
     trigger_gc_ctx: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator) MemoryAccount {
-        return .{ .allocator = allocator };
+        return .{ .allocator = allocator, .persistent_allocator = allocator };
     }
 
     pub fn initWithTrace(allocator: std.mem.Allocator, writer: *std.Io.Writer) MemoryAccount {
-        return .{ .allocator = allocator, .trace_writer = writer };
+        return .{ .allocator = allocator, .persistent_allocator = allocator, .trace_writer = writer };
     }
 
     /// Returns owned memory. Caller must free it with `free`.
@@ -32,7 +33,7 @@ pub const MemoryAccount = struct {
         try self.checkAllocation(bytes);
         const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, bytes);
-        const slice = try self.allocator.alloc(T, count);
+        const slice = try self.persistent_allocator.alloc(T, count);
         self.allocated_bytes = next_allocated_bytes;
         self.allocation_count += 1;
         self.alloc_calls += 1;
@@ -49,7 +50,7 @@ pub const MemoryAccount = struct {
         self.allocated_bytes -= bytes;
         self.allocation_count -= 1;
         self.free_calls += 1;
-        self.allocator.free(slice);
+        self.persistent_allocator.free(slice);
     }
 
     /// Returns owned memory. Caller must destroy it with `destroy`.
@@ -58,7 +59,7 @@ pub const MemoryAccount = struct {
         try self.checkAllocation(bytes);
         const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;
         if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, bytes);
-        const ptr = try self.allocator.create(T);
+        const ptr = try self.persistent_allocator.create(T);
         self.allocated_bytes = next_allocated_bytes;
         self.allocation_count += 1;
         self.create_calls += 1;
@@ -73,7 +74,7 @@ pub const MemoryAccount = struct {
         self.allocated_bytes -= @sizeOf(T);
         self.allocation_count -= 1;
         self.destroy_calls += 1;
-        self.allocator.destroy(ptr);
+        self.persistent_allocator.destroy(ptr);
     }
 
     pub fn hasOutstandingAllocations(self: MemoryAccount) bool {

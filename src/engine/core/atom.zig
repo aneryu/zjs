@@ -801,8 +801,8 @@ pub const AtomTable = struct {
         const backing: []DynamicAtom = if (self.entries_capacity != 0) self.entries.ptr[0..self.entries_capacity] else self.entries[0..0];
         self.entries = &.{};
         self.entries_capacity = 0;
-        self.string_index.deinit(account.allocator);
-        self.symbol_index.deinit(account.allocator);
+        self.string_index.deinit(account.persistent_allocator);
+        self.symbol_index.deinit(account.persistent_allocator);
         for (entries) |*entry| {
             const bytes = entry.bytes;
             entry.bytes = &.{};
@@ -1029,8 +1029,8 @@ pub const AtomTable = struct {
     fn indexEntry(self: *AtomTable, idx: EntryIndex) !void {
         const entry = &self.entries[idx];
         switch (entry.kind) {
-            .string => try self.string_index.put(self.memory.allocator, .{ .bytes = entry.bytes }, idx),
-            .symbol => try self.symbol_index.put(self.memory.allocator, .{ .bytes = entry.bytes }, idx),
+            .string => try self.string_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
+            .symbol => try self.symbol_index.put(self.memory.persistent_allocator, .{ .bytes = entry.bytes }, idx),
             .private => {},
         }
     }
