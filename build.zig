@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zjs_enable_ic = b.option(bool, "zjs_enable_ic", "Enable shape-keyed inline caches") orelse true;
+    const shard_filter = b.option([]const u8, "shard", "Only run the specified zjs test shard");
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     const quick_oom_options = b.addOptions();
@@ -272,6 +273,7 @@ pub fn build(b: *std.Build) void {
     const test_exec_step = b.step("test-exec", "Run bytecode execution tests");
     var exec_run_steps: [exec_shards.len]*std.Build.Step = undefined;
     inline for (exec_shards, 0..) |shard, i| {
+        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
         const test_mod = b.createModule(.{
             .root_source_file = b.path(shard.path),
             .target = target,
@@ -291,7 +293,9 @@ pub fn build(b: *std.Build) void {
         });
         const run_tests = b.addRunArtifact(tests);
         exec_run_steps[i] = &run_tests.step;
-        test_exec_step.dependOn(&run_tests.step);
+        if (matches_filter) {
+            test_exec_step.dependOn(&run_tests.step);
+        }
     }
 
     // `test`: separate ReleaseSafe exec test artifacts that share the
@@ -318,6 +322,7 @@ pub fn build(b: *std.Build) void {
     engine_release_safe_mod.addOptions("build_options", engine_options);
     const test_step = b.step("test", "Run all Zig tests (ReleaseSafe exec shards, fast warm runs, slow first cold compile)");
     inline for (exec_shards) |shard| {
+        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
         const fast_test_mod = b.createModule(.{
             .root_source_file = b.path(shard.path),
             .target = target,
@@ -336,7 +341,9 @@ pub fn build(b: *std.Build) void {
             .root_module = fast_test_mod,
         });
         const run_fast_tests = b.addRunArtifact(fast_tests);
-        test_step.dependOn(&run_fast_tests.step);
+        if (matches_filter) {
+            test_step.dependOn(&run_fast_tests.step);
+        }
     }
 
     const builtins_tests = b.addTest(.{
