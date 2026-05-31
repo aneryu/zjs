@@ -1379,7 +1379,7 @@ fn runWorkerStride(
         const test_path = tests[index];
         var stderr_text: []const u8 = "";
         var stderr_storage: [stderr_storage_len]u8 = undefined;
-        const result = try runOneTest(
+        const result = runOneTest(
             allocator,
             io,
             engine_path,
@@ -1396,7 +1396,12 @@ fn runWorkerStride(
             reporter,
             &stderr_storage,
             &stderr_text,
-        );
+        ) catch |err| {
+            if (reporter) |r| {
+                r.lockedPrint(io, "test262 worker error: {s}: {s}\n", .{ test_path, @errorName(err) }) catch {};
+            }
+            return err;
+        };
         if (result == .skipped) {
             summary.selection.skipped_by_feature += 1;
             continue;
