@@ -393,7 +393,12 @@ pub fn build(b: *std.Build) void {
     test_debug_step.dependOn(&run_core_tests.step);
     test_debug_step.dependOn(&run_bytecode_tests.step);
     test_debug_step.dependOn(&run_frontend_tests.step);
-    for (exec_run_steps) |run_step| test_debug_step.dependOn(run_step);
+    inline for (exec_shards, 0..) |shard, i| {
+        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
+        if (matches_filter) {
+            test_debug_step.dependOn(exec_run_steps[i]);
+        }
+    }
     test_debug_step.dependOn(&run_builtins_tests.step);
     test_debug_step.dependOn(&run_tools_tests.step);
     test_debug_step.dependOn(&run_test262_runner_tests.step);
