@@ -451,9 +451,12 @@ pub const Reporter = struct {
         const dir = self.reports_dir orelse return;
         try std.Io.Dir.cwd().createDirPath(io, dir);
 
+        var sorted_failure_log: std.ArrayList(u8) = .empty;
+        defer sorted_failure_log.deinit(self.allocator);
+        try renderSortedFailureLog(self.allocator, &sorted_failure_log, self.failure_log.items);
         const log_path = try std.fs.path.join(self.allocator, &.{ dir, "test262-failures.log" });
         defer self.allocator.free(log_path);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = self.failure_log.items });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = sorted_failure_log.items });
 
         var buckets_json: std.ArrayList(u8) = .empty;
         defer buckets_json.deinit(self.allocator);
@@ -524,6 +527,27 @@ fn renderBucketsJson(
     try buffer.appendSlice(allocator, "  }\n}\n");
 }
 
+fn renderSortedFailureLog(
+    allocator: std.mem.Allocator,
+    buffer: *std.ArrayList(u8),
+    failure_log: []const u8,
+) !void {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+
+    var line_iter = std.mem.splitScalar(u8, failure_log, '\n');
+    while (line_iter.next()) |line| {
+        if (line.len == 0) continue;
+        try lines.append(allocator, line);
+    }
+
+    std.mem.sort([]const u8, lines.items, {}, lessThanFailureLogLine);
+    for (lines.items) |line| {
+        try buffer.appendSlice(allocator, line);
+        try buffer.append(allocator, '\n');
+    }
+}
+
 fn renderByDirJson(
     allocator: std.mem.Allocator,
     buffer: *std.ArrayList(u8),
@@ -576,6 +600,10 @@ fn lessThanDirEntry(_: void, lhs: Reporter.DirEntry, rhs: Reporter.DirEntry) boo
 fn lessThanSkippedFeatureEntry(_: void, lhs: Reporter.SkippedFeatureEntry, rhs: Reporter.SkippedFeatureEntry) bool {
     if (lhs.skipped != rhs.skipped) return lhs.skipped > rhs.skipped;
     return std.mem.lessThan(u8, lhs.feature, rhs.feature);
+}
+
+fn lessThanFailureLogLine(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
 }
 
 /// Anti-regression baseline machinery (CC-1 / plan §4).
@@ -2491,6 +2519,26 @@ test "known error renderer emits sorted unique newline-separated entries" {
     const text = try renderKnownErrorsText(std.testing.allocator, failures, "");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("test/a.js\ntest/z.js\n", text);
+}
+
+test "test262 failure log renderer emits sorted lines" {
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(std.testing.allocator);
+
+    try renderSortedFailureLog(
+        std.testing.allocator,
+        &rendered,
+        "test262/test/z.js\tTypeError\tTypeError\n" ++
+            "test262/test/a.js\tTest262Error\tTest262Error\n" ++
+            "test262/test/m.js\tSyntaxError\tSyntaxError\n",
+    );
+
+    try std.testing.expectEqualStrings(
+        "test262/test/a.js\tTest262Error\tTest262Error\n" ++
+            "test262/test/m.js\tSyntaxError\tSyntaxError\n" ++
+            "test262/test/z.js\tTypeError\tTypeError\n",
+        rendered.items,
+    );
 }
 
 test "known error renderer writes paths relative to errorfile directory" {
