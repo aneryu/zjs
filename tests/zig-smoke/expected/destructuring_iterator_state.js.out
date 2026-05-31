@@ -1,0 +1,9 @@
+values 1 2
+i,next
+false
+false
+false
+sealed 1 2 2
+i,next
+string rest ab
+closed 1 iterator,next1,return

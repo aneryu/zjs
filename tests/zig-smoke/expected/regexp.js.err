@@ -1,0 +1,2 @@
+TypeError: not a function
+    at <anonymous> (tests/zig-smoke/regexp.js:7:20)

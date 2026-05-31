@@ -1,0 +1,10 @@
+[
+  "int_sum",
+  "empty_loop",
+  "prop_read",
+  "array_read",
+  "func_call",
+  "math_min",
+  "string_build",
+  "json_roundtrip"
+]

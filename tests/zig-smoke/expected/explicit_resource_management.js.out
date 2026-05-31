@@ -1,0 +1,8 @@
+symbol|symbol||
+body|dispose:second|dispose:first
+false
+true
+true
+stack:use:resource|stack:adopt:value:true|stack:defer
+true
+async:use|async:use:then|async:defer|async:defer:then

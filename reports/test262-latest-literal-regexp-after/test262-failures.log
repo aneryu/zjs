@@ -1,0 +1,3 @@
+quickjs/test262/test/language/literals/regexp/u-surrogate-pairs-atom-escape-char-class.js	Test262Error	Test262Error
+quickjs/test262/test/language/literals/regexp/u-surrogate-pairs-atom-char-class.js	Test262Error	Test262Error
+quickjs/test262/test/language/literals/regexp/u-surrogate-pairs.js	Test262Error	Test262Error

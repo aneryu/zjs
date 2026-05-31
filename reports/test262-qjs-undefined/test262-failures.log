@@ -1,0 +1,5 @@
+quickjs/test262/test/built-ins/undefined/15.1.1.3-0.js	TypeError	TypeError: Cannot convert undefined or null to object     at getOwnPropertyDescriptor (native)     at <anonymous> (/dev/shm/zjs-2162044-0-1219a55c5eb9449a.js:213:44)
+quickjs/test262/test/built-ins/undefined/15.1.1.3-1.js	TypeError	TypeError: 'undefined' is read-only     at <anonymous> (/dev/shm/zjs-2162044-1-e700d44b7fc72879.js:212:1)
+quickjs/test262/test/built-ins/undefined/15.1.1.3-2.js	TypeError	TypeError: cannot read property 'undefined' of undefined     at <anonymous> (/dev/shm/zjs-2162044-2-17fe1589d047f473.js:218:18)
+quickjs/test262/test/built-ins/undefined/15.1.1.3-3.js	TypeError	TypeError: 'undefined' is read-only     at <anonymous> (/dev/shm/zjs-2162044-3-93e1cc69937916a.js:201:3)
+quickjs/test262/test/built-ins/undefined/prop-desc.js	TypeError	TypeError: Cannot convert undefined or null to object     at getOwnPropertyDescriptor (native)     at verifyProperty (/dev/shm/zjs-2162044-7-ff81a0668eb57e42.js:250:49)     at <anonymous> (/dev/shm/zjs-2162044-7-ff81a0668eb57e42.js:587:16)
