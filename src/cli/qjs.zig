@@ -286,7 +286,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const jobs_start = monotonicNanos();
-    runtime.runJobs();
+    try runtime.runJobs();
     jobs_ns = elapsedNanosSince(jobs_start);
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         const exception = takePendingRejectionOrException(&runtime);
@@ -716,7 +716,7 @@ const ReplSession = struct {
             defer self.allocator.free(source);
             const value = try self.runtime.evalFileWithOutputModeRuntimeStrict(source, self.output, .script, path, true);
             value.free(self.runtime.runtime);
-            self.runtime.runJobs();
+            try self.runtime.runJobs();
             return .continue_input;
         }
         try self.output.writeAll("unknown directive\n");
@@ -890,7 +890,7 @@ pub fn evalReplLine(runtime: *engine.Engine, output: *std.Io.Writer, line: []con
             return;
         };
         defer value.free(runtime.runtime);
-        runtime.runJobs();
+        try runtime.runJobs();
         return;
     }
     const expression_source = try std.fmt.allocPrint(
@@ -919,7 +919,7 @@ pub fn evalReplLine(runtime: *engine.Engine, output: *std.Io.Writer, line: []con
         clearPendingException(runtime);
         return;
     }
-    runtime.runJobs();
+    try runtime.runJobs();
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         const exception = takePendingRejectionOrException(runtime);
         exception.free(runtime.runtime);
@@ -1278,7 +1278,7 @@ fn runBatchSource(
         return test262_protocol.status_failed;
     }
 
-    runtime.runJobs();
+    try runtime.runJobs();
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         const exception = takePendingRejectionOrException(&runtime);
         exception.free(runtime.runtime);

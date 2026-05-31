@@ -1,0 +1,14 @@
+test262/test/built-ins/Array/prototype/sort/precise-setter-sets-successor.js	Test262Error	Test262Error
+test262/test/built-ins/Error/prototype/stack/setter-no-argument.js	Test262Error	Test262Error
+test262/test/built-ins/Error/prototype/stack/setter-non-string-value.js	Test262Error	Test262Error
+test262/test/built-ins/Error/prototype/stack/setter-cross-realm.js	Test262Error	Test262Error
+test262/test/built-ins/Error/prototype/stack/setter-proxy-wrapping-prototype.js	Test262Error	Test262Error
+test262/test/built-ins/Error/prototype/stack/setter-via-assignment.js	Test262Error	Test262Error
+test262/test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/BigInt/tonumber-value-detached-buffer.js	Test262Error	Test262Error
+test262/test/built-ins/TypedArrayConstructors/internals/DefineOwnProperty/tonumber-value-detached-buffer.js	Test262Error	Test262Error
+test262/test/language/import/import-bytes/bytes-from-json.js	Test262Error	Test262Error
+test262/test/language/import/import-bytes/bytes-from-png.js	Test262Error	Test262Error
+test262/test/language/import/import-bytes/bytes-from-empty.js	Test262Error	Test262Error
+test262/test/language/import/import-bytes/bytes-from-js.js	Test262Error	Test262Error
+test262/test/language/import/import-bytes/bytes-from-txt.js	Test262Error	Test262Error
+test262/test/staging/sm/strict/8.12.5.js	Test262Error	Test262Error

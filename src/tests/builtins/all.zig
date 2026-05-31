@@ -1532,7 +1532,7 @@ test "promise buffers reflect proxy iterator and atomics helpers" {
 
     promise_jobs = 0;
     try builtins.promise.enqueueReaction(&js.job_queue, js.context, countPromiseJob, &.{core.Value.int32(2)});
-    js.runJobs();
+    try js.runJobs();
     try std.testing.expectEqual(@as(usize, 3), promise_jobs);
 
     var bytes = [_]u8{ 1, 2, 3 };

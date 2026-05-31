@@ -1,8 +1,7 @@
 # Limitations
 
-`zjs` is a technical alpha of a QuickJS C-to-Zig rewrite. It is designed for
-semantic convergence and validation work, not as a production JavaScript
-runtime.
+`zjs` has reached its Production v1 Candidate status. It is designed for
+semantic convergence, validation work, and production-grade embedded use cases, rather than a broad, general-purpose production JavaScript runtime (such as a full Node.js/Deno competitor).
 
 ## Runtime Boundary
 
@@ -10,7 +9,7 @@ runtime.
   local `quickjs/` source tree.
 - Compatibility is scoped to the active `test262.conf` profile and the
   focused regression tests in this repository.
-- `zjs` is not a Node.js, Deno, browser, or production QuickJS replacement.
+- `zjs` is not a Node.js, Deno, browser, or general-purpose production QuickJS replacement.
 - The engine-only Production v1 target is trusted-code embedding, not
   hostile-code sandboxing. See [docs/security-boundary.md](docs/security-boundary.md).
 

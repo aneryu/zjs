@@ -1856,7 +1856,7 @@ test "eval for-await IteratorClose does not await rejected async return" {
         \\})();
     , &stream);
     defer result.free(js.runtime);
-    js.runJobs();
+    try js.runJobs();
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("", stream.buffered());
@@ -2225,7 +2225,7 @@ test "GC keeps direct eval captures, class field initializers, and generator cap
     try std.testing.expect(verify_result.isUndefined());
 
     // 4. Flush job queue to execute the async generator callback and verify it ran
-    js.runJobs();
+    try js.runJobs();
 
     const verify_async_result = try js.eval(
         \\assert.sameValue(async_called, true);

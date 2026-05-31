@@ -581,18 +581,18 @@ test "Engine API eval and job queue are wired" {
     helpers.job_counter = 0;
     try js.job_queue.enqueueFunc(js.context, countJob, &.{});
     try js.job_queue.enqueueFunc(js.context, countJob, &.{});
-    js.runJobs();
+    try js.runJobs();
     try std.testing.expectEqual(@as(usize, 2), helpers.job_counter);
 
     helpers.job_counter = 0;
     var i: usize = 0;
     while (i < 16) : (i += 1) try js.job_queue.enqueueFunc(js.context, countJob, &.{});
-    js.runJobs();
+    try js.runJobs();
     try std.testing.expectEqual(@as(usize, 16), helpers.job_counter);
 
     helpers.job_counter = 0;
     try js.job_queue.enqueueFunc(js.context, countJobArgs, &.{ core.Value.int32(2), core.Value.int32(3) });
-    js.runJobs();
+    try js.runJobs();
     try std.testing.expectEqual(@as(usize, 5), helpers.job_counter);
 
     helpers.job_counter = 0;
@@ -603,7 +603,7 @@ test "Engine API eval and job queue are wired" {
         core.Value.int32(4),
         core.Value.int32(5),
     });
-    js.runJobs();
+    try js.runJobs();
     try std.testing.expectEqual(@as(usize, 15), helpers.job_counter);
 
     try std.testing.expectError(error.TooManyJobArgs, js.job_queue.enqueueFunc(js.context, countJobArgs, &.{
@@ -1158,4 +1158,160 @@ test "Engine eval preserves one-shot object missing field host output semantics"
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("true\nfalse\ncustom:true\nfalse\n", stream.buffered());
+}
+
+test "Engine runJobs preserves pending JS exceptions for callers" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+    js.context.preserve_uncaught_exception = true;
+
+    const setup = try js.eval("var __zjs_timer_throw = function() { throw new Error('timer boom'); };");
+    defer setup.free(js.runtime);
+    const global = try engine.exec.qjs_vm.ensureContextGlobal(js.context);
+    const callback_key = try js.runtime.internAtom("__zjs_timer_throw");
+    defer js.runtime.atoms.free(callback_key);
+    const callback = global.getProperty(callback_key);
+    defer callback.free(js.runtime);
+
+    try js.context.ensureOsTimerCapacity(1);
+    const timer_index = js.context.os_timers.len;
+    js.context.os_timers = js.context.os_timers.ptr[0 .. timer_index + 1];
+    js.context.os_timers[timer_index] = try core.OsTimer.init(js.context, 1, callback, 0, 0, false);
+
+    try js.runJobs();
+    try std.testing.expect(js.context.hasException());
+
+    var exception = js.takeExceptionInfo();
+    defer exception.deinit();
+}
+
+test "host module graph syntax diagnostics do not write to program output" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./bad.js",
+            .path = "/fixture/bad.js",
+            .source = "export const = ;",
+            .kind = .esm,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+    const hooks = hostHooks(&host);
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    try std.testing.expectError(
+        error.SyntaxError,
+        js.evalFileModuleGraphWithHostHooks(
+            "import './bad.js';",
+            &stream,
+            "/fixture/main.mjs",
+            hooks,
+            std.testing.allocator,
+        ),
+    );
+    try std.testing.expectEqualStrings("", stream.buffered());
+}
+
+test "host commonjs wrapper passes directory dirname" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const modules = [_]HostFixtureModule{
+        .{
+            .specifier = "./lib/dep.cjs",
+            .path = "/fixture/lib/dep.cjs",
+            .source =
+            \\module.exports = {
+            \\  filename: __filename,
+            \\  dirname: __dirname,
+            \\};
+            ,
+            .kind = .commonjs,
+        },
+    };
+    const host = HostFixture{ .modules = &modules };
+    const hooks = hostHooks(&host);
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalFileModuleGraphWithHostHooks(
+        \\import info from './lib/dep.cjs';
+        \\assert.sameValue(info.filename, '/fixture/lib/dep.cjs');
+        \\assert.sameValue(info.dirname, '/fixture/lib');
+    ,
+        &stream,
+        "/fixture/main.mjs",
+        hooks,
+        std.testing.allocator,
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("", stream.buffered());
+}
+
+const HostFixtureModule = struct {
+    specifier: []const u8,
+    path: []const u8,
+    source: []const u8,
+    kind: engine.Engine.HostHooks.ModuleKind,
+};
+
+const HostFixture = struct {
+    modules: []const HostFixtureModule,
+
+    fn findBySpecifierOrPath(self: HostFixture, specifier: []const u8) ?HostFixtureModule {
+        for (self.modules) |module| {
+            if (std.mem.eql(u8, module.specifier, specifier) or std.mem.eql(u8, module.path, specifier)) return module;
+        }
+        return null;
+    }
+
+    fn findByPath(self: HostFixture, path: []const u8) ?HostFixtureModule {
+        for (self.modules) |module| {
+            if (std.mem.eql(u8, module.path, path)) return module;
+        }
+        return null;
+    }
+};
+
+fn hostHooks(host: *const HostFixture) engine.Engine.HostHooks {
+    return .{
+        .ptr = @constCast(host),
+        .resolveModule = resolveFixtureModule,
+        .loadModule = loadFixtureModule,
+    };
+}
+
+fn resolveFixtureModule(
+    ptr: *anyopaque,
+    specifier: []const u8,
+    referrer: ?[]const u8,
+    allocator: std.mem.Allocator,
+) anyerror!engine.Engine.HostHooks.ResolvedModule {
+    _ = referrer;
+    const host: *const HostFixture = @ptrCast(@alignCast(ptr));
+    const module = host.findBySpecifierOrPath(specifier) orelse return error.ModuleNotFound;
+    return .{
+        .specifier = try allocator.dupe(u8, specifier),
+        .path = try allocator.dupe(u8, module.path),
+        .kind = module.kind,
+    };
+}
+
+fn loadFixtureModule(
+    ptr: *anyopaque,
+    resolved: engine.Engine.HostHooks.ResolvedModule,
+    allocator: std.mem.Allocator,
+) anyerror!engine.Engine.HostHooks.LoadedModule {
+    const host: *const HostFixture = @ptrCast(@alignCast(ptr));
+    const module = host.findByPath(resolved.path) orelse return error.ModuleNotFound;
+    return .{
+        .source = module.source,
+        .path = try allocator.dupe(u8, module.path),
+        .kind = module.kind,
+        .owned = false,
+    };
 }

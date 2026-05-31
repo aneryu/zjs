@@ -1665,7 +1665,7 @@ fn runEmbeddedEngine(
     defer value.free(js.runtime);
 
     if (!value.isException()) {
-        js.runJobs();
+        try js.runJobs();
         if (js.context.hasException()) {
             stderr_out.* = "unhandled promise rejection";
             const async_exception = js.takeException();

@@ -248,19 +248,65 @@ pub const Engine = struct {
         resolveModule: *const fn (*anyopaque, []const u8, ?[]const u8, std.mem.Allocator) anyerror!ResolvedModule,
         loadModule: *const fn (*anyopaque, ResolvedModule, std.mem.Allocator) anyerror!LoadedModule,
 
+        pub const ModuleKind = enum { esm, commonjs, json, wasm, builtin };
+
         pub const ResolvedModule = struct {
             specifier: []const u8,
             path: []const u8,
-            kind: enum { esm, commonjs, json, wasm, builtin },
+            kind: ModuleKind,
         };
 
         pub const LoadedModule = struct {
             source: []const u8,
             path: []const u8,
-            kind: enum { esm, commonjs, json, wasm, builtin },
+            kind: ModuleKind,
             owned: bool = false,
         };
     };
+
+    fn wrapSourceByKind(
+        allocator: std.mem.Allocator,
+        kind: HostHooks.ModuleKind,
+        source: []const u8,
+        path: []const u8,
+        allocated: *bool,
+    ) ![]const u8 {
+        switch (kind) {
+            .esm, .builtin => {
+                allocated.* = false;
+                return source;
+            },
+            .json => {
+                allocated.* = true;
+                return try std.fmt.allocPrint(allocator, "export default {s};", .{source});
+            },
+            .commonjs => {
+                const dirname = std.fs.path.dirname(path) orelse ".";
+                allocated.* = true;
+                return try std.fmt.allocPrint(allocator,
+                    \\var exports = {{}}, module = {{ exports: exports }};
+                    \\(function(exports, require, module, __filename, __dirname) {{
+                    \\{s}
+                    \\}})(exports, undefined, module, "{s}", "{s}");
+                    \\export default module.exports;
+                , .{ source, path, dirname });
+            },
+            .wasm => {
+                var bytes_list = std.ArrayList(u8).empty;
+                errdefer bytes_list.deinit(allocator);
+                try bytes_list.appendSlice(allocator, "const bytes = new Uint8Array([");
+                for (source, 0..) |b, i| {
+                    if (i > 0) try bytes_list.appendSlice(allocator, ",");
+                    var buf: [16]u8 = undefined;
+                    const slice = try std.fmt.bufPrint(&buf, "{d}", .{b});
+                    try bytes_list.appendSlice(allocator, slice);
+                }
+                try bytes_list.appendSlice(allocator, "]);\nconst module = new WebAssembly.Module(bytes);\nconst instance = new WebAssembly.Instance(module);\nexport default instance.exports;\n");
+                allocated.* = true;
+                return try bytes_list.toOwnedSlice(allocator);
+            },
+        }
+    }
 
     pub fn evalFileModuleGraphWithHostHooks(
         self: *Engine,
@@ -284,25 +330,31 @@ pub const Engine = struct {
         self.runtime.modules.linkModule(self.runtime, root_module_name) catch |err| return moduleResolutionError(err);
         const global = try exec.qjs_vm.ensureContextGlobal(self.context);
         for (module_postorder.items) |path| {
-            var module_source: []const u8 = undefined;
+            var raw_module_source: []const u8 = undefined;
             const is_root = std.mem.eql(u8, path, filename);
             var loaded_owned = false;
+            var loaded_kind: HostHooks.ModuleKind = .esm;
 
             if (is_root) {
-                module_source = source_text;
+                raw_module_source = source_text;
             } else {
                 const resolved = try host_hooks.resolveModule(host_hooks.ptr, path, null, allocator);
                 defer allocator.free(resolved.specifier);
                 defer allocator.free(resolved.path);
 
                 const loaded = try host_hooks.loadModule(host_hooks.ptr, resolved, allocator);
-                module_source = loaded.source;
+                raw_module_source = loaded.source;
                 loaded_owned = loaded.owned;
+                loaded_kind = loaded.kind;
                 defer allocator.free(loaded.path);
             }
 
+            var module_source_allocated = false;
+            const module_source = try wrapSourceByKind(allocator, loaded_kind, raw_module_source, path, &module_source_allocated);
+            defer if (module_source_allocated) allocator.free(module_source);
+
             var compiled = try frontend.parser.parse(self.runtime, module_source, .{ .mode = .module, .filename = path });
-            if (loaded_owned) allocator.free(module_source);
+            if (loaded_owned) allocator.free(raw_module_source);
             defer compiled.deinit();
             if (compiled.syntax_error) |err| {
                 if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
@@ -328,9 +380,13 @@ pub const Engine = struct {
             defer if (loaded.owned) allocator.free(loaded.source);
             defer allocator.free(loaded.path);
 
-            const dep_step = try self.evalPreloadedFileModuleStep(loaded.source, output, path, null, null);
-            try self.handleModuleEvalStep(allocator, &continuations, dep_step, loaded.source, path, false);
-            self.runJobs();
+            var module_source_allocated = false;
+            const module_source = try wrapSourceByKind(allocator, loaded.kind, loaded.source, path, &module_source_allocated);
+            defer if (module_source_allocated) allocator.free(module_source);
+
+            const dep_step = try self.evalPreloadedFileModuleStep(module_source, output, path, null, null);
+            try self.handleModuleEvalStep(allocator, &continuations, dep_step, module_source, path, false);
+            try self.runJobs();
             if (self.context.hasUnhandledRejection() or self.context.hasException()) return error.UnhandledPromiseRejection;
         }
 
@@ -369,8 +425,10 @@ pub const Engine = struct {
             if (std.mem.eql(u8, existing, path)) return;
         }
         const owned_path = try allocator.dupe(u8, path);
-        errdefer allocator.free(owned_path);
+        var seen_owns_path = false;
+        errdefer if (!seen_owns_path) allocator.free(owned_path);
         try seen.append(allocator, owned_path);
+        seen_owns_path = true;
 
         const module_name = try runtime.internAtom(path);
         defer runtime.atoms.free(module_name);
@@ -440,7 +498,11 @@ pub const Engine = struct {
             defer if (loaded.owned) allocator.free(loaded.source);
             defer allocator.free(loaded.path);
 
-            try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, host_hooks, loaded.source, loaded.path, seen, postorder);
+            var module_source_allocated = false;
+            const module_source = try wrapSourceByKind(allocator, loaded.kind, loaded.source, loaded.path, &module_source_allocated);
+            defer if (module_source_allocated) allocator.free(module_source);
+
+            try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, host_hooks, module_source, loaded.path, seen, postorder);
         }
 
         const order_path = try allocator.dupe(u8, path);
@@ -495,7 +557,7 @@ pub const Engine = struct {
             defer allocator.free(dep_source);
             const dep_step = try self.evalPreloadedFileModuleStep(dep_source, output, path, null, null);
             try self.handleModuleEvalStep(allocator, &continuations, dep_step, dep_source, path, false);
-            self.runJobs();
+            try self.runJobs();
             if (self.context.hasUnhandledRejection() or self.context.hasException()) return error.UnhandledPromiseRejection;
         }
         try self.drainModuleContinuationsForDependencies(output, allocator, &continuations, normalized_filename);
@@ -550,7 +612,7 @@ pub const Engine = struct {
             defer if (!std.mem.eql(u8, path, target_path)) allocator.free(module_source);
             const value = try self.evalPreloadedFileModuleWithOutput(module_source, output, path);
             defer value.free(self.runtime);
-            self.runJobs();
+            try self.runJobs();
             if (self.context.hasUnhandledRejection() or self.context.hasException()) return error.UnhandledPromiseRejection;
         }
 
@@ -975,7 +1037,7 @@ pub const Engine = struct {
         current_roots_registered = false;
         var step_owned = true;
         errdefer if (step_owned) freeModuleEvalStep(self.runtime, step);
-        self.runJobs();
+        try self.runJobs();
         if (self.context.hasUnhandledRejection() or self.context.hasException()) return error.UnhandledPromiseRejection;
         step_owned = false;
         try self.handleModuleEvalStep(allocator, continuations, step, module_source, path, keep_result);
@@ -1016,11 +1078,13 @@ pub const Engine = struct {
         return false;
     }
 
-    pub fn runJobs(self: *Engine) void {
+    pub fn runJobs(self: *Engine) !void {
         self.job_queue.runAll();
-        if (exec.qjs_vm.ensureContextGlobal(self.context)) |global| {
-            exec.qjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch {};
-        } else |_| {}
+        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        exec.qjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
+            if (self.context.hasException() or self.context.hasUnhandledRejection()) return;
+            return err;
+        };
     }
 
     pub fn exposeStdOsGlobals(self: *Engine) !void {

@@ -4,9 +4,7 @@
 reference, while this repository keeps the active validation profile in the
 root `test262` checkout and fixture snapshots under `tests/fixtures/`.
 
-This is a technical alpha. It is useful for QuickJS parity work, engine
-experiments, and validation tooling, but it is not a drop-in replacement for
-QuickJS, Node.js, or Deno.
+This is a Production v1 Candidate. It has reached production-grade maturity for its targeted validation profile and embedded runtime use cases, but it is not a general-purpose drop-in replacement for Node.js or Deno outside its specified API surface.
 
 ## Status
 

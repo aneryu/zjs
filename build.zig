@@ -151,8 +151,7 @@ pub fn build(b: *std.Build) void {
         .root_module = smoke_runner_mod,
     });
     const run_smoke = b.addRunArtifact(smoke_runner_exe);
-    run_smoke.step.dependOn(&install_qjs.step);
-    run_smoke.addArg("zig-out/bin/zjs");
+    run_smoke.addArtifactArg(qjs_exe);
     run_smoke.addArg("tests/zig-smoke/manifest.txt");
     const smoke_step = b.step("smoke", "Run JS smoke scripts against zjs");
     smoke_step.dependOn(&run_smoke.step);

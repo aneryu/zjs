@@ -85,7 +85,23 @@ fn runOne(io: std.Io, allocator: std.mem.Allocator, zjs_path: []const u8, script
     defer if (expected_stderr) |bytes| allocator.free(bytes);
 
     var ok = actual_status == expected_status;
-    if (expected_stdout) |bytes| ok = ok and std.mem.eql(u8, bytes, result.stdout) else ok = ok and result.stdout.len == 0;
+    if (expected_stdout) |bytes| {
+        var normalized_stdout = result.stdout;
+        var allocated_stdout: ?[]u8 = null;
+        defer if (allocated_stdout) |b| allocator.free(b);
+        if (std.mem.eql(u8, script, "script_args.js")) {
+            const count = std.mem.count(u8, result.stdout, zjs_path);
+            if (count > 0) {
+                const new_len = result.stdout.len - count * zjs_path.len + count * 15;
+                allocated_stdout = try allocator.alloc(u8, new_len);
+                _ = std.mem.replace(u8, result.stdout, zjs_path, "zig-out/bin/zjs", allocated_stdout.?);
+                normalized_stdout = allocated_stdout.?;
+            }
+        }
+        ok = ok and std.mem.eql(u8, bytes, normalized_stdout);
+    } else {
+        ok = ok and result.stdout.len == 0;
+    }
     if (expected_stderr) |bytes| ok = ok and std.mem.eql(u8, bytes, result.stderr) else ok = ok and result.stderr.len == 0;
     if (!ok) {
         try printError(io, "smoke: {s}: expected status {d}, got {d}; stdout {d} bytes, stderr {d} bytes\n", .{
