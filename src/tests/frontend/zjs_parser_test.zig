@@ -90,6 +90,20 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     return function;
 }
 
+fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+    const name = try env.rt.internAtom("test");
+    defer env.rt.atoms.free(name);
+    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
+    errdefer function.deinit(env.rt);
+    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+    try lex.enableTypeScript();
+    var state = try ParseState.init(&lex, &function);
+    defer state.deinit(env.rt);
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
+    return function;
+}
+
 fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3254,4 +3268,129 @@ test "F10.1c Nested function: bytecode dual-buffering" {
 
     // Verify emit_to_function_def flag is false after parsing
     try std.testing.expectEqual(false, state.emit_to_function_def);
+}
+
+test "TS: Class Constructor Parameter Properties" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\class Point {
+        \\    constructor(public x, readonly y) {
+        \\    }
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.constants.values.len > 0);
+}
+
+test "TS: Enum Declarations" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\enum Direction {
+        \\    Up,
+        \\    Down = 2,
+        \\    Left,
+        \\    Right = "Right"
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try expectOpcode(bytecode.code, op.put_field);
+    try expectOpcode(bytecode.code, op.put_array_el);
+}
+
+test "TS: Namespaces" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\namespace Outer {
+        \\    export namespace Inner {
+        \\        export const x = 1;
+        \\        export function foo() {}
+        \\        export class Bar {}
+        \\    }
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Nested Constructor Block Parameter Re-emission" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\class Base {
+        \\    constructor(public x) {
+        \\        this.x = 10;
+        \\        {
+        \\            const y = 20;
+        \\        }
+        \\    }
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Derived Constructor Parameter Properties post-super" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\class Derived extends Base {
+        \\    constructor(public y) {
+        \\        super(1);
+        \\    }
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Namespace Scope Isolation" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\namespace N {
+        \\    var w = 1;
+        \\    export function f() {}
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Dotted Namespaces" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+    var bytecode = try parseTSStatement(&env,
+        \\namespace A.B {
+        \\    export const x = 42;
+        \\}
+    );
+    defer bytecode.deinit(env.rt);
+    try std.testing.expect(bytecode.code.len > 0);
+}
+
+test "TS: Strict Enum Constant Expression Rejection" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+
+    // 1. Valid enum declaration with positive/negative numbers and string literals
+    var valid_bytecode = try parseTSStatement(&env,
+        \\enum Direction {
+        \\    Up = 1,
+        \\    Down = -2,
+        \\    Left = "Left"
+        \\}
+    );
+    defer valid_bytecode.deinit(env.rt);
+    try std.testing.expect(valid_bytecode.code.len > 0);
+
+    // 2. Invalid enum declaration with complex expression should throw UnexpectedToken
+    const invalid_res = parseTSStatement(&env,
+        \\enum Direction {
+        \\    Up = 10 - 8
+        \\}
+    );
+    try std.testing.expectError(error.UnexpectedToken, invalid_res);
 }

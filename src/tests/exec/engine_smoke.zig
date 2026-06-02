@@ -62,17 +62,19 @@ test "Engine eval preserves as and satisfies runtime property names in TypeScrip
     try std.testing.expect(result.isUndefined());
 }
 
-test "Engine eval rejects TypeScript parameter properties" {
+test "Engine eval supports TypeScript parameter properties" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    try std.testing.expectError(
-        error.SyntaxError,
-        js.evalWithOptions(
-            "class Box { constructor(public value: number) {} }",
-            .{ .source_kind = .typescript },
-        ),
-    );
+    var result = try js.evalWithOptions(
+        \\class Box {
+        \\    constructor(public value: number) {}
+        \\}
+        \\const b = new Box(42);
+        \\b.value === 42 ? 42 : 0
+    , .{ .source_kind = .typescript, .mode = .eval_indirect });
+    defer result.free(js.runtime);
+    try std.testing.expectEqual(@as(i32, 42), result.asInt32());
 }
 
 test "Engine eval strips TypeScript automatically for ts filenames" {

@@ -536,3 +536,63 @@ test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
         try std.testing.expectEqualStrings(e.name, env.rt.atoms.name(ka).?);
     }
 }
+
+test "F1: Lexer enableTypeScript strips variable and function TypeScript annotations dynamically" {
+    var env = try TestEnv.init();
+    defer env.deinit();
+
+    const src =
+        \\const x: number = 42;
+        \\function add(a: number, b?: number): number { return a + (b || 0); }
+        \\console.log(add(x, 1));
+    ;
+    var lex = env.lexer(src);
+    defer lex.deinit();
+    try lex.enableTypeScript();
+
+    // The lexer should skip all TS type parts and only emit clean JS tokens.
+    // e.g. "const", "x", "=", "42", ";", etc.
+    var tok = try lex.next();
+    defer freeAndDrain(&lex, &tok);
+    try std.testing.expectEqual(t.TOK_CONST, tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("x", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual('=', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(';', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_FUNCTION, tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("add", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual('(', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("a", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(',', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("b", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(')', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual('{', tok.val);
+}

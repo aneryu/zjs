@@ -7,7 +7,6 @@ const zjs_lexer = @import("zjs_lexer.zig");
 const zjs_parser = @import("zjs_parser.zig");
 const zjs_token = @import("zjs_token.zig");
 const source_pos = @import("source_pos.zig");
-const ts_strip = @import("ts_strip.zig");
 
 pub const Mode = enum {
     script,
@@ -16,7 +15,7 @@ pub const Mode = enum {
     eval_indirect,
 };
 
-pub const SourceKind = ts_strip.SourceKind;
+pub const SourceKind = zjs_lexer.SourceKind;
 pub const Feature = zjs_parser.Feature;
 
 pub const ParsePath = enum {
@@ -68,16 +67,9 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
     rt.memory.allocator = arena.allocator();
     defer rt.memory.allocator = original_allocator;
 
-    var stripped_source: ?[]u8 = null;
-    defer if (stripped_source) |buffer| rt.memory.allocator.free(buffer);
-    const parse_source: []const u8 = if (ts_strip.shouldStrip(options.source_kind, options.filename)) blk: {
-        stripped_source = try ts_strip.strip(rt.memory.allocator, source);
-        break :blk stripped_source.?;
-    } else source;
-
     const filename_atom = try rt.internAtom(options.filename);
     defer rt.atoms.free(filename_atom);
-    const effective_strict = options.strict or sourceHasOnlyStrictFlag(parse_source) or sourceHasUseStrictDirective(parse_source);
+    const effective_strict = options.strict or sourceHasOnlyStrictFlag(source) or sourceHasUseStrictDirective(source);
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
     var function_owned = true;
@@ -90,7 +82,7 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
 
     var features = std.EnumSet(Feature).initEmpty();
 
-    compileQjsProgram(rt, filename_atom, parse_source, options, &function, &features) catch |err| switch (err) {
+    compileQjsProgram(rt, filename_atom, source, options, &function, &features) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
             var result = Result{
@@ -101,7 +93,7 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
                 .arena = undefined,
             };
             function_owned = false;
-            try setFallbackSyntaxError(&result, rt, filename_atom, parse_source, @errorName(err));
+            try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
             result.arena = arena;
             return result;
         },
@@ -130,8 +122,12 @@ fn compileQjsProgram(
 ) !void {
     const effective_strict = options.strict or sourceHasOnlyStrictFlag(source) or sourceHasUseStrictDirective(source);
     var lex = zjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+    defer lex.deinit();
     lex.is_strict_mode = options.mode == .module or effective_strict;
     lex.is_module = options.mode == .module;
+    if (zjs_lexer.shouldStrip(options.source_kind, options.filename)) {
+        try lex.enableTypeScript();
+    }
     var state = try zjs_parser.ParseState.init(&lex, function);
     defer state.deinit(rt);
     state.runtime = rt;

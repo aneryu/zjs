@@ -33,6 +33,7 @@ pub const Error = error{
     LegacyOctalInStrictMode,
     HtmlCommentInModule,
     OutOfMemory,
+    SyntaxError,
 };
 
 pub const Lexer = struct {
@@ -65,12 +66,61 @@ pub const Lexer = struct {
     mark_line: u32 = 1,
     mark_col: u32 = 1,
 
+    is_typescript: bool = false,
+    skipped_intervals: std.ArrayList(Range),
+
     pub fn init(
         allocator: std.mem.Allocator,
         atoms: *AtomTable,
         source: []const u8,
     ) Lexer {
-        return .{ .allocator = allocator, .atoms = atoms, .source = source };
+        return .{
+            .allocator = allocator,
+            .atoms = atoms,
+            .source = source,
+            .skipped_intervals = std.ArrayList(Range).empty,
+        };
+    }
+
+    pub fn deinit(self: *Lexer) void {
+        self.skipped_intervals.deinit(self.allocator);
+    }
+
+    pub fn enableTypeScript(self: *Lexer) !void {
+        self.is_typescript = true;
+        try markTypeRanges(self);
+    }
+
+    fn getSkippedIntervalAtPos(self: *const Lexer, pos: usize) ?Range {
+        for (self.skipped_intervals.items) |range| {
+            if (range.start == pos) return range;
+            if (range.start > pos) break;
+        }
+        return null;
+    }
+
+    fn skipRange(self: *Lexer, range: Range) bool {
+        var p = self.pos;
+        var saw_lf = false;
+        while (p < range.end) : (p += 1) {
+            const c = self.source[p];
+            if (c == '\n') {
+                self.line += 1;
+                self.col = 1;
+                saw_lf = true;
+            } else if (c == '\r') {
+                if (p + 1 < range.end and self.source[p + 1] == '\n') {
+                    p += 1;
+                }
+                self.line += 1;
+                self.col = 1;
+                saw_lf = true;
+            } else {
+                self.col += 1;
+            }
+        }
+        self.pos = range.end;
+        return saw_lf;
     }
 
     pub fn freeToken(self: *Lexer, tok: *t.Token) void {
@@ -199,6 +249,16 @@ pub const Lexer = struct {
         self.got_lf = false;
         var allow_html_close = self.col == 1;
         while (self.pos < self.source.len) {
+            if (self.is_typescript) {
+                if (self.getSkippedIntervalAtPos(self.pos)) |range| {
+                    const saw_lf = self.skipRange(range);
+                    if (saw_lf) {
+                        self.got_lf = true;
+                        allow_html_close = true;
+                    }
+                    continue;
+                }
+            }
             const c = self.peek();
             if (c == ' ' or c == '\t' or c == 0x0B or c == 0x0C) {
                 self.bump();
@@ -1486,4 +1546,1039 @@ fn isReservedKeyword(val: t.TokenKind, is_strict: bool) bool {
 // memory module unused right now; kept for future eviction tests.
 comptime {
     _ = memory;
+}
+
+// ---- TypeScript Streaming Type-Filter Erasure Helpers ----
+
+pub const Range = struct {
+    start: usize,
+    end: usize,
+};
+
+pub const SourceKind = enum {
+    auto,
+    javascript,
+    typescript,
+};
+
+pub fn isTypeScriptPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".ts") or
+        std.mem.endsWith(u8, path, ".mts") or
+        std.mem.endsWith(u8, path, ".cts") or
+        std.mem.endsWith(u8, path, ".tsx");
+}
+
+pub fn shouldStrip(kind: SourceKind, filename: []const u8) bool {
+    return switch (kind) {
+        .typescript => true,
+        .javascript => false,
+        .auto => isTypeScriptPath(filename),
+    };
+}
+
+const TSTokenKind = enum {
+    identifier,
+    number,
+    string,
+    template,
+    regexp,
+    punct,
+};
+
+const TSToken = struct {
+    kind: TSTokenKind,
+    start: usize,
+    end: usize,
+
+    fn text(self: TSToken, src: []const u8) []const u8 {
+        return src[self.start..self.end];
+    }
+};
+
+fn markTypeRanges(self: *Lexer) !void {
+    var tokens = std.ArrayList(TSToken).empty;
+    defer tokens.deinit(self.allocator);
+    try tsTokenize(self.allocator, self.source, &tokens);
+
+    var ranges = std.ArrayList(Range).empty;
+    defer ranges.deinit(self.allocator);
+
+    try markTypeOnlyStatements(self.allocator, self.source, tokens.items, &ranges);
+    try markMixedTypeSpecifiers(self.allocator, self.source, tokens.items, &ranges);
+    try markClassAndTypeModifiers(self.allocator, self.source, tokens.items, &ranges);
+    try markImplementsClauses(self.allocator, self.source, tokens.items, &ranges);
+    try markTypeParameters(self.allocator, self.source, tokens.items, &ranges);
+    try markTypeAnnotations(self.allocator, self.source, tokens.items, &ranges);
+    try markTypeAssertions(self.allocator, self.source, tokens.items, &ranges);
+    try markNonNullAssertions(self.allocator, self.source, tokens.items, &ranges);
+
+    std.mem.sort(Range, ranges.items, {}, rangeLessThan);
+    self.skipped_intervals.clearRetainingCapacity();
+    for (ranges.items) |range| {
+        if (self.skipped_intervals.items.len == 0 or range.start > self.skipped_intervals.items[self.skipped_intervals.items.len - 1].end) {
+            try self.skipped_intervals.append(self.allocator, range);
+        } else if (range.end > self.skipped_intervals.items[self.skipped_intervals.items.len - 1].end) {
+            self.skipped_intervals.items[self.skipped_intervals.items.len - 1].end = range.end;
+        }
+    }
+}
+
+fn tsTokenize(allocator: std.mem.Allocator, src: []const u8, tokens: *std.ArrayList(TSToken)) !void {
+    var i: usize = 0;
+    var prev_sig: ?TSToken = null;
+    while (i < src.len) {
+        const c = src[i];
+        if (std.ascii.isWhitespace(c)) {
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < src.len and src[i + 1] == '/') {
+            i = tsSkipLineComment(src, i + 2);
+            continue;
+        }
+        if (c == '/' and i + 1 < src.len and src[i + 1] == '*') {
+            i = tsSkipBlockComment(src, i + 2);
+            continue;
+        }
+
+        const start = i;
+        const token = if (tsIsIdentStart(c)) blk: {
+            i += 1;
+            while (i < src.len and tsIsIdentContinue(src[i])) i += 1;
+            break :blk TSToken{ .kind = .identifier, .start = start, .end = i };
+        } else if (std.ascii.isDigit(c)) blk: {
+            i = tsSkipNumber(src, i);
+            break :blk TSToken{ .kind = .number, .start = start, .end = i };
+        } else if (c == '\'' or c == '"') blk: {
+            i = tsSkipQuoted(src, i, c);
+            break :blk TSToken{ .kind = .string, .start = start, .end = i };
+        } else if (c == '`') blk: {
+            i = tsSkipTemplate(src, i);
+            break :blk TSToken{ .kind = .template, .start = start, .end = i };
+        } else if (c == '/' and tsCanStartRegExp(prev_sig, src)) blk: {
+            i = tsSkipRegExp(src, i);
+            break :blk TSToken{ .kind = .regexp, .start = start, .end = i };
+        } else blk: {
+            i += tsPunctuatorLen(src[i..]);
+            break :blk TSToken{ .kind = .punct, .start = start, .end = i };
+        };
+
+        try tokens.append(allocator, token);
+        prev_sig = token;
+    }
+}
+
+fn tsSkipLineComment(src: []const u8, start: usize) usize {
+    var i = start;
+    while (i < src.len and src[i] != '\n' and src[i] != '\r') i += 1;
+    return i;
+}
+
+fn tsSkipBlockComment(src: []const u8, start: usize) usize {
+    var i = start;
+    while (i + 1 < src.len and !(src[i] == '*' and src[i + 1] == '/')) i += 1;
+    return if (i + 1 < src.len) i + 2 else src.len;
+}
+
+fn tsSkipQuoted(src: []const u8, start: usize, quote: u8) usize {
+    var i = start + 1;
+    var escaped = false;
+    while (i < src.len) : (i += 1) {
+        const c = src[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == quote) return i + 1;
+        if (c == '\n' or c == '\r') return i;
+    }
+    return src.len;
+}
+
+fn tsSkipTemplate(src: []const u8, start: usize) usize {
+    var i = start + 1;
+    var escaped = false;
+    while (i < src.len) : (i += 1) {
+        const c = src[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '`') return i + 1;
+    }
+    return src.len;
+}
+
+fn tsSkipRegExp(src: []const u8, start: usize) usize {
+    var i = start + 1;
+    var escaped = false;
+    var in_class = false;
+    while (i < src.len) : (i += 1) {
+        const c = src[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '[') {
+            in_class = true;
+            continue;
+        }
+        if (c == ']') {
+            in_class = false;
+            continue;
+        }
+        if (c == '/' and !in_class) {
+            i += 1;
+            while (i < src.len and tsIsIdentContinue(src[i])) i += 1;
+            return i;
+        }
+        if (c == '\n' or c == '\r') return i;
+    }
+    return src.len;
+}
+
+fn tsSkipNumber(src: []const u8, start: usize) usize {
+    var i = start;
+    while (i < src.len) {
+        const c = src[i];
+        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.') {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+fn tsPunctuatorLen(rest: []const u8) usize {
+    const puncts = [_][]const u8{
+        ">>>=", "===", "!==", ">>>", "<<=", ">>=", "...", "=>",
+        "==",   "!=",  "<=",  ">=",  "&&",  "||",  "??",  "?.",
+        "++",   "--",  "+=",  "-=",  "*=",  "/=",  "%=",  "&=",
+        "|=",   "^=",  "<<",  ">>",  "**",
+    };
+    for (puncts) |p| {
+        if (std.mem.startsWith(u8, rest, p)) return p.len;
+    }
+    return 1;
+}
+
+fn tsCanStartRegExp(prev: ?TSToken, src: []const u8) bool {
+    const token = prev orelse return true;
+    const txt = token.text(src);
+    if (token.kind == .identifier) {
+        return textEql(txt, "return") or textEql(txt, "throw") or textEql(txt, "case") or
+            textEql(txt, "delete") or textEql(txt, "void") or textEql(txt, "typeof") or
+            textEql(txt, "yield") or textEql(txt, "await") or textEql(txt, "in") or
+            textEql(txt, "of") or textEql(txt, "instanceof");
+    }
+    if (token.kind != .punct) return false;
+    return textEql(txt, "(") or textEql(txt, "{") or textEql(txt, "[") or
+        textEql(txt, ",") or textEql(txt, ";") or textEql(txt, ":") or
+        textEql(txt, "=") or textEql(txt, "=>") or textEql(txt, "!") or
+        textEql(txt, "?") or textEql(txt, "&&") or textEql(txt, "||") or
+        textEql(txt, "??") or textEql(txt, "+") or textEql(txt, "-") or
+        textEql(txt, "*") or textEql(txt, "/") or textEql(txt, "%") or
+        textEql(txt, "~");
+}
+
+fn markTypeOnlyStatements(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "import") and tokenTextEql(src, tokens, i + 1, "type")) {
+            try addRange(ranges, allocator, tokens[i].start, findStatementEnd(src, tokens, i));
+            continue;
+        }
+        if (textEql(txt, "export")) {
+            if (tokenTextEql(src, tokens, i + 1, "type")) {
+                try addRange(ranges, allocator, tokens[i].start, findStatementEnd(src, tokens, i));
+                continue;
+            }
+            if (tokenTextEql(src, tokens, i + 1, "interface")) {
+                try addInterfaceRange(allocator, src, tokens, ranges, i, i + 1);
+                continue;
+            }
+            if (tokenTextEql(src, tokens, i + 1, "declare")) {
+                try addDeclareRange(allocator, src, tokens, ranges, i, i + 1);
+                continue;
+            }
+        }
+        if (textEql(txt, "declare")) {
+            try addDeclareRange(allocator, src, tokens, ranges, i, i);
+            continue;
+        }
+        if (textEql(txt, "interface") and isStatementStart(src, tokens, i)) {
+            try addInterfaceRange(allocator, src, tokens, ranges, i, i);
+            continue;
+        }
+        if (textEql(txt, "type") and isStatementStart(src, tokens, i) and looksLikeTypeAlias(src, tokens, i)) {
+            try addRange(ranges, allocator, tokens[i].start, findStatementEnd(src, tokens, i));
+            continue;
+        }
+    }
+}
+
+fn addDeclareRange(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+    range_start_idx: usize,
+    declare_idx: usize,
+) !void {
+    if (tokenTextEql(src, tokens, declare_idx + 1, "interface")) {
+        try addInterfaceRange(allocator, src, tokens, ranges, range_start_idx, declare_idx + 1);
+        return;
+    }
+
+    var end = findStatementEnd(src, tokens, declare_idx);
+    var j = declare_idx + 1;
+    while (j < tokens.len and tokens[j].start < end) : (j += 1) {
+        if (tokenTextEql(src, tokens, j, "{")) {
+            if (findMatchingForward(src, tokens, j, "{", "}")) |close_idx| {
+                end = tokens[close_idx].end;
+                if (close_idx + 1 < tokens.len and tokenTextEql(src, tokens, close_idx + 1, ";")) {
+                    end = tokens[close_idx + 1].end;
+                }
+            }
+            break;
+        }
+    }
+    try addRange(ranges, allocator, tokens[range_start_idx].start, end);
+}
+
+fn addInterfaceRange(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+    range_start_idx: usize,
+    interface_idx: usize,
+) !void {
+    var end = findStatementEnd(src, tokens, interface_idx);
+    var j = interface_idx + 1;
+    while (j < tokens.len and tokens[j].start < end) : (j += 1) {
+        if (tokenTextEql(src, tokens, j, "{")) {
+            if (findMatchingForward(src, tokens, j, "{", "}")) |close_idx| {
+                end = tokens[close_idx].end;
+                if (close_idx + 1 < tokens.len and tokenTextEql(src, tokens, close_idx + 1, ";")) {
+                    end = tokens[close_idx + 1].end;
+                }
+            }
+            break;
+        }
+    }
+    try addRange(ranges, allocator, tokens[range_start_idx].start, end);
+}
+
+fn looksLikeTypeAlias(src: []const u8, tokens: []const TSToken, type_idx: usize) bool {
+    var depth: usize = 0;
+    var i = type_idx + 1;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "{") or textEql(txt, "(") or textEql(txt, "[")) {
+            depth += 1;
+        } else if (textEql(txt, "}") or textEql(txt, ")") or textEql(txt, "]")) {
+            if (depth == 0) return false;
+            depth -= 1;
+        } else if (depth == 0 and textEql(txt, "=")) {
+            return true;
+        } else if (depth == 0 and (textEql(txt, ";") or hasLineBreakBetween(src, tokens[type_idx].end, tokens[i].start))) {
+            return false;
+        }
+    }
+    return false;
+}
+
+fn markMixedTypeSpecifiers(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!tokenTextEql(src, tokens, i, "import") and !tokenTextEql(src, tokens, i, "export")) continue;
+        if (tokenTextEql(src, tokens, i + 1, "type")) continue;
+        const stmt_end = findStatementEnd(src, tokens, i);
+        const open_idx = findTokenBeforeOffset(src, tokens, i + 1, stmt_end, "{") orelse continue;
+        const close_idx = findMatchingForward(src, tokens, open_idx, "{", "}") orelse continue;
+        if (tokens[close_idx].end > stmt_end) continue;
+
+        var spec_count: usize = 0;
+        var type_spec_count: usize = 0;
+        var segment_start = open_idx + 1;
+        while (segment_start < close_idx) {
+            while (segment_start < close_idx and tokenTextEql(src, tokens, segment_start, ",")) segment_start += 1;
+            if (segment_start >= close_idx) break;
+            var segment_end = segment_start;
+            while (segment_end < close_idx and !tokenTextEql(src, tokens, segment_end, ",")) segment_end += 1;
+            spec_count += 1;
+            if (tokenTextEql(src, tokens, segment_start, "type")) {
+                type_spec_count += 1;
+                const remove_start = if (segment_start > open_idx + 1 and tokenTextEql(src, tokens, segment_start - 1, ","))
+                    tokens[segment_start - 1].start
+                else
+                    tokens[segment_start].start;
+                const remove_end = if (segment_end < close_idx and tokenTextEql(src, tokens, segment_end, ","))
+                    tokens[segment_end].end
+                else
+                    tokens[segment_end - 1].end;
+                try addRange(ranges, allocator, remove_start, remove_end);
+            }
+            segment_start = segment_end + 1;
+        }
+
+        if (spec_count != 0 and spec_count == type_spec_count) {
+            try addRange(ranges, allocator, tokens[i].start, stmt_end);
+        }
+    }
+}
+
+fn markClassAndTypeModifiers(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var in_constructor_params = false;
+    var paren_depth: usize = 0;
+
+    for (tokens, 0..) |tok, i| {
+        const txt = tok.text(src);
+
+        if (textEql(txt, "constructor")) {
+            if (i + 1 < tokens.len and textEql(tokens[i + 1].text(src), "(")) {
+                in_constructor_params = true;
+                paren_depth = 0;
+            }
+        }
+
+        if (in_constructor_params) {
+            if (textEql(txt, "(")) {
+                paren_depth += 1;
+            } else if (textEql(txt, ")")) {
+                paren_depth -= 1;
+                if (paren_depth == 0) {
+                    in_constructor_params = false;
+                }
+            }
+        }
+
+        if (!isTsModifier(txt)) continue;
+
+        // If we are in constructor parameter list (paren_depth == 1 means top-level parameters),
+        // we preserve public/private/protected/readonly modifiers as parameter properties!
+        if (in_constructor_params and paren_depth == 1) {
+            if (textEql(txt, "public") or textEql(txt, "private") or textEql(txt, "protected") or textEql(txt, "readonly")) {
+                continue;
+            }
+        }
+
+        if (textEql(txt, "abstract") and tokenTextEql(src, tokens, i + 1, "class")) {
+            try addRange(ranges, allocator, tok.start, tok.end);
+            continue;
+        }
+        if (modifierCanAppearsHere(src, tokens, i)) {
+            try addRange(ranges, allocator, tok.start, tok.end);
+        }
+    }
+}
+
+fn modifierCanAppearsHere(src: []const u8, tokens: []const TSToken, idx: usize) bool {
+    const prev = if (idx == 0) null else tokens[idx - 1].text(src);
+    const next = if (idx + 1 < tokens.len) tokens[idx + 1].text(src) else "";
+    if (textEql(next, "(") or textEql(next, ":") or textEql(next, "=") or textEql(next, ";")) return false;
+    if (prev) |p| {
+        return textEql(p, "{") or textEql(p, "(") or textEql(p, ",") or textEql(p, ";");
+    }
+    return true;
+}
+
+fn isTsModifier(txt: []const u8) bool {
+    return textEql(txt, "public") or textEql(txt, "private") or textEql(txt, "protected") or
+        textEql(txt, "readonly") or textEql(txt, "override") or textEql(txt, "abstract");
+}
+
+fn findImplementsClassBrace(src: []const u8, tokens: []const TSToken, start_idx: usize) ?usize {
+    var i = start_idx;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        const kind = tokens[i].kind;
+        if (textEql(txt, "{")) {
+            return i;
+        }
+        if (textEql(txt, ";") or textEql(txt, "}")) return null;
+        if (kind == .identifier) {
+            if (textEql(txt, "const") or textEql(txt, "let") or textEql(txt, "var") or
+                textEql(txt, "function") or textEql(txt, "class") or textEql(txt, "interface") or
+                textEql(txt, "if") or textEql(txt, "while") or textEql(txt, "for") or
+                textEql(txt, "return"))
+            {
+                return null;
+            }
+        }
+    }
+    return null;
+}
+
+fn markImplementsClauses(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!tokenTextEql(src, tokens, i, "implements")) continue;
+        const brace_idx = findImplementsClassBrace(src, tokens, i + 1) orelse continue;
+        try addRange(ranges, allocator, tokens[i].start, tokens[brace_idx].start);
+        i = brace_idx - 1;
+    }
+}
+
+fn markTypeParameters(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        if (!tokenTextEql(src, tokens, i, "<")) continue;
+        if (!looksLikeTypeParameterStart(src, tokens, i)) continue;
+        if (findTypeAngleEnd(src, tokens, i)) |end_idx| {
+            try addRange(ranges, allocator, tokens[i].start, tokens[end_idx].end);
+            i = end_idx;
+        }
+    }
+}
+
+fn looksLikeTypeParameterStart(src: []const u8, tokens: []const TSToken, lt_idx: usize) bool {
+    if (lt_idx == 0) return false;
+    const prev = tokens[lt_idx - 1].text(src);
+    const prev_kind = tokens[lt_idx - 1].kind;
+    const is_call_or_expr = textEql(prev, ")") or textEql(prev, "]") or prev_kind == .number or prev_kind == .string or prev_kind == .regexp;
+    if (is_call_or_expr) return false;
+
+    if (lt_idx >= 2 and textEql(prev, "class")) return false;
+    return true;
+}
+
+fn markTypeAnnotations(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    for (tokens, 0..) |tok, i| {
+        if (!textEql(tok.text(src), ":")) continue;
+        if (!isTypeAnnotationColon(src, tokens, i)) continue;
+        const stop_arrow = i > 0 and tokenTextEql(src, tokens, i - 1, ")");
+        const end_idx = findTypeEnd(src, tokens, i + 1, stop_arrow) orelse tokens.len;
+        const start = if (i > 0 and tokenTextEql(src, tokens, i - 1, "?")) tokens[i - 1].start else tok.start;
+        const end = if (end_idx < tokens.len) tokens[end_idx].start else src.len;
+        if (end > start) try addRange(ranges, allocator, start, end);
+    }
+}
+
+fn isTypeAnnotationColon(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool {
+    if (colon_idx == 0 or colon_idx + 1 >= tokens.len) return false;
+    if (hasUnmatchedTernaryQuestionBefore(src, tokens, colon_idx)) return false;
+
+    const prev_idx = if (tokenTextEql(src, tokens, colon_idx - 1, "?")) blk: {
+        if (colon_idx < 2) return false;
+        break :blk colon_idx - 2;
+    } else colon_idx - 1;
+    if (prev_idx >= tokens.len) return false;
+    const prev = tokens[prev_idx].text(src);
+    if (textEql(prev, ")")) return true;
+
+    const enclosing = findEnclosingOpen(src, tokens, colon_idx);
+    if (enclosing) |open_idx| {
+        const open = tokens[open_idx].text(src);
+        if (textEql(open, "(")) return isParameterList(src, tokens, open_idx);
+        if (textEql(open, "{")) return braceBelongsToClass(src, tokens, open_idx) and classFieldSegmentAllowsType(src, tokens, open_idx, colon_idx);
+        return false;
+    }
+
+    return isVariableDeclarationType(src, tokens, colon_idx);
+}
+
+fn isParameterList(src: []const u8, tokens: []const TSToken, open_idx: usize) bool {
+    const close_idx = findMatchingForward(src, tokens, open_idx, "(", ")") orelse return false;
+    const before = if (open_idx == 0) "" else tokens[open_idx - 1].text(src);
+    const after = if (close_idx + 1 < tokens.len) tokens[close_idx + 1].text(src) else "";
+    if (isControlKeyword(before)) return false;
+    if (textEql(before, "function") or textEql(before, "constructor")) return true;
+    if (open_idx >= 2 and tokens[open_idx - 1].kind == .identifier and tokenTextEql(src, tokens, open_idx - 2, "function")) return true;
+    if (open_idx > 0 and tokens[open_idx - 1].kind == .identifier and (textEql(after, "{") or textEql(after, "=>"))) return true;
+    if (open_idx > 0 and tokens[open_idx - 1].kind == .identifier and textEql(after, ":")) {
+        return returnTypeAfterParameterListLeadsToBody(src, tokens, close_idx);
+    }
+    if (textEql(after, "=>")) return true;
+    return false;
+}
+
+fn returnTypeAfterParameterListLeadsToBody(src: []const u8, tokens: []const TSToken, close_idx: usize) bool {
+    if (!tokenTextEql(src, tokens, close_idx + 1, ":")) return false;
+    const end_idx = findTypeEnd(src, tokens, close_idx + 2, true) orelse return false;
+    return tokenTextEql(src, tokens, end_idx, "{") or tokenTextEql(src, tokens, end_idx, "=>");
+}
+
+fn isControlKeyword(txt: []const u8) bool {
+    return textEql(txt, "if") or textEql(txt, "for") or textEql(txt, "while") or
+        textEql(txt, "switch") or textEql(txt, "with") or textEql(txt, "catch");
+}
+
+fn isVariableDeclarationType(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool {
+    var stmt_start: usize = 0;
+    var i = colon_idx;
+    while (i > 0) {
+        i -= 1;
+        const txt = tokens[i].text(src);
+        if (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}")) {
+            stmt_start = i + 1;
+            break;
+        }
+    }
+
+    var saw_decl = false;
+    var last_comma_or_decl = stmt_start;
+    i = stmt_start;
+    while (i < colon_idx) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "let") or textEql(txt, "const") or textEql(txt, "var")) {
+            saw_decl = true;
+            last_comma_or_decl = i + 1;
+        } else if (textEql(txt, ",")) {
+            last_comma_or_decl = i + 1;
+        }
+    }
+    if (!saw_decl) return false;
+
+    i = last_comma_or_decl;
+    while (i < colon_idx) : (i += 1) {
+        if (tokenTextEql(src, tokens, i, "=")) return false;
+    }
+    return true;
+}
+
+fn classFieldSegmentAllowsType(src: []const u8, tokens: []const TSToken, class_open_idx: usize, colon_idx: usize) bool {
+    var start = class_open_idx + 1;
+    var i = colon_idx;
+    while (i > class_open_idx + 1) {
+        i -= 1;
+        if (tokenTextEql(src, tokens, i, ";") or tokenTextEql(src, tokens, i, "{") or tokenTextEql(src, tokens, i, "}")) {
+            start = i + 1;
+            break;
+        }
+    }
+    i = start;
+    while (i < colon_idx) : (i += 1) {
+        if (tokenTextEql(src, tokens, i, "=")) return false;
+    }
+    return true;
+}
+
+fn markTypeAssertions(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    for (tokens, 0..) |tok, i| {
+        const txt = tok.text(src);
+        if (!textEql(txt, "as") and !textEql(txt, "satisfies")) continue;
+        if (insideImportOrExportStatement(src, tokens, i)) continue;
+        if (!isTypeAssertionOperator(src, tokens, i)) continue;
+        const end_idx = findTypeAssertionEnd(src, tokens, i + 1) orelse tokens.len;
+        const end = if (end_idx < tokens.len) tokens[end_idx].start else src.len;
+        if (end > tok.start) try addRange(ranges, allocator, tok.start, end);
+    }
+}
+
+fn markNonNullAssertions(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    tokens: []const TSToken,
+    ranges: *std.ArrayList(Range),
+) !void {
+    for (tokens, 0..) |tok, i| {
+        if (!textEql(tok.text(src), "!")) continue;
+        if (i == 0 or i + 1 >= tokens.len) continue;
+        const prev = tokens[i - 1].text(src);
+        const next = tokens[i + 1].text(src);
+        const prev_can_end_expr = tokens[i - 1].kind == .identifier or tokens[i - 1].kind == .number or
+            tokens[i - 1].kind == .string or textEql(prev, ")") or textEql(prev, "]");
+        if (!prev_can_end_expr) continue;
+        if (textEql(next, "=") or textEql(next, "==") or textEql(next, "===")) continue;
+        try addRange(ranges, allocator, tok.start, tok.end);
+    }
+}
+
+fn isTypeAssertionOperator(src: []const u8, tokens: []const TSToken, idx: usize) bool {
+    if (idx == 0 or idx + 1 >= tokens.len) return false;
+    if (!previousTokenCanEndExpression(src, tokens[idx - 1])) return false;
+
+    const next = tokens[idx + 1].text(src);
+    if (textEql(next, ":") or textEql(next, ",") or textEql(next, ";") or textEql(next, ")") or textEql(next, "}") or textEql(next, "=")) {
+        return false;
+    }
+
+    return true;
+}
+
+fn previousTokenCanEndExpression(src: []const u8, token: TSToken) bool {
+    return switch (token.kind) {
+        .identifier => identifierCanEndExpression(token.text(src)),
+        .number, .string, .template, .regexp => true,
+        .punct => {
+            const txt = token.text(src);
+            return textEql(txt, ")") or textEql(txt, "]") or textEql(txt, "}");
+        },
+    };
+}
+
+fn identifierCanEndExpression(txt: []const u8) bool {
+    return !textEql(txt, "const") and !textEql(txt, "let") and !textEql(txt, "var") and
+        !textEql(txt, "function") and !textEql(txt, "class") and !textEql(txt, "return") and
+        !textEql(txt, "throw") and !textEql(txt, "case") and !textEql(txt, "delete") and
+        !textEql(txt, "typeof") and !textEql(txt, "void") and !textEql(txt, "new") and
+        !textEql(txt, "in") and !textEql(txt, "instanceof") and !textEql(txt, "yield") and
+        !textEql(txt, "await");
+}
+
+fn findTypeEnd(src: []const u8, tokens: []const TSToken, start_idx: usize, stop_arrow: bool) ?usize {
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+    var angle: usize = 0;
+    var i = start_idx;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "(")) paren += 1 else if (textEql(txt, ")")) {
+            if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) return i;
+            paren -|= 1;
+        } else if (textEql(txt, "[")) bracket += 1 else if (textEql(txt, "]")) {
+            if (bracket == 0 and paren == 0 and brace == 0 and angle == 0) return i;
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) {
+            if (i == start_idx or brace > 0 or paren > 0 or bracket > 0 or angle > 0) {
+                brace += 1;
+            } else {
+                return i;
+            }
+        } else if (textEql(txt, "}")) {
+            if (brace == 0 and paren == 0 and bracket == 0 and angle == 0) return i;
+            brace -|= 1;
+        } else if (textEql(txt, "<")) {
+            angle += 1;
+        } else if (textEql(txt, ">")) {
+            if (angle > 0) angle -= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) {
+            if (textEql(txt, ",") or textEql(txt, ";") or textEql(txt, "=")) return i;
+            if (stop_arrow and textEql(txt, "=>")) return i;
+        }
+    }
+    return null;
+}
+
+fn findTypeAssertionEnd(src: []const u8, tokens: []const TSToken, start_idx: usize) ?usize {
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+    var angle: usize = 0;
+    var i = start_idx;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "(")) paren += 1 else if (textEql(txt, ")")) {
+            if (paren == 0 and bracket == 0 and brace == 0 and angle == 0) return i;
+            paren -|= 1;
+        } else if (textEql(txt, "[")) bracket += 1 else if (textEql(txt, "]")) {
+            if (bracket == 0 and paren == 0 and brace == 0 and angle == 0) return i;
+            bracket -|= 1;
+        } else if (textEql(txt, "{")) brace += 1 else if (textEql(txt, "}")) {
+            if (brace == 0 and paren == 0 and bracket == 0 and angle == 0) return i;
+            brace -|= 1;
+        } else if (textEql(txt, "<")) {
+            angle += 1;
+        } else if (textEql(txt, ">")) {
+            if (angle > 0) angle -= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and angle == 0 and isExpressionDelimiter(txt)) {
+            return i;
+        }
+    }
+    return null;
+}
+
+fn isExpressionDelimiter(txt: []const u8) bool {
+    return textEql(txt, ",") or textEql(txt, ";") or textEql(txt, ":") or textEql(txt, "?") or
+        textEql(txt, "}") or textEql(txt, "=>") or textEql(txt, "||") or textEql(txt, "&&") or
+        textEql(txt, "??") or textEql(txt, "+") or textEql(txt, "-") or textEql(txt, "*") or
+        textEql(txt, "/") or textEql(txt, "%") or textEql(txt, "==") or textEql(txt, "===") or
+        textEql(txt, "!=") or textEql(txt, "!==") or textEql(txt, "<=") or textEql(txt, ">=") or
+        textEql(txt, "=");
+}
+
+fn isValidTypeParameterList(src: []const u8, tokens: []const TSToken, start: usize, end: usize) bool {
+    var i = start + 1;
+    while (i < end) : (i += 1) {
+        const txt = tokens[i].text(src);
+        const kind = tokens[i].kind;
+        if (textEql(txt, "&&") or textEql(txt, "||") or textEql(txt, "??") or
+            textEql(txt, "==") or textEql(txt, "!=") or textEql(txt, "===") or textEql(txt, "!==") or
+            textEql(txt, "*") or textEql(txt, "/") or textEql(txt, "%") or
+            textEql(txt, "instanceof") or textEql(txt, "++") or textEql(txt, "--"))
+        {
+            return false;
+        }
+        if (kind == .identifier) {
+            if (textEql(txt, "if") or textEql(txt, "else") or textEql(txt, "while") or
+                textEql(txt, "for") or textEql(txt, "return") or textEql(txt, "const") or
+                textEql(txt, "let") or textEql(txt, "var") or textEql(txt, "function") or
+                textEql(txt, "class") or textEql(txt, "throw") or textEql(txt, "try") or
+                textEql(txt, "catch") or textEql(txt, "finally"))
+            {
+                return false;
+            }
+        }
+    }
+    if (end + 1 < tokens.len) {
+        const next_txt = tokens[end + 1].text(src);
+        const next_kind = tokens[end + 1].kind;
+        if (next_kind == .identifier) {
+            if (!textEql(next_txt, "extends") and !textEql(next_txt, "implements") and !textEql(next_txt, "as") and !textEql(next_txt, "satisfies")) {
+                return false;
+            }
+        }
+        if (next_kind == .number or next_kind == .string or next_kind == .regexp) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn findTypeAngleEnd(src: []const u8, tokens: []const TSToken, lt_idx: usize) ?usize {
+    var depth: usize = 0;
+    var i = lt_idx;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "<")) {
+            depth += 1;
+        } else if (textEql(txt, ">")) {
+            depth -|= 1;
+            if (depth == 0) {
+                if (isValidTypeParameterList(src, tokens, lt_idx, i)) {
+                    return i;
+                }
+                return null;
+            }
+        } else if (depth == 1 and (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}"))) {
+            return null;
+        }
+    }
+    return null;
+}
+
+fn findStatementEnd(src: []const u8, tokens: []const TSToken, start_idx: usize) usize {
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+    var i = start_idx;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "(")) paren += 1 else if (textEql(txt, ")")) paren -|= 1 else if (textEql(txt, "[")) bracket += 1 else if (textEql(txt, "]")) bracket -|= 1 else if (textEql(txt, "{")) brace += 1 else if (textEql(txt, "}")) {
+            if (brace == 0 and paren == 0 and bracket == 0) return tokens[i].end;
+            brace -|= 1;
+        }
+        if (paren == 0 and bracket == 0 and brace == 0) {
+            if (textEql(txt, ";")) return tokens[i].end;
+            if (i + 1 < tokens.len and hasLineBreakBetween(src, tokens[i].end, tokens[i + 1].start) and !continuesAcrossLine(txt)) {
+                return tokens[i].end;
+            }
+        }
+    }
+    return src.len;
+}
+
+fn continuesAcrossLine(txt: []const u8) bool {
+    return textEql(txt, ",") or textEql(txt, "=") or textEql(txt, "|") or textEql(txt, "&") or
+        textEql(txt, "?") or textEql(txt, ":") or textEql(txt, "extends") or textEql(txt, "(") or
+        textEql(txt, "{") or textEql(txt, "[");
+}
+
+fn findMatchingForward(src: []const u8, tokens: []const TSToken, open_idx: usize, open_text: []const u8, close_text: []const u8) ?usize {
+    var depth: usize = 0;
+    var i = open_idx;
+    while (i < tokens.len) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, open_text)) {
+            depth += 1;
+        } else if (textEql(txt, close_text)) {
+            depth -|= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+fn findEnclosingOpen(src: []const u8, tokens: []const TSToken, idx: usize) ?usize {
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+    var i = idx;
+    while (i > 0) {
+        i -= 1;
+        const txt = tokens[i].text(src);
+        if (textEql(txt, ")")) paren += 1 else if (textEql(txt, "]")) bracket += 1 else if (textEql(txt, "}")) brace += 1 else if (textEql(txt, "(")) {
+            if (paren == 0) return i;
+            paren -= 1;
+        } else if (textEql(txt, "[")) {
+            if (bracket == 0) return i;
+            bracket -= 1;
+        } else if (textEql(txt, "{")) {
+            if (brace == 0) return i;
+            brace -= 1;
+        }
+    }
+    return null;
+}
+
+fn braceBelongsToClass(src: []const u8, tokens: []const TSToken, open_idx: usize) bool {
+    var i = open_idx;
+    while (i > 0) {
+        i -= 1;
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "class")) return true;
+        if (textEql(txt, ";") or textEql(txt, "{") or textEql(txt, "}")) return false;
+    }
+    return false;
+}
+
+fn hasUnmatchedTernaryQuestionBefore(src: []const u8, tokens: []const TSToken, colon_idx: usize) bool {
+    if (colon_idx > 0 and tokenTextEql(src, tokens, colon_idx - 1, "?")) return false;
+    var paren: usize = 0;
+    var bracket: usize = 0;
+    var brace: usize = 0;
+    var i = colon_idx;
+    while (i > 0) {
+        i -= 1;
+        const txt = tokens[i].text(src);
+        if (textEql(txt, ")")) paren += 1 else if (textEql(txt, "]")) bracket += 1 else if (textEql(txt, "}")) brace += 1 else if (textEql(txt, "(")) {
+            if (paren == 0) break;
+            paren -= 1;
+        } else if (textEql(txt, "[")) {
+            if (bracket == 0) break;
+            bracket -= 1;
+        } else if (textEql(txt, "{")) {
+            if (brace == 0) break;
+            brace -= 1;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and textEql(txt, "?")) {
+            return true;
+        } else if (paren == 0 and bracket == 0 and brace == 0 and (textEql(txt, ";") or textEql(txt, ","))) {
+            break;
+        }
+    }
+    return false;
+}
+
+fn insideImportOrExportStatement(src: []const u8, tokens: []const TSToken, idx: usize) bool {
+    var stmt_start: usize = 0;
+    var i = idx;
+    while (i > 0) {
+        i -= 1;
+        if (tokenTextEql(src, tokens, i, ";")) {
+            stmt_start = i + 1;
+            break;
+        }
+    }
+
+    var saw_import = false;
+    var saw_export = false;
+    var saw_equals = false;
+    i = stmt_start;
+    while (i < idx) : (i += 1) {
+        const txt = tokens[i].text(src);
+        if (textEql(txt, "import")) saw_import = true;
+        if (textEql(txt, "export")) saw_export = true;
+        if (textEql(txt, "=")) saw_equals = true;
+    }
+
+    if (saw_equals) return false;
+    if (saw_import) return true;
+    if (!saw_export) return false;
+    if (findEnclosingOpen(src, tokens, idx)) |open_idx| {
+        return tokenTextEql(src, tokens, open_idx, "{") and open_idx >= stmt_start;
+    }
+    i = stmt_start;
+    while (i < idx) : (i += 1) {
+        if (tokenTextEql(src, tokens, i, "*") or tokenTextEql(src, tokens, i, "from")) return true;
+    }
+    return false;
+}
+
+fn isStatementStart(src: []const u8, tokens: []const TSToken, idx: usize) bool {
+    if (idx == 0) return true;
+    const prev = tokens[idx - 1].text(src);
+    return textEql(prev, ";") or textEql(prev, "{") or textEql(prev, "}");
+}
+
+fn findTokenBeforeOffset(src: []const u8, tokens: []const TSToken, start_idx: usize, end_offset: usize, needle: []const u8) ?usize {
+    var i = start_idx;
+    while (i < tokens.len and tokens[i].start < end_offset) : (i += 1) {
+        if (textEql(tokens[i].text(src), needle)) return i;
+    }
+    return null;
+}
+
+fn hasLineBreakBetween(src: []const u8, start: usize, end: usize) bool {
+    var i = start;
+    while (i < end and i < src.len) : (i += 1) {
+        if (src[i] == '\n' or src[i] == '\r') return true;
+    }
+    return false;
+}
+
+fn addRange(ranges: *std.ArrayList(Range), allocator: std.mem.Allocator, start: usize, end: usize) !void {
+    if (end <= start) return;
+    try ranges.append(allocator, .{ .start = start, .end = end });
+}
+
+fn rangeLessThan(_: void, a: Range, b: Range) bool {
+    return a.start < b.start;
+}
+
+fn tokenTextEql(src: []const u8, tokens: []const TSToken, idx: usize, expected: []const u8) bool {
+    return idx < tokens.len and textEql(tokens[idx].text(src), expected);
+}
+
+fn textEql(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+fn tsIsIdentStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_' or c == '$' or c >= 0x80;
+}
+
+fn tsIsIdentContinue(c: u8) bool {
+    return tsIsIdentStart(c) or std.ascii.isDigit(c);
 }

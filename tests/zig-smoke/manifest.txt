@@ -11,6 +11,7 @@ arrow_super_this_binding.js
 async.js
 async_generator_marker.js
 auto_init_markers.js
+c_parity_alias_accessor.js
 c_parity_array_semantics.js
 c_parity_eval.js
 c_parity_globals.js

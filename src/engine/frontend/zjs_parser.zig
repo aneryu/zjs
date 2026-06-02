@@ -311,6 +311,8 @@ pub const ParseState = struct {
     return_depth: u32 = 0,
     /// Whether we're in a constructor.
     in_constructor: bool = false,
+    /// Whether we are currently parsing the outermost constructor block.
+    is_outer_constructor_block: bool = false,
     /// Whether `super` is syntactically allowed in the current function body.
     allow_super: bool = false,
     /// Whether direct `super(...)` constructor calls are syntactically allowed.
@@ -369,6 +371,11 @@ pub const ParseState = struct {
     eval_global_var_bindings: bool = false,
     eval_annex_b_blocked_function_names: []const Atom = &.{},
     features: std.EnumSet(Feature) = .initEmpty(),
+    in_namespace: bool = false,
+    current_namespace_atom: ?Atom = null,
+    last_declared_atom: ?Atom = null,
+    current_parameter_properties: ?std.ArrayList(Atom) = null,
+    namespace_export: bool = false,
 
     /// QuickJS `eval_ret_idx` mirror (`quickjs.c:21480`). When ≥ 0,
     /// the slot at this local index receives the result of every
@@ -1371,6 +1378,20 @@ pub const ParseState = struct {
         if (s.token.payload.ident.has_escape) return false;
         const ident_str = s.lex.atoms.name(s.token.payload.ident.atom) orelse return false;
         return std.mem.eql(u8, ident_str, name);
+    }
+
+    fn isParameterModifier(s: *ParseState) bool {
+        const k = s.peekKind();
+        if (k == tok.TOK_PUBLIC or k == tok.TOK_PRIVATE or k == tok.TOK_PROTECTED) return true;
+        if (k == tok.TOK_IDENT) {
+            if (s.token.payload.ident.has_escape) return false;
+            const ident_str = s.lex.atoms.name(s.token.payload.ident.atom) orelse return false;
+            return std.mem.eql(u8, ident_str, "public") or
+                std.mem.eql(u8, ident_str, "private") or
+                std.mem.eql(u8, ident_str, "protected") or
+                std.mem.eql(u8, ident_str, "readonly");
+        }
+        return false;
     }
 
     fn isOfToken(s: *ParseState) bool {
@@ -4334,6 +4355,15 @@ pub fn parseLhsExpr(s: *ParseState, flags: ParseFlags) Error!void {
         try s.emitOp(opcode.op.swap);
         try s.emitOpU16(opcode.op.call_method, 0);
         try s.emitOp(opcode.op.drop);
+        if (s.in_constructor and s.class_has_extends) {
+            if (s.current_parameter_properties) |props| {
+                for (props.items) |prop_atom| {
+                    try s.emitThisValue();
+                    try s.emitScopeGetVar(prop_atom);
+                    try s.emitOpAtom(opcode.op.put_field, prop_atom);
+                }
+            }
+        }
         s.last_was_super = false;
     }
 }
@@ -4377,6 +4407,15 @@ fn emitCapturedSuperConstructorCall(s: *ParseState, flags: ParseFlags, loc: ?Sou
     try s.emitOp(opcode.op.swap);
     try s.emitOpU16(opcode.op.call_method, 0);
     try s.emitOp(opcode.op.drop);
+    if (s.in_constructor and s.class_has_extends) {
+        if (s.current_parameter_properties) |props| {
+            for (props.items) |prop_atom| {
+                try s.emitScopeGetVar(atom_this);
+                try s.emitScopeGetVar(prop_atom);
+                try s.emitOpAtom(opcode.op.put_field, prop_atom);
+            }
+        }
+    }
 }
 
 fn parseNewExpr(s: *ParseState, flags: ParseFlags) Error!void {
@@ -6618,7 +6657,10 @@ fn predeclareVarDeclarators(s: *ParseState) Error!void {
                     const fd = s.cur_func();
                     const existing_var = fd.findVar(atom_id);
                     if ((existing_var < 0 or fd.vars[@intCast(existing_var)].var_kind == .function_name) and fd.findArg(atom_id) < 0) {
-                        const var_idx = try fd.addScopeVar(atom_id, .normal, 0, false, false);
+                        const var_idx = if (s.in_namespace)
+                            try fd.addScopeVar(atom_id, .normal, s.scope_level, true, false)
+                        else
+                            try fd.addScopeVar(atom_id, .normal, 0, false, false);
                         if (atomNameEquals(s, atom_id, "arguments")) {
                             fd.arguments_var_idx = @intCast(var_idx);
                         }
@@ -7034,6 +7076,17 @@ pub fn parseBlock(s: *ParseState) Error!void {
     errdefer s.popScope();
     // Check for directive prologue (simplified)
     try parseDirectives(s);
+
+    if (s.is_outer_constructor_block and !s.class_has_extends) {
+        s.is_outer_constructor_block = false;
+        if (s.current_parameter_properties) |props| {
+            for (props.items) |prop_atom| {
+                try s.emitOp(opcode.op.push_this);
+                try s.emitScopeGetVar(prop_atom);
+                try s.emitOpAtom(opcode.op.put_field, prop_atom);
+            }
+        }
+    }
     if (direct_using_kind) |stack_kind| {
         const stack_loc = try emitCreateUsingDisposableStack(s, stack_kind);
         const catch_off = try emitForwardJump(s, opcode.op.@"catch");
@@ -7203,6 +7256,210 @@ fn rewriteTrailingPutVarRefToSetVarRef(s: *ParseState, idx: u16) Error!void {
     code[code.len - 3] = opcode.op.set_var_ref;
 }
 
+fn parseEnumDeclaration(s: *ParseState) Error!void {
+    try s.expectToken(tok.TOK_ENUM);
+    if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
+    const enum_atom = s.token.payload.ident.atom;
+    try s.advance();
+
+    // Register variable in current scope if not exists
+    const existing_var = s.cur_func().findVar(enum_atom);
+    if (existing_var < 0) {
+        _ = try s.addScopeVar(enum_atom, .normal, false, false);
+    }
+
+    // Emit Enum = Enum || {}
+    try s.emitScopeGetVarUndef(enum_atom);
+    try s.emitOp(opcode.op.dup);
+    const skip_jump = try emitForwardJump(s, opcode.op.if_true);
+    try s.emitOp(opcode.op.drop);
+    try s.emitOp(opcode.op.object);
+    try patchForwardJump(s, skip_jump);
+    try s.emitScopePutVar(enum_atom);
+
+    try s.expectToken('{');
+
+    var counter: i32 = 0;
+    while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+        if (!isIdentifierLikeToken(s)) return Error.UnexpectedToken;
+        const member_atom = identifierLikeAtom(s);
+        try s.advance();
+
+        const member_name = s.lex.atoms.name(member_atom) orelse "";
+
+        var is_string_init = false;
+        if (s.peekKind() == '=') {
+            try s.advance();
+            if (s.peekKind() == tok.TOK_STRING) {
+                const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
+                if (!is_simple) return Error.UnexpectedToken;
+                is_string_init = true;
+                // String initializer: emit Enum.Member = "string"
+                try s.emitScopeGetVar(enum_atom);
+                try emitStringLiteralValue(s, s.token.payload.str.bytes);
+                try s.advance();
+                try s.emitOpAtom(opcode.op.put_field, member_atom);
+            } else {
+                var has_explicit = false;
+                var val: i32 = 0;
+                if (s.peekKind() == tok.TOK_NUMBER) {
+                    const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
+                    if (!is_simple) return Error.UnexpectedToken;
+                    has_explicit = true;
+                    val = @intFromFloat(s.token.payload.num.value);
+                    try parseAssignExpr(s);
+                } else if (s.peekKind() == '-' and s.peekNextKind() == tok.TOK_NUMBER) {
+                    try s.advance(); // consume '-'
+                    const is_simple = s.peekNextKind() == ',' or s.peekNextKind() == '}';
+                    if (!is_simple) return Error.UnexpectedToken;
+                    has_explicit = true;
+                    val = -@as(i32, @intFromFloat(s.token.payload.num.value));
+                    try s.emitOpI32(opcode.op.push_i32, val);
+                    try s.advance(); // consume the number
+                } else {
+                    return Error.UnexpectedToken;
+                }
+                if (has_explicit) {
+                    counter = val;
+                }
+            }
+        } else {
+            // No initializer: emit push_i32 counter
+            try s.emitOpI32(opcode.op.push_i32, counter);
+        }
+
+        if (!is_string_init) {
+            // Double mapping: Enum[Enum["Member"] = value] = "Member"
+            try s.emitScopeGetVar(enum_atom); // Stack: [value, outer_obj]
+            try s.emitOp(opcode.op.swap); // Stack: [outer_obj, value]
+            try s.emitOp(opcode.op.dup); // Stack: [outer_obj, value, value]
+            try s.emitScopeGetVar(enum_atom); // Stack: [outer_obj, value, value, inner_obj]
+            try s.emitOp(opcode.op.swap); // Stack: [outer_obj, value, inner_obj, value]
+            try s.emitOpAtom(opcode.op.put_field, member_atom); // Stack: [outer_obj, value]
+            try emitStringLiteralValue(s, member_name); // Stack: [outer_obj, value, "Member"]
+            try s.emitOp(opcode.op.put_array_el);
+            counter += 1;
+        }
+
+        if (s.peekKind() == ',') {
+            try s.advance();
+        } else if (s.peekKind() != '}') {
+            return Error.UnexpectedToken;
+        }
+    }
+
+    try s.expectToken('}');
+    s.last_declared_atom = enum_atom;
+
+    if (s.namespace_export) {
+        if (s.current_namespace_atom) |ns_atom| {
+            try s.emitScopeGetVar(ns_atom);
+            try s.emitScopeGetVar(enum_atom);
+            try s.emitOpAtom(opcode.op.put_field, enum_atom);
+        }
+    }
+}
+
+fn parseNamespaceDeclaration(s: *ParseState) Error!void {
+    try s.expectToken(tok.TOK_IDENT); // Already matched "namespace" in caller
+    try parseNamespaceDeclarationWithIdent(s);
+}
+
+fn parseNamespaceDeclarationWithIdent(s: *ParseState) Error!void {
+    if (s.peekKind() != tok.TOK_IDENT) return Error.UnexpectedToken;
+    const ns_atom = s.token.payload.ident.atom;
+    try s.advance();
+
+    // Register variable in current scope if not exists
+    const existing_var = s.cur_func().findVar(ns_atom);
+    if (existing_var < 0) {
+        _ = try s.addScopeVar(ns_atom, .normal, false, false);
+    }
+
+    // Emit Namespace = Namespace || {}
+    try s.emitScopeGetVarUndef(ns_atom);
+    try s.emitOp(opcode.op.dup);
+    const skip_jump = try emitForwardJump(s, opcode.op.if_true);
+    try s.emitOp(opcode.op.drop);
+    try s.emitOp(opcode.op.object);
+    try patchForwardJump(s, skip_jump);
+    try s.emitScopePutVar(ns_atom);
+
+    if (s.peekKind() == @as(tok.TokenKind, @intCast('.'))) {
+        try s.advance(); // consume '.'
+
+        try s.pushScope();
+        const saved_in_namespace = s.in_namespace;
+        const saved_namespace_atom = s.current_namespace_atom;
+        s.in_namespace = true;
+        s.current_namespace_atom = ns_atom;
+        defer {
+            s.in_namespace = saved_in_namespace;
+            s.current_namespace_atom = saved_namespace_atom;
+            s.popScope();
+        }
+
+        try parseNamespaceDeclarationWithIdent(s);
+
+        if (s.last_declared_atom) |nested_atom| {
+            try s.emitScopeGetVar(ns_atom);
+            try s.emitScopeGetVar(nested_atom);
+            try s.emitOpAtom(opcode.op.put_field, nested_atom);
+        }
+
+        s.last_declared_atom = ns_atom;
+        if (s.namespace_export) {
+            if (s.current_namespace_atom) |parent_ns| {
+                try s.emitScopeGetVar(parent_ns);
+                try s.emitScopeGetVar(ns_atom);
+                try s.emitOpAtom(opcode.op.put_field, ns_atom);
+            }
+        }
+        return;
+    }
+
+    try s.expectToken('{');
+    try s.pushScope();
+    const saved_in_namespace = s.in_namespace;
+    const saved_namespace_atom = s.current_namespace_atom;
+    s.in_namespace = true;
+    s.current_namespace_atom = ns_atom;
+    defer {
+        s.in_namespace = saved_in_namespace;
+        s.current_namespace_atom = saved_namespace_atom;
+        s.popScope();
+    }
+
+    while (s.peekKind() != '}' and s.peekKind() != tok.TOK_EOF) {
+        try parseNamespaceStatement(s);
+    }
+
+    try s.expectToken('}');
+    s.last_declared_atom = ns_atom;
+
+    if (s.namespace_export) {
+        if (saved_namespace_atom) |parent_ns| {
+            try s.emitScopeGetVar(parent_ns);
+            try s.emitScopeGetVar(ns_atom);
+            try s.emitOpAtom(opcode.op.put_field, ns_atom);
+        }
+    }
+}
+
+fn parseNamespaceStatement(s: *ParseState) Error!void {
+    var is_exported = false;
+    if (s.peekKind() == tok.TOK_EXPORT) {
+        is_exported = true;
+        try s.advance();
+    }
+
+    const saved_namespace_export = s.namespace_export;
+    s.namespace_export = is_exported;
+    defer s.namespace_export = saved_namespace_export;
+
+    try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
+}
+
 /// Mirror `js_parse_statement_or_decl` (`quickjs.c:28228`).
 pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
     s.features.insert(.statement);
@@ -7255,6 +7512,12 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             } else {
                 try s.emitOpNoSource(opcode.op.drop);
             }
+        },
+        tok.TOK_ENUM => {
+            if (!s.lex.is_typescript) {
+                return Error.UnexpectedToken;
+            }
+            try parseEnumDeclaration(s);
         },
         tok.TOK_RETURN => {
             if (s.is_eval or s.return_depth == 0) return Error.UnexpectedToken;
@@ -7347,6 +7610,10 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             try parseClass(s, true);
         },
         tok.TOK_IDENT => {
+            if (s.lex.is_typescript and s.isIdent("namespace") and s.peekNextKind() == tok.TOK_IDENT) {
+                try parseNamespaceDeclaration(s);
+                return;
+            }
             if (usingDeclarationStart(s)) {
                 if (!decl_mask.other) return Error.UnexpectedToken;
                 try parseUsingDeclaration(s, .sync);
@@ -8694,7 +8961,7 @@ fn relocateMovedJumpTargets(code: []u8, old_start: usize, new_start: usize) Erro
 /// per QuickJS hoisting rules; for `let`/`const`, it attaches at the
 /// current lexical scope.
 fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_flags: ParseFlags) Error!void {
-    const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST;
+    const is_lexical = var_tok == tok.TOK_LET or var_tok == tok.TOK_CONST or s.in_namespace;
     const is_const = var_tok == tok.TOK_CONST;
     while (true) {
         const sloppy_keyword_var = (s.peekKind() == tok.TOK_YIELD or
@@ -8856,6 +9123,13 @@ fn parseVar(s: *ParseState, var_tok: tok.TokenKind, export_decl: bool, parse_fla
                 if (var_tok == tok.TOK_LET) {
                     try s.emitOp(opcode.op.undefined);
                     try s.emitScopePutVarInit(atom_id);
+                }
+            }
+            if (s.namespace_export) {
+                if (s.current_namespace_atom) |ns_atom| {
+                    try s.emitScopeGetVar(ns_atom);
+                    try s.emitScopeGetVar(atom_id);
+                    try s.emitOpAtom(opcode.op.put_field, atom_id);
                 }
             }
         } else if (s.peekKind() == '[' or s.peekKind() == '{') {
@@ -10221,6 +10495,21 @@ fn forInBlockBodyVarDeclaresName(s: *ParseState, atom_id: Atom) bool {
 /// Parse function declaration
 /// Mirrors `js_parse_function_decl` in quickjs.c:36388
 fn parseFunctionDecl(s: *ParseState, func_kind: ParseFunctionKind, source_start: usize) Error!void {
+    const saved_parameter_properties = s.current_parameter_properties;
+    if (func_kind == .class_constructor or func_kind == .derived_class_constructor) {
+        s.current_parameter_properties = std.ArrayList(Atom).empty;
+    } else {
+        s.current_parameter_properties = null;
+    }
+    defer {
+        if (func_kind == .class_constructor or func_kind == .derived_class_constructor) {
+            if (s.current_parameter_properties) |*props| {
+                props.deinit(s.function.memory.allocator);
+            }
+        }
+        s.current_parameter_properties = saved_parameter_properties;
+    }
+
     try s.advance();
 
     // Check for generator: function*
@@ -10237,6 +10526,7 @@ fn parseFunctionDecl(s: *ParseState, func_kind: ParseFunctionKind, source_start:
         return Error.UnexpectedToken;
     }
     const name_atom = identifierLikeAtom(s);
+    s.last_declared_atom = name_atom;
     if (s.lex.is_module and s.cur_func_stack.len == 0 and s.scope_level == 0 and hasKnownBinding(s, name_atom)) {
         return Error.UnexpectedToken;
     }
@@ -10364,6 +10654,13 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
     const saved_class_field_initializer_depth = s.class_field_initializer_depth;
     const saved_class_static_field_this_atom = s.class_static_field_this_atom;
     const saved_reject_await_in_parameter_initializer = s.reject_await_in_parameter_initializer;
+    const saved_in_constructor = s.in_constructor;
+    s.in_constructor = func_kind == .class_constructor or func_kind == .derived_class_constructor;
+    defer s.in_constructor = saved_in_constructor;
+    const saved_is_outer_constructor_block = s.is_outer_constructor_block;
+    s.is_outer_constructor_block = func_kind == .class_constructor or func_kind == .derived_class_constructor;
+    defer s.is_outer_constructor_block = saved_is_outer_constructor_block;
+
     var child_pushed = false;
     errdefer if (child_pushed) {
         s.discardCurrentFunction();
@@ -10539,12 +10836,14 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
                     !parent_fd.is_strict_mode and
                     func_kind == .normal and
                     !visible_lexical_blocking_annex_b and
-                    !name_blocks_annex_b_parameter_rule;
+                    !name_blocks_annex_b_parameter_rule and
+                    !s.in_namespace;
                 const annex_b_block_function_var = is_block_level_function_decl and
                     !parent_fd.is_strict_mode and
                     func_kind == .normal and
                     !visible_lexical_blocking_annex_b and
-                    !name_blocks_annex_b_parameter_rule;
+                    !name_blocks_annex_b_parameter_rule and
+                    !s.in_namespace;
                 const duplicate_hoisted_block_func = is_block_level_function_decl and s.scopeHasVar(0, name);
                 const function_decl_idx: u16 = if (annex_b_if_function_var) blk: {
                     const is_top_level_annex_b_if_scope =
@@ -10666,9 +10965,21 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
 
         // Parse parameters, including default values, destructuring, and rest.
         while (s.peekKind() != ')' and s.peekKind() != tok.TOK_EOF) {
+            var has_modifier = false;
+            if (s.lex.is_typescript and (func_kind == .class_constructor or func_kind == .derived_class_constructor)) {
+                while (s.isParameterModifier()) {
+                    has_modifier = true;
+                    try s.advance();
+                }
+            }
             if (isIdentifierLikeToken(s)) {
                 // Simple parameter
                 const param_atom = identifierLikeAtom(s);
+                if (has_modifier) {
+                    if (s.current_parameter_properties) |*props| {
+                        try props.append(s.function.memory.allocator, param_atom);
+                    }
+                }
                 const arg_index = param_count;
                 const strict_params = s.is_strict or s.cur_func().is_strict_mode;
                 if (func_kind == .set and strict_params and
@@ -10933,6 +11244,16 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
         } else if (keep_child_value) {
             s.skip_next_ident_get = s.pending_function_name;
         }
+        if (s.namespace_export) {
+            if (s.current_namespace_atom) |ns_atom| {
+                const func_atom = child_ptr.func_name;
+                if (func_atom != atom_module.ids.empty_string) {
+                    try s.emitScopeGetVar(ns_atom);
+                    try s.emitScopeGetVar(func_atom);
+                    try s.emitOpAtom(opcode.op.put_field, func_atom);
+                }
+            }
+        }
     }
 }
 
@@ -10959,6 +11280,13 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     const saved_is_strict = s.is_strict;
     const saved_lex_is_strict = s.lex.is_strict_mode;
     const saved_new_target_allowed = s.new_target_allowed;
+    const saved_in_constructor = s.in_constructor;
+    s.in_constructor = false;
+    defer s.in_constructor = saved_in_constructor;
+    const saved_parameter_properties = s.current_parameter_properties;
+    s.current_parameter_properties = null;
+    defer s.current_parameter_properties = saved_parameter_properties;
+
     const arrow_new_target_allowed = saved_new_target_allowed;
     var child_pushed = false;
     errdefer if (child_pushed) {
@@ -13789,6 +14117,21 @@ fn classStaticBlockThisTempAtom(s: *ParseState) Error!Atom {
 }
 
 fn parseClassElementFunction(s: *ParseState, kind: ParseFunctionKind, source_start: usize) Error!void {
+    const saved_parameter_properties = s.current_parameter_properties;
+    if (kind == .class_constructor or kind == .derived_class_constructor) {
+        s.current_parameter_properties = std.ArrayList(Atom).empty;
+    } else {
+        s.current_parameter_properties = null;
+    }
+    defer {
+        if (kind == .class_constructor or kind == .derived_class_constructor) {
+            if (s.current_parameter_properties) |*props| {
+                props.deinit(s.function.memory.allocator);
+            }
+        }
+        s.current_parameter_properties = saved_parameter_properties;
+    }
+
     const saved_pending_name = s.pending_function_name;
     const saved_pending_decl = s.pending_function_is_decl;
     const saved_in_async = s.in_async;
@@ -14365,6 +14708,15 @@ fn parseClass(s: *ParseState, is_decl: bool) Error!void {
             try emitClassDeclLocalInitFromClassStack(s, class_local_idx, fields_idx, parsed_class_fields_init_child_index);
             if (class_name_local_idx) |local_idx| try s.emitCloseLoc(local_idx);
             try s.emitOp(opcode.op.drop);
+            if (s.namespace_export) {
+                if (s.current_namespace_atom) |ns_atom| {
+                    if (class_name) |class_atom| {
+                        try s.emitScopeGetVar(ns_atom);
+                        try s.emitScopeGetVar(class_atom);
+                        try s.emitOpAtom(opcode.op.put_field, class_atom);
+                    }
+                }
+            }
             return;
         }
         if (!class_has_extends) try s.emitOp(opcode.op.undefined);
@@ -14382,6 +14734,15 @@ fn parseClass(s: *ParseState, is_decl: bool) Error!void {
             try s.emitPutVarRef(@intCast(class_ref_idx));
         } else {
             try s.emitOp(opcode.op.drop);
+        }
+        if (s.namespace_export) {
+            if (s.current_namespace_atom) |ns_atom| {
+                if (class_name) |class_atom| {
+                    try s.emitScopeGetVar(ns_atom);
+                    try s.emitScopeGetVar(class_atom);
+                    try s.emitOpAtom(opcode.op.put_field, class_atom);
+                }
+            }
         }
     } else {
         const expr_name_atom = class_name orelse s.pending_function_name orelse atom_module.ids.empty_string;
