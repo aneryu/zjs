@@ -1672,7 +1672,7 @@ test "zjs perf json opcode profile includes counters and rows" {
 
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try dumpPerfJsonOpcodeProfile(&writer.interface, &profile);
+    try dumpPerfJsonOpcodeProfile(&writer, &profile);
     const json = writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"opcode_profile\"") != null);

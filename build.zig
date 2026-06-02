@@ -579,10 +579,15 @@ pub fn build(b: *std.Build) void {
         .{ .name = "exec-vm-assignments", .path = "src/tests/exec/vm_assignments.zig" },
         .{ .name = "exec-vm-prototypes", .path = "src/tests/exec/vm_prototypes.zig" },
         .{ .name = "exec-vm-iter-async", .path = "src/tests/exec/vm_iter_async.zig" },
-        .{ .name = "exec-vm-shared-internal", .path = "src/engine/internal_tests.zig" },
     };
 
     const test_exec_step = b.step("test-exec", "Run bytecode execution tests");
+    const oom_helpers_matches_filter = if (shard_filter) |filter|
+        std.mem.eql(u8, "exec-oom-helpers", filter) or
+            std.mem.eql(u8, "exec-oom-helpers-oom", filter) or
+            std.mem.eql(u8, "exec-oom-helpers-oom-exhaustive", filter)
+    else
+        true;
     var exec_run_steps: [exec_shards.len]*std.Build.Step = undefined;
     inline for (exec_shards, 0..) |shard, i| {
         const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
@@ -608,6 +613,21 @@ pub fn build(b: *std.Build) void {
         if (matches_filter) {
             test_exec_step.dependOn(&run_tests.step);
         }
+    }
+    const oom_helpers_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    oom_helpers_test_mod.addOptions("oom_options", quick_oom_options);
+    const oom_helpers_tests = b.addTest(.{
+        .name = "exec-oom-helpers",
+        .root_module = oom_helpers_test_mod,
+    });
+    const run_oom_helpers_tests = b.addRunArtifact(oom_helpers_tests);
+    if (oom_helpers_matches_filter) {
+        test_exec_step.dependOn(&run_oom_helpers_tests.step);
     }
 
     // `test`: separate ReleaseSafe exec test artifacts that share the
@@ -681,15 +701,27 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-                .{ .name = "zjs_cli", .module = zjs_cli_mod },
-                .{ .name = "smoke_runner", .module = smoke_runner_mod },
                 .{ .name = "test262_runner", .module = test262_runner_mod },
             },
         }),
     });
 
     const run_tools_tests = b.addRunArtifact(tools_tests);
+    const zjs_cli_tests = b.addTest(.{
+        .name = "zjs-cli",
+        .root_module = zjs_cli_mod,
+    });
+    const run_zjs_cli_tests = b.addRunArtifact(zjs_cli_tests);
+    const smoke_runner_tests = b.addTest(.{
+        .name = "smoke-runner",
+        .root_module = smoke_runner_mod,
+    });
+    const run_smoke_runner_tests = b.addRunArtifact(smoke_runner_tests);
+    const test262_protocol_tests = b.addTest(.{
+        .name = "test262-protocol",
+        .root_module = test262_protocol_mod,
+    });
+    const run_test262_protocol_tests = b.addRunArtifact(test262_protocol_tests);
     const test262_runner_tests = b.addTest(.{
         .root_module = test262_runner_mod,
     });
@@ -697,12 +729,16 @@ pub fn build(b: *std.Build) void {
 
     const test_tools_step = b.step("test-tools", "Run CLI and validation tooling tests");
     test_tools_step.dependOn(&run_tools_tests.step);
+    test_tools_step.dependOn(&run_zjs_cli_tests.step);
+    test_tools_step.dependOn(&run_smoke_runner_tests.step);
+    test_tools_step.dependOn(&run_test262_protocol_tests.step);
     test_tools_step.dependOn(&run_test262_runner_tests.step);
 
     const test_debug_step = b.step("test-debug", "Run available Zig tests with exec shards in Debug mode (slower run, fast cold compile)");
     test_debug_step.dependOn(&run_engine_root_tests.step);
     test_debug_step.dependOn(&run_engine_production_tests.step);
     test_debug_step.dependOn(&run_core_tests.step);
+    test_debug_step.dependOn(&run_gc_stress_tests.step);
     test_debug_step.dependOn(&run_bytecode_tests.step);
     test_debug_step.dependOn(&run_frontend_tests.step);
     inline for (exec_shards, 0..) |shard, i| {
@@ -711,8 +747,14 @@ pub fn build(b: *std.Build) void {
             test_debug_step.dependOn(exec_run_steps[i]);
         }
     }
+    if (oom_helpers_matches_filter) {
+        test_debug_step.dependOn(&run_oom_helpers_tests.step);
+    }
     test_debug_step.dependOn(&run_builtins_tests.step);
     test_debug_step.dependOn(&run_tools_tests.step);
+    test_debug_step.dependOn(&run_zjs_cli_tests.step);
+    test_debug_step.dependOn(&run_smoke_runner_tests.step);
+    test_debug_step.dependOn(&run_test262_protocol_tests.step);
     test_debug_step.dependOn(&run_test262_runner_tests.step);
 
     const engine_oom_mod = b.addModule("quickjs_zig_engine_oom", .{
@@ -724,7 +766,49 @@ pub fn build(b: *std.Build) void {
     engine_oom_mod.addOptions("build_options", engine_options);
     const test_oom_step = b.step("test-oom", "Run sampled exec OOM fail-index sweeps in Debug mode");
     const test_oom_exhaustive_step = b.step("test-oom-exhaustive", "Run exhaustive exec OOM fail-index sweeps in Debug mode (very slow)");
+    const sampled_oom_helpers_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    sampled_oom_helpers_test_mod.addOptions("oom_options", sampled_oom_options);
+    const sampled_oom_helpers_tests = b.addTest(.{
+        .name = "exec-oom-helpers-oom",
+        .root_module = sampled_oom_helpers_test_mod,
+        .filters = &.{"OOM"},
+    });
+    const run_sampled_oom_helpers_tests = b.addRunArtifact(sampled_oom_helpers_tests);
+    if (oom_helpers_matches_filter) {
+        test_oom_step.dependOn(&run_sampled_oom_helpers_tests.step);
+    }
+
+    const exhaustive_oom_helpers_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    exhaustive_oom_helpers_test_mod.addOptions("oom_options", exhaustive_oom_options);
+    const exhaustive_oom_helpers_tests = b.addTest(.{
+        .name = "exec-oom-helpers-oom-exhaustive",
+        .root_module = exhaustive_oom_helpers_test_mod,
+        .filters = &.{"OOM"},
+    });
+    const run_exhaustive_oom_helpers_tests = b.addRunArtifact(exhaustive_oom_helpers_tests);
+    if (oom_helpers_matches_filter) {
+        test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_helpers_tests.step);
+    }
+
     inline for (exec_shards) |shard| {
+        const oom_matches_filter = if (shard_filter) |filter|
+            std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom", filter)
+        else
+            true;
+        const exhaustive_oom_matches_filter = if (shard_filter) |filter|
+            std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom-exhaustive", filter)
+        else
+            true;
         const oom_test_mod = b.createModule(.{
             .root_source_file = b.path(shard.path),
             .target = target,
@@ -744,7 +828,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"OOM"},
         });
         const run_oom_tests = b.addRunArtifact(oom_tests);
-        test_oom_step.dependOn(&run_oom_tests.step);
+        if (oom_matches_filter) {
+            test_oom_step.dependOn(&run_oom_tests.step);
+        }
 
         const exhaustive_oom_test_mod = b.createModule(.{
             .root_source_file = b.path(shard.path),
@@ -765,7 +851,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"OOM"},
         });
         const run_exhaustive_oom_tests = b.addRunArtifact(exhaustive_oom_tests);
-        test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_tests.step);
+        if (exhaustive_oom_matches_filter) {
+            test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_tests.step);
+        }
     }
 
     // `test-fast` remains as an alias for `test` (ReleaseSafe exec shards) for compatibility
@@ -781,10 +869,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_engine_root_tests.step);
     test_step.dependOn(&run_engine_production_tests.step);
     test_step.dependOn(&run_core_tests.step);
+    test_step.dependOn(&run_gc_stress_tests.step);
     test_step.dependOn(&run_bytecode_tests.step);
     test_step.dependOn(&run_frontend_tests.step);
+    if (oom_helpers_matches_filter) {
+        test_step.dependOn(&run_oom_helpers_tests.step);
+    }
     test_step.dependOn(&run_builtins_tests.step);
     test_step.dependOn(&run_tools_tests.step);
+    test_step.dependOn(&run_zjs_cli_tests.step);
+    test_step.dependOn(&run_smoke_runner_tests.step);
+    test_step.dependOn(&run_test262_protocol_tests.step);
     test_step.dependOn(&run_test262_runner_tests.step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");

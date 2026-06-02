@@ -346,6 +346,7 @@ pub const Reporter = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     reports_dir: ?[]const u8,
+    quiet: bool = false,
     failure_log: std.ArrayList(u8) = .empty,
     buckets: [@typeInfo(Bucket).@"enum".fields.len]usize = @splat(0),
     by_dir: std.ArrayList(DirEntry) = .empty,
@@ -353,6 +354,10 @@ pub const Reporter = struct {
 
     pub fn init(allocator: std.mem.Allocator, reports_dir: ?[]const u8) Reporter {
         return .{ .allocator = allocator, .reports_dir = reports_dir };
+    }
+
+    pub fn initQuiet(allocator: std.mem.Allocator, reports_dir: ?[]const u8) Reporter {
+        return .{ .allocator = allocator, .reports_dir = reports_dir, .quiet = true };
     }
 
     pub fn deinit(self: *Reporter) void {
@@ -367,6 +372,7 @@ pub const Reporter = struct {
     /// must go through this so multi-threaded runs do not interleave
     /// fragments.
     pub fn lockedPrint(self: *Reporter, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+        if (self.quiet) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         var stderr_buf: [4096]u8 = undefined;
@@ -1173,6 +1179,20 @@ pub fn collectSelection(allocator: std.mem.Allocator, io: std.Io, config: Config
 }
 
 pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config, zjs_path: []const u8) !ExecutionSummary {
+    return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, false);
+}
+
+fn runSelectedTestsQuiet(allocator: std.mem.Allocator, io: std.Io, config: Config, zjs_path: []const u8) !ExecutionSummary {
+    return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, true);
+}
+
+fn runSelectedTestsWithReporterMode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: Config,
+    zjs_path: []const u8,
+    quiet_reporter: bool,
+) !ExecutionSummary {
     var prepared = try prepareSelection(allocator, io, config);
     errdefer prepared.deinit(allocator);
 
@@ -1189,7 +1209,10 @@ pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config
     const harness_prelude = try makeHarnessPrelude(allocator, io, summary.selection.harnessdir);
     defer allocator.free(harness_prelude);
 
-    var reporter = Reporter.init(allocator, config.reports_dir);
+    var reporter = if (quiet_reporter)
+        Reporter.initQuiet(allocator, config.reports_dir)
+    else
+        Reporter.init(allocator, config.reports_dir);
     defer reporter.deinit();
 
     const engine_path = config.engine_path orelse zjs_path;
@@ -2815,8 +2838,8 @@ test "test262 override path maps only manifest entries" {
 }
 
 test "test262 timeout threshold does not classify passing tests as failure" {
-    const config = try parseArgs(&.{ "-vv", "-T", "0", "-f", "tests/zig-smoke/arith.js" });
-    var summary = try runSelectedTests(std.testing.allocator, std.testing.io, config, "zig-out/bin/zjs");
+    const config = try parseArgs(&.{ "-T", "0", "-f", "tests/zig-smoke/arith.js" });
+    var summary = try runSelectedTestsQuiet(std.testing.allocator, std.testing.io, config, "zig-out/bin/zjs");
     defer summary.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.passed);
