@@ -1,71 +1,67 @@
 summary:
-  old geomean: 2.0627
-  new geomean: 1.0158
-  delta:        -50.8%
-  compatible:   72 -> 72
-  unsupported:  1 -> 1
+  old geomean: 0.8512
+  new geomean: 0.8415
+  delta:        -1.1%
+  compatible:   73 -> 73
+  unsupported:  0 -> 0
   skipped:      0 -> 0
-  sample cfg:   iters=30, warmup=5 -> iters=120, warmup=15
+  sample cfg:   iters=120, warmup=15 -> iters=120, warmup=15
 
 regressions:
   case                     category        old    new    zjs avg delta  ratio delta  winner
-  prop_write               object          1.56   1.27         +14.2%       -18.1%  qjs
-  array_write              array           1.57   1.39         +31.1%       -11.7%  qjs
-  array_hole_length_decr   array           1.50   1.12         +40.1%       -24.8%  qjs
-  global_destruct_strict   destructuring   1.52   1.42         +31.0%        -6.6%  qjs
-  regexp_ascii             regexp          0.94   1.45         +15.6%       +53.3%  zjs->qjs
-  float_toString           conversion      1.43   1.47         +14.3%        +2.3%  qjs
-  string_to_int            conversion      1.17   1.14         +15.6%        -2.8%  qjs
-  bigint256_arith          bigint          1.33   1.75         +33.5%       +31.7%  qjs
+  json_roundtrip           json            1.16   1.26         +15.9%        +8.3%  qjs
+  prop_read                object          0.52   0.72         +47.8%       +38.0%  zjs
+  array_read               array           0.43   0.54         +48.6%       +27.2%  zjs
+  func_call                function        0.34   0.39         +61.8%       +13.8%  zjs
+  date_now                 date            1.62   1.84         +50.2%       +13.9%  qjs
+  prop_write               object          1.24   1.73        +112.6%       +39.3%  qjs
+  prop_create              object          1.56   1.71         +65.4%        +9.5%  qjs
+  prop_delete              object          1.89   1.36         +12.2%       -28.4%  qjs
+  array_write              array           1.29   1.34         +31.2%        +3.8%  qjs
+  array_prop_create        array           1.11   1.39         +35.6%       +25.2%  qjs
+  array_length_decr        array           1.65   1.50         +60.3%        -9.2%  qjs
+  array_hole_length_decr   array           1.59   1.45         +20.0%        -8.8%  qjs
+  array_push               array           1.35   1.45         +45.2%        +7.5%  qjs
+  array_pop                array           1.24   1.48         +57.5%       +19.0%  qjs
+  typed_array_read         typedarray      1.55   1.40         +27.5%       -10.1%  qjs
+  typed_array_write        typedarray      1.29   1.29         +53.6%        -0.1%  qjs
+  global_read              global          0.52   0.89         +22.5%       +71.7%  zjs
+  global_write             global          1.25   1.49         +35.4%       +19.2%  qjs
+  global_destruct          destructuring   1.78   1.95         +14.1%        +9.2%  qjs
+  global_destruct_strict   destructuring   1.42   1.57         +11.8%       +10.5%  qjs
+  closure_var              function        1.84   1.66         +20.2%        -9.5%  qjs
+  map_delete               collection      0.95   1.47         +59.9%       +54.2%  tie->qjs
+  weak_map_set             collection      2.10   2.11         +11.6%        +0.3%  qjs
+  weak_map_delete          collection      1.57   1.41         +29.5%       -10.3%  qjs
+  array_for                array           0.45   0.66         +47.0%       +44.0%  zjs
+  array_for_in             array           1.37   1.26         +39.5%        -7.9%  qjs
+  array_for_of             array           1.27   1.42         +81.4%       +12.1%  qjs
+  object_null              object          1.81   1.47         +33.4%       -18.6%  qjs
+  regexp_ascii             regexp          1.84   1.52         +20.5%       -17.1%  qjs
+  string_slice1            string          1.76   2.19         +12.4%       +24.4%  qjs
+  string_slice3            string          1.39   1.62         +19.0%       +16.2%  qjs
+  sort_bench               sort            1.59   1.54         +12.8%        -2.6%  qjs
+  float_to_string          conversion      1.29   1.91         +18.7%       +47.4%  qjs
+  float_toString           conversion      2.38   1.19         +23.1%       -49.8%  qjs
+  float_toFixed            conversion      1.32   1.55         +37.7%       +17.6%  qjs
+  float_toPrecision        conversion      1.22   1.32         +38.4%        +8.5%  qjs
+  float_toExponential      conversion      1.05   1.18         +38.3%       +12.4%  qjs
+  string_to_int            conversion      1.80   1.32         +24.3%       -26.5%  qjs
+  string_to_float          conversion      1.38   1.31         +49.2%        -5.2%  qjs
+  bigint64_arith           bigint          1.66   2.12         +10.9%       +28.0%  qjs
+  prop_read_mono           object          0.05   0.04         +23.4%       -22.3%  zjs
+  prop_read_poly3          object          0.04   0.04         +20.0%        -0.5%  zjs
+  global_read_loop         global          0.05   0.07         +53.5%       +45.5%  zjs
+  closure_call_loop        function        0.05   0.07         +47.8%       +37.8%  zjs
+  dense_array_write_read   array           0.23   0.43         +28.6%       +90.3%  zjs
+  string_concat_loop       string          0.56   0.64         +33.6%       +14.3%  zjs
+  map_string_keys          collection      0.78   0.64         +20.7%       -17.8%  zjs
+  bigint_short_sum         bigint          0.70   1.18         +16.5%       +69.3%  zjs->qjs
 
 improvements:
   case                     category        old    new    zjs avg delta  ratio delta  winner
-  int_sum                  arithmetic      3.89   2.91         -51.5%       -25.3%  qjs
-  json_roundtrip           json            1.50   1.32         -37.0%       -11.8%  qjs
-  empty_loop               control         0.89   0.72         -38.7%       -19.5%  zjs
-  prop_read                object          5.13   1.13         -71.8%       -77.9%  qjs
-  array_read               array           4.68   1.89         -76.0%       -59.5%  qjs
-  func_call                function        1.78   0.39         -85.5%       -77.9%  qjs->zjs
-  math_min                 math            3.72   2.05         -49.1%       -45.0%  qjs
-  string_build             string          3.46   0.95         -63.7%       -72.6%  qjs->zjs
-  date_now                 date            1.81   0.92         -12.1%       -49.4%  qjs->zjs
-  array_prop_create        array           2.05   1.09         -46.4%       -46.9%  qjs
-  array_push               array           2.79   0.81         -48.0%       -71.1%  qjs->zjs
-  array_pop                array           1.06   1.01         -20.6%        -5.5%  qjs->tie
-  typed_array_read         typedarray      1.62   0.65         -30.0%       -59.8%  qjs->zjs
-  typed_array_write        typedarray      1.61   1.46         -16.7%        -9.5%  qjs
-  global_read              global          3.71   0.40         -80.5%       -89.2%  qjs->zjs
-  global_write_strict      global          1.88   0.80         -30.3%       -57.2%  qjs->zjs
-  closure_var              function        2.04   1.09         -12.9%       -46.8%  qjs
-  map_set                  collection      1.80   0.76         -47.0%       -58.1%  qjs->zjs
-  map_delete               collection      2.14   0.93         -40.6%       -56.3%  qjs->zjs
-  weak_map_set             collection      1.04   0.92         -31.4%       -11.6%  tie->zjs
-  weak_map_delete          collection      2.69   0.92         -44.9%       -65.7%  qjs->zjs
-  array_for                array           4.31   1.70         -70.1%       -60.6%  qjs
-  array_for_in             array           1.52   0.98         -35.4%       -35.5%  qjs->tie
-  array_for_of             array           1.48   1.14         -31.2%       -22.6%  qjs
-  object_null              object          1.47   0.97         -30.5%       -33.8%  qjs->tie
-  string_build2            string          4.07   1.23         -76.9%       -69.7%  qjs
-  string_concat2           string          2.01   1.01         -22.6%       -49.7%  qjs->tie
-  string_concat3           string          2.67   1.30         -23.3%       -51.5%  qjs
-  string_slice1            string          2.57   0.97         -39.3%       -62.1%  qjs->tie
-  string_slice3            string          1.63   0.98         -35.1%       -40.0%  qjs->tie
-  sort_bench               sort            1.35   1.11         -40.2%       -17.8%  qjs
-  int_to_string            conversion      1.67   1.23         -30.9%       -26.5%  qjs
-  int_toString             conversion      1.61   0.76         -19.4%       -52.7%  qjs->zjs
-  float_toFixed            conversion      1.48   0.86         -39.1%       -41.9%  qjs->zjs
-  float_toPrecision        conversion      1.62   1.07         -32.8%       -33.7%  qjs
-  float_toExponential      conversion      1.38   1.15         -27.6%       -16.5%  qjs
-  bigint64_arith           bigint          2.03   0.94         -27.2%       -53.6%  qjs->zjs
-  vm_int_sum_large         control         4.24   1.38         -46.5%       -67.5%  qjs
-  prop_read_mono           object          4.57   2.29         -49.4%       -50.0%  qjs
-  prop_read_poly3          object          4.75   1.55         -62.4%       -67.4%  qjs
-  proto_read               object          4.85   2.14         -55.1%       -55.7%  qjs
-  global_read_loop         global          6.57   0.06         -99.1%       -99.2%  qjs->zjs
-  call2_loop               function        2.79   1.75         -34.0%       -37.1%  qjs
-  closure_call_loop        function        4.01   1.87         -54.0%       -53.3%  qjs
-  dense_array_write_read   array           5.03   3.53         -27.7%       -29.8%  qjs
-  array_map_callback       array           0.98   0.14         -83.6%       -85.4%  tie->zjs
-  string_concat_loop       string         86.46   1.06         -98.4%       -98.8%  qjs
-  map_string_keys          collection      3.12   0.36         -80.4%       -88.3%  qjs->zjs
-  regexp_test_cached       regexp          0.56   0.06         -89.5%       -89.5%  zjs
+  uri_decode_4byte         uri             2.13   1.21         -28.0%       -43.0%  qjs
+  uri_component_decode_4byte uri             1.99   1.00         -29.9%       -49.7%  qjs->tie
+  float_arith              arithmetic      1.38   1.13         -10.3%       -18.1%  qjs
+  map_set                  collection      1.54   1.55         -16.5%        +0.8%  qjs
+  regexp_test_cached       regexp          0.06   0.03         -19.3%       -51.5%  zjs

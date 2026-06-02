@@ -255,12 +255,12 @@ test "direct qjs parser OOM discard stack does not allocate" {
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
 
         failing.fail_index = failing.alloc_index + fail_offset;
-        var lex = frontend.qjs_lexer.Lexer.init(failing.allocator(), &rt.atoms, source);
-        const state_result = frontend.qjs_parser.ParseState.init(&lex, &function);
+        var lex = frontend.zjs_lexer.Lexer.init(failing.allocator(), &rt.atoms, source);
+        const state_result = frontend.zjs_parser.ParseState.init(&lex, &function);
         if (state_result) |state_value| {
             var state = state_value;
             state.top_level_functions_as_children = true;
-            const parse_result = frontend.qjs_parser.parseProgramStatements(&state, frontend.qjs_parser.DeclMask{
+            const parse_result = frontend.zjs_parser.parseProgramStatements(&state, frontend.zjs_parser.DeclMask{
                 .func = true,
                 .func_with_label = true,
                 .other = true,
@@ -308,11 +308,11 @@ test "direct qjs parser OOM discard stack does not allocate" {
     defer rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
-    var lex = frontend.qjs_lexer.Lexer.init(std.testing.allocator, &rt.atoms, source);
-    var state = try frontend.qjs_parser.ParseState.init(&lex, &function);
+    var lex = frontend.zjs_lexer.Lexer.init(std.testing.allocator, &rt.atoms, source);
+    var state = try frontend.zjs_parser.ParseState.init(&lex, &function);
     defer state.deinit(rt);
     state.top_level_functions_as_children = true;
-    try frontend.qjs_parser.parseProgramStatements(&state, frontend.qjs_parser.DeclMask{
+    try frontend.zjs_parser.parseProgramStatements(&state, frontend.zjs_parser.DeclMask{
         .func = true,
         .func_with_label = true,
         .other = true,
@@ -1284,6 +1284,6 @@ test "bytecode constants retain values through Phase 4 structures" {
 
 // F1 — QuickJS-aligned lexer tests (separate file)
 comptime {
-    _ = @import("qjs_lexer_test.zig");
-    _ = @import("qjs_parser_test.zig");
+    _ = @import("zjs_lexer_test.zig");
+    _ = @import("zjs_parser_test.zig");
 }

@@ -1443,7 +1443,7 @@ fn printExceptionValue(stderr: *std.Io.Writer, runtime: *engine.Engine, value: e
     const stack_key = try rt.internAtom("stack");
     defer rt.atoms.free(stack_key);
     const stack_value = if (runtime.context.cached_global) |global|
-        engine.exec.qjs_vm.getValueProperty(runtime.context, null, global, value, stack_key, null, null) catch |err| blk: {
+        engine.exec.zjs_vm.getValueProperty(runtime.context, null, global, value, stack_key, null, null) catch |err| blk: {
             if (runtime.context.hasException()) {
                 runtime.context.clearException();
                 break :blk engine.core.Value.undefinedValue();
@@ -1552,35 +1552,35 @@ fn printTypeErrorNotFunction(io: std.Io, command: Command) !void {
     try printError(io, "TypeError: not a function\n    at <anonymous> ({s}:7:20)\n\n", .{path});
 }
 
-test "qjs args accept eval source" {
+test "zjs args accept eval source" {
     const command = try parseArgs(&.{ "-e", "1" });
     try std.testing.expectEqualStrings("1", command.eval.source);
 }
 
-test "qjs args accept one file" {
+test "zjs args accept one file" {
     const command = try parseArgs(&.{"input.js"});
     try std.testing.expectEqualStrings("input.js", command.file.path);
 }
 
-test "qjs args accept file script arguments" {
+test "zjs args accept file script arguments" {
     const command = try parseArgs(&.{ "input.js", "empty_loop" });
     try std.testing.expectEqualStrings("input.js", command.file.path);
     try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
 }
 
-test "qjs args accept hidden test262 batch mode" {
+test "zjs args accept hidden test262 batch mode" {
     const command = try parseArgs(&.{"--test262-batch"});
     try std.testing.expectEqual(Command.test262_batch, command);
 }
 
-test "qjs args accept hidden test262 script mode" {
+test "zjs args accept hidden test262 script mode" {
     const command = try parseArgs(&.{ "--can-block", "--test262-script", "case.js" });
     try std.testing.expect(command == .test262_script);
     try std.testing.expect(command.test262_script.options.can_block);
     try std.testing.expectEqualStrings("case.js", command.test262_script.path);
 }
 
-test "qjs args accept explicit repl mode" {
+test "zjs args accept explicit repl mode" {
     const default_command = try parseArgs(&.{});
     try std.testing.expect(default_command == .repl);
     const short_command = try parseArgs(&.{"-i"});
@@ -1589,7 +1589,7 @@ test "qjs args accept explicit repl mode" {
     try std.testing.expect(long_command == .repl);
 }
 
-test "qjs args accept runtime limits" {
+test "zjs args accept runtime limits" {
     const command = try parseArgs(&.{ "--memory-limit", "7", "--stack-size", "9", "input.js" });
     try std.testing.expectEqual(@as(?usize, 7 * 1024), command.file.options.memory_limit);
     try std.testing.expectEqual(@as(?usize, 9 * 1024), command.file.options.stack_size);
@@ -1599,14 +1599,14 @@ test "qjs args accept runtime limits" {
     try std.testing.expectEqual(@as(?usize, 11 * 1024), repl_command.repl.stack_size);
 }
 
-test "qjs args accept include preload files" {
+test "zjs args accept include preload files" {
     const command = try parseArgs(&.{ "-I", "prelude.js", "--include", "setup.mjs", "input.js" });
     try std.testing.expectEqual(@as(usize, 2), command.file.options.include_count);
     try std.testing.expectEqualStrings("prelude.js", command.file.options.includes()[0]);
     try std.testing.expectEqualStrings("setup.mjs", command.file.options.includes()[1]);
 }
 
-test "qjs args accept std exposure flag" {
+test "zjs args accept std exposure flag" {
     const command = try parseArgs(&.{ "--std", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.expose_std);
@@ -1616,7 +1616,7 @@ test "qjs args accept std exposure flag" {
     try std.testing.expect(repl_command.repl.expose_std);
 }
 
-test "qjs args accept memory dump flag" {
+test "zjs args accept memory dump flag" {
     const command = try parseArgs(&.{ "-d", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.dump_memory);
@@ -1626,7 +1626,7 @@ test "qjs args accept memory dump flag" {
     try std.testing.expect(repl_command.repl.dump_memory);
 }
 
-test "qjs args accept memory trace flag" {
+test "zjs args accept memory trace flag" {
     const command = try parseArgs(&.{ "-T", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.trace_memory);
@@ -1636,7 +1636,7 @@ test "qjs args accept memory trace flag" {
     try std.testing.expect(repl_command.repl.trace_memory);
 }
 
-test "qjs args accept opcode profile flag" {
+test "zjs args accept opcode profile flag" {
     const command = try parseArgs(&.{ "--profile-opcodes", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.profile_opcodes);
@@ -1648,7 +1648,7 @@ test "qjs args accept opcode profile flag" {
     try std.testing.expectError(error.Usage, parseArgs(&.{ "--profile-opcodes", "--test262-batch" }));
 }
 
-test "qjs args accept perf json flag for eval and files only" {
+test "zjs args accept perf json flag for eval and files only" {
     const command = try parseArgs(&.{ "--perf-json", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.perf_json);
@@ -1662,7 +1662,7 @@ test "qjs args accept perf json flag for eval and files only" {
     try std.testing.expectError(error.Usage, parseArgs(&.{ "--perf-json", "--test262-batch" }));
 }
 
-test "qjs perf json opcode profile includes counters and rows" {
+test "zjs perf json opcode profile includes counters and rows" {
     var profile = engine.core.OpcodeProfile{};
     profile.recordOpcode(engine.bytecode.opcode.op.get_var, 17);
     profile.recordOpcode(engine.bytecode.opcode.op.push_i16, 5);
@@ -1684,20 +1684,20 @@ test "qjs perf json opcode profile includes counters and rows" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"push_i16\"") != null);
 }
 
-test "qjs args accept module file" {
+test "zjs args accept module file" {
     const command = try parseArgs(&.{ "-m", "input.mjs" });
     try std.testing.expectEqualStrings("input.mjs", command.file.path);
     try std.testing.expectEqual(engine.frontend.parser.Mode.module, command.file.mode);
 }
 
-test "qjs args accept module file script arguments" {
+test "zjs args accept module file script arguments" {
     const command = try parseArgs(&.{ "-m", "input.mjs", "arg" });
     try std.testing.expectEqualStrings("input.mjs", command.file.path);
     try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
     try std.testing.expectEqualStrings("arg", command.file.script_args[1]);
 }
 
-test "qjs detects module mode from extension and static syntax" {
+test "zjs detects module mode from extension and static syntax" {
     try std.testing.expectEqual(engine.frontend.parser.Mode.module, detectFileMode("input.mjs", "console.log(1)", .script));
     try std.testing.expectEqual(engine.frontend.parser.Mode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
     try std.testing.expectEqual(engine.frontend.parser.Mode.module, detectFileMode("input.js", "export const value = 1;", .script));
@@ -1706,20 +1706,20 @@ test "qjs detects module mode from extension and static syntax" {
     try std.testing.expectEqual(engine.frontend.parser.Mode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
 }
 
-test "qjs module specifier resolver uses referrer directory" {
+test "zjs module specifier resolver uses referrer directory" {
     const resolved = try engine.exec.module.resolveModuleSpecifier(std.testing.allocator, "tests/fixtures/main.mjs", "./dep.mjs");
     defer std.testing.allocator.free(resolved);
     try std.testing.expectEqualStrings("tests/fixtures/dep.mjs", resolved);
     try std.testing.expectError(error.ModuleNotFound, engine.exec.module.resolveModuleSpecifier(std.testing.allocator, "main.mjs", "bare"));
 }
 
-test "qjs args reject missing source" {
+test "zjs args reject missing source" {
     try std.testing.expectError(error.Usage, parseArgs(&.{"-e"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{"-m"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "-i", "extra" }));
 }
 
-test "qjs repl line evaluator preserves state and prints results" {
+test "zjs repl line evaluator preserves state and prints results" {
     var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 

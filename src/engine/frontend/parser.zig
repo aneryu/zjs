@@ -3,9 +3,9 @@ const std = @import("std");
 const atom = @import("../core/atom.zig");
 const Runtime = @import("../core/runtime.zig").Runtime;
 const bytecode = @import("../bytecode/root.zig");
-const qjs_lexer = @import("qjs_lexer.zig");
-const qjs_parser = @import("qjs_parser.zig");
-const qjs_token = @import("qjs_token.zig");
+const zjs_lexer = @import("zjs_lexer.zig");
+const zjs_parser = @import("zjs_parser.zig");
+const zjs_token = @import("zjs_token.zig");
 const source_pos = @import("source_pos.zig");
 const ts_strip = @import("ts_strip.zig");
 
@@ -17,7 +17,7 @@ pub const Mode = enum {
 };
 
 pub const SourceKind = ts_strip.SourceKind;
-pub const Feature = qjs_parser.Feature;
+pub const Feature = zjs_parser.Feature;
 
 pub const ParsePath = enum {
     quickjs_parser,
@@ -129,10 +129,10 @@ fn compileQjsProgram(
     features: *std.EnumSet(Feature),
 ) !void {
     const effective_strict = options.strict or sourceHasOnlyStrictFlag(source) or sourceHasUseStrictDirective(source);
-    var lex = qjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+    var lex = zjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
     lex.is_strict_mode = options.mode == .module or effective_strict;
     lex.is_module = options.mode == .module;
-    var state = try qjs_parser.ParseState.init(&lex, function);
+    var state = try zjs_parser.ParseState.init(&lex, function);
     defer state.deinit(rt);
     state.runtime = rt;
     state.is_strict = options.mode == .module or effective_strict;
@@ -172,12 +172,12 @@ fn compileQjsProgram(
         try state.enableReturnCompletion();
     }
 
-    try qjs_parser.parseDirectives(&state);
+    try zjs_parser.parseDirectives(&state);
 
-    const decl_mask = qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true };
-    try qjs_parser.parseProgramStatements(&state, decl_mask);
+    const decl_mask = zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true };
+    try zjs_parser.parseProgramStatements(&state, decl_mask);
     if (options.mode == .module) {
-        try qjs_parser.validateModuleLocalExports(&state);
+        try zjs_parser.validateModuleLocalExports(&state);
     }
 
     if (return_completion) {
@@ -261,7 +261,7 @@ fn setFallbackSyntaxError(
     source: []const u8,
     message: []const u8,
 ) !void {
-    var lex = qjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+    var lex = zjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
     var pos = source_pos.Position{ .line = 1, .column = 1, .offset = 0 };
     while (true) {
         var tok = lex.next() catch |err| {
@@ -270,7 +270,7 @@ fn setFallbackSyntaxError(
             return;
         };
         pos = .{ .line = lex.line, .column = lex.col, .offset = lex.pos };
-        if (tok.val == qjs_token.TOK_EOF) break;
+        if (tok.val == zjs_token.TOK_EOF) break;
         lex.freeToken(&tok);
     }
     result.syntax_error = try source_pos.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, pos, message);

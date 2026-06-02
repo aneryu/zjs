@@ -11000,7 +11000,14 @@ fn fastDenseArrayElementValue(value: core.Value, key: core.Value) ?core.Value {
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
     if (object.proxyTarget() != null or object.exotic != null) return null;
-    return object.getDenseArrayElementValue(@intCast(index_i32));
+    if (!object.is_array or object.arrayElementStorageMode() != .dense) return null;
+    const index: u32 = @intCast(index_i32);
+    const atom_id = core.atom.atomFromUInt32(index);
+    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
+    const elements = object.arrayElements();
+    if (@as(usize, @intCast(index_i32)) >= elements.len) return null;
+    if (elements[@intCast(index_i32)]) |stored| return stored.dup();
+    return null;
 }
 
 fn fastStringIndexValue(rt: *core.Runtime, value: core.Value, key: core.Value) ?core.Value {

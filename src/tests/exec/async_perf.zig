@@ -1983,8 +1983,8 @@ test "Atomics waitAsync timeout runs pre-settlement then callback" {
     try std.testing.expect(setup.isUndefined());
 
     std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), std.Io.Duration.fromMilliseconds(3), .awake) catch {};
-    const global = try engine.exec.qjs_vm.ensureContextGlobal(js.context);
-    try engine.exec.qjs_vm.drainPendingPromiseJobs(js.context, &stream, global);
+    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
+    try engine.exec.zjs_vm.drainPendingPromiseJobs(js.context, &stream, global);
 
     try std.testing.expectEqualStrings("true true\ntimed-out\n", stream.buffered());
 }
@@ -1992,8 +1992,8 @@ test "Atomics waitAsync timeout runs pre-settlement then callback" {
 test "test262 agent broadcast shares SharedArrayBuffer backing store" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
-    _ = engine.exec.qjs_vm.cleanupTest262Agents();
-    const baseline_agents = engine.exec.qjs_vm.test262AgentRecordCountForTests();
+    _ = engine.exec.zjs_vm.cleanupTest262Agents();
+    const baseline_agents = engine.exec.zjs_vm.test262AgentRecordCountForTests();
 
     var output_buffer: [128]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -2017,12 +2017,12 @@ test "test262 agent broadcast shares SharedArrayBuffer backing store" {
     try std.testing.expectEqualStrings("40:42\n42\n", stream.buffered());
 
     var attempts: usize = 0;
-    while (engine.exec.qjs_vm.test262AgentRecordCountForTests() != baseline_agents and attempts < 100) : (attempts += 1) {
-        _ = engine.exec.qjs_vm.cleanupTest262Agents();
+    while (engine.exec.zjs_vm.test262AgentRecordCountForTests() != baseline_agents and attempts < 100) : (attempts += 1) {
+        _ = engine.exec.zjs_vm.cleanupTest262Agents();
         std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
-    _ = engine.exec.qjs_vm.cleanupTest262Agents();
-    try std.testing.expectEqual(baseline_agents, engine.exec.qjs_vm.test262AgentRecordCountForTests());
+    _ = engine.exec.zjs_vm.cleanupTest262Agents();
+    try std.testing.expectEqual(baseline_agents, engine.exec.zjs_vm.test262AgentRecordCountForTests());
 }
 
 test "Atomics wait honors runtime CanBlock setting for timeout paths" {

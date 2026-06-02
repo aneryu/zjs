@@ -1,5 +1,5 @@
 //! QuickJS-aligned VM dispatcher for bytecode produced by
-//! `frontend/qjs_parser.zig`, tracked by the current test262-driven
+//! `frontend/zjs_parser.zig`, tracked by the current test262-driven
 //! and post-terminal alignment plans.
 //!
 //! This is the only VM dispatcher after the parser-rewrite M2 swap.
@@ -559,8 +559,8 @@ pub fn runWithArgsState(
                 if (try property_vm.tryFuseCheckedLocalDenseArrayInt32AppendRange(ctx, function, global, &frame, idx, stop_before_pc == null, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) continue;
                 if (try property_vm.tryFuseCheckedLocalDenseArrayIndexedAppend(ctx, function, global, &frame, idx, stop_before_pc == null, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) continue;
                 if (try property_vm.tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(ctx, function, global, &frame, idx, stop_before_pc == null, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) continue;
-                if (tryFuseLocalInt32LessThanFalseBranch(function, &frame, idx)) continue;
-                if (tryFuseLocalShortBigIntLessThanFalseBranch(function, &frame, idx)) continue;
+                if (tryFuseLocalInt32CompareBranch(function, &frame, idx)) continue;
+                if (tryFuseLocalShortBigIntCompareBranch(function, &frame, idx)) continue;
                 if (frame.pc < function.code.len) {
                     switch (function.code[frame.pc]) {
                         op.post_inc, op.post_dec => {
@@ -2481,20 +2481,101 @@ const varRefCellFromValue = shared_vm.varRefCellFromValue;
 const throwTdzReference = shared_vm.throwTdzReference;
 const readInt = shared_vm.readInt;
 
-fn tryFuseLocalInt32LessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, idx: usize) bool {
-    if (frame.pc + 8 > function.code.len) return false;
+fn tryFuseLocalInt32CompareBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, idx: usize) bool {
     const code = function.code;
-    if (code[frame.pc] != op.push_i32) return false;
-    if (code[frame.pc + 5] != op.lt) return false;
-    if (code[frame.pc + 6] != op.if_false8) return false;
+    const pc = frame.pc;
+    if (pc >= code.len) return false;
+    const opc = code[pc];
+    var rhs_val: i32 = undefined;
+    var rhs_len: usize = 0;
+    switch (opc) {
+        op.push_i32 => {
+            if (pc + 5 > code.len) return false;
+            rhs_val = readInt(i32, code[pc + 1 ..][0..4]);
+            rhs_len = 5;
+        },
+        op.push_i16 => {
+            if (pc + 3 > code.len) return false;
+            rhs_val = @intCast(readInt(i16, code[pc + 1 ..][0..2]));
+            rhs_len = 3;
+        },
+        op.push_i8 => {
+            if (pc + 2 > code.len) return false;
+            rhs_val = @intCast(@as(i8, @bitCast(code[pc + 1])));
+            rhs_len = 2;
+        },
+        op.push_minus1 => { rhs_val = -1; rhs_len = 1; },
+        op.push_0 => { rhs_val = 0; rhs_len = 1; },
+        op.push_1 => { rhs_val = 1; rhs_len = 1; },
+        op.push_2 => { rhs_val = 2; rhs_len = 1; },
+        op.push_3 => { rhs_val = 3; rhs_len = 1; },
+        op.push_4 => { rhs_val = 4; rhs_len = 1; },
+        op.push_5 => { rhs_val = 5; rhs_len = 1; },
+        op.push_6 => { rhs_val = 6; rhs_len = 1; },
+        op.push_7 => { rhs_val = 7; rhs_len = 1; },
+        else => return false,
+    }
+    if (pc + rhs_len >= code.len) return false;
+    const cmp_op = code[pc + rhs_len];
+    switch (cmp_op) {
+        op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {},
+        else => return false,
+    }
+    const cmp_len: usize = 1;
+    if (pc + rhs_len + cmp_len >= code.len) return false;
+    const br_op = code[pc + rhs_len + cmp_len];
+    var is_if_true = false;
+    var br_len: usize = 0;
+    var branch_offset: i32 = 0;
+    var branch_operand_pc: usize = 0;
+    switch (br_op) {
+        op.if_false8 => {
+            if (pc + rhs_len + cmp_len + 2 > code.len) return false;
+            is_if_true = false;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = @as(i8, @bitCast(code[branch_operand_pc]));
+            br_len = 2;
+        },
+        op.if_true8 => {
+            if (pc + rhs_len + cmp_len + 2 > code.len) return false;
+            is_if_true = true;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = @as(i8, @bitCast(code[branch_operand_pc]));
+            br_len = 2;
+        },
+        op.if_false => {
+            if (pc + rhs_len + cmp_len + 5 > code.len) return false;
+            is_if_true = false;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            br_len = 5;
+        },
+        op.if_true => {
+            if (pc + rhs_len + cmp_len + 5 > code.len) return false;
+            is_if_true = true;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            br_len = 5;
+        },
+        else => return false,
+    }
     const lhs = frame.locals[idx].asInt32() orelse return false;
-    const rhs = readInt(i32, code[frame.pc + 1 ..][0..4]);
-    const operand_pc = frame.pc + 7;
-    const diff: i8 = @bitCast(code[operand_pc]);
-    frame.pc = if (lhs < rhs)
-        frame.pc + 8
-    else
-        @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
+    const cond_passed = switch (cmp_op) {
+        op.lt => lhs < rhs_val,
+        op.lte => lhs <= rhs_val,
+        op.gt => lhs > rhs_val,
+        op.gte => lhs >= rhs_val,
+        op.eq, op.strict_eq => lhs == rhs_val,
+        op.neq, op.strict_neq => lhs != rhs_val,
+        else => unreachable,
+    };
+    const take_branch = cond_passed == is_if_true;
+    const instruction_len = rhs_len + cmp_len + br_len;
+    if (take_branch) {
+        frame.pc = @intCast(@as(i64, @intCast(branch_operand_pc)) + @as(i64, branch_offset));
+    } else {
+        frame.pc = pc + instruction_len;
+    }
     return true;
 }
 
@@ -2540,20 +2621,82 @@ fn decodeEmptyCheckedLocalPostIncLoopTail(code: []const u8, body_pc: usize, exit
     return operand_pc + 1 == exit_pc;
 }
 
-fn tryFuseLocalShortBigIntLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, idx: usize) bool {
-    if (frame.pc + 8 > function.code.len) return false;
+fn tryFuseLocalShortBigIntCompareBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, idx: usize) bool {
     const code = function.code;
-    if (code[frame.pc] != op.push_bigint_i32) return false;
-    if (code[frame.pc + 5] != op.lt) return false;
-    if (code[frame.pc + 6] != op.if_false8) return false;
+    const pc = frame.pc;
+    if (pc >= code.len) return false;
+    const opc = code[pc];
+    var rhs_val: i64 = undefined;
+    var rhs_len: usize = 0;
+    switch (opc) {
+        op.push_bigint_i32 => {
+            if (pc + 5 > code.len) return false;
+            rhs_val = readInt(i32, code[pc + 1 ..][0..4]);
+            rhs_len = 5;
+        },
+        else => return false,
+    }
+    if (pc + rhs_len >= code.len) return false;
+    const cmp_op = code[pc + rhs_len];
+    switch (cmp_op) {
+        op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq => {},
+        else => return false,
+    }
+    const cmp_len: usize = 1;
+    if (pc + rhs_len + cmp_len >= code.len) return false;
+    const br_op = code[pc + rhs_len + cmp_len];
+    var is_if_true = false;
+    var br_len: usize = 0;
+    var branch_offset: i32 = 0;
+    var branch_operand_pc: usize = 0;
+    switch (br_op) {
+        op.if_false8 => {
+            if (pc + rhs_len + cmp_len + 2 > code.len) return false;
+            is_if_true = false;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = @as(i8, @bitCast(code[branch_operand_pc]));
+            br_len = 2;
+        },
+        op.if_true8 => {
+            if (pc + rhs_len + cmp_len + 2 > code.len) return false;
+            is_if_true = true;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = @as(i8, @bitCast(code[branch_operand_pc]));
+            br_len = 2;
+        },
+        op.if_false => {
+            if (pc + rhs_len + cmp_len + 5 > code.len) return false;
+            is_if_true = false;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            br_len = 5;
+        },
+        op.if_true => {
+            if (pc + rhs_len + cmp_len + 5 > code.len) return false;
+            is_if_true = true;
+            branch_operand_pc = pc + rhs_len + cmp_len + 1;
+            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            br_len = 5;
+        },
+        else => return false,
+    }
     const lhs = frame.locals[idx].asShortBigInt() orelse return false;
-    const rhs: i64 = readInt(i32, code[frame.pc + 1 ..][0..4]);
-    const operand_pc = frame.pc + 7;
-    const diff: i8 = @bitCast(code[operand_pc]);
-    frame.pc = if (lhs < rhs)
-        frame.pc + 8
-    else
-        @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
+    const cond_passed = switch (cmp_op) {
+        op.lt => lhs < rhs_val,
+        op.lte => lhs <= rhs_val,
+        op.gt => lhs > rhs_val,
+        op.gte => lhs >= rhs_val,
+        op.eq, op.strict_eq => lhs == rhs_val,
+        op.neq, op.strict_neq => lhs != rhs_val,
+        else => unreachable,
+    };
+    const take_branch = cond_passed == is_if_true;
+    const instruction_len = rhs_len + cmp_len + br_len;
+    if (take_branch) {
+        frame.pc = @intCast(@as(i64, @intCast(branch_operand_pc)) + @as(i64, branch_offset));
+    } else {
+        frame.pc = pc + instruction_len;
+    }
     return true;
 }
 

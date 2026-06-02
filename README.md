@@ -27,7 +27,7 @@ part of the current compatibility boundary.
 ## Build
 
 ```sh
-zig build qjs --summary all
+zig build zjs --summary all
 zig build run-test262 --summary all
 ```
 

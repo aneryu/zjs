@@ -14,7 +14,7 @@ Inline caches are enabled by default and can be disabled with:
 
 ```sh
 zig build test -Dzjs_enable_ic=false --summary all
-zig build qjs -Dzjs_enable_ic=false --summary all
+zig build zjs -Dzjs_enable_ic=false --summary all
 ```
 
 ## Cacheable Opcodes

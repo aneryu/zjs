@@ -12,7 +12,7 @@ const std = @import("std");
 const atom_module = @import("../core/atom.zig");
 const memory = @import("../core/memory.zig");
 const unicode = @import("../libs/unicode.zig");
-const t = @import("qjs_token.zig");
+const t = @import("zjs_token.zig");
 
 const Atom = atom_module.Atom;
 const AtomTable = atom_module.AtomTable;

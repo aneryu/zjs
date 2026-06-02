@@ -875,7 +875,9 @@ pub const Object = struct {
     length: u32 = 0,
     length_writable: bool = true,
     is_with_environment: bool = false,
+    is_prototype: bool = false,
     properties: []property.Entry = &.{},
+
     property_capacity: usize = 0,
     exotic: ?ExoticMethods = null,
 
@@ -1028,7 +1030,13 @@ pub const Object = struct {
             },
             else => {},
         }
-        if (prototype) |proto| gc.retain(&proto.header);
+        if (prototype) |proto| {
+            gc.retain(&proto.header);
+            proto.is_prototype = true;
+            if (proto.may_have_indexed_properties) {
+                rt.any_prototype_may_have_indexed_properties = true;
+            }
+        }
         self.* = .{
             .header = .{ .kind = .object },
             .class_id = class_id,
@@ -6350,7 +6358,13 @@ pub const Object = struct {
             try rt.shapes.cloneWithPrototype(self.shape_ref, proto_id)
         else
             null;
-        if (prototype) |proto| gc.retain(&proto.header);
+        if (prototype) |proto| {
+            gc.retain(&proto.header);
+            proto.is_prototype = true;
+            if (proto.may_have_indexed_properties) {
+                rt.any_prototype_may_have_indexed_properties = true;
+            }
+        }
         const old_prototype = self.prototype;
         self.prototype = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -7712,7 +7726,7 @@ pub const Object = struct {
         const elements = self.arrayElements();
         if (index >= elements.len) return false;
         if (self.prototype) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto) and proto.hasProperty(atom_id)) return false;
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
         const old_value = elements[@intCast(index)];
@@ -7727,7 +7741,7 @@ pub const Object = struct {
         if (!self.extensible) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.prototype) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto) and proto.hasProperty(atom_id)) return false;
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
         }
 
         try self.ensureArrayElementCapacity(rt, index + 1);
@@ -7736,7 +7750,7 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0 .. @as(usize, @intCast(index)) + 1];
         if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
         elements.*[@intCast(index)] = new_value.dup();
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         self.length = index + 1;
         return true;
     }
@@ -7753,7 +7767,7 @@ pub const Object = struct {
         elements[0] = new_value.dup();
         self.arrayElementsSlot().* = elements[0..1];
         self.arrayElementsCapacitySlot().* = 1;
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         self.length = 1;
     }
 
@@ -7767,7 +7781,7 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0 .. @as(usize, @intCast(index)) + 1];
         if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
         elements.*[@intCast(index)] = new_value.dup();
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         self.length = index + 1;
         return true;
     }
@@ -7784,7 +7798,7 @@ pub const Object = struct {
         for (values, 0..) |item, index| {
             elements.*[index] = item.dup();
         }
-        if (values.len != 0) self.may_have_indexed_properties = true;
+        if (values.len != 0) self.markIndexedProperties(rt);
         self.length = @intCast(values.len);
         return true;
     }
@@ -7793,7 +7807,7 @@ pub const Object = struct {
         if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         if (start != self.length or start >= limit or !self.length_writable or !self.extensible) return false;
         if (self.prototype) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto)) return false;
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
         const start_index: usize = @intCast(start);
@@ -7817,7 +7831,7 @@ pub const Object = struct {
         }
         elements.* = elements.*.ptr[0..limit_index];
         if (start_index > old_len) @memset(elements.*[old_len..start_index], null);
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         self.length = limit;
 
         if (start_index >= old_len) {
@@ -7841,7 +7855,7 @@ pub const Object = struct {
         if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         if (start_index != self.length or !self.length_writable or !self.extensible) return false;
         if (self.prototype) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto)) return false;
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
         const limit = try std.math.add(u32, start_index, count);
@@ -7860,7 +7874,7 @@ pub const Object = struct {
         const old_len = elements.*.len;
         elements.* = elements.*.ptr[0..limit_element];
         if (start_element > old_len) @memset(elements.*[old_len..start_element], null);
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         self.length = limit;
 
         var offset: u32 = 0;
@@ -7885,7 +7899,7 @@ pub const Object = struct {
         if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         if (start_index != self.length or !self.length_writable or !self.extensible) return false;
         if (self.prototype) |proto| {
-            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto)) return false;
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
 
         if (limit > array.max_array_length) return false;
@@ -7903,7 +7917,7 @@ pub const Object = struct {
         const old_len = elements.*.len;
         elements.* = elements.*.ptr[0..limit_element];
         if (start_element > old_len) @memset(elements.*[old_len..start_element], null);
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         self.length = limit;
 
         var index = start_element;
@@ -7948,13 +7962,21 @@ pub const Object = struct {
         const next_value = new_value.dup();
         const old = elements.*[element_index];
         elements.*[element_index] = next_value;
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         if (index >= self.length) self.length = index + 1;
         if (old) |stored| stored.free(rt);
         return true;
     }
 
-    fn arrayAppendPrototypeChainHasNoIndexedProperties(proto: *Object) bool {
+    pub fn markIndexedProperties(self: *Object, rt: *Runtime) void {
+        self.may_have_indexed_properties = true;
+        if (self.is_prototype) {
+            rt.any_prototype_may_have_indexed_properties = true;
+        }
+    }
+
+    fn arrayAppendPrototypeChainHasNoIndexedProperties(proto: *Object, rt: *Runtime) bool {
+        if (!rt.any_prototype_may_have_indexed_properties) return true;
         var cursor: ?*Object = proto;
         while (cursor) |object| {
             if (object.may_have_indexed_properties) return false;
@@ -7987,7 +8009,7 @@ pub const Object = struct {
         const next_value = new_value.dup();
         const old = elements.*[element_index];
         elements.*[element_index] = next_value;
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         if (index >= self.length) self.length = index + 1;
         if (old) |stored| stored.free(rt);
     }
@@ -8432,7 +8454,7 @@ pub const Object = struct {
         const next_value = new_value.dup();
         const old = elements.*[element_index];
         elements.*[element_index] = next_value;
-        self.may_have_indexed_properties = true;
+        self.markIndexedProperties(rt);
         if (old) |stored| stored.free(rt);
         return true;
     }
@@ -8515,7 +8537,7 @@ pub const Object = struct {
 
         const entry_atom = self.properties[old_len].atom_id;
         if (array.arrayIndexFromAtom(&rt.atoms, entry_atom) != null) {
-            self.may_have_indexed_properties = true;
+            self.markIndexedProperties(rt);
         }
         try self.adoptShapeForNewProperty(rt, entry_atom, self.properties[old_len].flags.bits());
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
@@ -8578,7 +8600,7 @@ pub const Object = struct {
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
-    fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
+    pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
         if (self.shape_ref.hasPropertyHash()) {
             var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
             var steps: usize = 0;

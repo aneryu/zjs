@@ -126,7 +126,7 @@ test "Engine defineScriptArgs OOM releases pending global array once" {
 }
 
 fn fillGlobalPropertyCapacity(js: *engine.Engine) !void {
-    const global = try engine.exec.qjs_vm.ensureContextGlobal(js.context);
+    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
     var index: usize = 0;
     while (global.properties.len < global.property_capacity) : (index += 1) {
         var name_buffer: [64]u8 = undefined;
@@ -1175,7 +1175,7 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
 
     const setup = try js.eval("var __zjs_timer_throw = function() { throw new Error('timer boom'); };");
     defer setup.free(js.runtime);
-    const global = try engine.exec.qjs_vm.ensureContextGlobal(js.context);
+    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
     const callback_key = try js.runtime.internAtom("__zjs_timer_throw");
     defer js.runtime.atoms.free(callback_key);
     const callback = global.getProperty(callback_key);

@@ -113,9 +113,9 @@ pub const Engine = struct {
 
     pub fn deinit(self: *Engine) void {
         self.job_queue.deinit();
-        exec.qjs_vm.cleanupWorkersForRuntime(self.runtime);
-        _ = exec.qjs_vm.cleanupTest262Agents();
-        exec.qjs_vm.cleanupAtomicsWaitersForContext(self.context);
+        exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
+        _ = exec.zjs_vm.cleanupTest262Agents();
+        exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();
         self.runtime.destroy();
     }
@@ -335,7 +335,7 @@ pub const Engine = struct {
         defer self.runtime.atoms.free(root_module_name);
         if (self.runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
         self.runtime.modules.linkModule(self.runtime, root_module_name) catch |err| return moduleResolutionError(err);
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         for (module_postorder.items) |path| {
             var raw_module_source: []const u8 = undefined;
             const is_root = std.mem.eql(u8, path, filename);
@@ -635,7 +635,7 @@ pub const Engine = struct {
         max_source_size: usize,
         postorder: []const []const u8,
     ) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         for (postorder) |path| {
             const module_source = if (std.mem.eql(u8, path, root_path))
                 root_source
@@ -658,7 +658,7 @@ pub const Engine = struct {
         allocator: std.mem.Allocator,
         max_source_size: usize,
     ) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         for (self.runtime.modules.modules) |record| {
             if (record.synthetic_kind == .none) continue;
             if (record.synthetic_kind == .native_std or record.synthetic_kind == .native_os) {
@@ -674,7 +674,7 @@ pub const Engine = struct {
     }
 
     fn initializeNativeSyntheticModules(self: *Engine) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         for (self.runtime.modules.modules) |record| {
             if (record.synthetic_kind != .native_std and record.synthetic_kind != .native_os) continue;
             _ = try exec.module.initializeSyntheticFileModule(self.context, global, record.module_name, "");
@@ -774,9 +774,9 @@ pub const Engine = struct {
                 if (timing) |t| t.vm_run_ns += elapsedNanosSince(vm_start);
                 break :blk value;
             };
-            const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+            const global = try exec.zjs_vm.ensureContextGlobal(self.context);
             const jobs_start = monotonicNanos();
-            try exec.qjs_vm.drainPendingPromiseJobs(self.context, output, global);
+            try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
             if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
             if (mode == .script and !std.mem.eql(u8, filename, "<repl>")) {
                 result.free(self.runtime);
@@ -794,9 +794,9 @@ pub const Engine = struct {
                 if (timing) |t| t.vm_run_ns += elapsedNanosSince(vm_start);
                 break :blk value;
             };
-            const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+            const global = try exec.zjs_vm.ensureContextGlobal(self.context);
             const jobs_start = monotonicNanos();
-            try exec.qjs_vm.drainPendingPromiseJobs(self.context, output, global);
+            try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
             if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
             if (mode == .script and !std.mem.eql(u8, filename, "<repl>")) {
                 result.free(self.runtime);
@@ -827,7 +827,7 @@ pub const Engine = struct {
             var stack = exec.stack.Stack.init(&self.runtime.memory, self.context.stack_limit);
             defer stack.deinit(self.runtime);
             const vm_start = monotonicNanos();
-            const result = exec.qjs_vm.runModuleWithOutputAndVarRefsState(
+            const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(
                 self.context,
                 &stack,
                 function,
@@ -849,9 +849,9 @@ pub const Engine = struct {
             if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
                 resume_value = result;
                 resume_value_symbol_rooted = try self.runtime.registerExternalValueSymbolRoot(result);
-                const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+                const global = try exec.zjs_vm.ensureContextGlobal(self.context);
                 const jobs_start = monotonicNanos();
-                try exec.qjs_vm.drainPendingPromiseJobs(self.context, output, global);
+                try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
                 if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
                 continue;
             }
@@ -912,7 +912,7 @@ pub const Engine = struct {
         const continuation = try exec.property_ops.expectObject(owned_continuation);
         var stack = exec.stack.Stack.init(&self.runtime.memory, self.context.stack_limit);
         defer stack.deinit(self.runtime);
-        const result = exec.qjs_vm.runModuleWithOutputAndVarRefsState(self.context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return moduleResolutionError(err);
+        const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(self.context, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return moduleResolutionError(err);
         if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
             return .{ .suspended = .{
                 .continuation = owned_continuation,
@@ -1034,8 +1034,8 @@ pub const Engine = struct {
         const module_source = current.source;
         const path = current.path;
         const keep_result = current.keep_result;
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
-        try exec.qjs_vm.drainPendingPromiseJobs(self.context, output, global);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
         continuation_owned = false;
         const step = try self.evalPreloadedFileModuleStep(module_source, output, path, continuation, awaited_value);
         awaited_value.free(self.runtime);
@@ -1087,15 +1087,15 @@ pub const Engine = struct {
 
     pub fn runJobs(self: *Engine) !void {
         self.job_queue.runAll();
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
-        exec.qjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
             if (self.context.hasException() or self.context.hasUnhandledRejection()) return;
             return err;
         };
     }
 
     pub fn exposeStdOsGlobals(self: *Engine) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         try self.exposeNativeModuleGlobal(global, "std", .native_std);
         try self.exposeNativeModuleGlobal(global, "os", .native_os);
     }
@@ -1123,7 +1123,7 @@ pub const Engine = struct {
         const function_object = try exec.property_ops.expectObject(function_value);
         function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
         function_object.externalHostFunctionIdSlot().* = id;
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         try function_object.setFunctionRealmGlobalPtr(self.runtime, global);
         return function_value;
     }
@@ -1136,7 +1136,7 @@ pub const Engine = struct {
         call: ExternalHostCallFn,
         finalizer: ?ExternalHostFinalizer,
     ) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         const function_value = try self.createExternalHostFunctionValue(name, length, ptr, call, finalizer);
         defer function_value.free(self.runtime);
 
@@ -1146,7 +1146,7 @@ pub const Engine = struct {
     }
 
     pub fn defineArgvGlobals(self: *Engine, argv0: []const u8, exec_argv: []const []const u8) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         const argv0_value = try exec.value_ops.createStringValue(self.runtime, argv0);
         defer argv0_value.free(self.runtime);
         const argv0_key = try self.runtime.internAtom("argv0");
@@ -1156,7 +1156,7 @@ pub const Engine = struct {
     }
 
     fn defineStringArrayGlobal(self: *Engine, name: []const u8, items: []const []const u8) !void {
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         const values = try self.runtime.memory.alloc(core.Value, items.len);
         defer self.runtime.memory.free(core.Value, values);
         var initialized: usize = 0;
@@ -1187,7 +1187,7 @@ pub const Engine = struct {
     pub fn defineCliArgvGlobalsLazy(self: *Engine, argv0: []const u8, exec_argv: []const []const u8) !void {
         self.runtime.cli_argv0 = argv0;
         self.runtime.cli_exec_argv = exec_argv;
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         const flags = core.property.Flags.data(true, true, true);
         try global.defineCliGlobalAutoInitProperty(self.runtime, core.atom.predefinedId("argv0", .string).?, "argv0", flags, global);
         try global.defineCliGlobalAutoInitProperty(self.runtime, core.atom.predefinedId("execArgv", .string).?, "execArgv", flags, global);
@@ -1195,7 +1195,7 @@ pub const Engine = struct {
 
     pub fn defineCliScriptArgsLazy(self: *Engine, args: []const []const u8) !void {
         self.runtime.cli_script_args = args;
-        const global = try exec.qjs_vm.ensureContextGlobal(self.context);
+        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
         try global.defineCliGlobalAutoInitProperty(
             self.runtime,
             core.atom.predefinedId("scriptArgs", .string).?,

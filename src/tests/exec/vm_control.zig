@@ -3,11 +3,11 @@ const engine = @import("quickjs_zig_engine");
 
 const builtins = engine.builtins;
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
-const helpers = @import("qjs_vm_helpers.zig");
+const helpers = @import("zjs_vm_helpers.zig");
 const oom_helpers = @import("oom_helpers.zig");
 const parseAndRun = helpers.parseAndRun;
 const parseAndRunWithTopLevelChildren = helpers.parseAndRunWithTopLevelChildren;
@@ -500,15 +500,15 @@ fn expectSortEntryOOMCleanup(mode: SortEntryOOMMode) !void {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         const rt = try core.Runtime.create(failing.allocator());
         const ctx = try core.Context.create(rt);
-        const global = try engine.exec.qjs_vm.ensureContextGlobal(ctx);
+        const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
 
         const receiver = try createSortEntryOOMReceiver(rt, mode);
         const method = try sortEntryOOMMethod(rt, global, mode);
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = switch (mode) {
-            .sort => engine.exec.qjs_vm.qjsArraySortCall(ctx, null, global, receiver, method, &.{}, null, null),
-            .to_sorted, .typed_to_sorted => engine.exec.qjs_vm.qjsArrayByCopyCall(ctx, null, global, receiver, method, &.{}, null, null),
+            .sort => engine.exec.zjs_vm.qjsArraySortCall(ctx, null, global, receiver, method, &.{}, null, null),
+            .to_sorted, .typed_to_sorted => engine.exec.zjs_vm.qjsArrayByCopyCall(ctx, null, global, receiver, method, &.{}, null, null),
         };
         failing.fail_index = std.math.maxInt(usize);
 

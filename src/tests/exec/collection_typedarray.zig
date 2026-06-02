@@ -557,13 +557,13 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
         var vm = engine.exec.Vm.init(ctx);
 
         const warmup_result = try vm.run(&warmup.function);
-        const warmup_global = try engine.exec.qjs_vm.ensureContextGlobal(ctx);
-        try engine.exec.qjs_vm.drainPendingPromiseJobs(ctx, null, warmup_global);
+        const warmup_global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, warmup_global);
         warmup_result.free(rt);
 
         const result = try vm.run(&compiled.function);
-        const global = try engine.exec.qjs_vm.ensureContextGlobal(ctx);
-        try engine.exec.qjs_vm.drainPendingPromiseJobs(ctx, null, global);
+        const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, global);
         result.free(rt);
 
         cleanupPromiseKeyedCombinatorOOMIteration(rt, ctx, &vm, &compiled, &warmup);
@@ -583,8 +583,8 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
 
         var vm = engine.exec.Vm.init(ctx);
         const warmup_result = try vm.run(&warmup.function);
-        const warmup_global = try engine.exec.qjs_vm.ensureContextGlobal(ctx);
-        try engine.exec.qjs_vm.drainPendingPromiseJobs(ctx, null, warmup_global);
+        const warmup_global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, warmup_global);
         warmup_result.free(rt);
 
         failing.fail_index = failing.alloc_index + fail_offset;
@@ -593,8 +593,8 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
 
         if (result) |value| {
             saw_success = true;
-            const global = try engine.exec.qjs_vm.ensureContextGlobal(ctx);
-            try engine.exec.qjs_vm.drainPendingPromiseJobs(ctx, null, global);
+            const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+            try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, global);
             value.free(rt);
         } else |err| switch (err) {
             error.OutOfMemory => saw_oom = true,

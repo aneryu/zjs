@@ -46,8 +46,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
-    const qjs_cli_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/qjs.zig"),
+    const zjs_cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -90,16 +90,16 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const qjs_exe = b.addExecutable(.{
+    const zjs_exe = b.addExecutable(.{
         .name = "zjs",
-        .root_module = qjs_cli_mod,
+        .root_module = zjs_cli_mod,
     });
-    const install_qjs = b.addInstallArtifact(qjs_exe, .{});
-    const qjs_step = b.step("qjs", "Build and install zjs");
-    qjs_step.dependOn(&install_qjs.step);
-    b.installArtifact(qjs_exe);
-    const qjs_test262_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/qjs.zig"),
+    const install_zjs = b.addInstallArtifact(zjs_exe, .{});
+    const zjs_step = b.step("zjs", "Build and install zjs");
+    zjs_step.dependOn(&install_zjs.step);
+    b.installArtifact(zjs_exe);
+    const zjs_test262_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
@@ -108,11 +108,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "test262_protocol", .module = test262_protocol_fast_mod },
         },
     });
-    const qjs_test262_exe = b.addExecutable(.{
+    const zjs_test262_exe = b.addExecutable(.{
         .name = "zjs-test262",
-        .root_module = qjs_test262_mod,
+        .root_module = zjs_test262_mod,
     });
-    const install_qjs_test262 = b.addInstallArtifact(qjs_test262_exe, .{});
+    const install_zjs_test262 = b.addInstallArtifact(zjs_test262_exe, .{});
 
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
@@ -129,12 +129,12 @@ pub fn build(b: *std.Build) void {
     const install_run_test262 = b.addInstallArtifact(run_test262_exe, .{});
     const run_test262_step = b.step("run-test262", "Build and install run-test262");
     run_test262_step.dependOn(&install_run_test262.step);
-    run_test262_step.dependOn(&install_qjs_test262.step);
+    run_test262_step.dependOn(&install_zjs_test262.step);
 
     // Add actual test262 execution step.
     const run_test262_exec = b.addRunArtifact(run_test262_exe);
     run_test262_exec.step.dependOn(&install_run_test262.step);
-    run_test262_exec.step.dependOn(&install_qjs_test262.step);
+    run_test262_exec.step.dependOn(&install_zjs_test262.step);
     run_test262_exec.addArg("-c");
     run_test262_exec.addArg("test262.conf");
     run_test262_exec.addArg("-d");
@@ -151,12 +151,12 @@ pub fn build(b: *std.Build) void {
         .root_module = smoke_runner_mod,
     });
     const run_smoke = b.addRunArtifact(smoke_runner_exe);
-    run_smoke.addArtifactArg(qjs_exe);
+    run_smoke.addArtifactArg(zjs_exe);
     run_smoke.addArg("tests/zig-smoke/manifest.txt");
     const smoke_step = b.step("smoke", "Run JS smoke scripts against zjs");
     smoke_step.dependOn(&run_smoke.step);
 
-    const run_perf_benchmark = b.addRunArtifact(qjs_test262_exe);
+    const run_perf_benchmark = b.addRunArtifact(zjs_test262_exe);
     run_perf_benchmark.addArg("--perf-json");
     run_perf_benchmark.addArg("tests/perf/microbench.js");
     const perf_benchmark_step = b.step("perf-benchmark", "Run a repeatable diagnostic JS performance benchmark");
@@ -189,7 +189,7 @@ pub fn build(b: *std.Build) void {
         "if_false8=1",
         "reports/perf/current/scripts/uri_decode_4byte.js",
     });
-    run_perf_uri_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_uri_profile.step.dependOn(&install_zjs_test262.step);
     const perf_uri_profile_step = b.step("perf-uri-profile", "Record a zjs runtime profile for the URI 4-byte decode benchmark script");
     perf_uri_profile_step.dependOn(&run_perf_uri_profile.step);
 
@@ -220,7 +220,7 @@ pub fn build(b: *std.Build) void {
         "if_false8=1",
         "reports/perf/current/scripts/uri_component_decode_4byte.js",
     });
-    run_perf_uri_component_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_uri_component_profile.step.dependOn(&install_zjs_test262.step);
     const perf_uri_component_profile_step = b.step("perf-uri-component-profile", "Record a zjs runtime profile for the URI component 4-byte decode benchmark script");
     perf_uri_component_profile_step.dependOn(&run_perf_uri_component_profile.step);
 
@@ -243,7 +243,7 @@ pub fn build(b: *std.Build) void {
         "goto8=0",
         "reports/perf/current/scripts/prop_read_global_mono.js",
     });
-    run_perf_prop_global_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_prop_global_profile.step.dependOn(&install_zjs_test262.step);
     const perf_prop_global_profile_step = b.step("perf-prop-global-profile", "Record a zjs runtime profile for the global property read benchmark script");
     perf_prop_global_profile_step.dependOn(&run_perf_prop_global_profile.step);
 
@@ -266,7 +266,7 @@ pub fn build(b: *std.Build) void {
         "goto8=0",
         "reports/perf/current/scripts/proto_read_global.js",
     });
-    run_perf_proto_global_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_proto_global_profile.step.dependOn(&install_zjs_test262.step);
     const perf_proto_global_profile_step = b.step("perf-proto-global-profile", "Record a zjs runtime profile for the global prototype read benchmark script");
     perf_proto_global_profile_step.dependOn(&run_perf_proto_global_profile.step);
 
@@ -293,7 +293,7 @@ pub fn build(b: *std.Build) void {
         "goto8=0",
         "reports/perf/current/scripts/prop_read_poly3_global.js",
     });
-    run_perf_prop_poly3_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_prop_poly3_profile.step.dependOn(&install_zjs_test262.step);
     const perf_prop_poly3_profile_step = b.step("perf-prop-poly3-profile", "Record a zjs runtime profile for the global polymorphic property read benchmark script");
     perf_prop_poly3_profile_step.dependOn(&run_perf_prop_poly3_profile.step);
 
@@ -318,7 +318,7 @@ pub fn build(b: *std.Build) void {
         "goto8=0",
         "reports/perf/current/scripts/call2_loop_global.js",
     });
-    run_perf_call2_global_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_call2_global_profile.step.dependOn(&install_zjs_test262.step);
     const perf_call2_global_profile_step = b.step("perf-call2-global-profile", "Record a zjs runtime profile for the global call2 loop benchmark script");
     perf_call2_global_profile_step.dependOn(&run_perf_call2_global_profile.step);
 
@@ -341,7 +341,7 @@ pub fn build(b: *std.Build) void {
         "goto8=0",
         "reports/perf/current/scripts/closure_call_loop_global.js",
     });
-    run_perf_closure_call_global_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_closure_call_global_profile.step.dependOn(&install_zjs_test262.step);
     const perf_closure_call_global_profile_step = b.step("perf-closure-call-global-profile", "Record a zjs runtime profile for the global closure call loop benchmark script");
     perf_closure_call_global_profile_step.dependOn(&run_perf_closure_call_global_profile.step);
 
@@ -390,7 +390,7 @@ pub fn build(b: *std.Build) void {
         "drop=1",
         "reports/perf/current/scripts/string_loop.js",
     });
-    run_perf_string_loop_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_string_loop_profile.step.dependOn(&install_zjs_test262.step);
     const perf_string_loop_profile_step = b.step("perf-string-loop-profile", "Record a zjs runtime profile for the string microbench loop script");
     perf_string_loop_profile_step.dependOn(&run_perf_string_loop_profile.step);
 
@@ -407,7 +407,7 @@ pub fn build(b: *std.Build) void {
         "0\n",
         "reports/perf/current/scripts/empty_loop.js",
     });
-    run_perf_empty_loop_profile.step.dependOn(&install_qjs_test262.step);
+    run_perf_empty_loop_profile.step.dependOn(&install_zjs_test262.step);
     const perf_empty_loop_profile_step = b.step("perf-empty-loop-profile", "Record a zjs runtime profile for the empty int32 for-loop benchmark script");
     perf_empty_loop_profile_step.dependOn(&run_perf_empty_loop_profile.step);
 
@@ -495,7 +495,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "quickjs_zig_engine", .module = engine_mod },
-                .{ .name = "qjs_cli", .module = qjs_cli_mod },
+                .{ .name = "zjs_cli", .module = zjs_cli_mod },
                 .{ .name = "smoke_runner", .module = smoke_runner_mod },
                 .{ .name = "test262_runner", .module = test262_runner_mod },
             },
@@ -682,7 +682,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "quickjs_zig_engine", .module = engine_mod },
-                .{ .name = "qjs_cli", .module = qjs_cli_mod },
+                .{ .name = "zjs_cli", .module = zjs_cli_mod },
                 .{ .name = "smoke_runner", .module = smoke_runner_mod },
                 .{ .name = "test262_runner", .module = test262_runner_mod },
             },

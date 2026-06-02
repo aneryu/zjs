@@ -2,11 +2,11 @@ const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
-const helpers = @import("qjs_vm_helpers.zig");
+const helpers = @import("zjs_vm_helpers.zig");
 const parseAndRun = helpers.parseAndRun;
 const parseAndRunWithTopLevelChildren = helpers.parseAndRunWithTopLevelChildren;
 const parseStmtAndRun = helpers.parseStmtAndRun;
@@ -45,8 +45,8 @@ test "eval_ret: <ret> is allocated at slot 0 (first var)" {
     // The synthetic var uses atom 82 (`<ret>`).
     try std.testing.expectEqual(@as(@TypeOf(state.function_def.vars[0].var_name), 82), state.function_def.vars[0].var_name);
 
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     // In non-global eval, `var x;` is allocated in the eval variable
     // environment after the synthetic <ret> slot.

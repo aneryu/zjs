@@ -35,8 +35,8 @@ const function_def_mod = @import("../bytecode/function_def.zig");
 const bytecode_module = @import("../bytecode/module.zig");
 const opcode = @import("../bytecode/opcode.zig");
 
-const lexer_mod = @import("qjs_lexer.zig");
-const tok = @import("qjs_token.zig");
+const lexer_mod = @import("zjs_lexer.zig");
+const tok = @import("zjs_token.zig");
 
 const Atom = atom_module.Atom;
 

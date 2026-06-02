@@ -9,8 +9,8 @@
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
-const t = engine.frontend.qjs_token;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
+const t = engine.frontend.zjs_token;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
 const atom = engine.core.atom;
 
 const TestEnv = struct {

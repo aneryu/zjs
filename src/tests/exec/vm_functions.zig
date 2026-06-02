@@ -2,11 +2,11 @@ const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
-const helpers = @import("qjs_vm_helpers.zig");
+const helpers = @import("zjs_vm_helpers.zig");
 const parseAndRun = helpers.parseAndRun;
 const parseAndRunWithTopLevelChildren = helpers.parseAndRunWithTopLevelChildren;
 const parseStmtAndRun = helpers.parseStmtAndRun;
@@ -100,7 +100,7 @@ test "M2.3: qjs_vm preserves UTF-16 code units for string index properties" {
     try expectSingleCodeUnit(result, 0x100);
 }
 
-test "M2.3: qjs_parser records function-local while back edge against child bytecode" {
+test "M2.3: zjs_parser records function-local while back edge against child bytecode" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
@@ -111,7 +111,7 @@ test "M2.3: qjs_parser records function-local while back edge against child byte
     try expectStringBytes(result, "0000");
 }
 
-test "M2.3: qjs_parser records function-local do while back edge against child bytecode" {
+test "M2.3: zjs_parser records function-local do while back edge against child bytecode" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
@@ -353,8 +353,8 @@ test "F10.1b: top-level var_count populated from global vars" {
     var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, "var a; var b; var c;");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
@@ -374,8 +374,8 @@ test "F10.1b: top-level scope_get_var lowers to get_var for global var" {
     var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, "var x; x");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
@@ -410,7 +410,7 @@ test "F10.1b: scope_get_var stays get_var for unknown identifiers" {
     var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, "globalUndefined");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
     const op = engine.bytecode.opcode.op;
@@ -575,8 +575,8 @@ test "TDZ: var x = 1; x reads via plain get_loc (no TDZ check)" {
     var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, "var x = 1; x");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 
@@ -604,8 +604,8 @@ test "TDZ: lexical prologue emits set_loc_uninitialized for let only" {
     var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, "var v; let a; let b;");
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
 

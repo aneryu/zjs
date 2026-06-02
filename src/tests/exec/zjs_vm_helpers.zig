@@ -1,15 +1,15 @@
 //! F2+F3 QuickJS-dispatch end-to-end tests.
 //!
-//! Validates that bytecode produced by `frontend/qjs_parser` executes
+//! Validates that bytecode produced by `frontend/zjs_parser` executes
 //! through the QuickJS-aligned VM dispatcher.
 
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
 pub fn parseAndRun(rt: *core.Runtime, ctx: *core.Context, src: []const u8) !core.Value {
     const name = try rt.internAtom("test");
@@ -20,7 +20,7 @@ pub fn parseAndRun(rt: *core.Runtime, ctx: *core.Context, src: []const u8) !core
     var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
 
     // Run the FunctionDef-backed finalize pipeline so locals are lowered
     // to get_loc / put_loc instead of falling back to global get_var /
@@ -42,7 +42,7 @@ pub fn parseAndRunWithTopLevelChildren(rt: *core.Runtime, ctx: *core.Context, sr
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(rt);
     state.top_level_functions_as_children = true;
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
 
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
@@ -75,8 +75,8 @@ pub fn parseStmtAndRun(rt: *core.Runtime, ctx: *core.Context, src: []const u8) !
     defer state.deinit(rt);
 
     try state.enableEvalReturn();
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     try state.finalizeEvalReturn();
 
@@ -99,8 +99,8 @@ pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.Runtime, ctx: *core.Context
     state.top_level_functions_as_children = true;
 
     try state.enableEvalReturn();
-    while (state.token.val != engine.frontend.qjs_token.TOK_EOF) {
-        try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    while (state.token.val != engine.frontend.zjs_token.TOK_EOF) {
+        try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     }
     try state.finalizeEvalReturn();
 

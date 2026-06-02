@@ -196,6 +196,8 @@ pub const Runtime = struct {
     cli_script_args: []const []const u8 = &.{},
     external_host_functions: []host_function.ExternalRecord = &.{},
     external_host_functions_capacity: usize = 0,
+    any_prototype_may_have_indexed_properties: bool = false,
+
 
     /// Returns an owned runtime. Caller must release it with `destroy`.
     pub fn create(allocator: std.mem.Allocator) !*Runtime {

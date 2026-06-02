@@ -9,9 +9,9 @@
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 const op = engine.bytecode.opcode.op;
 
 const TestEnv = struct {
@@ -40,7 +40,7 @@ fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -54,7 +54,7 @@ fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecod
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -70,7 +70,7 @@ fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     defer state.deinit(env.rt);
     state.is_strict = true;
     state.function_def.is_strict_mode = true;
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -85,7 +85,7 @@ fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -99,7 +99,7 @@ fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.by
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.rt);
     return function;
 }
@@ -114,7 +114,7 @@ fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecod
     lex.is_module = true;
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -130,7 +130,7 @@ fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Byte
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.top_level_lexical_as_module_ref = true;
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -265,7 +265,7 @@ fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.B
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
     state.return_depth = 1;
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try engine.bytecode.pipeline.finalize.runWithFunctionDef(&function, &state.function_def);
     return function;
 }
@@ -3056,7 +3056,7 @@ test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     // After parsing: scope_level back to 0, but a new scope was
     // appended (push then pop, the structure is retained for §F10.1
@@ -3077,7 +3077,7 @@ test "F10.1a FunctionDef: nested blocks build parent chain" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     // After parsing: 3 scopes (initial 0 + outer block + inner block).
     try std.testing.expectEqual(@as(usize, 3), state.function_def.scopes.len);
@@ -3104,7 +3104,7 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
     const v = state.function_def.vars[0];
@@ -3128,7 +3128,7 @@ test "F10.1a FunctionDef: const registers as lexical + const" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.vars.len);
     try std.testing.expectEqual(true, state.function_def.vars[0].is_lexical);
@@ -3147,7 +3147,7 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 0), state.function_def.vars.len);
     try std.testing.expectEqual(@as(usize, 1), state.function_def.global_vars.len);
@@ -3167,7 +3167,7 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(usize, 2), state.function_def.vars.len);
     // `a` is registered in the outer block scope (1), `b` in the
@@ -3195,8 +3195,8 @@ test "F10.1a FunctionDef: findVar locates by name" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try qjs_parser.parseStatementOrDecl(&state, qjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
+    try zjs_parser.parseStatementOrDecl(&state, zjs_parser.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     try std.testing.expectEqual(@as(i32, 0), state.function_def.findVar(x_atom));
     try std.testing.expectEqual(@as(i32, 1), state.function_def.findVar(y_atom));
@@ -3217,7 +3217,7 @@ test "F10.1b Nested function: cur_func stack management" {
     var state = try ParseState.init(&lex, &function);
     defer state.deinit(env.rt);
 
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
 
     // Verify that the cur_func stack is empty after parsing (back to root)
     try std.testing.expectEqual(@as(usize, 0), state.cur_func_stack.len);
@@ -3242,7 +3242,7 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     defer state.deinit(env.rt);
     state.top_level_functions_as_children = true;
 
-    try qjs_parser.parseExpr(&state);
+    try zjs_parser.parseExpr(&state);
 
     try std.testing.expect(countOpcode(state.function.code, op.fclosure) + countOpcode(state.function.code, op.fclosure8) > 0);
 

@@ -2,11 +2,11 @@ const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
-const helpers = @import("qjs_vm_helpers.zig");
+const helpers = @import("zjs_vm_helpers.zig");
 const parseAndRun = helpers.parseAndRun;
 const parseAndRunWithTopLevelChildren = helpers.parseAndRunWithTopLevelChildren;
 const parseStmtAndRun = helpers.parseStmtAndRun;

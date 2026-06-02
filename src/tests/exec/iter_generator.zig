@@ -1783,7 +1783,7 @@ fn expectForAwaitStartStackOverflowCleanup(js: *engine.Engine, source: []const u
     try stack.reserveAdditional(parsed.function.stack_size);
     stack.limit = 2;
 
-    try std.testing.expectError(error.StackOverflow, engine.exec.qjs_vm.runWithOutput(js.context, &stack, &parsed.function, null));
+    try std.testing.expectError(error.StackOverflow, engine.exec.zjs_vm.runWithOutput(js.context, &stack, &parsed.function, null));
 }
 
 test "eval for-await closes async iterator when next rejects" {

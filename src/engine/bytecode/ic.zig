@@ -71,21 +71,20 @@ pub const Slot = struct {
             .invalid => .invalidated,
             .mono => blk: {
                 const entry = self.entries[0];
-                if (entry.holder_shape_ref != null) break :blk .miss;
-                const guard_shape = entry.shape_ref orelse break :blk .miss;
-                if (guard_shape != receiver.shape_ref or entry.atom_id != atom_id) break :blk .miss;
-                if (entry.version == receiver.shape_ref.version) break :blk .{ .hit = entry.slot_index };
-                break :blk .invalidated;
+                if (entry.holder_shape_ref == null and entry.shape_ref == receiver.shape_ref and entry.atom_id == atom_id) {
+                    if (entry.version == receiver.shape_ref.version) break :blk .{ .hit = entry.slot_index };
+                    break :blk .invalidated;
+                }
+                break :blk .miss;
             },
             .poly => blk: {
                 var i: usize = 0;
                 while (i < self.entry_count) : (i += 1) {
                     const entry = self.entries[i];
-                    if (entry.holder_shape_ref != null) continue;
-                    const guard_shape = entry.shape_ref orelse continue;
-                    if (guard_shape != receiver.shape_ref or entry.atom_id != atom_id) continue;
-                    if (entry.version == receiver.shape_ref.version) break :blk .{ .hit = entry.slot_index };
-                    break :blk .invalidated;
+                    if (entry.holder_shape_ref == null and entry.shape_ref == receiver.shape_ref and entry.atom_id == atom_id) {
+                        if (entry.version == receiver.shape_ref.version) break :blk .{ .hit = entry.slot_index };
+                        break :blk .invalidated;
+                    }
                 }
                 break :blk .miss;
             },
@@ -98,25 +97,30 @@ pub const Slot = struct {
             .invalid => .invalidated,
             .mono => blk: {
                 const entry = self.entries[0];
-                const receiver_shape = entry.shape_ref orelse break :blk .miss;
-                const holder_shape = entry.holder_shape_ref orelse break :blk .miss;
-                if (receiver_shape != receiver.shape_ref or entry.atom_id != atom_id) break :blk .miss;
-                if (entry.version != receiver.shape_ref.version) break :blk .invalidated;
-                const holder = receiver.getPrototype() orelse break :blk .invalidated;
-                if (holder.shape_ref != holder_shape or entry.holder_version != holder.shape_ref.version) break :blk .invalidated;
-                break :blk .{ .hit = .{ .holder = holder, .slot_index = entry.slot_index } };
+                if (entry.shape_ref == receiver.shape_ref and entry.atom_id == atom_id) {
+                    if (entry.version != receiver.shape_ref.version) break :blk .invalidated;
+                    const holder_shape = entry.holder_shape_ref orelse break :blk .miss;
+                    const holder = receiver.getPrototype() orelse break :blk .invalidated;
+                    if (holder.shape_ref == holder_shape and entry.holder_version == holder.shape_ref.version) {
+                        break :blk .{ .hit = .{ .holder = holder, .slot_index = entry.slot_index } };
+                    }
+                    break :blk .invalidated;
+                }
+                break :blk .miss;
             },
             .poly => blk: {
                 var i: usize = 0;
                 while (i < self.entry_count) : (i += 1) {
                     const entry = self.entries[i];
-                    const receiver_shape = entry.shape_ref orelse continue;
-                    const holder_shape = entry.holder_shape_ref orelse continue;
-                    if (receiver_shape != receiver.shape_ref or entry.atom_id != atom_id) continue;
-                    if (entry.version != receiver.shape_ref.version) break :blk .invalidated;
-                    const holder = receiver.getPrototype() orelse break :blk .invalidated;
-                    if (holder.shape_ref != holder_shape or entry.holder_version != holder.shape_ref.version) break :blk .invalidated;
-                    break :blk .{ .hit = .{ .holder = holder, .slot_index = entry.slot_index } };
+                    if (entry.shape_ref == receiver.shape_ref and entry.atom_id == atom_id) {
+                        if (entry.version != receiver.shape_ref.version) break :blk .invalidated;
+                        const holder_shape = entry.holder_shape_ref orelse continue;
+                        const holder = receiver.getPrototype() orelse break :blk .invalidated;
+                        if (holder.shape_ref == holder_shape and entry.holder_version == holder.shape_ref.version) {
+                            break :blk .{ .hit = .{ .holder = holder, .slot_index = entry.slot_index } };
+                        }
+                        break :blk .invalidated;
+                    }
                 }
                 break :blk .miss;
             },

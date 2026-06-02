@@ -166,7 +166,7 @@ pub fn endSharedTest() void {
         const thrown = eng.context.takeUnhandledRejection();
         thrown.free(eng.runtime);
     }
-    engine.exec.qjs_vm.cleanupAtomicsWaitersForContext(eng.context);
+    engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(eng.context);
     if (eng.context.cached_global) |global| {
         // Reset global lexical bindings (let / const) so the next
         // test can re-declare any name without triggering a

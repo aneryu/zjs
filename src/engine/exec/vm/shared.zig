@@ -19,7 +19,7 @@ const iter_vm = @import("iter.zig");
 const json_vm = @import("json.zig");
 const module_mod = @import("../module.zig");
 const property_ops = @import("../property_ops.zig");
-const qjs_vm = @import("../qjs_vm.zig");
+const zjs_vm = @import("../zjs_vm.zig");
 const stack_mod = @import("../stack.zig");
 const value_ops = @import("../value_ops.zig");
 const value_vm = @import("value.zig");
@@ -47,8 +47,8 @@ const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 const eval_class_field_initializer_flag: u16 = 0x8000;
 const eval_parameter_initializer_flag: u16 = 0x4000;
 const eval_ret_atom: core.Atom = 82;
-const runWithArgs = qjs_vm.runWithArgs;
-const runWithArgsState = qjs_vm.runWithArgsState;
+const runWithArgs = zjs_vm.runWithArgs;
+const runWithArgsState = zjs_vm.runWithArgsState;
 
 pub fn ensureLocalsCapacity(ctx: *core.Context, frame: *frame_mod.Frame, idx: usize) !void {
     if (idx < frame.locals.len and idx < frame.locals_uninit.len) return;
@@ -3871,7 +3871,7 @@ test "qjsAggregateErrorConstructWithPrototype preserves direct symbol errors and
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const errors_source = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     var errors_source_alive = true;
@@ -4889,7 +4889,7 @@ test "qjsErrorConstructWithPrototype preserves direct symbol cause" {
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const options = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var options_alive = true;
@@ -32581,7 +32581,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const state = try createPromiseResolvingState(rt);
     var state_alive = true;
@@ -32746,7 +32746,7 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
     var reaction_alive = true;
@@ -34875,13 +34875,13 @@ pub fn dynamicFunctionNewTargetPrototype(
 }
 
 fn parameterSourceContainsAwait(rt: *core.Runtime, source: []const u8) !bool {
-    var lexer = frontend.qjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+    var lexer = frontend.zjs_lexer.Lexer.init(rt.memory.allocator, &rt.atoms, source);
     lexer.is_strict_mode = true;
     while (true) {
         var token = try lexer.next();
         defer lexer.freeToken(&token);
-        if (token.val == frontend.qjs_token.TOK_AWAIT) return true;
-        if (token.val == frontend.qjs_token.TOK_EOF) return false;
+        if (token.val == frontend.zjs_token.TOK_AWAIT) return true;
+        if (token.val == frontend.zjs_token.TOK_EOF) return false;
     }
 }
 
@@ -38872,7 +38872,7 @@ test "qjsDestructuringRest roots direct symbol values while creating rest array"
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const source = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     var source_alive = true;
@@ -38911,7 +38911,7 @@ test "qjsDestructuringObjectRest roots direct symbol values while creating rest 
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var source_alive = true;
@@ -42408,14 +42408,14 @@ fn test262AgentRun(agent: *Test262Agent) void {
     rt.setCanBlock(true);
     const ctx = core.Context.create(rt) catch return;
     defer ctx.destroy();
-    defer qjs_vm.cleanupAtomicsWaitersForContext(ctx);
-    const global = qjs_vm.ensureContextGlobal(ctx) catch return;
+    defer zjs_vm.cleanupAtomicsWaitersForContext(ctx);
+    const global = zjs_vm.ensureContextGlobal(ctx) catch return;
     var compiled = frontend.parser.parse(rt, agent.source, .{ .mode = .script, .filename = "<test262-agent>" }) catch return;
     defer compiled.deinit();
     if (compiled.syntax_error != null) return;
     var stack = stack_mod.Stack.init(&rt.memory, rt.stack_size);
     defer stack.deinit(rt);
-    const result = qjs_vm.runWithOutput(ctx, &stack, &compiled.function, null) catch return;
+    const result = zjs_vm.runWithOutput(ctx, &stack, &compiled.function, null) catch return;
     result.free(rt);
     drainPendingPromiseJobs(ctx, null, global) catch {};
     while (!test262AgentIsDone(agent)) {
@@ -42517,7 +42517,7 @@ pub fn qjsTest262AgentReceiveBroadcast(
 
     const sab = try builtins.buffer.sharedArrayBufferFromStore(ctx.runtime, store, max_byte_length, null);
     defer sab.free(ctx.runtime);
-    const callback_result = try callValueOrBytecode(ctx, output, global orelse try qjs_vm.ensureContextGlobal(ctx), core.Value.undefinedValue(), args[0], &.{sab}, null, null);
+    const callback_result = try callValueOrBytecode(ctx, output, global orelse try zjs_vm.ensureContextGlobal(ctx), core.Value.undefinedValue(), args[0], &.{sab}, null, null);
     callback_result.free(ctx.runtime);
     return core.Value.undefinedValue();
 }
@@ -42813,8 +42813,8 @@ fn qjsWorkerThreadMain(worker: *QjsWorker) void {
     rt.setCanBlock(true);
     const ctx = core.Context.create(rt) catch return;
     defer ctx.destroy();
-    defer qjs_vm.cleanupAtomicsWaitersForContext(ctx);
-    const global = qjs_vm.ensureContextGlobal(ctx) catch return;
+    defer zjs_vm.cleanupAtomicsWaitersForContext(ctx);
+    const global = zjs_vm.ensureContextGlobal(ctx) catch return;
     const parent = qjsWorkerParentObject(rt) catch return;
     defer parent.free(rt);
     const worker_ns = core.Object.create(rt, core.class.ids.object, null) catch return;
@@ -43050,7 +43050,7 @@ fn qjsWorkerEvalPreloadedFileModuleStep(
     const continuation = try property_ops.expectObject(owned_continuation);
     var stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit);
     defer stack.deinit(ctx.runtime);
-    const result = qjs_vm.runModuleWithOutputAndVarRefsState(ctx, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return qjsWorkerModuleResolutionError(err);
+    const result = zjs_vm.runModuleWithOutputAndVarRefsState(ctx, &stack, &compiled.function, output, module_var_refs, continuation, resume_value) catch |err| return qjsWorkerModuleResolutionError(err);
     if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
         return .{ .suspended = .{
             .continuation = owned_continuation,
@@ -49280,7 +49280,7 @@ test "qjsObjectEntryArrayValue roots direct symbol value while creating entry ar
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var source_alive = true;
@@ -49319,7 +49319,7 @@ test "qjsObjectEnumerableOwnPropertiesCall roots direct symbol values while crea
     defer rt.destroy();
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
-    const global = try qjs_vm.ensureContextGlobal(ctx);
+    const global = try zjs_vm.ensureContextGlobal(ctx);
 
     const source = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var source_alive = true;

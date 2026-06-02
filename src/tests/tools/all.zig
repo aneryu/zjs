@@ -1,20 +1,20 @@
-const qjs_cli = @import("qjs_cli");
+const zjs_cli = @import("zjs_cli");
 const smoke_runner = @import("smoke_runner");
 const test262_runner = @import("test262_runner");
 const std = @import("std");
 
-test "qjs args accept eval source and one file" {
-    const eval_command = try qjs_cli.parseArgs(&.{ "-e", "1" });
+test "zjs args accept eval source and one file" {
+    const eval_command = try zjs_cli.parseArgs(&.{ "-e", "1" });
     try std.testing.expectEqualStrings("1", eval_command.eval.source);
 
-    const file_command = try qjs_cli.parseArgs(&.{"input.js"});
+    const file_command = try zjs_cli.parseArgs(&.{"input.js"});
     try std.testing.expectEqualStrings("input.js", file_command.file.path);
     try std.testing.expectEqual(@as(usize, 1), file_command.file.script_args.len);
 }
 
-test "qjs args reject invalid forms" {
-    try std.testing.expectError(error.Usage, qjs_cli.parseArgs(&.{"-e"}));
-    try std.testing.expectError(error.Usage, qjs_cli.parseArgs(&.{"--unknown"}));
+test "zjs args reject invalid forms" {
+    try std.testing.expectError(error.Usage, zjs_cli.parseArgs(&.{"-e"}));
+    try std.testing.expectError(error.Usage, zjs_cli.parseArgs(&.{"--unknown"}));
 }
 
 test "smoke manifest helpers count entries and build expected paths" {

@@ -80,7 +80,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     const ctx = try core.Context.create(rt);
     defer ctx.destroy();
 
-    const global = try engine.exec.qjs_vm.ensureContextGlobal(ctx);
+    const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
 
     const this_name = try rt.internAtom("this");
     defer rt.atoms.free(this_name);
@@ -100,7 +100,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
     var stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer stack.deinit(rt);
 
-    const result = try engine.exec.qjs_vm.runWithArgsState(
+    const result = try engine.exec.zjs_vm.runWithArgsState(
         ctx,
         &stack,
         &function,
@@ -399,10 +399,10 @@ test "createRealm OOM after global transfer releases realm global once" {
         defer parsed.deinit();
         var stack = engine.exec.stack.Stack.init(&js.runtime.memory, js.context.stack_limit);
         defer stack.deinit(js.runtime);
-        const global = try engine.exec.qjs_vm.ensureContextGlobal(js.context);
+        const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
 
         failing.fail_index = failing.alloc_index + fail_offset;
-        const result = engine.exec.qjs_vm.runWithArgs(
+        const result = engine.exec.zjs_vm.runWithArgs(
             js.context,
             &stack,
             &parsed.function,
@@ -475,7 +475,7 @@ fn createUrlGetFullOOMFixture(js: *engine.Engine) !UrlGetFullOOMFixture {
 }
 
 fn callUrlGetFullOOMFixture(js: *engine.Engine, fixture: UrlGetFullOOMFixture) !core.Value {
-    const global = try engine.exec.qjs_vm.ensureContextGlobal(js.context);
+    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
     return engine.exec.call.callValueWithThisGlobalsAndGlobal(
         js.context,
         null,
@@ -957,7 +957,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer stack.deinit(rt);
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("8\n", output.buffered());
@@ -1555,7 +1555,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
@@ -1606,7 +1606,7 @@ test "string static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("B\n", output.buffered());
@@ -1663,7 +1663,7 @@ test "string prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n", output.buffered());
@@ -1713,7 +1713,7 @@ test "date static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
@@ -1776,7 +1776,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
@@ -1855,7 +1855,7 @@ test "date prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
@@ -1930,7 +1930,7 @@ test "array static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
@@ -2033,7 +2033,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
@@ -2158,7 +2158,7 @@ test "collection native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
@@ -2323,7 +2323,7 @@ test "buffer native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [40]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
@@ -2417,7 +2417,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
@@ -2471,7 +2471,7 @@ test "regexp static native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
@@ -2587,7 +2587,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
@@ -2729,7 +2729,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
@@ -2813,7 +2813,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     defer stack.deinit(rt);
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    const vm_result = try engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, &output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
     defer vm_result.free(rt);
     try std.testing.expect(vm_result.isUndefined());
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
@@ -2889,7 +2889,7 @@ test "throwTypeErrorMessage OOM before throw releases error value" {
             rt.destroy();
         }
 
-        const warm_result = engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, null, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+        const warm_result = engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, null, global, true, false, false, &.{}, &.{}, &.{}, &.{});
         if (warm_result) |value| {
             value.free(rt);
             return error.TestUnexpectedResult;
@@ -2901,7 +2901,7 @@ test "throwTypeErrorMessage OOM before throw releases error value" {
         }
 
         failing.fail_index = failing.alloc_index + fail_offset;
-        const result = engine.exec.qjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, null, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+        const result = engine.exec.zjs_vm.runWithArgs(ctx, &stack, &parsed.function, global.value(), &.{}, &.{}, null, global, true, false, false, &.{}, &.{}, &.{}, &.{});
         failing.fail_index = std.math.maxInt(usize);
 
         if (result) |value| {

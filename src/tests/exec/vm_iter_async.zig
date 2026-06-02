@@ -2,11 +2,11 @@ const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
-const helpers = @import("qjs_vm_helpers.zig");
+const helpers = @import("zjs_vm_helpers.zig");
 const parseAndRun = helpers.parseAndRun;
 const parseAndRunWithTopLevelChildren = helpers.parseAndRunWithTopLevelChildren;
 const parseStmtAndRun = helpers.parseStmtAndRun;
@@ -294,7 +294,7 @@ test "G1/P0: qjs_vm cross-realm eval for-await uses target realm promise" {
     defer result.free(rt);
     const promise = objectFromValue(result);
     try std.testing.expectEqual(core.class.ids.promise, promise.class_id);
-    try engine.exec.qjs_vm.drainPendingPromiseJobs(ctx, null, ctx.cached_global.?);
+    try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, ctx.cached_global.?);
     const settled = promise.promiseResult().?;
     try std.testing.expectEqual(true, settled.asBool().?);
 }
@@ -349,7 +349,7 @@ test "G1/P0: qjs_vm cross-realm async generator yield-star uses target realm pro
     defer result.free(rt);
     const promise = objectFromValue(result);
     try std.testing.expectEqual(core.class.ids.promise, promise.class_id);
-    try engine.exec.qjs_vm.drainPendingPromiseJobs(ctx, null, ctx.cached_global.?);
+    try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, ctx.cached_global.?);
     const settled = promise.promiseResult().?;
     try std.testing.expectEqual(true, settled.asBool().?);
 }

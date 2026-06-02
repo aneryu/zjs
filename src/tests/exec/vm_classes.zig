@@ -2,11 +2,11 @@ const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
-const QjsLexer = engine.frontend.qjs_lexer.Lexer;
-const qjs_parser = engine.frontend.qjs_parser;
-const ParseState = qjs_parser.ParseState;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const zjs_parser = engine.frontend.zjs_parser;
+const ParseState = zjs_parser.ParseState;
 
-const helpers = @import("qjs_vm_helpers.zig");
+const helpers = @import("zjs_vm_helpers.zig");
 const oom_helpers = @import("oom_helpers.zig");
 const parseAndRun = helpers.parseAndRun;
 const parseAndRunWithTopLevelChildren = helpers.parseAndRunWithTopLevelChildren;
@@ -36,7 +36,7 @@ fn expectPrototypeInstallOOMCleanup(src: []const u8) !void {
         rt.atoms.free(warm_name);
         var warm_lex = QjsLexer.init(std.testing.allocator, &rt.atoms, "0");
         var warm_state = try ParseState.init(&warm_lex, &warm_function);
-        try qjs_parser.parseExpr(&warm_state);
+        try zjs_parser.parseExpr(&warm_state);
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&warm_function, &warm_state.function_def, rt);
 
         const name = try rt.internAtom("prototype-oom");
@@ -45,7 +45,7 @@ fn expectPrototypeInstallOOMCleanup(src: []const u8) !void {
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
         var state = try ParseState.init(&lex, &function);
         state.top_level_functions_as_children = true;
-        try qjs_parser.parseExpr(&state);
+        try zjs_parser.parseExpr(&state);
         try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, rt);
 
         var vm = engine.exec.Vm.init(ctx);

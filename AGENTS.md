@@ -72,7 +72,7 @@ available only through git history.
 
 ### Build
 
-- `zig build qjs --summary all`
+- `zig build zjs --summary all`
 - `zig build run-test262 --summary all`
 
 ### Regression

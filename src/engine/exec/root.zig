@@ -7,7 +7,7 @@ const stack_mod = @import("stack.zig");
 
 pub const subsystem_name = "exec";
 
-pub const qjs_vm = @import("qjs_vm.zig");
+pub const zjs_vm = @import("zjs_vm.zig");
 pub const frame = @import("frame.zig");
 pub const stack = @import("stack.zig");
 pub const call = @import("call.zig");
@@ -63,11 +63,11 @@ pub const Vm = struct {
 
     pub fn run(self: *Vm, function: *const bytecode.Bytecode) !core.Value {
         try self.stack.reserveAdditional(function.stack_size);
-        return qjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
+        return zjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
     }
 
     pub fn runWithVarRefs(self: *Vm, function: *const bytecode.Bytecode, var_refs: []const core.Value) !core.Value {
         try self.stack.reserveAdditional(function.stack_size);
-        return qjs_vm.runWithOutputAndVarRefs(self.ctx, &self.stack, function, self.output, var_refs);
+        return zjs_vm.runWithOutputAndVarRefs(self.ctx, &self.stack, function, self.output, var_refs);
     }
 };
