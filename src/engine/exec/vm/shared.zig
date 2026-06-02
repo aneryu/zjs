@@ -30564,6 +30564,7 @@ pub fn qjsErrorStackSetter(
 ) !core.Value {
     const receiver = objectFromValue(this_value) orelse return error.TypeError;
     const value = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    if (!value.isString()) return error.TypeError;
 
     const home_global = objectRealmGlobal(function_object) orelse global;
     if (constructorPrototypeFromGlobal(ctx.runtime, home_global, "Error")) |error_proto| {
@@ -30592,7 +30593,10 @@ pub fn qjsErrorStackSetter(
     }
 
     const own_desc = desc.?;
-    if (own_desc.kind == .accessor and isErrorStackSetterValue(own_desc.setter)) {
+    if (own_desc.kind == .accessor and sameObjectIdentity(own_desc.setter, function_object.value()) and isErrorStackSetterValue(own_desc.setter)) {
+        if (try proxySetTrapForErrorStackSetter(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame)) {
+            return core.Value.undefinedValue();
+        }
         try defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, true, true, true), caller_function, caller_frame);
         return core.Value.undefinedValue();
     }
@@ -30616,6 +30620,36 @@ pub fn qjsErrorStackSetter(
             return core.Value.undefinedValue();
         },
     }
+}
+
+fn proxySetTrapForErrorStackSetter(
+    ctx: *core.Context,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.Value,
+    receiver: *core.Object,
+    stack_key: core.Atom,
+    value: core.Value,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    const target_value = receiver.proxyTarget() orelse return false;
+    const handler_value = receiver.proxyHandler() orelse return error.TypeError;
+    const set_atom = try ctx.runtime.internAtom("set");
+    defer ctx.runtime.atoms.free(set_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) return false;
+    if (!isCallableValue(trap)) return error.TypeError;
+
+    const key_value = try proxyTrapKeyValue(ctx.runtime, stack_key);
+    defer key_value.free(ctx.runtime);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
+    try validateProxySetResult(ctx, output, global, target, stack_key, value, caller_function, caller_frame);
+    return true;
 }
 
 fn isErrorStackSetterValue(value: core.Value) bool {
@@ -51477,7 +51511,9 @@ fn typedArrayDefineOwnPropertyVm(
                 if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
                 const coerced = try coerceTypedArrayElementInput(ctx, output, global, desc.value);
                 defer coerced.free(ctx.runtime);
-                if (!try builtins.buffer.typedArraySetElement(ctx.runtime, object, index, coerced)) return false;
+                if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return true;
+                if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return false;
+                _ = try builtins.buffer.typedArraySetElement(ctx.runtime, object, index, coerced);
             }
             return true;
         },

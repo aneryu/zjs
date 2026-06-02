@@ -1,5 +1,5 @@
 {
-  "total_skipped": 5225,
+  "total_skipped": 5230,
   "features": [
     { "feature": "Temporal", "skipped": 4602 },
     { "feature": "source-phase-imports", "skipped": 230 },
@@ -9,6 +9,7 @@
     { "feature": "decorators", "skipped": 24 },
     { "feature": "regexp-duplicate-named-groups", "skipped": 16 },
     { "feature": "host-gc-required", "skipped": 15 },
-    { "feature": "Intl.Era-monthcode", "skipped": 10 }
+    { "feature": "Intl.Era-monthcode", "skipped": 10 },
+    { "feature": "import-bytes", "skipped": 5 }
   ]
 }

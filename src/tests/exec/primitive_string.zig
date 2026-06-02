@@ -58,11 +58,18 @@ test "Engine eval executes String.fromCharCode smoke subset" {
     const result = try js.evalWithOutput(
         \\print(String.fromCharCode(65));
         \\print(String.fromCharCode(72, 101, 108, 108, 111));
+        \\let calls = 0;
+        \\let dynamic = { valueOf: function() { calls++; return 66; } };
+        \\print(String.fromCharCode(dynamic), calls);
+        \\let saved = String.fromCharCode;
+        \\String.fromCharCode = function(x) { return "patched:" + x; };
+        \\print(String.fromCharCode(67));
+        \\String.fromCharCode = saved;
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("A\nHello\n", stream.buffered());
+    try std.testing.expectEqualStrings("A\nHello\nB 1\npatched:67\n", stream.buffered());
 }
 
 test "Engine eval executes string method smoke subset" {

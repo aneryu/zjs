@@ -1,7 +1,8 @@
 # zjs microbench top 10
 
 - Source report: `reports/perf/current/microbench.json`
-- Generated: 2026-05-20T07:43:29.165Z
+- Report timestamp: 2026-05-20T07:42:53.939Z
+- Generated: 2026-06-02T03:00:01.659Z
 - Sort: zjs/qjs ratio
 - Compatible cases: 72
 - Unsupported cases: 1

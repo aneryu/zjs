@@ -38,6 +38,38 @@ test "TypedArray array-like construction does not replay coercions after fast pa
     try std.testing.expect(result.isUndefined());
 }
 
+test "TypedArray defineProperty value conversion may detach buffer" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var ta = new Int8Array([17]);
+        \\assert.sameValue(Reflect.defineProperty(ta, 0, {
+        \\    value: {
+        \\        valueOf: function() {
+        \\            ta.buffer.transfer();
+        \\            return 42;
+        \\        }
+        \\    }
+        \\}), true);
+        \\assert.sameValue(ta[0], undefined);
+        \\
+        \\var big = new BigInt64Array([17n]);
+        \\assert.sameValue(Reflect.defineProperty(big, 0, {
+        \\    value: {
+        \\        valueOf: function() {
+        \\            big.buffer.transfer();
+        \\            return 42n;
+        \\        }
+        \\    }
+        \\}), true);
+        \\assert.sameValue(big[0], undefined);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Promise constructor resolve and reject functions inherit Function.prototype" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -1729,6 +1761,10 @@ test "URI globals use observable string coercion and reject malformed UTF-8" {
         \\assert.sameValue(encodeURIComponent(object), "%20");
         \\assert.sameValue(decodeURI({ toString: function() { return "%5E"; } }), "^");
         \\assert.sameValue(decodeURIComponent({ toString: function() { return "%5E"; } }), "^");
+        \\var originalFromCharCode = String.fromCharCode;
+        \\String.fromCharCode = function() { return "patched"; };
+        \\assert.sameValue(decodeURI("%F0%A0%80%80") === String.fromCharCode(0xD840, 0xDC00), false);
+        \\String.fromCharCode = originalFromCharCode;
         \\var threw = false;
         \\try { decodeURIComponent("%ED%A0%80"); } catch (e) { threw = e instanceof URIError; }
         \\assert.sameValue(threw, true);

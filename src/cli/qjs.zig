@@ -1047,10 +1047,49 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *engine.Engine, perf_prof
     try stderr.print("  }}", .{});
     if (perf_profile) |profile| {
         try stderr.print(",\n", .{});
+        try dumpPerfJsonOpcodeProfile(stderr, profile);
+        try stderr.print(",\n", .{});
         try dumpPerfJsonIc(stderr, profile);
     }
     try stderr.print("\n}}\n", .{});
     try stderr.flush();
+}
+
+fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const engine.core.OpcodeProfile) !void {
+    var rows: [engine.core.profile.max_opcode_count]OpcodeProfileRow = undefined;
+    var row_count: usize = 0;
+    for (profile.count, 0..) |count, opcode| {
+        if (count == 0) continue;
+        rows[row_count] = .{
+            .opcode = @intCast(opcode),
+            .count = count,
+            .nanos = profile.nanos[opcode],
+        };
+        row_count += 1;
+    }
+    std.mem.sort(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+
+    try output.print("  \"opcode_profile\": {{\n", .{});
+    try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
+    try output.print("    \"measured_ns\": {d},\n", .{profile.totalOpcodeNanos()});
+    try output.print("    \"value_dups\": {d},\n", .{profile.value_dup_count});
+    try output.print("    \"value_frees\": {d},\n", .{profile.value_free_count});
+    try output.print("    \"prop_lookups\": {d},\n", .{profile.prop_lookup_count});
+    try output.print("    \"global_lookups\": {d},\n", .{profile.global_lookup_count});
+    try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
+    try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
+    try output.writeAll("    \"opcodes\": [");
+    for (rows[0..row_count], 0..) |row, index| {
+        if (index != 0) try output.writeByte(',');
+        const name = engine.bytecode.opcode.nameOf(row.opcode);
+        const display_name = if (name.len == 0) "<invalid>" else name;
+        const avg = if (row.count == 0) 0 else row.nanos / row.count;
+        try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
+        try writeJsonString(output, display_name);
+        try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
+    }
+    if (row_count != 0) try output.writeByte('\n');
+    try output.writeAll("    ]\n  }");
 }
 
 fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const engine.core.OpcodeProfile) !void {
@@ -1621,6 +1660,28 @@ test "qjs args accept perf json flag for eval and files only" {
     try std.testing.expectError(error.Usage, parseArgs(&.{"--perf-json"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "--perf-json", "-i" }));
     try std.testing.expectError(error.Usage, parseArgs(&.{ "--perf-json", "--test262-batch" }));
+}
+
+test "qjs perf json opcode profile includes counters and rows" {
+    var profile = engine.core.OpcodeProfile{};
+    profile.recordOpcode(engine.bytecode.opcode.op.get_var, 17);
+    profile.recordOpcode(engine.bytecode.opcode.op.push_i16, 5);
+    profile.recordValueDup();
+    profile.recordValueFree();
+    profile.recordGlobalLookup();
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try dumpPerfJsonOpcodeProfile(&writer.interface, &profile);
+    const json = writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"opcode_profile\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"opcodes_executed\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value_dups\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value_frees\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"global_lookups\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"get_var\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"push_i16\"") != null);
 }
 
 test "qjs args accept module file" {

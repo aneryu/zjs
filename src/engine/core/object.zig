@@ -7145,6 +7145,8 @@ pub const Object = struct {
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?Value {
         if (!self.is_array or self.arrayElementStorageMode() != .dense) return null;
+        const atom_id = atom.atomFromUInt32(index);
+        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return null;
         const element_index: usize = @intCast(index);
         const elements = self.arrayElements();
         if (element_index >= elements.len) return null;
@@ -7706,6 +7708,7 @@ pub const Object = struct {
     pub fn writeDenseArrayIndex(self: *Object, rt: *Runtime, index: u32, atom_id: atom.Atom, new_value: Value) !bool {
         if (!self.is_array or !self.length_writable) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
+        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         const elements = self.arrayElements();
         if (index >= elements.len) return false;
         if (self.prototype) |proto| {
@@ -7720,7 +7723,9 @@ pub const Object = struct {
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *Runtime, index: u32, atom_id: atom.Atom, new_value: Value) !bool {
         if (!self.is_array or index != self.length or !self.length_writable) return false;
+        if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         if (!self.extensible) return false;
+        if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto) and proto.hasProperty(atom_id)) return false;
         }
@@ -7863,6 +7868,49 @@ pub const Object = struct {
             const index = start_element + @as(usize, @intCast(offset));
             const element_delta: i32 = @intCast(offset);
             const element_value = start_value + element_delta;
+            if (index < old_len) {
+                const old = elements.*[index];
+                elements.*[index] = Value.int32(element_value);
+                if (old) |stored| stored.free(rt);
+            } else {
+                elements.*[index] = Value.int32(element_value);
+            }
+        }
+        return true;
+    }
+
+    pub fn appendDenseArrayInt32MulAndMaskRange(self: *Object, rt: *Runtime, start_index: u32, limit: u32, multiplier: i32, mask: i32) !bool {
+        if (start_index >= limit) return true;
+        if (multiplier < 0 or mask < 0) return false;
+        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.length or !self.length_writable or !self.extensible) return false;
+        if (self.prototype) |proto| {
+            if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto)) return false;
+        }
+
+        if (limit > array.max_array_length) return false;
+        const max_safe_integer: i128 = 9007199254740991;
+        const last_index = limit - 1;
+        const last_product = @as(i128, @intCast(last_index)) * @as(i128, multiplier);
+        if (last_product > max_safe_integer) return false;
+
+        const start_element: usize = @intCast(start_index);
+        const limit_element: usize = @intCast(limit);
+        const elements = self.arrayElementsSlot();
+        if (start_element < elements.*.len and elements.*[start_element] != null) return false;
+
+        try self.ensureArrayElementCapacity(rt, limit);
+        const old_len = elements.*.len;
+        elements.* = elements.*.ptr[0..limit_element];
+        if (start_element > old_len) @memset(elements.*[old_len..start_element], null);
+        self.may_have_indexed_properties = true;
+        self.length = limit;
+
+        var index = start_element;
+        while (index < limit_element) : (index += 1) {
+            const product_exact = @as(i128, @intCast(index)) * @as(i128, multiplier);
+            const product: i32 = @truncate(product_exact);
+            const element_value = product & mask;
             if (index < old_len) {
                 const old = elements.*[index];
                 elements.*[index] = Value.int32(element_value);

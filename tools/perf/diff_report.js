@@ -9,6 +9,7 @@ const defaultCaseAbsoluteMs = 0.05;
 const defaultGeomeanRegressionRatio = 1.05;
 
 let emitJson = false;
+let outputPath = null;
 let failOnCaseRegression = true;
 let failOnGeomeanRegression = true;
 let enforceSameSampleConfig = true;
@@ -26,6 +27,7 @@ function usage() {
 Compares two zjs microbench JSON reports.
 
 Options:
+  --output PATH                   Write report to PATH instead of stdout
   --json                         Print machine-readable JSON
   --case-regression-ratio N      Per-case regression ratio (default: ${defaultCaseRegressionRatio})
   --case-improvement-ratio N     Per-case improvement ratio (default: ${defaultCaseImprovementRatio})
@@ -72,8 +74,8 @@ function readReport(filePath, label) {
     } catch (err) {
         fail(`error: unable to read ${label} report ${filePath}: ${err.message}`);
     }
-    if (!parsed || !Array.isArray(parsed.cases)) {
-        fail(`error: ${label} report ${filePath} is not a microbench JSON report`);
+    if (!parsed || parsed.tool !== 'zjs-microbench' || !Array.isArray(parsed.cases)) {
+        fail(`error: ${label} report ${filePath} is not a zjs-microbench JSON report`);
     }
     return parsed;
 }
@@ -313,54 +315,59 @@ function fmtPercent(value) {
     return value == null || !Number.isFinite(value) ? '-' : `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
 }
 
-function printCaseTable(title, rows) {
-    console.log(`${title}:`);
+function caseTableLines(title, rows) {
+    const lines = [`${title}:`];
     if (rows.length === 0) {
-        console.log('  none');
-        return;
+        lines.push('  none');
+        return lines;
     }
-    console.log('  case                     category        old    new    zjs avg delta  ratio delta  winner');
+    lines.push('  case                     category        old    new    zjs avg delta  ratio delta  winner');
     for (const row of rows) {
         const winner = row.oldWinner === row.newWinner ? row.newWinner : `${row.oldWinner}->${row.newWinner}`;
-        console.log(
+        lines.push(
             `  ${row.case.padEnd(24)} ${row.category.padEnd(14)} ${fmtNumber(row.oldRatio).padStart(5)}  ${fmtNumber(row.newRatio).padStart(5)}  ${fmtPercent(row.zjsDeltaPercent).padStart(13)}  ${fmtPercent(row.ratioDeltaPercent).padStart(11)}  ${winner}`,
         );
     }
+    return lines;
 }
 
-function printText(result) {
-    console.log('summary:');
-    console.log(`  old geomean: ${fmtNumber(result.summary.oldGeomean, 4)}`);
-    console.log(`  new geomean: ${fmtNumber(result.summary.newGeomean, 4)}`);
-    console.log(`  delta:        ${fmtPercent(result.summary.geomeanDeltaPercent)}`);
-    console.log(`  compatible:   ${result.summary.oldCompatible} -> ${result.summary.newCompatible}`);
-    console.log(`  unsupported:  ${result.summary.oldUnsupported} -> ${result.summary.newUnsupported}`);
-    console.log(`  skipped:      ${result.summary.oldSkipped} -> ${result.summary.newSkipped}`);
-    console.log(`  sample cfg:   ${sampleConfigText(result.summary.oldSampleConfig)} -> ${sampleConfigText(result.summary.newSampleConfig)}`);
-    console.log();
+function formatText(result) {
+    const lines = [
+        'summary:',
+        `  old geomean: ${fmtNumber(result.summary.oldGeomean, 4)}`,
+        `  new geomean: ${fmtNumber(result.summary.newGeomean, 4)}`,
+        `  delta:        ${fmtPercent(result.summary.geomeanDeltaPercent)}`,
+        `  compatible:   ${result.summary.oldCompatible} -> ${result.summary.newCompatible}`,
+        `  unsupported:  ${result.summary.oldUnsupported} -> ${result.summary.newUnsupported}`,
+        `  skipped:      ${result.summary.oldSkipped} -> ${result.summary.newSkipped}`,
+        `  sample cfg:   ${sampleConfigText(result.summary.oldSampleConfig)} -> ${sampleConfigText(result.summary.newSampleConfig)}`,
+        '',
+    ];
 
     if (result.failures.length !== 0) {
-        console.log('failures:');
-        for (const failure of result.failures) console.log(`  - ${failure}`);
-        console.log();
+        lines.push('failures:');
+        for (const failure of result.failures) lines.push(`  - ${failure}`);
+        lines.push('');
     }
     if (result.warnings.length !== 0) {
-        console.log('warnings:');
-        for (const warning of result.warnings) console.log(`  - ${warning}`);
-        console.log();
+        lines.push('warnings:');
+        for (const warning of result.warnings) lines.push(`  - ${warning}`);
+        lines.push('');
     }
     if (result.statusChanges.length !== 0) {
-        console.log('status changes:');
+        lines.push('status changes:');
         for (const change of result.statusChanges) {
             const suffix = change.reason ? ` (${change.reason})` : '';
-            console.log(`  ${change.case}: ${change.oldStatus} -> ${change.newStatus}${suffix}`);
+            lines.push(`  ${change.case}: ${change.oldStatus} -> ${change.newStatus}${suffix}`);
         }
-        console.log();
+        lines.push('');
     }
 
-    printCaseTable('regressions', result.regressions);
-    console.log();
-    printCaseTable('improvements', result.improvements);
+    lines.push(...caseTableLines('regressions', result.regressions));
+    lines.push('');
+    lines.push(...caseTableLines('improvements', result.improvements));
+    lines.push('');
+    return `${lines.join('\n')}`;
 }
 
 const positional = [];
@@ -368,6 +375,9 @@ const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     switch (arg) {
+        case '--output':
+            outputPath = args[++i] || fail('error: --output requires a path');
+            break;
         case '--json':
             emitJson = true;
             break;
@@ -423,9 +433,11 @@ if (positional.length !== 2) {
 const oldReport = readReport(positional[0], 'old');
 const newReport = readReport(positional[1], 'new');
 const result = compareReports(oldReport, newReport);
-if (emitJson) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+const output = emitJson ? `${JSON.stringify(result, null, 2)}\n` : formatText(result);
+if (outputPath) {
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, output);
 } else {
-    printText(result);
+    process.stdout.write(output);
 }
 process.exit(result.ok ? 0 : 1);

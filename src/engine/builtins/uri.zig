@@ -173,13 +173,27 @@ fn fastHexPair(high: u8, low: u8) ?u8 {
     return (fastHexValue(high) orelse return null) << 4 | (fastHexValue(low) orelse return null);
 }
 
+const fast_hex_table: [256]i8 = initFastHexTable();
+
+fn initFastHexTable() [256]i8 {
+    var table: [256]i8 = @splat(-1);
+    var digit: usize = 0;
+    while (digit < 10) : (digit += 1) {
+        table['0' + digit] = @intCast(digit);
+    }
+    var upper: usize = 0;
+    while (upper < 6) : (upper += 1) {
+        const value: i8 = @intCast(upper + 10);
+        table['A' + upper] = value;
+        table['a' + upper] = value;
+    }
+    return table;
+}
+
 fn fastHexValue(byte: u8) ?u8 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'A'...'F' => byte - 'A' + 10,
-        'a'...'f' => byte - 'a' + 10,
-        else => null,
-    };
+    const value = fast_hex_table[byte];
+    if (value < 0) return null;
+    return @intCast(value);
 }
 
 pub fn escape(rt: *core.Runtime, input: core.Value) !core.Value {
@@ -377,10 +391,10 @@ fn decodeBytes(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8, co
             index += 1;
             continue;
         }
-        if (index + 2 >= bytes.len or !std.ascii.isHex(bytes[index + 1]) or !std.ascii.isHex(bytes[index + 2])) {
+        if (index + 2 >= bytes.len) {
             return error.URIError;
         }
-        const decoded: u8 = @intCast((hexValue(bytes[index + 1]) << 4) | hexValue(bytes[index + 2]));
+        const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
         index += 3;
         if (!component and isReserved(decoded)) {
             try out.append(rt.memory.allocator, '%');
@@ -405,10 +419,10 @@ fn decodeBytes(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8, co
 
             var remaining = decoded_utf8.count;
             while (remaining > 0) : (remaining -= 1) {
-                if (index + 2 >= bytes.len or bytes[index] != '%' or !std.ascii.isHex(bytes[index + 1]) or !std.ascii.isHex(bytes[index + 2])) {
+                if (index + 2 >= bytes.len or bytes[index] != '%') {
                     return error.URIError;
                 }
-                const continuation: u8 = @intCast((hexValue(bytes[index + 1]) << 4) | hexValue(bytes[index + 2]));
+                const continuation = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
                 index += 3;
                 if ((continuation & 0xc0) != 0x80) return error.URIError;
                 decoded_utf8.codepoint = (decoded_utf8.codepoint << 6) | (continuation & 0x3f);
@@ -437,10 +451,10 @@ fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usi
             index += 1;
             continue;
         }
-        if (index + 2 >= bytes.len or !std.ascii.isHex(bytes[index + 1]) or !std.ascii.isHex(bytes[index + 2])) {
+        if (index + 2 >= bytes.len) {
             return error.URIError;
         }
-        const decoded: u8 = @intCast((hexValue(bytes[index + 1]) << 4) | hexValue(bytes[index + 2]));
+        const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
         index += 3;
         if (!component and isReserved(decoded)) {
             dest[len] = '%';
@@ -467,10 +481,10 @@ fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usi
 
             var remaining = decoded_utf8.count;
             while (remaining > 0) : (remaining -= 1) {
-                if (index + 2 >= bytes.len or bytes[index] != '%' or !std.ascii.isHex(bytes[index + 1]) or !std.ascii.isHex(bytes[index + 2])) {
+                if (index + 2 >= bytes.len or bytes[index] != '%') {
                     return error.URIError;
                 }
-                const continuation: u8 = @intCast((hexValue(bytes[index + 1]) << 4) | hexValue(bytes[index + 2]));
+                const continuation = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return error.URIError;
                 index += 3;
                 if ((continuation & 0xc0) != 0x80) return error.URIError;
                 decoded_utf8.codepoint = (decoded_utf8.codepoint << 6) | (continuation & 0x3f);
@@ -632,10 +646,4 @@ fn isUnescaped(ch: u8) bool {
 
 fn isReserved(ch: u8) bool {
     return ch == ';' or ch == ',' or ch == '/' or ch == '?' or ch == ':' or ch == '@' or ch == '&' or ch == '=' or ch == '+' or ch == '$' or ch == '#';
-}
-
-fn hexValue(ch: u8) u8 {
-    if (ch >= '0' and ch <= '9') return @intCast(ch - '0');
-    if (ch >= 'a' and ch <= 'f') return @intCast(ch - 'a' + 10);
-    return @intCast(ch - 'A' + 10);
 }

@@ -248,15 +248,20 @@ test "Error prepareStackTrace formats captured frames lazily" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "Error stack setter accepts non-string own stack values" {
+test "Error stack setter rejects non-string stack values" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
     const result = try js.eval(
         \\var err = new Error("x");
-        \\err.stack = 123;
-        \\assert.sameValue(Object.prototype.hasOwnProperty.call(err, "stack"), true);
-        \\assert.sameValue(err.stack, 123);
+        \\assert.throws(TypeError, function() {
+        \\    err.stack = 123;
+        \\});
+        \\assert.throws(TypeError, function() {
+        \\    Object.getOwnPropertyDescriptor(Error.prototype, "stack").set.call(err);
+        \\});
+        \\assert.sameValue(Object.prototype.hasOwnProperty.call(err, "stack"), false);
+        \\assert.sameValue(typeof err.stack, "string");
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -269,11 +274,14 @@ test "Error stack copied accessor setter writes without recursion" {
     const result = try js.eval(
         \\var err = new Error("x");
         \\Object.defineProperty(err, "stack", Object.getOwnPropertyDescriptor(Error.prototype, "stack"));
-        \\err.stack = 123;
+        \\assert.throws(TypeError, function() {
+        \\    err.stack = 123;
+        \\});
+        \\err.stack = "updated";
         \\var desc = Object.getOwnPropertyDescriptor(err, "stack");
-        \\assert.sameValue(desc.value, 123);
+        \\assert.sameValue(desc.value, "updated");
         \\assert.sameValue(desc.writable, true);
-        \\assert.sameValue(err.stack, 123);
+        \\assert.sameValue(err.stack, "updated");
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
@@ -286,11 +294,11 @@ test "Error stack copied accessor setter writes through proxy without recursion"
     const result = try js.eval(
         \\var proxy = new Proxy(new Error("x"), {});
         \\Object.defineProperty(proxy, "stack", Object.getOwnPropertyDescriptor(Error.prototype, "stack"));
-        \\proxy.stack = 123;
+        \\proxy.stack = "updated";
         \\var desc = Object.getOwnPropertyDescriptor(proxy, "stack");
-        \\assert.sameValue(desc.value, 123);
+        \\assert.sameValue(desc.value, "updated");
         \\assert.sameValue(desc.writable, true);
-        \\assert.sameValue(proxy.stack, 123);
+        \\assert.sameValue(proxy.stack, "updated");
     );
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());

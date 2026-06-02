@@ -423,7 +423,10 @@ pub fn runWithArgsState(
             // ---- Push constants ----
             op.push_i32 => try value_vm.pushInt32Operand(stack, function, &frame),
             op.push_bigint_i32 => try value_vm.pushBigIntI32Operand(stack, function, &frame),
-            op.push_i16 => try value_vm.pushI16Operand(stack, function, &frame),
+            op.push_i16 => {
+                if (property_vm.tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, &frame, frame.pc - 1, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) continue;
+                try value_vm.pushI16Operand(stack, function, &frame);
+            },
             op.push_i8 => try value_vm.pushI8Operand(stack, function, &frame),
             op.push_minus1 => try value_vm.pushSmallIntMaybeFuse(stack, function, &frame, -1),
             op.push_0 => try value_vm.pushSmallIntMaybeFuse(stack, function, &frame, 0),
@@ -452,7 +455,7 @@ pub fn runWithArgsState(
             //   - idx ∈ [0, 4)    → 1-byte short form (idx in opcode)
             //   - idx ∈ [4, 256)  → 2-byte u8-form (`get_loc8`, ...)
             //   - idx ∈ [256, 2^16) → 3-byte u16-form
-            op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => try property_vm.loc(ctx, function, global, &frame, stack, opc, sync_global_lexical_locals, execGetLoc, execPutLoc, execSetLoc),
+            op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => try property_vm.loc(ctx, function, global, &frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, execGetLoc, execPutLoc, execSetLoc, setSlotValue, syncTopLevelGlobalLexicalLocal),
 
             op.get_arg, op.put_arg, op.set_arg, op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try property_vm.arg(ctx, function, &frame, stack, opc, execGetArg, execPutArg, execSetArg),
 
@@ -492,6 +495,8 @@ pub fn runWithArgsState(
                         return err;
                     }
                 }
+                if (stop_before_pc == null and
+                    try tryFuseCheckedLocalEmptyInt32Range(ctx, function, global, &frame, idx, sync_global_lexical_locals)) continue;
                 if (frame.pc < function.code.len) {
                     switch (function.code[frame.pc]) {
                         op.push_i32 => {
@@ -643,6 +648,7 @@ pub fn runWithArgsState(
                 try syncTopLevelGlobalLexicalLocal(ctx, function, global, &frame, idx, sync_global_lexical_locals);
             },
             op.push_atom_value => {
+                if (try property_vm.tryFuseAtomPercentHexGlobalStringStore(ctx, global, function, &frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) continue;
                 if (!(ctx.runtime.opcode_profile == null and try regexp_vm.tryPushLiteralFromAtomPair(ctx, global, stack, function, &frame, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp")))) {
                     try value_vm.pushAtomValue(ctx, stack, function, &frame);
                 }
@@ -754,12 +760,19 @@ pub fn runWithArgsState(
             },
 
             // ---- Control flow ----
-            op.goto => control_vm.jump32(function, &frame),
-            op.goto16 => control_vm.jump16(function, &frame),
+            op.goto => {
+                if (stop_before_pc == null and property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, &frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object)) continue;
+                control_vm.jump32(function, &frame);
+            },
+            op.goto16 => {
+                if (stop_before_pc == null and property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, &frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object)) continue;
+                control_vm.jump16(function, &frame);
+            },
             op.goto8 => {
                 if (stop_before_pc == null and tryFuseGoto8RegExpLiteralAssignmentLoop(ctx, global, function, &frame)) continue;
                 if (stop_before_pc == null and tryFuseGoto8LocalInt32LessThanFalseBranch(function, &frame)) continue;
                 if (stop_before_pc == null and tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function, &frame)) continue;
+                if (stop_before_pc == null and property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, &frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object)) continue;
                 control_vm.jump8(function, &frame);
             },
             op.if_false => try control_vm.branch32(ctx, stack, function, &frame, false),
@@ -776,6 +789,7 @@ pub fn runWithArgsState(
             },
             op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => try property_vm.makeSlotRef(ctx, stack, function, &frame, opc, ensureVarRefsCapacity, ensureVarRefCell, ensureLocalVarRefCell),
             op.make_var_ref => {
+                if (try property_vm.tryFuseMakeVarRefPercentHexGlobalStringAssignment(ctx, global, function, &frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs)) continue;
                 property_vm.makeVarRef(ctx, output, global, stack, function, &frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs) catch |err| {
                     if (try handleCatchableRuntimeError(ctx, stack, &frame, &catch_target, global, err)) {
                         continue;
@@ -2482,6 +2496,48 @@ fn tryFuseLocalInt32LessThanFalseBranch(function: *const bytecode.Bytecode, fram
     else
         @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
     return true;
+}
+
+fn tryFuseCheckedLocalEmptyInt32Range(
+    ctx: *core.Context,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    idx: usize,
+    sync_global_lexical_locals: bool,
+) !bool {
+    if (ctx.runtime.hasInterruptHandler()) return false;
+    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return false;
+    if (idx < function.var_is_const.len and function.var_is_const[idx]) return false;
+    const condition_pc = frame.pc -| 3;
+    const current = frame.locals[idx].asInt32() orelse return false;
+    const condition = decodeLocalInt32LessThanLoopCondition(function.code, condition_pc) orelse return false;
+    if (condition.idx != idx) return false;
+    if (!decodeEmptyCheckedLocalPostIncLoopTail(function.code, condition.body_pc, condition.false_pc, condition_pc, @intCast(idx))) return false;
+
+    if (current < condition.limit) {
+        setSlotValue(ctx, &frame.locals[idx], core.Value.int32(condition.limit));
+        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    }
+    frame.pc = condition.false_pc;
+    return true;
+}
+
+fn decodeEmptyCheckedLocalPostIncLoopTail(code: []const u8, body_pc: usize, exit_pc: usize, condition_pc: usize, idx: u16) bool {
+    if (body_pc + 10 > code.len) return false;
+    if (code[body_pc] != op.get_loc_check) return false;
+    if (readInt(u16, code[body_pc + 1 ..][0..2]) != idx) return false;
+    if (code[body_pc + 3] != op.post_inc) return false;
+    if (code[body_pc + 4] != op.put_loc_check) return false;
+    if (readInt(u16, code[body_pc + 5 ..][0..2]) != idx) return false;
+    if (code[body_pc + 7] != op.drop) return false;
+    if (code[body_pc + 8] != op.goto8) return false;
+    const operand_pc = body_pc + 9;
+    const diff: i8 = @bitCast(code[operand_pc]);
+    const target_pc_i64 = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
+    if (target_pc_i64 < 0) return false;
+    if (@as(usize, @intCast(target_pc_i64)) != condition_pc) return false;
+    return operand_pc + 1 == exit_pc;
 }
 
 fn tryFuseLocalShortBigIntLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, idx: usize) bool {

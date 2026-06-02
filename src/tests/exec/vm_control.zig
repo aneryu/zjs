@@ -445,6 +445,42 @@ test "P5 Array: change-by-copy methods return copied arrays" {
     try std.testing.expectEqual(true, result.asBool().?);
 }
 
+test "P5 Array sort setter writeback updates successor element" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function(){
+        \\  const array = [undefined, "c", , "b", undefined, , "a", "d"];
+        \\  Object.defineProperty(array, "2", {
+        \\    get() {
+        \\      return this.foo;
+        \\    },
+        \\    set(v) {
+        \\      array[3] = "foobar";
+        \\      this.foo = v;
+        \\    }
+        \\  });
+        \\  array.sort();
+        \\  return array[0] === "a" &&
+        \\    array[1] === "b" &&
+        \\    array[2] === "c" &&
+        \\    array[3] === "d" &&
+        \\    array[4] === undefined &&
+        \\    array[5] === undefined &&
+        \\    array[6] === undefined &&
+        \\    !("7" in array) &&
+        \\    !array.hasOwnProperty("7") &&
+        \\    array.length === 8 &&
+        \\    array.foo === "c";
+        \\})()
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(true, result.asBool().?);
+}
+
 test "P5 Array sort entry OOM releases pending values" {
     try expectSortEntryOOMCleanup(.sort);
     try expectSortEntryOOMCleanup(.to_sorted);

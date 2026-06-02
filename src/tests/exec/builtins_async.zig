@@ -376,7 +376,7 @@ test "dense array indexed append range preserves ordinary set guards" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    var output_buffer: [128]u8 = undefined;
+    var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\let fast = [];
@@ -384,6 +384,17 @@ test "dense array indexed append range preserves ordinary set guards" {
         \\let sum = 0;
         \\for (let i = 0; i < fast.length; i++) sum += fast[i];
         \\print(fast.length, sum, fast[7]);
+        \\let masked = [];
+        \\let maskedSum = 0;
+        \\for (let i = 0; i < 8; i++) masked[i] = (i * 7) & 255;
+        \\for (let i = 0; i < masked.length; i++) maskedSum += masked[i];
+        \\print(masked.length, masked[0], masked[7], maskedSum);
+        \\function varMasked() {
+        \\  var values = [];
+        \\  for (var i = 0; i < 8; i++) values[i] = (i * 7) & 255;
+        \\  return values.length + ":" + values[0] + ":" + values[7];
+        \\}
+        \\print(varMasked());
         \\let seen = "";
         \\Object.defineProperty(Array.prototype, "0", {
         \\  set: function(v) { seen += v + ":"; },
@@ -396,12 +407,29 @@ test "dense array indexed append range preserves ordinary set guards" {
         \\print(guarded.length);
         \\print(guarded[0]);
         \\print(Object.prototype.hasOwnProperty.call(guarded, "0"));
+        \\let maskedGuarded = [];
+        \\for (let i = 0; i < 2; i++) maskedGuarded[i] = (i * 7) & 255;
+        \\print(seen);
+        \\print(maskedGuarded.length);
+        \\print(maskedGuarded[0]);
+        \\print(Object.prototype.hasOwnProperty.call(maskedGuarded, "0"));
+        \\print(maskedGuarded[1]);
+        \\function varMaskedGuarded() {
+        \\  var values = [];
+        \\  for (var i = 0; i < 2; i++) values[i] = (i * 7) & 255;
+        \\  print(seen);
+        \\  print(values.length);
+        \\  print(values[0]);
+        \\  print(Object.prototype.hasOwnProperty.call(values, "0"));
+        \\  print(values[1]);
+        \\}
+        \\varMaskedGuarded();
         \\delete Array.prototype[0];
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("8 28 7\n0:\n2\n99\nfalse\n", stream.buffered());
+    try std.testing.expectEqualStrings("8 28 7\n8 0 49 196\n8:0:49\n0:\n2\n99\nfalse\n0:0:\n2\n99\nfalse\n7\n0:0:0:\n2\n99\nfalse\n7\n", stream.buffered());
 }
 
 test "Engine eval executes Date smoke fixture subset" {

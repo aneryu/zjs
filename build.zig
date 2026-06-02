@@ -162,6 +162,303 @@ pub fn build(b: *std.Build) void {
     const perf_benchmark_step = b.step("perf-benchmark", "Run a repeatable diagnostic JS performance benchmark");
     perf_benchmark_step.dependOn(&run_perf_benchmark.step);
 
+    const run_perf_uri_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/uri_decode_4byte.json",
+        "--stdout",
+        "reports/perf/current/runtime/uri_decode_4byte.stdout",
+        "--expect-stdout",
+        "65536\n",
+        "--expect-opcode-max",
+        "get_var=67626",
+        "--expect-opcode-max",
+        "get_var_ref0=0",
+        "--expect-opcode-max",
+        "put_var=1042",
+        "--expect-opcode-max",
+        "push_i16=1040",
+        "--expect-opcode-max",
+        "goto16=0",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "if_false8=1",
+        "reports/perf/current/scripts/uri_decode_4byte.js",
+    });
+    run_perf_uri_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_uri_profile_step = b.step("perf-uri-profile", "Record a zjs runtime profile for the URI 4-byte decode benchmark script");
+    perf_uri_profile_step.dependOn(&run_perf_uri_profile.step);
+
+    const run_perf_uri_component_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/uri_component_decode_4byte.json",
+        "--stdout",
+        "reports/perf/current/runtime/uri_component_decode_4byte.stdout",
+        "--expect-stdout",
+        "65536\n",
+        "--expect-opcode-max",
+        "get_var=67626",
+        "--expect-opcode-max",
+        "get_var_ref0=0",
+        "--expect-opcode-max",
+        "put_var=1042",
+        "--expect-opcode-max",
+        "push_i16=1040",
+        "--expect-opcode-max",
+        "goto16=0",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "if_false8=1",
+        "reports/perf/current/scripts/uri_component_decode_4byte.js",
+    });
+    run_perf_uri_component_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_uri_component_profile_step = b.step("perf-uri-component-profile", "Record a zjs runtime profile for the URI component 4-byte decode benchmark script");
+    perf_uri_component_profile_step.dependOn(&run_perf_uri_component_profile.step);
+
+    const run_perf_prop_global_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/prop_read_global_mono.json",
+        "--stdout",
+        "reports/perf/current/runtime/prop_read_global_mono.stdout",
+        "--expect-stdout",
+        "1000000\n",
+        "--expect-opcode-max",
+        "get_field=0",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "goto8=0",
+        "reports/perf/current/scripts/prop_read_global_mono.js",
+    });
+    run_perf_prop_global_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_prop_global_profile_step = b.step("perf-prop-global-profile", "Record a zjs runtime profile for the global property read benchmark script");
+    perf_prop_global_profile_step.dependOn(&run_perf_prop_global_profile.step);
+
+    const run_perf_proto_global_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/proto_read_global.json",
+        "--stdout",
+        "reports/perf/current/runtime/proto_read_global.stdout",
+        "--expect-stdout",
+        "1000000\n",
+        "--expect-opcode-max",
+        "get_field=0",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "goto8=0",
+        "reports/perf/current/scripts/proto_read_global.js",
+    });
+    run_perf_proto_global_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_proto_global_profile_step = b.step("perf-proto-global-profile", "Record a zjs runtime profile for the global prototype read benchmark script");
+    perf_proto_global_profile_step.dependOn(&run_perf_proto_global_profile.step);
+
+    const run_perf_prop_poly3_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/prop_read_poly3_global.json",
+        "--stdout",
+        "reports/perf/current/runtime/prop_read_poly3_global.stdout",
+        "--expect-stdout",
+        "1000000\n",
+        "--expect-opcode-max",
+        "get_array_el=0",
+        "--expect-opcode-max",
+        "get_field=0",
+        "--expect-opcode-max",
+        "mod=0",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "goto8=0",
+        "reports/perf/current/scripts/prop_read_poly3_global.js",
+    });
+    run_perf_prop_poly3_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_prop_poly3_profile_step = b.step("perf-prop-poly3-profile", "Record a zjs runtime profile for the global polymorphic property read benchmark script");
+    perf_prop_poly3_profile_step.dependOn(&run_perf_prop_poly3_profile.step);
+
+    const run_perf_call2_global_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/call2_loop_global.json",
+        "--stdout",
+        "reports/perf/current/runtime/call2_loop_global.stdout",
+        "--expect-stdout",
+        "500000500000\n",
+        "--expect-opcode-max",
+        "call2=0",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "post_inc=0",
+        "--expect-opcode-max",
+        "goto8=0",
+        "reports/perf/current/scripts/call2_loop_global.js",
+    });
+    run_perf_call2_global_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_call2_global_profile_step = b.step("perf-call2-global-profile", "Record a zjs runtime profile for the global call2 loop benchmark script");
+    perf_call2_global_profile_step.dependOn(&run_perf_call2_global_profile.step);
+
+    const run_perf_closure_call_global_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/closure_call_loop_global.json",
+        "--stdout",
+        "reports/perf/current/runtime/closure_call_loop_global.stdout",
+        "--expect-stdout",
+        "500000500000\n",
+        "--expect-opcode-max",
+        "add=0",
+        "--expect-opcode-max",
+        "post_inc=0",
+        "--expect-opcode-max",
+        "goto8=0",
+        "reports/perf/current/scripts/closure_call_loop_global.js",
+    });
+    run_perf_closure_call_global_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_closure_call_global_profile_step = b.step("perf-closure-call-global-profile", "Record a zjs runtime profile for the global closure call loop benchmark script");
+    perf_closure_call_global_profile_step.dependOn(&run_perf_closure_call_global_profile.step);
+
+    const run_perf_string_loop_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/string_loop.json",
+        "--stdout",
+        "reports/perf/current/runtime/string_loop.stdout",
+        "--expect-stdout",
+        "261\n",
+        "--expect-opcode-max",
+        "get_var=1",
+        "--expect-opcode-max",
+        "get_length=2",
+        "--expect-opcode-max",
+        "push_i8=0",
+        "--expect-opcode-max",
+        "gt=0",
+        "--expect-opcode-max",
+        "get_field2=2",
+        "--expect-opcode-max",
+        "call_method=2",
+        "--expect-opcode-max",
+        "get_loc0=6000",
+        "--expect-opcode-max",
+        "get_loc1=100",
+        "--expect-opcode-max",
+        "add=2",
+        "--expect-opcode-max",
+        "get_arg0=0",
+        "--expect-opcode-max",
+        "lt=0",
+        "--expect-opcode-max",
+        "if_false8=0",
+        "--expect-opcode-max",
+        "post_inc=0",
+        "--expect-opcode-max",
+        "goto8=0",
+        "--expect-opcode-max",
+        "put_loc1=1",
+        "--expect-opcode-max",
+        "drop=1",
+        "reports/perf/current/scripts/string_loop.js",
+    });
+    run_perf_string_loop_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_string_loop_profile_step = b.step("perf-string-loop-profile", "Record a zjs runtime profile for the string microbench loop script");
+    perf_string_loop_profile_step.dependOn(&run_perf_string_loop_profile.step);
+
+    const run_perf_empty_loop_profile = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/run_runtime_profile.js",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs-test262"),
+        "--output",
+        "reports/perf/current/runtime/empty_loop.json",
+        "--stdout",
+        "reports/perf/current/runtime/empty_loop.stdout",
+        "--expect-stdout",
+        "0\n",
+        "reports/perf/current/scripts/empty_loop.js",
+    });
+    run_perf_empty_loop_profile.step.dependOn(&install_qjs_test262.step);
+    const perf_empty_loop_profile_step = b.step("perf-empty-loop-profile", "Record a zjs runtime profile for the empty int32 for-loop benchmark script");
+    perf_empty_loop_profile_step.dependOn(&run_perf_empty_loop_profile.step);
+
+    const perf_runtime_profiles_step = b.step("perf-runtime-profiles", "Record checked zjs runtime profiles for focused benchmark scripts");
+    perf_runtime_profiles_step.dependOn(&run_perf_uri_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_uri_component_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_prop_global_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_proto_global_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_prop_poly3_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_call2_global_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_closure_call_global_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_string_loop_profile.step);
+    perf_runtime_profiles_step.dependOn(&run_perf_empty_loop_profile.step);
+
+    const run_perf_env = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/write_env.js",
+        "--iters",
+        "120",
+        "--warmup",
+        "15",
+        "--output",
+        "reports/perf/current/env.md",
+        "--notes",
+        "top10/diff are generated from checked-in zjs-microbench JSON reports; perf-benchmark is a separate runtime smoke and does not refresh reports/perf/current/microbench.json.",
+    });
+
+    const run_perf_top10 = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/top10_report.js",
+        "--output",
+        "reports/perf/current/top10.md",
+        "reports/perf/current/microbench.json",
+    });
+    run_perf_top10.step.dependOn(&run_perf_env.step);
+
+    const run_perf_diff = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/diff_report.js",
+        "--allow-sample-config-drift",
+        "--warn-case-regressions",
+        "--output",
+        "reports/perf/current/diff.md",
+        "reports/perf/baseline/microbench-releasefast.json",
+        "reports/perf/current/microbench.json",
+    });
+    run_perf_diff.step.dependOn(&run_perf_top10.step);
+
+    const perf_compare_step = b.step("perf-compare", "Refresh checked-in performance report environment, top-10, and diff summaries");
+    perf_compare_step.dependOn(&run_perf_diff.step);
+
     const engine_root_test_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/root.zig"),
         .target = target,
