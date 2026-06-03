@@ -1,7 +1,0 @@
-array literal member 12
-array rest member 1,2,3
-object rest member 1 2
-order get iterator,call iterator,get next,lhs,call next,set a,get return,call return
-assigned A
-super 7
-this 8 9,10 11

@@ -28,17 +28,6 @@ pub fn build(b: *std.Build) void {
     exhaustive_oom_options.addOption(bool, "full_oom_sweep", true);
     exhaustive_oom_options.addOption(bool, "sampled_oom_sweep", false);
 
-    const test262_protocol_mod = b.createModule(.{
-        .root_source_file = b.path("src/tools/test262_protocol.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const test262_protocol_fast_mod = b.createModule(.{
-        .root_source_file = b.path("src/tools/test262_protocol.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    });
-
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/engine/root.zig"),
         .target = target,
@@ -46,26 +35,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
-    const zjs_cli_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/zjs.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            .{ .name = "test262_protocol", .module = test262_protocol_mod },
-        },
-    });
-    const test262_runner_mod = b.createModule(.{
-        .root_source_file = b.path("src/tools/test262_runner.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            .{ .name = "test262_protocol", .module = test262_protocol_mod },
-        },
-    });
     const test262_engine_fast_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/root.zig"),
         .target = target,
@@ -73,21 +42,23 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test262_engine_fast_mod.addOptions("build_options", engine_options);
-    const test262_runner_fast_mod = b.createModule(.{
-        .root_source_file = b.path("src/tools/test262_runner.zig"),
+    const zjs_cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
-            .{ .name = "test262_protocol", .module = test262_protocol_fast_mod },
+            .{ .name = "zjs", .module = test262_engine_fast_mod },
         },
     });
-    const smoke_runner_mod = b.createModule(.{
-        .root_source_file = b.path("src/tools/smoke_runner.zig"),
+    const test262_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/run_test262.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = engine_mod },
+        },
     });
 
     const zjs_exe = b.addExecutable(.{
@@ -98,21 +69,6 @@ pub fn build(b: *std.Build) void {
     const zjs_step = b.step("zjs", "Build and install zjs");
     zjs_step.dependOn(&install_zjs.step);
     b.installArtifact(zjs_exe);
-    const zjs_test262_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/zjs.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
-            .{ .name = "test262_protocol", .module = test262_protocol_fast_mod },
-        },
-    });
-    const zjs_test262_exe = b.addExecutable(.{
-        .name = "zjs-test262",
-        .root_module = zjs_test262_mod,
-    });
-    const install_zjs_test262 = b.addInstallArtifact(zjs_test262_exe, .{});
 
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
@@ -122,19 +78,17 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "test262_runner", .module = test262_runner_fast_mod },
+                .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
             },
         }),
     });
     const install_run_test262 = b.addInstallArtifact(run_test262_exe, .{});
     const run_test262_step = b.step("run-test262", "Build and install run-test262");
     run_test262_step.dependOn(&install_run_test262.step);
-    run_test262_step.dependOn(&install_zjs_test262.step);
 
     // Add actual test262 execution step.
     const run_test262_exec = b.addRunArtifact(run_test262_exe);
     run_test262_exec.step.dependOn(&install_run_test262.step);
-    run_test262_exec.step.dependOn(&install_zjs_test262.step);
     run_test262_exec.addArg("-c");
     run_test262_exec.addArg("test262.conf");
     run_test262_exec.addArg("-d");
@@ -146,281 +100,180 @@ pub fn build(b: *std.Build) void {
     const test262_gate_step = b.step("test262-gate", "Run test262 with regression gate");
     test262_gate_step.dependOn(&run_test262_exec.step);
 
-    const smoke_runner_exe = b.addExecutable(.{
-        .name = "smoke-runner",
-        .root_module = smoke_runner_mod,
-    });
-    const run_smoke = b.addRunArtifact(smoke_runner_exe);
-    run_smoke.addArtifactArg(zjs_exe);
-    run_smoke.addArg("tests/zig-smoke/manifest.txt");
-    const smoke_step = b.step("smoke", "Run JS smoke scripts against zjs");
-    smoke_step.dependOn(&run_smoke.step);
-
-    const run_perf_benchmark = b.addRunArtifact(zjs_test262_exe);
+    const run_perf_benchmark = b.addRunArtifact(zjs_exe);
     run_perf_benchmark.addArg("--perf-json");
     run_perf_benchmark.addArg("tests/perf/microbench.js");
     const perf_benchmark_step = b.step("perf-benchmark", "Run a repeatable diagnostic JS performance benchmark");
     perf_benchmark_step.dependOn(&run_perf_benchmark.step);
 
-    const run_perf_uri_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/uri_decode_4byte.json",
-        "--stdout",
-        "reports/perf/current/runtime/uri_decode_4byte.stdout",
-        "--expect-stdout",
-        "65536\n",
-        "--expect-opcode-max",
-        "get_var=67626",
-        "--expect-opcode-max",
-        "get_var_ref0=0",
-        "--expect-opcode-max",
-        "put_var=1042",
-        "--expect-opcode-max",
-        "push_i16=1040",
-        "--expect-opcode-max",
-        "goto16=0",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "if_false8=1",
-        "reports/perf/current/scripts/uri_decode_4byte.js",
-    });
-    run_perf_uri_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_uri_profile_step = b.step("perf-uri-profile", "Record a zjs runtime profile for the URI 4-byte decode benchmark script");
-    perf_uri_profile_step.dependOn(&run_perf_uri_profile.step);
+    const ProfileConfig = struct {
+        name: []const u8,
+        desc: []const u8,
+        script: []const u8,
+        expect_stdout: []const u8,
+        expect_opcodes: []const []const u8,
+    };
 
-    const run_perf_uri_component_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/uri_component_decode_4byte.json",
-        "--stdout",
-        "reports/perf/current/runtime/uri_component_decode_4byte.stdout",
-        "--expect-stdout",
-        "65536\n",
-        "--expect-opcode-max",
-        "get_var=67626",
-        "--expect-opcode-max",
-        "get_var_ref0=0",
-        "--expect-opcode-max",
-        "put_var=1042",
-        "--expect-opcode-max",
-        "push_i16=1040",
-        "--expect-opcode-max",
-        "goto16=0",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "if_false8=1",
-        "reports/perf/current/scripts/uri_component_decode_4byte.js",
-    });
-    run_perf_uri_component_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_uri_component_profile_step = b.step("perf-uri-component-profile", "Record a zjs runtime profile for the URI component 4-byte decode benchmark script");
-    perf_uri_component_profile_step.dependOn(&run_perf_uri_component_profile.step);
-
-    const run_perf_prop_global_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/prop_read_global_mono.json",
-        "--stdout",
-        "reports/perf/current/runtime/prop_read_global_mono.stdout",
-        "--expect-stdout",
-        "1000000\n",
-        "--expect-opcode-max",
-        "get_field=0",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "goto8=0",
-        "reports/perf/current/scripts/prop_read_global_mono.js",
-    });
-    run_perf_prop_global_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_prop_global_profile_step = b.step("perf-prop-global-profile", "Record a zjs runtime profile for the global property read benchmark script");
-    perf_prop_global_profile_step.dependOn(&run_perf_prop_global_profile.step);
-
-    const run_perf_proto_global_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/proto_read_global.json",
-        "--stdout",
-        "reports/perf/current/runtime/proto_read_global.stdout",
-        "--expect-stdout",
-        "1000000\n",
-        "--expect-opcode-max",
-        "get_field=0",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "goto8=0",
-        "reports/perf/current/scripts/proto_read_global.js",
-    });
-    run_perf_proto_global_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_proto_global_profile_step = b.step("perf-proto-global-profile", "Record a zjs runtime profile for the global prototype read benchmark script");
-    perf_proto_global_profile_step.dependOn(&run_perf_proto_global_profile.step);
-
-    const run_perf_prop_poly3_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/prop_read_poly3_global.json",
-        "--stdout",
-        "reports/perf/current/runtime/prop_read_poly3_global.stdout",
-        "--expect-stdout",
-        "1000000\n",
-        "--expect-opcode-max",
-        "get_array_el=0",
-        "--expect-opcode-max",
-        "get_field=0",
-        "--expect-opcode-max",
-        "mod=0",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "goto8=0",
-        "reports/perf/current/scripts/prop_read_poly3_global.js",
-    });
-    run_perf_prop_poly3_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_prop_poly3_profile_step = b.step("perf-prop-poly3-profile", "Record a zjs runtime profile for the global polymorphic property read benchmark script");
-    perf_prop_poly3_profile_step.dependOn(&run_perf_prop_poly3_profile.step);
-
-    const run_perf_call2_global_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/call2_loop_global.json",
-        "--stdout",
-        "reports/perf/current/runtime/call2_loop_global.stdout",
-        "--expect-stdout",
-        "500000500000\n",
-        "--expect-opcode-max",
-        "call2=0",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "post_inc=0",
-        "--expect-opcode-max",
-        "goto8=0",
-        "reports/perf/current/scripts/call2_loop_global.js",
-    });
-    run_perf_call2_global_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_call2_global_profile_step = b.step("perf-call2-global-profile", "Record a zjs runtime profile for the global call2 loop benchmark script");
-    perf_call2_global_profile_step.dependOn(&run_perf_call2_global_profile.step);
-
-    const run_perf_closure_call_global_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/closure_call_loop_global.json",
-        "--stdout",
-        "reports/perf/current/runtime/closure_call_loop_global.stdout",
-        "--expect-stdout",
-        "500000500000\n",
-        "--expect-opcode-max",
-        "add=0",
-        "--expect-opcode-max",
-        "post_inc=0",
-        "--expect-opcode-max",
-        "goto8=0",
-        "reports/perf/current/scripts/closure_call_loop_global.js",
-    });
-    run_perf_closure_call_global_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_closure_call_global_profile_step = b.step("perf-closure-call-global-profile", "Record a zjs runtime profile for the global closure call loop benchmark script");
-    perf_closure_call_global_profile_step.dependOn(&run_perf_closure_call_global_profile.step);
-
-    const run_perf_string_loop_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/string_loop.json",
-        "--stdout",
-        "reports/perf/current/runtime/string_loop.stdout",
-        "--expect-stdout",
-        "261\n",
-        "--expect-opcode-max",
-        "get_var=1",
-        "--expect-opcode-max",
-        "get_length=2",
-        "--expect-opcode-max",
-        "push_i8=0",
-        "--expect-opcode-max",
-        "gt=0",
-        "--expect-opcode-max",
-        "get_field2=2",
-        "--expect-opcode-max",
-        "call_method=2",
-        "--expect-opcode-max",
-        "get_loc0=6000",
-        "--expect-opcode-max",
-        "get_loc1=100",
-        "--expect-opcode-max",
-        "add=2",
-        "--expect-opcode-max",
-        "get_arg0=0",
-        "--expect-opcode-max",
-        "lt=0",
-        "--expect-opcode-max",
-        "if_false8=0",
-        "--expect-opcode-max",
-        "post_inc=0",
-        "--expect-opcode-max",
-        "goto8=0",
-        "--expect-opcode-max",
-        "put_loc1=1",
-        "--expect-opcode-max",
-        "drop=1",
-        "reports/perf/current/scripts/string_loop.js",
-    });
-    run_perf_string_loop_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_string_loop_profile_step = b.step("perf-string-loop-profile", "Record a zjs runtime profile for the string microbench loop script");
-    perf_string_loop_profile_step.dependOn(&run_perf_string_loop_profile.step);
-
-    const run_perf_empty_loop_profile = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/run_runtime_profile.js",
-        "--zjs",
-        b.getInstallPath(.bin, "zjs-test262"),
-        "--output",
-        "reports/perf/current/runtime/empty_loop.json",
-        "--stdout",
-        "reports/perf/current/runtime/empty_loop.stdout",
-        "--expect-stdout",
-        "0\n",
-        "reports/perf/current/scripts/empty_loop.js",
-    });
-    run_perf_empty_loop_profile.step.dependOn(&install_zjs_test262.step);
-    const perf_empty_loop_profile_step = b.step("perf-empty-loop-profile", "Record a zjs runtime profile for the empty int32 for-loop benchmark script");
-    perf_empty_loop_profile_step.dependOn(&run_perf_empty_loop_profile.step);
+    const profiles = [_]ProfileConfig{
+        .{
+            .name = "perf-uri-profile",
+            .desc = "Record a zjs runtime profile for the URI 4-byte decode benchmark script",
+            .script = "uri_decode_4byte",
+            .expect_stdout = "65536\n",
+            .expect_opcodes = &.{
+                "get_var=67626",
+                "get_var_ref0=0",
+                "put_var=1042",
+                "push_i16=1040",
+                "goto16=0",
+                "add=0",
+                "if_false8=1",
+            },
+        },
+        .{
+            .name = "perf-uri-component-profile",
+            .desc = "Record a zjs runtime profile for the URI component 4-byte decode benchmark script",
+            .script = "uri_component_decode_4byte",
+            .expect_stdout = "65536\n",
+            .expect_opcodes = &.{
+                "get_var=67626",
+                "get_var_ref0=0",
+                "put_var=1042",
+                "push_i16=1040",
+                "goto16=0",
+                "add=0",
+                "if_false8=1",
+            },
+        },
+        .{
+            .name = "perf-prop-global-profile",
+            .desc = "Record a zjs runtime profile for the global property read benchmark script",
+            .script = "prop_read_global_mono",
+            .expect_stdout = "1000000\n",
+            .expect_opcodes = &.{
+                "get_field=0",
+                "add=0",
+                "goto8=0",
+            },
+        },
+        .{
+            .name = "perf-proto-global-profile",
+            .desc = "Record a zjs runtime profile for the global prototype read benchmark script",
+            .script = "proto_read_global",
+            .expect_stdout = "1000000\n",
+            .expect_opcodes = &.{
+                "get_field=0",
+                "add=0",
+                "goto8=0",
+            },
+        },
+        .{
+            .name = "perf-prop-poly3-profile",
+            .desc = "Record a zjs runtime profile for the global polymorphic property read benchmark script",
+            .script = "prop_read_poly3_global",
+            .expect_stdout = "1000000\n",
+            .expect_opcodes = &.{
+                "get_array_el=0",
+                "get_field=0",
+                "mod=0",
+                "add=0",
+                "goto8=0",
+            },
+        },
+        .{
+            .name = "perf-call2-global-profile",
+            .desc = "Record a zjs runtime profile for the global call2 loop benchmark script",
+            .script = "call2_loop_global",
+            .expect_stdout = "500000500000\n",
+            .expect_opcodes = &.{
+                "call2=0",
+                "add=0",
+                "post_inc=0",
+                "goto8=0",
+            },
+        },
+        .{
+            .name = "perf-closure-call-global-profile",
+            .desc = "Record a zjs runtime profile for the global closure call loop benchmark script",
+            .script = "closure_call_loop_global",
+            .expect_stdout = "500000500000\n",
+            .expect_opcodes = &.{
+                "add=0",
+                "post_inc=0",
+                "goto8=0",
+            },
+        },
+        .{
+            .name = "perf-string-loop-profile",
+            .desc = "Record a zjs runtime profile for the string microbench loop script",
+            .script = "string_loop",
+            .expect_stdout = "261\n",
+            .expect_opcodes = &.{
+                "get_var=1",
+                "get_length=2",
+                "push_i8=0",
+                "gt=0",
+                "get_field2=2",
+                "call_method=2",
+                "get_loc0=6000",
+                "get_loc1=100",
+                "add=2",
+                "get_arg0=0",
+                "lt=0",
+                "if_false8=0",
+                "post_inc=0",
+                "goto8=0",
+                "put_loc1=1",
+                "drop=1",
+            },
+        },
+        .{
+            .name = "perf-empty-loop-profile",
+            .desc = "Record a zjs runtime profile for the empty int32 for-loop benchmark script",
+            .script = "empty_loop",
+            .expect_stdout = "0\n",
+            .expect_opcodes = &.{},
+        },
+    };
 
     const perf_runtime_profiles_step = b.step("perf-runtime-profiles", "Record checked zjs runtime profiles for focused benchmark scripts");
-    perf_runtime_profiles_step.dependOn(&run_perf_uri_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_uri_component_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_prop_global_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_proto_global_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_prop_poly3_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_call2_global_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_closure_call_global_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_string_loop_profile.step);
-    perf_runtime_profiles_step.dependOn(&run_perf_empty_loop_profile.step);
+
+    inline for (profiles) |profile| {
+        const base_args = [_][]const u8{
+            "node",
+            "tools/perf/run_runtime_profile.js",
+            "--zjs",
+            b.getInstallPath(.bin, "zjs"),
+            "--output",
+            "reports/perf/current/runtime/" ++ profile.script ++ ".json",
+            "--stdout",
+            "reports/perf/current/runtime/" ++ profile.script ++ ".stdout",
+            "--expect-stdout",
+            profile.expect_stdout,
+        };
+
+        const opcode_args = comptime blk: {
+            var arr: [profile.expect_opcodes.len * 2][]const u8 = undefined;
+            for (profile.expect_opcodes, 0..) |opcode, idx| {
+                arr[idx * 2] = "--expect-opcode-max";
+                arr[idx * 2 + 1] = opcode;
+            }
+            break :blk arr;
+        };
+
+        const script_args = [_][]const u8{
+            "reports/perf/current/scripts/" ++ profile.script ++ ".js",
+        };
+
+        const full_args = base_args ++ opcode_args ++ script_args;
+
+        const run_profile = b.addSystemCommand(&full_args);
+        run_profile.step.dependOn(&install_zjs.step);
+
+        const profile_step = b.step(profile.name, profile.desc);
+        profile_step.dependOn(&run_profile.step);
+        perf_runtime_profiles_step.dependOn(profile_step);
+    }
 
     const run_perf_env = b.addSystemCommand(&.{
         "node",
@@ -459,6 +312,7 @@ pub fn build(b: *std.Build) void {
     const perf_compare_step = b.step("perf-compare", "Refresh checked-in performance report environment, top-10, and diff summaries");
     perf_compare_step.dependOn(&run_perf_diff.step);
 
+    // 1. Engine tests
     const engine_root_test_mod = b.createModule(.{
         .root_source_file = b.path("src/engine/root.zig"),
         .target = target,
@@ -484,9 +338,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_engine_production_tests = b.addRunArtifact(engine_production_tests);
 
-    const leak_check_engine_step = b.step("leak-check-engine", "Run embedding lifecycle and leak-focused engine tests");
-    leak_check_engine_step.dependOn(&run_engine_production_tests.step);
-
+    // 2. Core runtime tests
     const core_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/core/all.zig"),
@@ -496,16 +348,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "quickjs_zig_engine", .module = engine_mod },
                 .{ .name = "zjs_cli", .module = zjs_cli_mod },
-                .{ .name = "smoke_runner", .module = smoke_runner_mod },
                 .{ .name = "test262_runner", .module = test262_runner_mod },
             },
         }),
     });
-
     const run_core_tests = b.addRunArtifact(core_tests);
-    const test_core_step = b.step("test-core", "Run core runtime foundation tests");
-    test_core_step.dependOn(&run_core_tests.step);
 
+    // 3. GC stress tests
     const gc_stress_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/gc_stress.zig"),
@@ -517,11 +366,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-
     const run_gc_stress_tests = b.addRunArtifact(gc_stress_tests);
-    const gc_stress_step = b.step("gc-stress", "Run deterministic GC stress tests");
-    gc_stress_step.dependOn(&run_gc_stress_tests.step);
 
+    // 4. Bytecode tests
     const bytecode_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/bytecode/all.zig"),
@@ -533,11 +380,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-
     const run_bytecode_tests = b.addRunArtifact(bytecode_tests);
-    const test_bytecode_step = b.step("test-bytecode", "Run opcode and bytecode metadata tests");
-    test_bytecode_step.dependOn(&run_bytecode_tests.step);
 
+    // 5. Frontend tests
     const frontend_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests/frontend/all.zig"),
@@ -549,10 +394,117 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-
     const run_frontend_tests = b.addRunArtifact(frontend_tests);
+
+    // 6. Builtins tests
+    const builtins_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/builtins/all.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "quickjs_zig_engine", .module = engine_mod },
+            },
+        }),
+    });
+    const run_builtins_tests = b.addRunArtifact(builtins_tests);
+
+    // 7. Tools and CLI tests
+    const tools_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/tools/all.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "test262_runner", .module = test262_runner_mod },
+            },
+        }),
+    });
+    const run_tools_tests = b.addRunArtifact(tools_tests);
+
+    const zjs_cli_tests = b.addTest(.{
+        .name = "zjs-cli",
+        .root_module = zjs_cli_mod,
+    });
+    const run_zjs_cli_tests = b.addRunArtifact(zjs_cli_tests);
+
+    const test262_runner_tests = b.addTest(.{
+        .root_module = test262_runner_mod,
+    });
+    const run_test262_runner_tests = b.addRunArtifact(test262_runner_tests);
+
+    // 8. OOM helpers tests
+    const oom_helpers_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    oom_helpers_test_mod.addOptions("oom_options", quick_oom_options);
+    const oom_helpers_tests = b.addTest(.{
+        .name = "exec-oom-helpers",
+        .root_module = oom_helpers_test_mod,
+    });
+    const run_oom_helpers_tests = b.addRunArtifact(oom_helpers_tests);
+
+    // User-facing steps to expose
+    const test_step = b.step("test", "Run all Zig tests (ReleaseSafe exec shards, fast warm runs, slow first cold compile)");
+    const test_debug_step = b.step("test-debug", "Run available Zig tests with exec shards in Debug mode (slower run, fast cold compile)");
+    const test_oom_step = b.step("test-oom", "Run sampled exec OOM fail-index sweeps in Debug mode");
+    const test_oom_exhaustive_step = b.step("test-oom-exhaustive", "Run exhaustive exec OOM fail-index sweeps in Debug mode (very slow)");
+
+    // Expose fine-grained steps as requested (only those selected to be kept)
+    const test_core_step = b.step("test-core", "Run core runtime foundation tests");
+    test_core_step.dependOn(&run_core_tests.step);
+
     const test_frontend_step = b.step("test-frontend", "Run frontend parser and emitter tests");
     test_frontend_step.dependOn(&run_frontend_tests.step);
+
+    const gc_stress_step = b.step("gc-stress", "Run deterministic GC stress tests");
+    gc_stress_step.dependOn(&run_gc_stress_tests.step);
+
+    // Filter logic variables
+    const oom_helpers_matches_filter = if (shard_filter) |filter|
+        std.mem.eql(u8, "exec-oom-helpers", filter) or
+            std.mem.eql(u8, "exec-oom-helpers-oom", filter) or
+            std.mem.eql(u8, "exec-oom-helpers-oom-exhaustive", filter)
+    else
+        true;
+
+    // Attach common non-exec tests to main test steps
+    inline for (&[_]*std.Build.Step{ test_step, test_debug_step }) |step| {
+        step.dependOn(&run_engine_root_tests.step);
+        step.dependOn(&run_engine_production_tests.step);
+        step.dependOn(&run_core_tests.step);
+        step.dependOn(&run_gc_stress_tests.step);
+        step.dependOn(&run_bytecode_tests.step);
+        step.dependOn(&run_frontend_tests.step);
+        step.dependOn(&run_builtins_tests.step);
+        step.dependOn(&run_tools_tests.step);
+        step.dependOn(&run_zjs_cli_tests.step);
+        step.dependOn(&run_test262_runner_tests.step);
+        if (oom_helpers_matches_filter) {
+            step.dependOn(&run_oom_helpers_tests.step);
+        }
+    }
+
+    const engine_release_safe_mod = b.addModule("quickjs_zig_engine_release_safe", .{
+        .root_source_file = b.path("src/engine/root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    engine_release_safe_mod.addOptions("build_options", engine_options);
+
+    const engine_oom_mod = b.addModule("quickjs_zig_engine_oom", .{
+        .root_source_file = b.path("src/engine/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    engine_oom_mod.addOptions("build_options", engine_options);
 
     // Each exec test source compiles into its own binary so the binaries can
     // be compiled and run in parallel during `zig build test`. Each binary
@@ -581,311 +533,142 @@ pub fn build(b: *std.Build) void {
         .{ .name = "exec-vm-iter-async", .path = "src/tests/exec/vm_iter_async.zig" },
     };
 
-    const test_exec_step = b.step("test-exec", "Run bytecode execution tests");
-    const oom_helpers_matches_filter = if (shard_filter) |filter|
-        std.mem.eql(u8, "exec-oom-helpers", filter) or
-            std.mem.eql(u8, "exec-oom-helpers-oom", filter) or
-            std.mem.eql(u8, "exec-oom-helpers-oom-exhaustive", filter)
-    else
-        true;
-    var exec_run_steps: [exec_shards.len]*std.Build.Step = undefined;
-    inline for (exec_shards, 0..) |shard, i| {
-        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
-        const test_mod = b.createModule(.{
-            .root_source_file = b.path(shard.path),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
-        });
-        test_mod.addOptions("build_options", engine_options);
-        if (execShardUsesOomOptions(shard.path)) {
-            test_mod.addOptions("oom_options", quick_oom_options);
-        }
-        const tests = b.addTest(.{
-            .name = shard.name,
-            .root_module = test_mod,
-        });
-        const run_tests = b.addRunArtifact(tests);
-        exec_run_steps[i] = &run_tests.step;
-        if (matches_filter) {
-            test_exec_step.dependOn(&run_tests.step);
-        }
-    }
-    const oom_helpers_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    oom_helpers_test_mod.addOptions("oom_options", quick_oom_options);
-    const oom_helpers_tests = b.addTest(.{
-        .name = "exec-oom-helpers",
-        .root_module = oom_helpers_test_mod,
-    });
-    const run_oom_helpers_tests = b.addRunArtifact(oom_helpers_tests);
-    if (oom_helpers_matches_filter) {
-        test_exec_step.dependOn(&run_oom_helpers_tests.step);
-    }
-
-    // `test`: separate ReleaseSafe exec test artifacts that share the
-    // engine compile via `engine_release_safe_mod`. ReleaseSafe keeps
-    // every safety check the Debug tests carry (overflow / undefined-
-    // behavior / index-out-of-bounds / leak detection), but trades the
-    // Debug allocator's heavy tracking and the per-call safety
-    // instrumentation for an LLVM-optimized binary. Empirically
-    // `eval(';')` drops from ~195 us/call to ~50 us/call, so the warm
-    // test wall time drops to roughly a third of `zig build test`
-    // (~10s -> ~5s on the 20-core ref machine).
-    //
-    // Cost: every test binary recompiles from scratch under
-    // ReleaseSafe (~3 min cold for the full set), and the cache lives
-    // in a separate per-optimize hash so flipping between
-    // `test` and `test-debug` does not steal each other's cached
-    // binaries.
-    const engine_release_safe_mod = b.addModule("quickjs_zig_engine_release_safe", .{
-        .root_source_file = b.path("src/engine/root.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-    });
-    engine_release_safe_mod.addOptions("build_options", engine_options);
-    const test_step = b.step("test", "Run all Zig tests (ReleaseSafe exec shards, fast warm runs, slow first cold compile)");
+    // Exec shards compilation and mapping to test steps
     inline for (exec_shards) |shard| {
-        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
-        const fast_test_mod = b.createModule(.{
-            .root_source_file = b.path(shard.path),
-            .target = target,
-            .optimize = .ReleaseSafe,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_release_safe_mod },
-            },
-        });
-        fast_test_mod.addOptions("build_options", engine_options);
-        if (execShardUsesOomOptions(shard.path)) {
-            fast_test_mod.addOptions("oom_options", quick_oom_options);
+        // 1. Debug/Default optimize mode
+        const debug_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
+        if (debug_matches_filter) {
+            const test_mod = b.createModule(.{
+                .root_source_file = b.path(shard.path),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "quickjs_zig_engine", .module = engine_mod },
+                },
+            });
+            test_mod.addOptions("build_options", engine_options);
+            if (execShardUsesOomOptions(shard.path)) {
+                test_mod.addOptions("oom_options", quick_oom_options);
+            }
+            const tests = b.addTest(.{
+                .name = shard.name,
+                .root_module = test_mod,
+            });
+            const run_tests = b.addRunArtifact(tests);
+            test_debug_step.dependOn(&run_tests.step);
         }
-        const fast_tests = b.addTest(.{
-            .name = shard.name ++ "-fast",
-            .root_module = fast_test_mod,
-        });
-        const run_fast_tests = b.addRunArtifact(fast_tests);
-        if (matches_filter) {
+
+        // 2. ReleaseSafe mode (used by the primary `test` step)
+        const fast_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
+        if (fast_matches_filter) {
+            const fast_test_mod = b.createModule(.{
+                .root_source_file = b.path(shard.path),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "quickjs_zig_engine", .module = engine_release_safe_mod },
+                },
+            });
+            fast_test_mod.addOptions("build_options", engine_options);
+            if (execShardUsesOomOptions(shard.path)) {
+                fast_test_mod.addOptions("oom_options", quick_oom_options);
+            }
+            const fast_tests = b.addTest(.{
+                .name = shard.name ++ "-fast",
+                .root_module = fast_test_mod,
+            });
+            const run_fast_tests = b.addRunArtifact(fast_tests);
             test_step.dependOn(&run_fast_tests.step);
         }
-    }
 
-    const builtins_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/builtins/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
-        }),
-    });
-
-    const run_builtins_tests = b.addRunArtifact(builtins_tests);
-    const test_builtins_step = b.step("test-builtins", "Run builtins and support library tests");
-    test_builtins_step.dependOn(&run_builtins_tests.step);
-
-    const tools_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/tools/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "test262_runner", .module = test262_runner_mod },
-            },
-        }),
-    });
-
-    const run_tools_tests = b.addRunArtifact(tools_tests);
-    const zjs_cli_tests = b.addTest(.{
-        .name = "zjs-cli",
-        .root_module = zjs_cli_mod,
-    });
-    const run_zjs_cli_tests = b.addRunArtifact(zjs_cli_tests);
-    const smoke_runner_tests = b.addTest(.{
-        .name = "smoke-runner",
-        .root_module = smoke_runner_mod,
-    });
-    const run_smoke_runner_tests = b.addRunArtifact(smoke_runner_tests);
-    const test262_protocol_tests = b.addTest(.{
-        .name = "test262-protocol",
-        .root_module = test262_protocol_mod,
-    });
-    const run_test262_protocol_tests = b.addRunArtifact(test262_protocol_tests);
-    const test262_runner_tests = b.addTest(.{
-        .root_module = test262_runner_mod,
-    });
-    const run_test262_runner_tests = b.addRunArtifact(test262_runner_tests);
-
-    const test_tools_step = b.step("test-tools", "Run CLI and validation tooling tests");
-    test_tools_step.dependOn(&run_tools_tests.step);
-    test_tools_step.dependOn(&run_zjs_cli_tests.step);
-    test_tools_step.dependOn(&run_smoke_runner_tests.step);
-    test_tools_step.dependOn(&run_test262_protocol_tests.step);
-    test_tools_step.dependOn(&run_test262_runner_tests.step);
-
-    const test_debug_step = b.step("test-debug", "Run available Zig tests with exec shards in Debug mode (slower run, fast cold compile)");
-    test_debug_step.dependOn(&run_engine_root_tests.step);
-    test_debug_step.dependOn(&run_engine_production_tests.step);
-    test_debug_step.dependOn(&run_core_tests.step);
-    test_debug_step.dependOn(&run_gc_stress_tests.step);
-    test_debug_step.dependOn(&run_bytecode_tests.step);
-    test_debug_step.dependOn(&run_frontend_tests.step);
-    inline for (exec_shards, 0..) |shard, i| {
-        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
-        if (matches_filter) {
-            test_debug_step.dependOn(exec_run_steps[i]);
-        }
-    }
-    if (oom_helpers_matches_filter) {
-        test_debug_step.dependOn(&run_oom_helpers_tests.step);
-    }
-    test_debug_step.dependOn(&run_builtins_tests.step);
-    test_debug_step.dependOn(&run_tools_tests.step);
-    test_debug_step.dependOn(&run_zjs_cli_tests.step);
-    test_debug_step.dependOn(&run_smoke_runner_tests.step);
-    test_debug_step.dependOn(&run_test262_protocol_tests.step);
-    test_debug_step.dependOn(&run_test262_runner_tests.step);
-
-    const engine_oom_mod = b.addModule("quickjs_zig_engine_oom", .{
-        .root_source_file = b.path("src/engine/root.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    engine_oom_mod.addOptions("build_options", engine_options);
-    const test_oom_step = b.step("test-oom", "Run sampled exec OOM fail-index sweeps in Debug mode");
-    const test_oom_exhaustive_step = b.step("test-oom-exhaustive", "Run exhaustive exec OOM fail-index sweeps in Debug mode (very slow)");
-    const sampled_oom_helpers_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    sampled_oom_helpers_test_mod.addOptions("oom_options", sampled_oom_options);
-    const sampled_oom_helpers_tests = b.addTest(.{
-        .name = "exec-oom-helpers-oom",
-        .root_module = sampled_oom_helpers_test_mod,
-        .filters = &.{"OOM"},
-    });
-    const run_sampled_oom_helpers_tests = b.addRunArtifact(sampled_oom_helpers_tests);
-    if (oom_helpers_matches_filter) {
-        test_oom_step.dependOn(&run_sampled_oom_helpers_tests.step);
-    }
-
-    const exhaustive_oom_helpers_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    exhaustive_oom_helpers_test_mod.addOptions("oom_options", exhaustive_oom_options);
-    const exhaustive_oom_helpers_tests = b.addTest(.{
-        .name = "exec-oom-helpers-oom-exhaustive",
-        .root_module = exhaustive_oom_helpers_test_mod,
-        .filters = &.{"OOM"},
-    });
-    const run_exhaustive_oom_helpers_tests = b.addRunArtifact(exhaustive_oom_helpers_tests);
-    if (oom_helpers_matches_filter) {
-        test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_helpers_tests.step);
-    }
-
-    inline for (exec_shards) |shard| {
-        const oom_matches_filter = if (shard_filter) |filter|
-            std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom", filter)
-        else
-            true;
-        const exhaustive_oom_matches_filter = if (shard_filter) |filter|
-            std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom-exhaustive", filter)
-        else
-            true;
-        const oom_test_mod = b.createModule(.{
-            .root_source_file = b.path(shard.path),
-            .target = target,
-            .optimize = .Debug,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_oom_mod },
-            },
-        });
-        oom_test_mod.addOptions("build_options", engine_options);
-        if (execShardUsesOomOptions(shard.path)) {
-            oom_test_mod.addOptions("oom_options", sampled_oom_options);
-        }
-        const oom_tests = b.addTest(.{
-            .name = shard.name ++ "-oom",
-            .root_module = oom_test_mod,
-            .filters = &.{"OOM"},
-        });
-        const run_oom_tests = b.addRunArtifact(oom_tests);
+        // 3. Sampled OOM mode (used by `test-oom` step)
+        const oom_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom", filter) else true;
         if (oom_matches_filter) {
+            const oom_test_mod = b.createModule(.{
+                .root_source_file = b.path(shard.path),
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "quickjs_zig_engine", .module = engine_oom_mod },
+                },
+            });
+            oom_test_mod.addOptions("build_options", engine_options);
+            if (execShardUsesOomOptions(shard.path)) {
+                oom_test_mod.addOptions("oom_options", sampled_oom_options);
+            }
+            const oom_tests = b.addTest(.{
+                .name = shard.name ++ "-oom",
+                .root_module = oom_test_mod,
+                .filters = &.{"OOM"},
+            });
+            const run_oom_tests = b.addRunArtifact(oom_tests);
             test_oom_step.dependOn(&run_oom_tests.step);
         }
 
-        const exhaustive_oom_test_mod = b.createModule(.{
-            .root_source_file = b.path(shard.path),
-            .target = target,
-            .optimize = .Debug,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_oom_mod },
-            },
-        });
-        exhaustive_oom_test_mod.addOptions("build_options", engine_options);
-        if (execShardUsesOomOptions(shard.path)) {
-            exhaustive_oom_test_mod.addOptions("oom_options", exhaustive_oom_options);
-        }
-        const exhaustive_oom_tests = b.addTest(.{
-            .name = shard.name ++ "-oom-exhaustive",
-            .root_module = exhaustive_oom_test_mod,
-            .filters = &.{"OOM"},
-        });
-        const run_exhaustive_oom_tests = b.addRunArtifact(exhaustive_oom_tests);
+        // 4. Exhaustive OOM mode (used by `test-oom-exhaustive` step)
+        const exhaustive_oom_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom-exhaustive", filter) else true;
         if (exhaustive_oom_matches_filter) {
+            const exhaustive_oom_test_mod = b.createModule(.{
+                .root_source_file = b.path(shard.path),
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "quickjs_zig_engine", .module = engine_oom_mod },
+                },
+            });
+            exhaustive_oom_test_mod.addOptions("build_options", engine_options);
+            if (execShardUsesOomOptions(shard.path)) {
+                exhaustive_oom_test_mod.addOptions("oom_options", exhaustive_oom_options);
+            }
+            const exhaustive_oom_tests = b.addTest(.{
+                .name = shard.name ++ "-oom-exhaustive",
+                .root_module = exhaustive_oom_test_mod,
+                .filters = &.{"OOM"},
+            });
+            const run_exhaustive_oom_tests = b.addRunArtifact(exhaustive_oom_tests);
             test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_tests.step);
         }
     }
 
-    // `test-fast` remains as an alias for `test` (ReleaseSafe exec shards) for compatibility
-    const test_fast_step = b.step("test-fast", "Run all Zig tests (ReleaseSafe exec shards, fast warm runs, slow first cold compile) [Alias for test]");
-    test_fast_step.dependOn(test_step);
-
-    // `test` also picks up the (cheap) non-exec test binaries
-    // from the Debug build so it remains a full drop-in replacement
-    // for `zig build test-debug`. Those non-exec binaries finish in <1s
-    // each even in Debug, so re-compiling them under ReleaseSafe just
-    // to save tens of milliseconds is not worth the extra cache
-    // entries.
-    test_step.dependOn(&run_engine_root_tests.step);
-    test_step.dependOn(&run_engine_production_tests.step);
-    test_step.dependOn(&run_core_tests.step);
-    test_step.dependOn(&run_gc_stress_tests.step);
-    test_step.dependOn(&run_bytecode_tests.step);
-    test_step.dependOn(&run_frontend_tests.step);
+    // 9. OOM helpers tests for OOM steps
     if (oom_helpers_matches_filter) {
-        test_step.dependOn(&run_oom_helpers_tests.step);
+        const sampled_oom_helpers_test_mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+        });
+        sampled_oom_helpers_test_mod.addOptions("oom_options", sampled_oom_options);
+        const sampled_oom_helpers_tests = b.addTest(.{
+            .name = "exec-oom-helpers-oom",
+            .root_module = sampled_oom_helpers_test_mod,
+            .filters = &.{"OOM"},
+        });
+        const run_sampled_oom_helpers_tests = b.addRunArtifact(sampled_oom_helpers_tests);
+        test_oom_step.dependOn(&run_sampled_oom_helpers_tests.step);
+
+        const exhaustive_oom_helpers_test_mod = b.createModule(.{
+            .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+        });
+        exhaustive_oom_helpers_test_mod.addOptions("oom_options", exhaustive_oom_options);
+        const exhaustive_oom_helpers_tests = b.addTest(.{
+            .name = "exec-oom-helpers-oom-exhaustive",
+            .root_module = exhaustive_oom_helpers_test_mod,
+            .filters = &.{"OOM"},
+        });
+        const run_exhaustive_oom_helpers_tests = b.addRunArtifact(exhaustive_oom_helpers_tests);
+        test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_helpers_tests.step);
     }
-    test_step.dependOn(&run_builtins_tests.step);
-    test_step.dependOn(&run_tools_tests.step);
-    test_step.dependOn(&run_zjs_cli_tests.step);
-    test_step.dependOn(&run_smoke_runner_tests.step);
-    test_step.dependOn(&run_test262_protocol_tests.step);
-    test_step.dependOn(&run_test262_runner_tests.step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
-    engine_production_gate_step.dependOn(test_fast_step);
     engine_production_gate_step.dependOn(gc_stress_step);
-    engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(test262_gate_step);
 }

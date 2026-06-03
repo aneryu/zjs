@@ -62,9 +62,7 @@ available only through git history.
 - `src/engine/builtins/`: ECMAScript built-in objects and constructors.
 - `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tools/`: smoke runner, test262 runner, and other tools.
 - `src/tests/`: Zig unit and integration test entrypoints.
-- `tests/zig-smoke/`: JavaScript smoke scripts, manifest, and golden output.
 - `test262/`: test262 checkout used by the local gate.
 - `tests/fixtures/`: fixture snapshots used by opcode and runner tests.
 
@@ -82,7 +80,7 @@ available only through git history.
 - `zig build test-oom --summary all` for sampled exec OOM fail-index coverage.
 - `zig build test-oom-exhaustive --summary all` for very slow full exec OOM
   fail-index audits.
-- `zig build smoke --summary all`
+
 - `git diff --check`
 
 ### test262
@@ -113,8 +111,7 @@ Missing or invalid arguments should print usage and exit non-zero.
 - Fix one problem class at a time; do not mix unrelated semantic domains.
 - Compare semantic fixes against QuickJS reference behavior and record key
   evidence.
-- After changes, run at least `zig build test --summary all` and
-  `zig build smoke --summary all`.
+- After changes, run at least `zig build test --summary all`.
 - Runner or test262 changes require the relevant runner fixture or target slice.
 - Keep non-trivial validation evidence close to the relevant code change,
   commit message, issue, or PR. Do not add broad status ledgers back to the
@@ -131,7 +128,7 @@ Missing or invalid arguments should print usage and exit non-zero.
 - Built-in object behavior: `src/engine/builtins/`.
 - RegExp, Unicode, BigInt, and number formatting: `src/engine/libs/`.
 - CLI behavior: `src/cli/`.
-- Smoke and test262 runner behavior: `src/tools/`.
+- test262 runner behavior: `src/cli/run_test262.zig`.
 
 ## Pre-Commit Checklist
 
@@ -139,6 +136,6 @@ Missing or invalid arguments should print usage and exit non-zero.
 - The change is limited to the minimum necessary files.
 - Related docs, tracking notes, or matrices are updated.
 - `zig build test --summary all` passes.
-- `zig build smoke --summary all` passes.
+
 - `git diff --check` passes.
 - No noisy logs, temporary debug output, or unrelated build noise were added.

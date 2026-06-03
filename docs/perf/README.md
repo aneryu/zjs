@@ -19,7 +19,7 @@ Run the current repeatable diagnostic benchmark with:
 zig build perf-benchmark --summary all
 ```
 
-This builds the ReleaseFast `zjs-test262` CLI and runs
+This builds the ReleaseFast `zjs` CLI and runs
 `tests/perf/microbench.js` with `--perf-json`. The fixture checks deterministic
 results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a

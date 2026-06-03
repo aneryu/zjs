@@ -29,13 +29,13 @@ pub const harness = struct {
     pub const Engine = HarnessEngine;
 };
 
-const Limits = struct {
+pub const Limits = struct {
     memory_bytes: ?usize = null,
     stack_bytes: ?usize = null,
     gc_threshold_bytes: ?usize = null,
 };
 
-const EngineOptions = struct {
+pub const EngineOptions = struct {
     allocator: std.mem.Allocator,
     trace_writer: ?*std.Io.Writer = null,
     limits: Limits = .{},
@@ -47,13 +47,15 @@ pub const ExternalHostCall = core.host_function.ExternalCall;
 pub const ExternalHostCallFn = core.host_function.ExternalCallFn;
 pub const ExternalHostFinalizer = core.host_function.ExternalFinalizer;
 
-const ExceptionInfo = struct {
+pub const ExceptionInfo = struct {
     value: JSValueHandle,
 
     pub fn deinit(self: *ExceptionInfo) void {
         self.value.deinit();
     }
 };
+
+pub const Engine = HarnessEngine;
 
 const HarnessEngine = struct {
     runtime: *core.JSRuntime,
