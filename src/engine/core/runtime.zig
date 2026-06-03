@@ -1455,6 +1455,26 @@ pub const JSRuntime = struct {
         const start_ns = profile.nowNanos();
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual, start_ns);
         self.gc.setMajorPhase(.mark_incremental);
+        self.tryRunMajorTraceMarkToCompletion(roots) catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return err;
+        };
+        self.gc.beginMajorWeakFixpoint();
+        self.tryRunMajorWeakFixpointToCompletion() catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return err;
+        };
+        self.runMajorFinalizationMetadataPostprocess() catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return err;
+        };
+        self.runMajorDeadWeakMetadataPostprocess();
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1480,10 +1500,274 @@ pub const JSRuntime = struct {
         return result;
     }
 
+    fn mapRootTraceError(err: RootTraceError) gc.CollectionError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.PayloadMarkFailed => error.PayloadMarkFailed,
+        };
+    }
+
+    fn tryRunMajorTraceMarkSome(
+        self: *JSRuntime,
+        roots: ?*const ValueRootFrame,
+        include_roots: bool,
+        max_items: usize,
+        scan_weak_edges: bool,
+    ) gc.CollectionError!bool {
+        const MajorTraceVisitor = struct {
+            rt: *JSRuntime,
+            scan_weak_edges: bool = false,
+            err: ?RootTraceError = null,
+
+            fn rootVisitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
+                const visitor: *@This() = @ptrCast(@alignCast(context));
+                try visitor.visitValue(slot);
+            }
+
+            fn rootVisitObject(context: *anyopaque, slot: *?*Object) RootTraceError!void {
+                const visitor: *@This() = @ptrCast(@alignCast(context));
+                try visitor.visitObject(slot);
+            }
+
+            pub fn visitObject(visitor: *@This(), slot: *?*Object) RootTraceError!void {
+                const obj = slot.* orelse return;
+                _ = try visitor.rt.gc.enqueueMajorTraceHeader(&obj.header);
+            }
+
+            pub fn visitValue(visitor: *@This(), slot: *JSValue) RootTraceError!void {
+                if (slot.refHeader()) |header| {
+                    try visitor.visitHeader(header);
+                }
+                if (slot.objectHeader()) |header| {
+                    try visitor.visitHeader(header);
+                }
+            }
+
+            pub fn visitSymbol(visitor: *@This(), symbol: *atom.Atom) RootTraceError!void {
+                _ = visitor;
+                _ = symbol;
+            }
+
+            pub fn visitWeakCollectionEntry(visitor: *@This(), entry: *object_mod.WeakCollectionEntry) RootTraceError!void {
+                if (!visitor.scan_weak_edges) return;
+                if (!visitor.rt.gc.majorTraceIdentityMarked(entry.key_identity)) return;
+                var value = entry.value;
+                try visitor.visitValue(&value);
+            }
+
+            pub fn visitFinalizationCell(visitor: *@This(), entry: *object_mod.FinalizationRegistryCell) RootTraceError!void {
+                if (!visitor.scan_weak_edges) return;
+                if (!entry.isActive()) return;
+                const target_identity = entry.target_identity orelse return;
+                if (!visitor.rt.gc.majorTraceIdentityMarked(target_identity)) return;
+                var held = entry.held_value;
+                try visitor.visitValue(&held);
+                var token = entry.unregister_token;
+                try visitor.visitValue(&token);
+            }
+
+            fn visitHeader(visitor: *@This(), header: *gc.Header) RootTraceError!void {
+                _ = try visitor.rt.gc.enqueueMajorTraceHeader(header);
+            }
+
+            fn drainSome(visitor: *@This(), max_items_inner: usize) RootTraceError!usize {
+                var processed: usize = 0;
+                while (processed < max_items_inner and visitor.rt.gc.hasMajorTraceWork()) {
+                    while (visitor.rt.gc.popMajorTraceObject()) |obj| {
+                        try obj.traceChildEdgesFallible(visitor.rt, visitor);
+                        processed += 1;
+                        if (processed >= max_items_inner) return processed;
+                    }
+                    while (visitor.rt.gc.popMajorTraceBytecode()) |fb| {
+                        try visitor.traceFunctionBytecode(fb);
+                        processed += 1;
+                        if (processed >= max_items_inner) return processed;
+                    }
+                }
+                return processed;
+            }
+
+            fn traceFunctionBytecode(visitor: *@This(), fb: *bytecode_function.FunctionBytecode) RootTraceError!void {
+                if (fb.class_fields_init) |*stored| try visitor.visitValue(stored);
+                for (fb.cpool) |*stored| try visitor.visitValue(stored);
+            }
+        };
+
+        var visitor = MajorTraceVisitor{ .rt = self, .scan_weak_edges = scan_weak_edges };
+        if (include_roots) {
+            self.gc.resetMajorTraceMark();
+            self.gc.setMajorPhase(.mark_roots);
+
+            var root_visitor = RootVisitor{
+                .context = &visitor,
+                .visit_value = MajorTraceVisitor.rootVisitValue,
+                .visit_object = MajorTraceVisitor.rootVisitObject,
+            };
+            self.traceRoots(roots orelse self.active_value_roots, &root_visitor) catch |err| return mapRootTraceError(err);
+        }
+
+        self.gc.setMajorPhase(if (scan_weak_edges or (!include_roots and self.gcStats().major_phase == .weak_fixpoint)) .weak_fixpoint else .mark_incremental);
+        _ = visitor.drainSome(max_items) catch |err| return mapRootTraceError(err);
+        return !self.gc.hasMajorTraceWork();
+    }
+
+    fn tryRunMajorTraceMarkToCompletion(
+        self: *JSRuntime,
+        roots: ?*const ValueRootFrame,
+    ) gc.CollectionError!void {
+        _ = try self.tryRunMajorTraceMarkSome(roots, true, std.math.maxInt(usize), false);
+    }
+
+    fn tryRunMajorWeakFixpointSome(self: *JSRuntime, max_items: usize) gc.CollectionError!bool {
+        self.gc.seedMajorWeakFixpoint() catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+        };
+        return self.tryRunMajorTraceMarkSome(null, false, max_items, true);
+    }
+
+    fn tryRunMajorWeakFixpointToCompletion(self: *JSRuntime) gc.CollectionError!void {
+        _ = try self.tryRunMajorWeakFixpointSome(std.math.maxInt(usize));
+    }
+
+    fn runMajorFinalizationMetadataPostprocess(self: *JSRuntime) gc.CollectionError!void {
+        var current = self.gc.gc_obj_list_head;
+        while (current) |node| {
+            const next = node.next;
+            const header = gc.headerFromGcNode(node);
+            if (header.kind != .object) {
+                current = next;
+                continue;
+            }
+            if (!self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1))) {
+                current = next;
+                continue;
+            }
+            const registry: *Object = @alignCast(@fieldParentPtr("header", header));
+            if (registry.finalizationRegistryCells().len == 0) {
+                current = next;
+                continue;
+            }
+
+            const cleanup_callback = registry.finalizationRegistryCleanupCallback();
+            const cells_slot = registry.finalizationRegistryCellsSlot();
+            for (cells_slot.*) |*cell| {
+                if (!cell.isActive() and !cell.isPending()) continue;
+                const target_identity = cell.target_identity orelse continue;
+                if ((target_identity & 1) != 0) continue;
+                if (self.gc.majorTraceIdentityMarked(target_identity)) {
+                    cell.state = .active;
+                    continue;
+                }
+
+                cell.state = .pending_enqueue;
+                var held = cell.held_value;
+                try self.enqueueMajorMetadataValue(&held);
+                var token = cell.unregister_token;
+                try self.enqueueMajorMetadataValue(&token);
+                _ = try self.tryRunMajorTraceMarkSome(null, false, std.math.maxInt(usize), false);
+                if (self.gc.majorTraceIdentityMarked(target_identity)) {
+                    cell.state = .active;
+                    continue;
+                }
+
+                if (cleanup_callback) |callback| try self.enqueueFinalizationJob(callback, cell.held_value);
+                cell.state = .queued;
+            }
+            current = next;
+        }
+    }
+
+    fn runMajorDeadWeakMetadataPostprocess(self: *JSRuntime) void {
+        var current = self.gc.gc_obj_list_head;
+        while (current) |node| {
+            const next = node.next;
+            const header = gc.headerFromGcNode(node);
+            if (header.kind != .object) {
+                current = next;
+                continue;
+            }
+            if (!self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1))) {
+                current = next;
+                continue;
+            }
+            const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+            if (obj.weakCollectionEntries().len != 0) {
+                const entries_slot = obj.weakCollectionEntriesSlot();
+                var removed_entry = false;
+                var index: usize = 0;
+                while (index < entries_slot.*.len) {
+                    const entry = &entries_slot.*[index];
+                    if ((entry.key_identity & 1) != 0 or self.gc.majorTraceIdentityMarked(entry.key_identity) or !self.metadataWeakValueSafeToDrop(entry.value)) {
+                        index += 1;
+                        continue;
+                    }
+
+                    entry.destroy(self);
+                    const last_index = entries_slot.*.len - 1;
+                    if (index < last_index) entries_slot.*[index] = entries_slot.*[last_index];
+                    entries_slot.* = entries_slot.*.ptr[0..last_index];
+                    removed_entry = true;
+                }
+                if (removed_entry) obj.clearCollectionIndex(self);
+            }
+            if (obj.weakRefTargetIdentity()) |identity| {
+                if ((identity & 1) == 0 and !self.gc.majorTraceIdentityMarked(identity)) {
+                    obj.clearWeakRefTargetIdentity(self);
+                }
+            }
+            current = next;
+        }
+    }
+
+    fn metadataWeakValueSafeToDrop(self: *JSRuntime, value: JSValue) bool {
+        if (value.refHeader()) |header| {
+            return self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1));
+        }
+        if (value.objectHeader()) |header| {
+            return self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1));
+        }
+        return true;
+    }
+
+    fn enqueueMajorMetadataValue(self: *JSRuntime, slot: *JSValue) gc.CollectionError!void {
+        if (slot.refHeader()) |header| {
+            _ = self.gc.enqueueMajorTraceHeader(header) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+            };
+        }
+        if (slot.objectHeader()) |header| {
+            _ = self.gc.enqueueMajorTraceHeader(header) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+            };
+        }
+    }
+
+    pub fn runMajorTraceMarkForTest(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        try self.tryRunMajorTraceMarkToCompletion(roots);
+    }
+
+    pub fn runMajorWeakFixpointForTest(self: *JSRuntime) gc.CollectionError!void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        self.gc.beginMajorWeakFixpoint();
+        try self.tryRunMajorWeakFixpointToCompletion();
+    }
+
+    pub fn runMajorFinalizationMetadataPostprocessForTest(self: *JSRuntime) gc.CollectionError!void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        try self.runMajorFinalizationMetadataPostprocess();
+    }
+
+    pub fn runMajorDeadWeakMetadataPostprocessForTest(self: *JSRuntime) void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        self.runMajorDeadWeakMetadataPostprocess();
+    }
+
     fn tryRunMajorMarkSliceWithValueRoots(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
         reason: gc.RequestReason,
+        point: gc.SchedulerPoint,
     ) gc.CollectionError!gc.CollectionResult {
         if (self.gc_running) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
@@ -1497,8 +1781,46 @@ pub const JSRuntime = struct {
         defer self.gc_running = false;
 
         const start_ns = profile.nowNanos();
-        self.gc.beginMajorCycle(reason, start_ns);
-        self.gc.setMajorPhase(.mark_incremental);
+        const start_new_cycle = !self.gc.hasActiveMajorCycle();
+        if (start_new_cycle) self.gc.beginMajorCycle(reason, start_ns);
+        switch (self.gcStats().major_phase) {
+            .mark_roots, .mark_incremental => {
+                const trace_done = self.tryRunMajorTraceMarkSome(roots, start_new_cycle, self.majorMarkObjectBudget(point), false) catch |err| {
+                    self.gc.recordFailure(err);
+                    self.gc.abortMajorCycle();
+                    self.gc.requestGC(.major, .collection_failed, .soon);
+                    return err;
+                };
+                if (!trace_done) {
+                    const end_ns = profile.nowNanos();
+                    return self.gc.finishMajorTraceSlice(if (end_ns > start_ns) end_ns - start_ns else 0);
+                }
+                self.gc.beginMajorWeakFixpoint();
+            },
+            .weak_fixpoint => {},
+            .sweep, .finalize_mark, .idle => {},
+        }
+
+        if (self.gcStats().major_phase == .weak_fixpoint) {
+            const weak_done = self.tryRunMajorWeakFixpointSome(self.majorMarkObjectBudget(point)) catch |err| {
+                self.gc.recordFailure(err);
+                self.gc.abortMajorCycle();
+                self.gc.requestGC(.major, .collection_failed, .soon);
+                return err;
+            };
+            if (!weak_done) {
+                const end_ns = profile.nowNanos();
+                return self.gc.finishMajorTraceSlice(if (end_ns > start_ns) end_ns - start_ns else 0);
+            }
+        }
+        self.runMajorFinalizationMetadataPostprocess() catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return err;
+        };
+        self.runMajorDeadWeakMetadataPostprocess();
+
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1536,6 +1858,12 @@ pub const JSRuntime = struct {
     }
 
     fn majorSweepPageBudget(self: *JSRuntime, point: gc.SchedulerPoint) usize {
+        if (point == .urgent) return std.math.maxInt(usize);
+        const budget_ns = self.gc.sliceBudgetNs(point);
+        return @max(@as(usize, 1), @as(usize, @intCast(budget_ns / 100_000)));
+    }
+
+    fn majorMarkObjectBudget(self: *JSRuntime, point: gc.SchedulerPoint) usize {
         if (point == .urgent) return std.math.maxInt(usize);
         const budget_ns = self.gc.sliceBudgetNs(point);
         return @max(@as(usize, 1), @as(usize, @intCast(budget_ns / 100_000)));
@@ -1805,8 +2133,8 @@ pub const JSRuntime = struct {
         const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
         const run_minor = self.gc.shouldRunMinorAt(scheduler_point);
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
-        const run_major_sweep = self.gc.hasActiveMajorCycle();
-        if (!run_minor and !run_major and !run_major_sweep) return .{};
+        const run_active_major = self.gc.hasActiveMajorCycle();
+        if (!run_minor and !run_major and !run_active_major) return .{};
 
         var result: gc.CollectionResult = .{};
         if (run_minor) {
@@ -1822,7 +2150,7 @@ pub const JSRuntime = struct {
                 gc.RequestReason.allocation_threshold
             else
                 gc.RequestReason.manual;
-            const major_result = try self.tryRunMajorMarkSliceWithValueRoots(roots orelse self.active_value_roots, reason);
+            const major_result = try self.tryRunMajorMarkSliceWithValueRoots(roots orelse self.active_value_roots, reason, scheduler_point);
             result.freed_objects +|= major_result.freed_objects;
             result.freed_bytecodes +|= major_result.freed_bytecodes;
             result.promoted_young_objects +|= major_result.promoted_young_objects;
@@ -1830,9 +2158,34 @@ pub const JSRuntime = struct {
             result.copied_young_objects +|= major_result.copied_young_objects;
             result.copied_young_bytes +|= major_result.copied_young_bytes;
             result.duration_ns +|= major_result.duration_ns;
-        } else if (run_major_sweep) {
-            const sweep_result = self.runMajorSweepSlice(scheduler_point);
-            result.duration_ns +|= sweep_result.duration_ns;
+            if (scheduler_point == .urgent and self.gc.hasActiveMajorCycle()) {
+                const sweep_result = self.runMajorSweepSlice(scheduler_point);
+                result.duration_ns +|= sweep_result.duration_ns;
+            }
+        } else if (run_active_major) {
+            switch (self.gcStats().major_phase) {
+                .mark_roots, .mark_incremental, .weak_fixpoint => {
+                    const reason = self.gc.activeMajorReason() orelse gc.RequestReason.manual;
+                    const major_result = try self.tryRunMajorMarkSliceWithValueRoots(roots orelse self.active_value_roots, reason, scheduler_point);
+                    result.freed_objects +|= major_result.freed_objects;
+                    result.freed_bytecodes +|= major_result.freed_bytecodes;
+                    result.promoted_young_objects +|= major_result.promoted_young_objects;
+                    result.promoted_young_bytes +|= major_result.promoted_young_bytes;
+                    result.copied_young_objects +|= major_result.copied_young_objects;
+                    result.copied_young_bytes +|= major_result.copied_young_bytes;
+                    result.duration_ns +|= major_result.duration_ns;
+                    if (scheduler_point == .urgent and self.gc.hasActiveMajorCycle()) {
+                        const sweep_result = self.runMajorSweepSlice(scheduler_point);
+                        result.duration_ns +|= sweep_result.duration_ns;
+                    }
+                },
+                .sweep => {
+                    const sweep_result = self.runMajorSweepSlice(scheduler_point);
+                    result.duration_ns +|= sweep_result.duration_ns;
+                },
+                .finalize_mark => {},
+                .idle => {},
+            }
         }
         return result;
     }

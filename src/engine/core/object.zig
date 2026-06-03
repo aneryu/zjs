@@ -2843,6 +2843,17 @@ pub const Object = struct {
         return null;
     }
 
+    pub fn weakRefTargetIdentity(self: *const Object) ?usize {
+        if (self.objectDataPayloadConst()) |payload| return payload.weak_target_identity;
+        return null;
+    }
+
+    pub fn clearWeakRefTargetIdentity(self: *Object, rt: *JSRuntime) void {
+        const payload = self.objectDataPayload() orelse return;
+        payload.weak_target_identity = null;
+        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+    }
+
     pub fn setWeakRefTarget(self: *Object, rt: *JSRuntime, target: JSValue) !void {
         std.debug.assert(self.class_id == class.ids.weak_ref);
         var rooted_target = target;

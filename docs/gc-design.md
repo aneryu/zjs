@@ -2148,7 +2148,7 @@ JIT call boundary GC protocol
 ```text
 提交边界（2026-06-03）：
   - 当前状态是可用的中间态，不是完整的新 GC 终态。
-  - 最近一次验证：zig build test --summary all，967/967 tests passed。
+  - 最近一次验证：zig build test --summary all，976/976 tests passed。
   - 最近一次验证：zig build zjs --summary all passed。
   - 最近一次验证：git diff --check passed。
   - 当前 build graph 不包含 smoke step；zig build smoke --summary all 会返回 no step named 'smoke'。
@@ -2167,7 +2167,7 @@ dense array elements、function captures、generator frame lists、module namesp
 nursery tuning。
 large object classification。
 old/large page metadata allocator、size-class page、free-list、allocation bitmap 与 mark bitmap。
-major GC 当前已拆出第一个 P2 中间态：STW cycle-removal mark backend 完成后进入 `.sweep` phase，old/large page metadata 通过 sweep cursor 按 scheduler budget 进行 lazy/page-slice sweep；active sweep 可在 callback boundary / idle poll 继续推进，不再由 pollGC 的 major mark 路径 sweep-all。
+major GC 当前已拆出第一个 P2 中间态：`beginMajorCycle` 只进入 mark phase，不提前启动 sweep cursor；root/strong-edge metadata mark prepass 会通过 `traceRoots` 和 object/FunctionBytecode worklist 标记 old/large page mark bitmap，并可按 scheduler budget 在 callback boundary / idle poll 分片推进；metadata weak/finalization fixpoint 会在 `.weak_fixpoint` phase 按已标记 object key/target 追踪 WeakMap value 与 active FinalizationRegistry held/token slots；metadata finalization postprocess 会按 metadata mark state enqueue object-target dead finalization cleanup 并保护 held value；metadata dead-weak postprocess 已覆盖 object-key 未标记且 weak value 已由 metadata mark 证明存活的 weak entry sweep，以及 WeakRef object target 未标记时的 identity cleanup；之后兼容调用现有 STW cycle-removal backend 作为最终语义后端；cycle-removal mark backend 完成后进入 `.sweep` phase，old/large page metadata 通过 sweep cursor 按 scheduler budget 进行 page-slice sweep；active sweep 可在 callback boundary / idle poll 继续推进，不再由 pollGC 的 major mark 路径 sweep-all；old/large allocation slow path 会先 lazy sweep 同 space 的 pending page 再增长 page metadata；`forceMajorGC` / urgent major poll 会在返回前完成 active mark+weak+sweep，不留下半完成 major cycle。
 GC scheduler request、callback/idle/safepoint 入口。
 native pin API、RSS/cgroup pressure request、deferred native cleanup queue（external host / std file close / class payload finalizer）。
 heap verifier 覆盖 heap/live bytes、page slot/bitmap/free-list accounting、pin metadata、remembered set。
@@ -2185,9 +2185,10 @@ P1:
   - 为移动 young object 继续补齐 collection 内所有 root、slot、handle、dirty card 更新与验证。
 
 P2:
-  - 将 major GC 的 mark roots / mark some / weak fixpoint 从当前 STW cycle-collector backend 继续拆成真正 incremental slice。
-  - 继续让 callback boundary / idle poll 按时间预算推进 active major mark/weak/sweep slice；当前已覆盖 active sweep slice。
-  - 继续扩展 lazy sweep/page recovery 到更完整的 sweep accounting、failure recovery 和 final completion gate。
+  - 将当前已独立且可分片的 major root/strong-edge metadata mark prepass、metadata weak/finalization fixpoint、metadata finalization enqueue、metadata dead weak safe-sweep 与 WeakRef cleanup 逐步变成 cycle collection 前的 authoritative mark state。
+  - 继续拆出现有 STW cycle-collector backend 中的剩余 resurrection / 完整 WeakMap value-garbage dead weak sweep / symbol weak target 语义，避免 metadata mark 完成后还需要完整 STW 复算。
+  - 继续让 callback boundary / idle poll 按时间预算推进 active major mark/weak/sweep slice；当前 active metadata mark、metadata weak/finalization fixpoint 与 active sweep slice 已覆盖。
+  - 继续扩展 lazy sweep/page recovery 到更完整的 failure recovery、跨 space allocation retry 和非 urgent 场景的 final completion gate。
 
 P3:
   - 增加 GC worker、atomic mark bits、concurrent mark stack、concurrent sweep page states。

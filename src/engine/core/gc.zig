@@ -554,6 +554,17 @@ pub const SpaceAccount = struct {
         return self.pages[slot.page_index].markSlot(slot.slot_index);
     }
 
+    fn markSlotIfUnmarked(self: *SpaceAccount, slot: PageSlot) bool {
+        if (!slot.isValid() or slot.page_index >= self.pages.len) return false;
+        const page = &self.pages[slot.page_index];
+        if (page.isMarked(slot.slot_index)) return false;
+        return page.markSlot(slot.slot_index);
+    }
+
+    fn clearMarkBits(self: *SpaceAccount) void {
+        for (self.pages) |*page| page.clearMarkBits();
+    }
+
     fn trimFreePages(self: *SpaceAccount, retain_hot_empty_pages: usize) void {
         var retained_pages: usize = 0;
         for (self.pages) |*page| {
@@ -1130,6 +1141,7 @@ pub const Registry = struct {
     major_reason: ?RequestReason = null,
     major_epoch: u64 = 0,
     major_started_ns: u64 = 0,
+    major_weak_seeded: bool = false,
     minor_request: Request = .{ .kind = .minor },
     major_request: Request = .{ .kind = .major },
     nursery: Nursery = .{},
@@ -1441,8 +1453,6 @@ pub const Registry = struct {
         self.major_epoch +%= 1;
         self.major_started_ns = start_ns;
         self.stats.current_mark_stack_depth = 0;
-        self.old_space.startSweep(self.fragmentationTriggerPerMille());
-        self.large_space.startSweep(self.fragmentationTriggerPerMille());
     }
 
     pub fn setMajorPhase(self: *Registry, phase: MajorPhase) void {
@@ -1458,13 +1468,117 @@ pub const Registry = struct {
         self.major_phase = .idle;
         self.major_reason = null;
         self.major_started_ns = 0;
-        self.stats.current_mark_stack_depth = 0;
+        self.clearMajorTraceMark();
         self.old_space.cancelSweep(self.fragmentationTriggerPerMille());
         self.large_space.cancelSweep(self.fragmentationTriggerPerMille());
     }
 
+    pub fn resetMajorTraceMark(self: *Registry) void {
+        self.clearMajorTraceMark();
+        self.visited.clearRetainingCapacity();
+    }
+
+    pub fn clearMajorTraceMark(self: *Registry) void {
+        self.old_space.clearMarkBits();
+        self.large_space.clearMarkBits();
+        self.object_worklist.clearRetainingCapacity();
+        self.bytecode_worklist.clearRetainingCapacity();
+        self.major_weak_seeded = false;
+        self.stats.current_mark_stack_depth = 0;
+    }
+
+    pub fn enqueueMajorTraceHeader(self: *Registry, header: *GCObjectHeader) !bool {
+        if (header.kind != .object and header.kind != .function_bytecode) return false;
+        const entry = try self.visited.getOrPut(@intFromPtr(header));
+        if (entry.found_existing) return false;
+
+        _ = self.markMajorTraceSlot(header);
+        switch (header.kind) {
+            .object => {
+                const obj: *object.Object = @alignCast(@fieldParentPtr("header", header));
+                try self.object_worklist.append(self.memory.persistent_allocator, obj);
+            },
+            .function_bytecode => {
+                const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                try self.bytecode_worklist.append(self.memory.persistent_allocator, fb);
+            },
+            .string, .big_int => unreachable,
+        }
+        self.recordMarkStackDepth(self.majorTraceWorkDepth());
+        return true;
+    }
+
+    pub fn popMajorTraceObject(self: *Registry) ?*object.Object {
+        const obj = self.object_worklist.pop() orelse return null;
+        self.recordMarkStackDepth(self.majorTraceWorkDepth());
+        return obj;
+    }
+
+    pub fn popMajorTraceBytecode(self: *Registry) ?*bytecode_function.FunctionBytecode {
+        const fb = self.bytecode_worklist.pop() orelse return null;
+        self.recordMarkStackDepth(self.majorTraceWorkDepth());
+        return fb;
+    }
+
+    pub fn hasMajorTraceWork(self: Registry) bool {
+        return self.object_worklist.items.len != 0 or self.bytecode_worklist.items.len != 0;
+    }
+
+    pub fn beginMajorWeakFixpoint(self: *Registry) void {
+        if (self.major_phase == .idle) return;
+        self.major_phase = .weak_fixpoint;
+        self.object_worklist.clearRetainingCapacity();
+        self.bytecode_worklist.clearRetainingCapacity();
+        self.major_weak_seeded = false;
+        self.stats.current_mark_stack_depth = 0;
+    }
+
+    pub fn seedMajorWeakFixpoint(self: *Registry) !void {
+        if (self.major_weak_seeded) return;
+        var iterator = self.visited.keyIterator();
+        while (iterator.next()) |address| {
+            const header: *GCObjectHeader = @ptrFromInt(address.*);
+            if (header.kind != .object) continue;
+            const obj: *object.Object = @alignCast(@fieldParentPtr("header", header));
+            try self.object_worklist.append(self.memory.persistent_allocator, obj);
+        }
+        self.major_weak_seeded = true;
+        self.recordMarkStackDepth(self.majorTraceWorkDepth());
+    }
+
+    pub fn majorTraceIdentityMarked(self: Registry, identity: usize) bool {
+        if ((identity & 1) != 0) return false;
+        return self.visited.contains(identity);
+    }
+
+    fn majorTraceWorkDepth(self: Registry) usize {
+        return self.object_worklist.items.len + self.bytecode_worklist.items.len;
+    }
+
+    fn markMajorTraceSlot(self: *Registry, header: *GCObjectHeader) bool {
+        const index = self.heapAllocationIndex(header) orelse return false;
+        const entry = self.heap_allocations[index];
+        return switch (entry.generation) {
+            .young => false,
+            .old, .immortal => self.old_space.markSlotIfUnmarked(entry.page),
+            .large => self.large_space.markSlotIfUnmarked(entry.page),
+        };
+    }
+
+    pub fn majorTraceMarkedForTest(self: Registry, header: *const GCObjectHeader) bool {
+        if (!builtin.is_test) @compileError("test-only helper");
+        const index = self.heapAllocationIndex(header) orelse return false;
+        const entry = self.heap_allocations[index];
+        return switch (entry.generation) {
+            .young => false,
+            .old, .immortal => self.old_space.pageMarked(entry.page),
+            .large => self.large_space.pageMarked(entry.page),
+        };
+    }
+
     pub fn finishMajorCycle(self: *Registry, result: CollectionResult) void {
         self.recordIncrementalSlice(result.duration_ns);
+        self.startMajorSweep();
         const swept_pages = self.old_space.sweepAllPages(self.fragmentationTriggerPerMille()) +| self.large_space.sweepAllPages(self.fragmentationTriggerPerMille());
         self.stats.last_swept_page_count = swept_pages;
         self.stats.swept_page_count +|= swept_pages;
@@ -1478,6 +1592,7 @@ pub const Registry = struct {
     pub fn finishMajorMarkSlice(self: *Registry, result: CollectionResult) void {
         self.recordIncrementalSlice(result.duration_ns);
         self.stats.current_mark_stack_depth = 0;
+        self.startMajorSweep();
         if (self.hasPendingMajorSweep()) {
             self.major_phase = .sweep;
             return;
@@ -1485,6 +1600,11 @@ pub const Registry = struct {
         self.major_phase = .idle;
         self.major_reason = null;
         self.major_started_ns = 0;
+    }
+
+    pub fn finishMajorTraceSlice(self: *Registry, duration_ns: u64) CollectionResult {
+        self.recordIncrementalSlice(duration_ns);
+        return .{ .duration_ns = duration_ns };
     }
 
     pub fn hasActiveMajorCycle(self: Registry) bool {
@@ -1519,6 +1639,24 @@ pub const Registry = struct {
             self.stats.current_mark_stack_depth = 0;
         }
         return .{ .duration_ns = duration_ns };
+    }
+
+    fn startMajorSweep(self: *Registry) void {
+        if (self.hasPendingMajorSweep()) return;
+        const trigger = self.fragmentationTriggerPerMille();
+        self.old_space.startSweep(trigger);
+        self.large_space.startSweep(trigger);
+    }
+
+    fn sweepSpaceForAllocation(self: *Registry, generation: Generation, max_pages: usize) void {
+        if (self.major_phase != .sweep or max_pages == 0) return;
+        const swept_pages = switch (generation) {
+            .young => 0,
+            .old, .immortal => self.old_space.sweepSomePages(max_pages, self.fragmentationTriggerPerMille()),
+            .large => self.large_space.sweepSomePages(max_pages, self.fragmentationTriggerPerMille()),
+        };
+        if (swept_pages == 0) return;
+        _ = self.finishMajorSweepSlice(swept_pages, 0);
     }
 
     pub fn recordIncrementalSlice(self: *Registry, duration_ns: u64) void {
@@ -1885,8 +2023,14 @@ pub const Registry = struct {
     fn recordSpaceAlloc(self: *Registry, generation: Generation, bytes: usize) !PageSlot {
         const slot = switch (generation) {
             .young => PageSlot{},
-            .old, .immortal => try self.old_space.allocateSizeClass(self.memory, bytes),
-            .large => try self.large_space.allocateLarge(self.memory, bytes),
+            .old, .immortal => blk: {
+                self.sweepSpaceForAllocation(generation, 1);
+                break :blk try self.old_space.allocateSizeClass(self.memory, bytes);
+            },
+            .large => blk: {
+                self.sweepSpaceForAllocation(generation, 1);
+                break :blk try self.large_space.allocateLarge(self.memory, bytes);
+            },
         };
         self.refreshSpacePageState();
         return slot;

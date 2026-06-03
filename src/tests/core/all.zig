@@ -3652,6 +3652,278 @@ test "gc callback boundary defers non-urgent major work until idle" {
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
+test "major gc begins mark phase without starting sweep cursor" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const object = try core.Object.create(&rt, core.class.ids.object, null);
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(object.value());
+    defer scope.deinit();
+
+    const before = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), before.old_page_count);
+    try std.testing.expectEqual(@as(usize, 0), before.old_needs_sweep_page_count);
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    const after_begin = rt.gcStats();
+    try std.testing.expectEqual(core.gc.MajorPhase.mark_roots, after_begin.major_phase);
+    try std.testing.expectEqual(@as(usize, 0), after_begin.old_needs_sweep_page_count);
+    try std.testing.expectEqual(@as(usize, 0), after_begin.large_needs_sweep_page_count);
+
+    rt.gc.abortMajorCycle();
+    const after_abort = rt.gcStats();
+    try std.testing.expectEqual(core.gc.MajorPhase.idle, after_abort.major_phase);
+    try std.testing.expectEqual(@as(usize, 0), after_abort.old_needs_sweep_page_count);
+}
+
+test "major trace mark prepass marks roots and strong child edges" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const parent = try core.Object.create(&rt, core.class.ids.object, null);
+    const child = try core.Object.create(&rt, core.class.ids.object, null);
+    const key = try rt.internAtom("majorTraceChild");
+    defer rt.atoms.free(key);
+    try parent.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(&rt);
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(parent.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+
+    const after_mark = rt.gcStats();
+    try std.testing.expectEqual(core.gc.MajorPhase.mark_incremental, after_mark.major_phase);
+    try std.testing.expectEqual(@as(usize, 0), after_mark.old_needs_sweep_page_count);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&parent.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&child.header));
+    try std.testing.expect(after_mark.mark_stack_peak >= 1);
+
+    rt.gc.abortMajorCycle();
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&parent.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&child.header));
+}
+
+test "major metadata weak fixpoint marks weakmap value for marked object key" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weakmap = try core.Object.create(&rt, core.class.ids.weakmap, null);
+    const key = try core.Object.create(&rt, core.class.ids.object, null);
+    const value = try core.Object.create(&rt, core.class.ids.object, null);
+
+    try appendWeakCollectionEntry(&rt, weakmap, key, value.value());
+    value.value().free(&rt);
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(weakmap.value());
+    _ = try scope.local(key.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weakmap.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&key.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&value.header));
+
+    try rt.runMajorWeakFixpointForTest();
+
+    const after_weak = rt.gcStats();
+    try std.testing.expectEqual(core.gc.MajorPhase.weak_fixpoint, after_weak.major_phase);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata weak fixpoint marks active finalization held slots for marked target" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const registry = try core.Object.create(&rt, core.class.ids.finalization_registry, null);
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    const held = try core.Object.create(&rt, core.class.ids.object, null);
+    const token = try core.Object.create(&rt, core.class.ids.object, null);
+
+    try appendFinalizationRegistryCell(&rt, registry, target.value(), held.value(), token.value());
+    held.value().free(&rt);
+    token.value().free(&rt);
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(registry.value());
+    _ = try scope.local(target.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&registry.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&target.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&held.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&token.header));
+
+    try rt.runMajorWeakFixpointForTest();
+
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&held.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&token.header));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata finalization postprocess enqueues dead target cleanup" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const registry = try core.Object.create(&rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = core.JSValue.int32(17);
+
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const self_key = try rt.internAtom("majorMetadataFinalizationSelf");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(&rt, self_key, core.Descriptor.data(target_value, true, true, true));
+
+    const held = try core.Object.create(&rt, core.class.ids.object, null);
+    try registry.appendFinalizationRegistryCell(&rt, target_value, held.value(), core.JSValue.undefinedValue());
+    held.value().free(&rt);
+    target_value.free(&rt);
+    target_value = core.JSValue.undefinedValue();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(registry.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&registry.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&target.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&held.header));
+
+    try rt.runMajorWeakFixpointForTest();
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&target.header));
+
+    try rt.runMajorFinalizationMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(core.object.FinalizationRegistryCellState.queued, registry.finalizationRegistryCells()[0].state);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&held.header));
+
+    rt.clearPendingFinalizationJobs();
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata dead weak sweep removes dead object key entry with marked value" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weakmap = try core.Object.create(&rt, core.class.ids.weakmap, null);
+    const key = try core.Object.create(&rt, core.class.ids.object, null);
+    var key_value = key.value();
+    const self_key = try rt.internAtom("majorMetadataDeadWeakSelf");
+    defer rt.atoms.free(self_key);
+    try key.defineOwnProperty(&rt, self_key, core.Descriptor.data(key_value, true, true, true));
+
+    const value = try core.Object.create(&rt, core.class.ids.object, null);
+    try appendWeakCollectionEntry(&rt, weakmap, key, value.value());
+    key_value.free(&rt);
+    key_value = core.JSValue.undefinedValue();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(weakmap.value());
+    _ = try scope.local(value.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weakmap.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&key.header));
+    try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
+
+    try rt.runMajorWeakFixpointForTest();
+    rt.runMajorDeadWeakMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata dead weak sweep clears dead weakref object target" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weak_ref = try core.Object.create(&rt, core.class.ids.weak_ref, null);
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const self_key = try rt.internAtom("majorMetadataDeadWeakRefSelf");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(&rt, self_key, core.Descriptor.data(target_value, true, true, true));
+    try weak_ref.setWeakRefTarget(&rt, target_value);
+    target_value.free(&rt);
+    target_value = core.JSValue.undefinedValue();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(weak_ref.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weak_ref.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&target.header));
+
+    {
+        const live = weak_ref.weakRefDeref(&rt);
+        defer live.free(&rt);
+        try std.testing.expectEqual(&target.header, live.refHeader().?);
+    }
+
+    try rt.runMajorWeakFixpointForTest();
+    rt.runMajorDeadWeakMetadataPostprocessForTest();
+
+    try std.testing.expect(weak_ref.weakRefDeref(&rt).isUndefined());
+
+    rt.gc.abortMajorCycle();
+}
+
 test "major gc sweep advances across callback boundary slices" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
@@ -3678,21 +3950,73 @@ test "major gc sweep advances across callback boundary slices" {
     rt.gc.requestGC(.major, .manual, .soon);
     _ = try rt.pollGC(null, .idle);
 
+    const after_first_mark_slice = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 0), after_first_mark_slice.major_gc_count);
+    try std.testing.expectEqual(@as(usize, 1), after_first_mark_slice.major_slice_count);
+    try std.testing.expectEqual(core.gc.MajorPhase.mark_incremental, after_first_mark_slice.major_phase);
+    try std.testing.expectEqual(@as(usize, 0), after_first_mark_slice.old_needs_sweep_page_count);
+    try std.testing.expect(!rt.gcPendingForTest());
+
+    var active_mark_guard: usize = 0;
+    while (rt.gcStats().major_phase == .mark_incremental or rt.gcStats().major_phase == .weak_fixpoint) {
+        _ = try rt.pollGC(null, .callback_boundary);
+        active_mark_guard += 1;
+        try std.testing.expect(active_mark_guard < 512);
+    }
+
     const after_mark = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), after_mark.major_gc_count);
-    try std.testing.expectEqual(@as(usize, 1), after_mark.major_slice_count);
+    try std.testing.expect(after_mark.major_slice_count > after_first_mark_slice.major_slice_count);
     try std.testing.expectEqual(core.gc.MajorPhase.sweep, after_mark.major_phase);
     try std.testing.expect(after_mark.old_needs_sweep_page_count > 1);
     try std.testing.expectEqual(@as(usize, 0), after_mark.last_swept_page_count);
-    try std.testing.expect(!rt.gcPendingForTest());
 
     _ = try rt.pollGC(null, .callback_boundary);
 
     const after_sweep = rt.gcStats();
-    try std.testing.expectEqual(@as(usize, 2), after_sweep.major_slice_count);
+    try std.testing.expectEqual(after_mark.major_slice_count + 1, after_sweep.major_slice_count);
     try std.testing.expectEqual(@as(usize, 1), after_sweep.last_swept_page_count);
     try std.testing.expect(after_sweep.old_needs_sweep_page_count < after_mark.old_needs_sweep_page_count);
     try std.testing.expect(after_sweep.sweep_time_ns == after_sweep.last_incremental_slice_ns);
+}
+
+test "old allocation lazily sweeps active major page before growing page metadata" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .callback_slice_budget_ns = 1,
+            .idle_slice_budget_ns = 1,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var scope = rt.enterHandleScope();
+    defer scope.deinit();
+
+    const first = try core.Object.create(&rt, core.class.ids.object, null);
+    _ = try scope.local(first.value());
+
+    const before = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), before.old_page_count);
+
+    rt.gc.requestGC(.major, .manual, .soon);
+    _ = try rt.pollGC(null, .idle);
+
+    const after_mark = rt.gcStats();
+    try std.testing.expectEqual(core.gc.MajorPhase.sweep, after_mark.major_phase);
+    try std.testing.expectEqual(@as(usize, 1), after_mark.old_needs_sweep_page_count);
+    try std.testing.expectEqual(@as(usize, 1), after_mark.major_slice_count);
+
+    const second = try core.Object.create(&rt, core.class.ids.object, null);
+    _ = try scope.local(second.value());
+
+    const after_alloc = rt.gcStats();
+    try std.testing.expectEqual(core.gc.MajorPhase.idle, after_alloc.major_phase);
+    try std.testing.expectEqual(@as(usize, 0), after_alloc.old_needs_sweep_page_count);
+    try std.testing.expectEqual(before.old_page_count, after_alloc.old_page_count);
+    try std.testing.expectEqual(@as(usize, 2), after_alloc.major_slice_count);
+    try std.testing.expectEqual(@as(usize, 1), after_alloc.last_swept_page_count);
 }
 
 test "gc scheduler keeps simultaneous minor and major requests separate" {
@@ -3755,6 +4079,41 @@ test "runtime force major gc runs an urgent major poll" {
     try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
+    try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "runtime force major gc completes active sweep before returning" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .callback_slice_budget_ns = 1,
+            .idle_slice_budget_ns = 1,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var scope = rt.enterHandleScope();
+    defer scope.deinit();
+
+    var index: usize = 0;
+    while (index < 128) : (index += 1) {
+        const object = try core.Object.create(&rt, core.class.ids.object, null);
+        _ = try scope.local(object.value());
+    }
+
+    const before = rt.gcStats();
+    try std.testing.expect(before.old_page_count > 1);
+
+    const result = try rt.forceMajorGC(null);
+    try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
+
+    const after = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), after.major_gc_count);
+    try std.testing.expectEqual(core.gc.MajorPhase.idle, after.major_phase);
+    try std.testing.expectEqual(@as(usize, 0), after.old_needs_sweep_page_count);
+    try std.testing.expectEqual(@as(usize, 2), after.major_slice_count);
+    try std.testing.expect(after.last_swept_page_count >= before.old_page_count);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
