@@ -150,6 +150,10 @@ pub const RootSlot = struct {
     }
 };
 
+const ExternalValueRoot = struct {
+    value: JSValue = JSValue.undefinedValue(),
+};
+
 pub const WeakPersistentCallback = *const fn (runtime: *JSRuntime, context: ?*anyopaque) void;
 
 pub const WeakRootSlot = struct {
@@ -482,7 +486,7 @@ pub const JSRuntime = struct {
     weak_root_slots_capacity: usize = 0,
     external_symbol_roots: []atom.Atom = &.{},
     external_symbol_roots_capacity: usize = 0,
-    external_value_roots: []JSValue = &.{},
+    external_value_roots: []ExternalValueRoot = &.{},
     external_value_roots_capacity: usize = 0,
     active_value_roots: ?*const ValueRootFrame = null,
     pending_finalization_jobs: []FinalizationJob = &.{},
@@ -765,7 +769,7 @@ pub const JSRuntime = struct {
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
         const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
         const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
-        const external_value_roots: []JSValue = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
+        const external_value_roots: []ExternalValueRoot = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
         const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
         const deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = if (self.deferred_class_payload_finalizers_capacity != 0) self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity] else self.deferred_class_payload_finalizers[0..0];
@@ -796,7 +800,7 @@ pub const JSRuntime = struct {
         if (persistent_root_slots.len != 0) self.memory.free(*RootSlot, persistent_root_slots);
         if (weak_root_slots.len != 0) self.memory.free(*WeakRootSlot, weak_root_slots);
         if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
-        if (external_value_roots.len != 0) self.memory.free(JSValue, external_value_roots);
+        if (external_value_roots.len != 0) self.memory.free(ExternalValueRoot, external_value_roots);
         if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
@@ -938,7 +942,9 @@ pub const JSRuntime = struct {
         for (self.persistent_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
-        try visitor.values(self.external_value_roots);
+        for (self.external_value_roots) |*root| {
+            try visitor.value(&root.value);
+        }
         for (self.pending_finalization_jobs) |*job| {
             try job.traceRoots(visitor);
         }
@@ -1216,6 +1222,11 @@ pub const JSRuntime = struct {
         return self.persistent_root_slots.len;
     }
 
+    pub fn externalValueRootCountForTest(self: JSRuntime) usize {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.external_value_roots.len;
+    }
+
     pub fn registerExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) !void {
         if (self.atoms.kind(atom_id) != .symbol) return;
         const retained = self.atoms.dup(atom_id);
@@ -1230,14 +1241,19 @@ pub const JSRuntime = struct {
     /// 1. Values registered with `registerExternalValueSymbolRoot` must be unregistered with
     ///    `unregisterExternalValueSymbolRoot` when the host no longer needs them.
     /// 2. If a registered JSValue is a Symbol atom, it is retained via the atom subsystem.
-    /// 3. Registered value roots are preserved across cycle-collection GC passes.
+    /// 3. Registered value roots are retained and pinned until unregister/clear because the host
+    ///    owns a by-value JSValue copy that cannot be rewritten by moving nursery GC.
     pub fn registerExternalValueSymbolRoot(self: *JSRuntime, value: JSValue) !bool {
         if (value.asSymbolAtom()) |atom_id| {
             try self.registerExternalSymbolRoot(atom_id);
             return true;
         }
         if (!valueMayContainNestedSymbolRoots(value)) return false;
-        try appendRuntimeValue(&self.memory, &self.external_value_roots, &self.external_value_roots_capacity, value);
+        var root = ExternalValueRoot{ .value = value.dup() };
+        errdefer root.value.free(self);
+        try self.pinExternalValueRoot(&root);
+        errdefer self.unpinExternalValueRoot(root);
+        try appendRuntimeExternalValueRoot(&self.memory, &self.external_value_roots, &self.external_value_roots_capacity, root);
         return true;
     }
 
@@ -1336,21 +1352,23 @@ pub const JSRuntime = struct {
     fn unregisterExternalValueRoot(self: *JSRuntime, value: JSValue) void {
         var found: ?usize = null;
         for (self.external_value_roots, 0..) |registered, index| {
-            if (registered.same(value)) {
+            if (registered.value.same(value)) {
                 found = index;
                 break;
             }
         }
         const index = found orelse return;
+        const root = self.external_value_roots[index];
         if (index + 1 < self.external_value_roots.len) {
-            std.mem.copyForwards(JSValue, self.external_value_roots[index .. self.external_value_roots.len - 1], self.external_value_roots[index + 1 ..]);
+            std.mem.copyForwards(ExternalValueRoot, self.external_value_roots[index .. self.external_value_roots.len - 1], self.external_value_roots[index + 1 ..]);
         }
         self.external_value_roots = self.external_value_roots[0 .. self.external_value_roots.len - 1];
+        self.releaseExternalValueRoot(root);
         if (self.external_value_roots.len == 0 and self.external_value_roots_capacity != 0) {
             const old_roots = self.external_value_roots.ptr[0..self.external_value_roots_capacity];
             self.external_value_roots = &.{};
             self.external_value_roots_capacity = 0;
-            self.memory.free(JSValue, old_roots);
+            self.memory.free(ExternalValueRoot, old_roots);
         }
     }
 
@@ -1359,7 +1377,23 @@ pub const JSRuntime = struct {
         const capacity = self.external_value_roots_capacity;
         self.external_value_roots = &.{};
         self.external_value_roots_capacity = 0;
-        if (capacity != 0) self.memory.free(JSValue, roots.ptr[0..capacity]);
+        for (roots) |root| self.releaseExternalValueRoot(root);
+        if (capacity != 0) self.memory.free(ExternalValueRoot, roots.ptr[0..capacity]);
+    }
+
+    fn pinExternalValueRoot(self: *JSRuntime, root: *ExternalValueRoot) !void {
+        const header = root.value.refHeader() orelse root.value.objectHeader() orelse return;
+        try self.gc.pinHeader(header);
+    }
+
+    fn unpinExternalValueRoot(self: *JSRuntime, root: ExternalValueRoot) void {
+        const header = root.value.refHeader() orelse root.value.objectHeader() orelse return;
+        self.gc.unpinHeader(header);
+    }
+
+    fn releaseExternalValueRoot(self: *JSRuntime, root: ExternalValueRoot) void {
+        self.unpinExternalValueRoot(root);
+        root.value.free(self);
     }
 
     pub fn registerExternalHostFunction(self: *JSRuntime, record: host_function.ExternalRecord) !u32 {
@@ -1446,7 +1480,7 @@ pub const JSRuntime = struct {
         return result;
     }
 
-    fn tryCollectMinorNonMoving(
+    fn tryCollectMinorMoving(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
     ) gc.CollectionError!gc.CollectionResult {
@@ -1465,19 +1499,15 @@ pub const JSRuntime = struct {
         const MinorPromotionVisitor = struct {
             rt: *JSRuntime,
             object_worklist: std.ArrayList(*Object) = .empty,
-            bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode) = .empty,
             freed_objects: usize = 0,
             promoted_young_objects: usize = 0,
             promoted_young_bytes: usize = 0,
             copied_young_objects: usize = 0,
             copied_young_bytes: usize = 0,
-            in_place_young_promotions: usize = 0,
-            in_place_young_promotion_bytes: usize = 0,
             err: ?gc.CollectionError = null,
 
             fn deinit(self_visitor: *@This()) void {
                 self_visitor.object_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
-                self_visitor.bytecode_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
             }
 
             fn rootVisitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
@@ -1508,6 +1538,17 @@ pub const JSRuntime = struct {
                 self_visitor.rt.rewriteForwardedValueSlot(slot);
             }
 
+            pub fn visitWeakCollectionEntry(self_visitor: *@This(), entry: *object_mod.WeakCollectionEntry) !void {
+                if (!self_visitor.rt.weakIdentityIsCurrentlyLive(entry.key_identity)) return;
+                try self_visitor.visitValue(&entry.value);
+            }
+
+            pub fn visitFinalizationCell(self_visitor: *@This(), entry: *object_mod.FinalizationRegistryCell) !void {
+                if (!entry.keepsHeldValuesAlive()) return;
+                try self_visitor.visitValue(&entry.held_value);
+                try self_visitor.visitValue(&entry.unregister_token);
+            }
+
             fn evacuateHeader(self_visitor: *@This(), header: *gc.Header) !void {
                 if (header.generation() != .young) return;
 
@@ -1527,7 +1568,7 @@ pub const JSRuntime = struct {
                         errdefer if (!moved) self_visitor.rt.memory.destroy(Object, new_obj);
                         new_obj.* = old_obj.*;
                         try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, new_obj);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
+                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len);
                         try self_visitor.rt.gc.recordForwarding(header, &new_obj.header);
                         try self_visitor.rt.gc.moveYoungAllocationToOld(header, &new_obj.header);
                         self_visitor.rt.gc.replaceNode(&old_obj.gc, &new_obj.gc);
@@ -1536,14 +1577,7 @@ pub const JSRuntime = struct {
                         self_visitor.copied_young_objects +|= 1;
                         self_visitor.copied_young_bytes +|= moved_bytes;
                     },
-                    .function_bytecode => {
-                        const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                        try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
-                        try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
-                        self_visitor.in_place_young_promotions +|= 1;
-                        self_visitor.in_place_young_promotion_bytes +|= moved_bytes;
-                    },
+                    .function_bytecode => unreachable,
                     .string, .big_int => {},
                 }
 
@@ -1592,16 +1626,9 @@ pub const JSRuntime = struct {
 
             fn drain(self_visitor: *@This()) !void {
                 var object_index: usize = 0;
-                var bytecode_index: usize = 0;
-                while (object_index < self_visitor.object_worklist.items.len or bytecode_index < self_visitor.bytecode_worklist.items.len) {
-                    while (object_index < self_visitor.object_worklist.items.len) : (object_index += 1) {
-                        const obj = self_visitor.object_worklist.items[object_index];
-                        try obj.traceChildEdgesFallible(self_visitor.rt, self_visitor);
-                    }
-                    while (bytecode_index < self_visitor.bytecode_worklist.items.len) : (bytecode_index += 1) {
-                        const fb = self_visitor.bytecode_worklist.items[bytecode_index];
-                        try self_visitor.traceFunctionBytecode(fb);
-                    }
+                while (object_index < self_visitor.object_worklist.items.len) : (object_index += 1) {
+                    const obj = self_visitor.object_worklist.items[object_index];
+                    try obj.traceChildEdgesFallible(self_visitor.rt, self_visitor);
                 }
             }
 
@@ -1682,8 +1709,6 @@ pub const JSRuntime = struct {
             .promoted_young_bytes = visitor.promoted_young_bytes,
             .copied_young_objects = visitor.copied_young_objects,
             .copied_young_bytes = visitor.copied_young_bytes,
-            .in_place_young_promotions = visitor.in_place_young_promotions,
-            .in_place_young_promotion_bytes = visitor.in_place_young_promotion_bytes,
             .nursery_allocated_bytes = nursery_allocated_bytes,
             .duration_ns = blk: {
                 const end_ns = profile.nowNanos();
@@ -1691,6 +1716,7 @@ pub const JSRuntime = struct {
             },
         };
         self.gc.finishMinorCollection(result);
+        self.gc.releaseForwardingShadows(self);
         if (builtin.mode == .Debug) {
             self.gc.verifyMinorPostcondition() catch unreachable;
             self.gc.verifyHeapAccounting() catch unreachable;
@@ -1722,7 +1748,7 @@ pub const JSRuntime = struct {
 
         var result: gc.CollectionResult = .{};
         if (run_minor) {
-            result = try self.tryCollectMinorNonMoving(roots orelse self.active_value_roots);
+            result = try self.tryCollectMinorMoving(roots orelse self.active_value_roots);
         }
 
         const major_request = self.gc.pendingMajorRequest();
@@ -1742,8 +1768,6 @@ pub const JSRuntime = struct {
             result.promoted_young_bytes +|= major_result.promoted_young_bytes;
             result.copied_young_objects +|= major_result.copied_young_objects;
             result.copied_young_bytes +|= major_result.copied_young_bytes;
-            result.in_place_young_promotions +|= major_result.in_place_young_promotions;
-            result.in_place_young_promotion_bytes +|= major_result.in_place_young_promotion_bytes;
             result.duration_ns +|= major_result.duration_ns;
         }
         return result;
@@ -2808,17 +2832,17 @@ fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capaci
     slice.*[len] = item;
 }
 
-fn appendRuntimeValue(account: *memory.MemoryAccount, slice: *[]JSValue, capacity: *usize, item: JSValue) !void {
+fn appendRuntimeExternalValueRoot(account: *memory.MemoryAccount, slice: *[]ExternalValueRoot, capacity: *usize, item: ExternalValueRoot) !void {
     if (slice.*.len == capacity.*) {
         const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(JSValue, next_capacity);
-        errdefer account.free(JSValue, next);
+        const next = try account.alloc(ExternalValueRoot, next_capacity);
+        errdefer account.free(ExternalValueRoot, next);
         @memcpy(next[0..slice.*.len], slice.*);
         const old_capacity = capacity.*;
         const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(JSValue, old);
+        if (old_capacity != 0) account.free(ExternalValueRoot, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];
