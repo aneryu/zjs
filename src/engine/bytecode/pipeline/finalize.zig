@@ -70,9 +70,6 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         fd.memory.free(bytecode_function.FunctionBytecode, slice);
     };
 
-    try rt.gc.add(&fb.header);
-    registered = true;
-
     // Copy flags and metadata
     fb.is_strict_mode = fd.is_strict_mode;
     fb.has_prototype = fd.has_prototype;
@@ -182,6 +179,9 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         }
     }
     cacheSimpleNumericBytecode(fb);
+
+    try rt.gc.addWithGeneration(&fb.header, .old, fb.heapByteSize());
+    registered = true;
 
     committed = true;
     return slice;

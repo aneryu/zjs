@@ -13,6 +13,7 @@ const bytecode_function = @import("../bytecode/function.zig");
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 pub const card_size: usize = 512;
+pub const logical_page_size: usize = 16 * KB;
 
 pub const Mode = enum {
     balanced,
@@ -33,11 +34,14 @@ pub const Policy = struct {
 
     old_heap_growth_factor: f64 = 1.6,
     old_fragmentation_trigger: f64 = 0.45,
+    old_fragmentation_trigger_per_mille: usize = 450,
 
     large_object_threshold: usize = 8 * KB,
 
     callback_slice_budget_ns: u64 = 300_000,
     idle_slice_budget_ns: u64 = 2_000_000,
+    allocation_slow_path_budget_ns: u64 = 2_000_000,
+    native_cleanup_slice_jobs: usize = 8,
 
     young_weight: usize = 1,
     old_weight: usize = 4,
@@ -47,6 +51,10 @@ pub const Policy = struct {
     major_debt_threshold: usize = 64 * MB,
     external_soft_limit: ?usize = null,
     external_hard_limit: ?usize = null,
+    rss_soft_limit: ?usize = null,
+    rss_hard_limit: ?usize = null,
+    cgroup_soft_ratio_per_mille: usize = 0,
+    cgroup_hard_ratio_per_mille: usize = 0,
 
     decommit_empty_pages: bool = true,
     retain_hot_empty_pages: usize = 64,
@@ -68,6 +76,8 @@ pub const Policy = struct {
                 policy.old_heap_growth_factor = 1.8;
                 policy.callback_slice_budget_ns = 200_000;
                 policy.idle_slice_budget_ns = 2_000_000;
+                policy.allocation_slow_path_budget_ns = 2_000_000;
+                policy.native_cleanup_slice_jobs = 16;
             },
             .low_rss => {
                 policy.enable_nursery = true;
@@ -78,6 +88,9 @@ pub const Policy = struct {
                 policy.idle_slice_budget_ns = 5_000_000;
                 policy.decommit_empty_pages = true;
                 policy.external_weight = 12;
+                policy.native_cleanup_slice_jobs = 16;
+                policy.cgroup_soft_ratio_per_mille = 850;
+                policy.cgroup_hard_ratio_per_mille = 950;
             },
             .low_latency => {
                 policy.enable_nursery = true;
@@ -86,6 +99,8 @@ pub const Policy = struct {
                 policy.minor_pause_target_ns = 1_000_000;
                 policy.callback_slice_budget_ns = 100_000;
                 policy.idle_slice_budget_ns = 1_000_000;
+                policy.allocation_slow_path_budget_ns = 500_000;
+                policy.native_cleanup_slice_jobs = 4;
             },
         }
         return policy;
@@ -94,14 +109,17 @@ pub const Policy = struct {
 
 pub const ExternalMemoryToken = struct {
     registry: ?*Registry = null,
+    id: u64 = 0,
     bytes: usize = 0,
 
     pub fn release(self: *ExternalMemoryToken) void {
         const registry = self.registry orelse return;
+        const id = self.id;
         const bytes = self.bytes;
         self.registry = null;
+        self.id = 0;
         self.bytes = 0;
-        registry.reportExternalFree(bytes);
+        registry.releaseExternalToken(id, bytes);
     }
 
     pub fn deinit(self: *ExternalMemoryToken) void {
@@ -134,12 +152,41 @@ pub const Phase = enum {
     cycle,
 };
 
+pub const MajorPhase = enum(u8) {
+    idle,
+    mark_roots,
+    mark_incremental,
+    weak_fixpoint,
+    finalize_mark,
+    sweep,
+};
+
+pub const PageState = enum(u8) {
+    allocating,
+    full,
+    marking,
+    needs_sweep,
+    sweeping,
+    swept,
+    empty,
+    decommitted,
+};
+
+pub const SchedulerPoint = enum(u8) {
+    allocation_slow_path,
+    callback_boundary,
+    idle,
+    safepoint,
+    urgent,
+};
+
 pub const RequestReason = enum(u8) {
     manual,
     nursery_full,
     allocation_threshold,
     allocation_debt,
     external_memory,
+    rss_pressure,
     collection_failed,
 };
 
@@ -158,6 +205,11 @@ pub const Request = struct {
     kind: RequestKind = .major,
     reason: ?RequestReason = null,
     urgency: RequestUrgency = .soon,
+};
+
+pub const PressureRequest = struct {
+    reason: RequestReason,
+    urgency: RequestUrgency,
 };
 
 pub const Nursery = struct {
@@ -189,6 +241,138 @@ pub const Generation = enum(u2) {
     large = 2,
     immortal = 3,
 };
+
+pub const HeapAllocation = struct {
+    header: *GCObjectHeader,
+    generation: Generation,
+    bytes: usize = 0,
+};
+
+pub const ExternalTokenEntry = struct {
+    id: u64 = 0,
+    bytes: usize = 0,
+};
+
+pub const PinEntry = struct {
+    header: *GCObjectHeader,
+    count: usize = 0,
+};
+
+pub const SpaceAccount = struct {
+    live_bytes: usize = 0,
+    committed_bytes: usize = 0,
+    free_bytes: usize = 0,
+    decommitted_bytes: usize = 0,
+    allocating_page_count: usize = 0,
+    full_page_count: usize = 0,
+    empty_page_count: usize = 0,
+    decommitted_page_count: usize = 0,
+    needs_sweep_page_count: usize = 0,
+    evacuation_candidate_page_count: usize = 0,
+    sweep_cursor_page: usize = 0,
+
+    fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
+        if (bytes == 0) return;
+        self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);
+        if (self.free_bytes >= bytes) {
+            self.free_bytes -= bytes;
+            return;
+        }
+
+        const needed = bytes - self.free_bytes;
+        self.free_bytes = 0;
+        const committed = alignForwardSaturating(needed, logical_page_size);
+        self.committed_bytes = std.math.add(usize, self.committed_bytes, committed) catch std.math.maxInt(usize);
+        if (committed > needed) {
+            self.free_bytes = std.math.add(usize, self.free_bytes, committed - needed) catch std.math.maxInt(usize);
+        }
+    }
+
+    fn recordFree(self: *SpaceAccount, bytes: usize, retain_hot_empty_pages: usize, decommit_empty_pages: bool) void {
+        if (bytes == 0) return;
+        self.live_bytes -|= bytes;
+        self.free_bytes = std.math.add(usize, self.free_bytes, bytes) catch std.math.maxInt(usize);
+        if (decommit_empty_pages) self.trimFreePages(retain_hot_empty_pages);
+    }
+
+    fn trimFreePages(self: *SpaceAccount, retain_hot_empty_pages: usize) void {
+        const retain_bytes = std.math.mul(usize, retain_hot_empty_pages, logical_page_size) catch std.math.maxInt(usize);
+        if (self.free_bytes <= retain_bytes) return;
+        const releasable = alignDown(self.free_bytes - retain_bytes, logical_page_size);
+        if (releasable == 0) return;
+        self.free_bytes -= releasable;
+        self.committed_bytes -|= releasable;
+        self.decommitted_bytes = std.math.add(usize, self.decommitted_bytes, releasable) catch std.math.maxInt(usize);
+    }
+
+    fn fragmentationPerMille(self: SpaceAccount) usize {
+        return ratioPerMille(self.free_bytes, self.committed_bytes);
+    }
+
+    fn refreshPageState(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
+        const committed_pages = self.committedPageCount();
+        const empty_pages = @min(committed_pages, self.free_bytes / logical_page_size);
+        const live_pages = @min(committed_pages, alignForwardSaturating(self.live_bytes, logical_page_size) / logical_page_size);
+        self.empty_page_count = empty_pages;
+        self.decommitted_page_count = self.decommitted_bytes / logical_page_size;
+        self.full_page_count = @min(live_pages, self.live_bytes / logical_page_size);
+        self.allocating_page_count = if (live_pages > self.full_page_count) 1 else 0;
+        const fragmented_pages = committed_pages -| self.full_page_count -| self.empty_page_count -| self.allocating_page_count;
+        self.evacuation_candidate_page_count = if (fragmentation_trigger_per_mille != 0 and self.fragmentationPerMille() >= fragmentation_trigger_per_mille)
+            fragmented_pages
+        else
+            0;
+        if (self.needs_sweep_page_count > committed_pages) self.needs_sweep_page_count = committed_pages;
+        if (self.sweep_cursor_page > committed_pages) self.sweep_cursor_page = committed_pages;
+    }
+
+    fn startSweep(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
+        self.refreshPageState(fragmentation_trigger_per_mille);
+        self.needs_sweep_page_count = self.committedPageCount() -| self.empty_page_count -| self.decommitted_page_count;
+        self.sweep_cursor_page = 0;
+    }
+
+    fn sweepSomePages(self: *SpaceAccount, max_pages: usize, fragmentation_trigger_per_mille: usize) usize {
+        if (max_pages == 0 or self.needs_sweep_page_count == 0) return 0;
+        const swept = @min(max_pages, self.needs_sweep_page_count);
+        self.needs_sweep_page_count -= swept;
+        self.sweep_cursor_page +|= swept;
+        if (self.needs_sweep_page_count == 0) self.sweep_cursor_page = 0;
+        self.refreshPageState(fragmentation_trigger_per_mille);
+        return swept;
+    }
+
+    fn sweepAllPages(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) usize {
+        return self.sweepSomePages(std.math.maxInt(usize), fragmentation_trigger_per_mille);
+    }
+
+    fn cancelSweep(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
+        self.needs_sweep_page_count = 0;
+        self.sweep_cursor_page = 0;
+        self.refreshPageState(fragmentation_trigger_per_mille);
+    }
+
+    fn committedPageCount(self: SpaceAccount) usize {
+        return self.committed_bytes / logical_page_size;
+    }
+};
+
+fn ratioPerMille(numerator: usize, denominator: usize) usize {
+    if (denominator == 0) return 0;
+    const scaled = std.math.mul(usize, numerator, 1000) catch std.math.maxInt(usize);
+    return @min(@as(usize, 1000), scaled / denominator);
+}
+
+fn alignForwardSaturating(value: usize, alignment: usize) usize {
+    if (value == 0) return 0;
+    const rem = value % alignment;
+    if (rem == 0) return value;
+    return std.math.add(usize, value, alignment - rem) catch std.math.maxInt(usize);
+}
+
+fn alignDown(value: usize, alignment: usize) usize {
+    return value - (value % alignment);
+}
 
 const generation_mask: u4 = 0b0011;
 const remembered_mask: u4 = 0b0100;
@@ -318,6 +502,34 @@ pub const CollectionResult = struct {
     duration_ns: u64 = 0,
 };
 
+const pause_sample_capacity: usize = 64;
+
+const PauseSamples = struct {
+    values: [pause_sample_capacity]u64 = [_]u64{0} ** pause_sample_capacity,
+    len: usize = 0,
+    next: usize = 0,
+
+    fn record(self: *PauseSamples, duration_ns: u64) void {
+        self.values[self.next] = duration_ns;
+        self.next = (self.next + 1) % pause_sample_capacity;
+        if (self.len < pause_sample_capacity) self.len += 1;
+    }
+
+    fn percentile(self: PauseSamples, per_mille: usize) u64 {
+        if (self.len == 0) return 0;
+        var scratch = self.values;
+        const samples = scratch[0..self.len];
+        std.mem.sort(u64, samples, {}, u64LessThan);
+        const clamped = @min(per_mille, @as(usize, 1000));
+        const rank = @max(@as(usize, 1), (clamped * self.len + 999) / 1000);
+        return samples[@min(rank - 1, self.len - 1)];
+    }
+};
+
+fn u64LessThan(_: void, lhs: u64, rhs: u64) bool {
+    return lhs < rhs;
+}
+
 pub const InvariantError = error{
     CorruptGcList,
     NegativeRefCount,
@@ -330,6 +542,25 @@ pub const InvariantError = error{
     NurseryEntryNotYoung,
     MissingRememberedEdge,
     MissingDirtyCard,
+    DuplicateHeapAllocation,
+    MissingHeapAllocation,
+    HeapLiveBytesMismatch,
+    YoungLiveBytesMismatch,
+    OldLiveBytesMismatch,
+    LargeObjectBytesMismatch,
+    OldSpaceLiveBytesMismatch,
+    LargeSpaceLiveBytesMismatch,
+    OldSpaceCommittedBytesMismatch,
+    LargeSpaceCommittedBytesMismatch,
+    OldSpacePageStateMismatch,
+    LargeSpacePageStateMismatch,
+    DuplicateExternalMemoryToken,
+    EmptyExternalMemoryToken,
+    ExternalTokenBytesMismatch,
+    LeakedExternalMemoryToken,
+    DuplicatePinEntry,
+    EmptyPinEntry,
+    PinnedHeaderFlagMismatch,
 };
 
 /// 19. GE Stats
@@ -347,13 +578,29 @@ pub const GeStats = struct {
     minor_gc_count: usize = 0,
     minor_gc_time_ns: u64 = 0,
     last_minor_pause_ns: u64 = 0,
+    minor_pause_samples: PauseSamples = .{},
     last_minor_survival_per_mille: usize = 0,
+    last_promotion_per_mille: usize = 0,
     nursery_resize_count: usize = 0,
     promoted_young_objects: usize = 0,
     promoted_young_bytes: usize = 0,
+    major_pause_samples: PauseSamples = .{},
+    incremental_slice_samples: PauseSamples = .{},
+    last_incremental_slice_ns: u64 = 0,
+    major_slice_count: usize = 0,
+    concurrent_mark_time_ns: u64 = 0,
+    sweep_time_ns: u64 = 0,
+    swept_page_count: usize = 0,
+    last_swept_page_count: usize = 0,
+    current_mark_stack_depth: usize = 0,
+    mark_stack_peak: usize = 0,
 
     allocated_bytes: usize = 0,
     peak_allocated_bytes: usize = 0,
+    heap_live_bytes: usize = 0,
+    young_live_bytes: usize = 0,
+    old_live_bytes: usize = 0,
+    large_object_bytes: usize = 0,
     collections: usize = 0,
     freed_objects: usize = 0,
 
@@ -368,6 +615,7 @@ pub const GeStats = struct {
     peak_external_bytes: usize = 0,
     external_alloc_count: usize = 0,
     external_free_count: usize = 0,
+    external_invalid_release_count: usize = 0,
     allocation_debt: usize = 0,
     gc_request_count: usize = 0,
     last_request_reason: ?RequestReason = null,
@@ -376,6 +624,33 @@ pub const GeStats = struct {
 pub const Stats = struct {
     total_allocated_bytes: usize = 0,
     peak_allocated_bytes: usize = 0,
+    heap_live_bytes: usize = 0,
+    young_live_bytes: usize = 0,
+    old_live_bytes: usize = 0,
+    large_object_bytes: usize = 0,
+    heap_committed_bytes: usize = 0,
+    young_committed_bytes: usize = 0,
+    old_committed_bytes: usize = 0,
+    old_empty_page_bytes: usize = 0,
+    large_committed_bytes: usize = 0,
+    large_empty_page_bytes: usize = 0,
+    empty_page_bytes: usize = 0,
+    decommitted_bytes: usize = 0,
+    old_fragmentation_ratio: usize = 0,
+    old_page_count: usize = 0,
+    old_allocating_page_count: usize = 0,
+    old_full_page_count: usize = 0,
+    old_empty_page_count: usize = 0,
+    old_decommitted_page_count: usize = 0,
+    old_needs_sweep_page_count: usize = 0,
+    old_sweep_cursor_page: usize = 0,
+    old_evacuation_candidate_page_count: usize = 0,
+    large_page_count: usize = 0,
+    large_empty_page_count: usize = 0,
+    large_decommitted_page_count: usize = 0,
+    large_needs_sweep_page_count: usize = 0,
+    rss_bytes: usize = 0,
+    cgroup_limit_bytes: usize = 0,
 
     young_allocated_bytes: usize = 0,
     young_alloc_count: usize = 0,
@@ -395,15 +670,36 @@ pub const Stats = struct {
     peak_external_bytes: usize = 0,
     external_alloc_count: usize = 0,
     external_free_count: usize = 0,
+    external_token_count: usize = 0,
+    external_token_bytes: usize = 0,
+    external_invalid_release_count: usize = 0,
     allocation_debt: usize = 0,
 
     minor_gc_count: usize = 0,
     minor_gc_time_ns: u64 = 0,
     last_minor_pause_ns: u64 = 0,
+    minor_pause_ns_p50: u64 = 0,
+    minor_pause_ns_p95: u64 = 0,
+    minor_pause_ns_p99: u64 = 0,
     last_minor_survival_per_mille: usize = 0,
+    last_promotion_per_mille: usize = 0,
     nursery_resize_count: usize = 0,
     major_gc_count: usize = 0,
     major_gc_time_ns: u64 = 0,
+    major_phase: MajorPhase = .idle,
+    major_slice_count: usize = 0,
+    last_incremental_slice_ns: u64 = 0,
+    major_pause_ns_p50: u64 = 0,
+    major_pause_ns_p95: u64 = 0,
+    major_pause_ns_p99: u64 = 0,
+    incremental_slice_ns_p50: u64 = 0,
+    incremental_slice_ns_p95: u64 = 0,
+    incremental_slice_ns_p99: u64 = 0,
+    concurrent_mark_time_ns: u64 = 0,
+    sweep_time_ns: u64 = 0,
+    swept_page_count: usize = 0,
+    last_swept_page_count: usize = 0,
+    mark_stack_peak: usize = 0,
     failed_collections: usize = 0,
     last_failure: FailureKind = .none,
     freed_objects: usize = 0,
@@ -413,9 +709,14 @@ pub const Stats = struct {
     remembered_set_size: usize = 0,
     dirty_card_count: usize = 0,
     forwarding_entry_count: usize = 0,
+    pinned_cell_count: usize = 0,
+    weak_ref_count: usize = 0,
+    finalizer_queue_length: usize = 0,
     pending_finalization_job_count: usize = 0,
     deferred_native_cleanup_count: usize = 0,
     deferred_native_cleanup_run_count: usize = 0,
+    deferred_class_payload_finalizer_count: usize = 0,
+    deferred_class_payload_finalizer_run_count: usize = 0,
 
     gc_request_count: usize = 0,
     pending_minor: bool = false,
@@ -442,11 +743,24 @@ pub const Registry = struct {
     forwarding_entries_capacity: usize = 0,
     nursery_entries: []NurseryEntry = &.{},
     nursery_entries_capacity: usize = 0,
+    heap_allocations: []HeapAllocation = &.{},
+    heap_allocations_capacity: usize = 0,
+    external_tokens: []ExternalTokenEntry = &.{},
+    external_tokens_capacity: usize = 0,
+    next_external_token_id: u64 = 1,
+    pin_entries: []PinEntry = &.{},
+    pin_entries_capacity: usize = 0,
 
     phase: Phase = .none,
+    major_phase: MajorPhase = .idle,
+    major_reason: ?RequestReason = null,
+    major_epoch: u64 = 0,
+    major_started_ns: u64 = 0,
     minor_request: Request = .{ .kind = .minor },
     major_request: Request = .{ .kind = .major },
     nursery: Nursery = .{},
+    old_space: SpaceAccount = .{},
+    large_space: SpaceAccount = .{},
     stats: GeStats = .{},
 
     // Reusable structures for cycle detection
@@ -466,6 +780,8 @@ pub const Registry = struct {
                 .committed_bytes = if (policy.enable_nursery) policy.nursery_initial_size else 0,
                 .max_bytes = if (policy.enable_nursery) policy.nursery_max_size else 0,
             },
+            .old_space = .{},
+            .large_space = .{},
             .visited = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .preserved = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .free_set = std.AutoHashMap(usize, void).init(account.persistent_allocator),
@@ -480,11 +796,13 @@ pub const Registry = struct {
 
         // 释放可能存活的所有 Candidate 对象
         while (self.gc_obj_list_tail) |node| {
-            self.unlinkNode(node);
             const h = headerFromGcNode(node);
+            self.recordHeapFree(h);
+            self.unlinkNode(node);
             h.flags.finalizing = true;
             if (h.kind == .object) {
                 object.Object.destroyFromHeader(rt, h);
+                rt.drainDeferredClassPayloadFinalizers();
             } else if (h.kind == .function_bytecode) {
                 bytecode_function.destroyFromHeader(rt, h);
             }
@@ -527,24 +845,82 @@ pub const Registry = struct {
         }
         self.nursery_entries = &.{};
         self.nursery_entries_capacity = 0;
+        if (self.heap_allocations_capacity != 0) {
+            self.memory.free(HeapAllocation, self.heap_allocations.ptr[0..self.heap_allocations_capacity]);
+        } else if (self.heap_allocations.len != 0) {
+            self.memory.free(HeapAllocation, self.heap_allocations);
+        }
+        self.heap_allocations = &.{};
+        self.heap_allocations_capacity = 0;
+        if (self.external_tokens_capacity != 0) {
+            self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
+        } else if (self.external_tokens.len != 0) {
+            self.memory.free(ExternalTokenEntry, self.external_tokens);
+        }
+        self.external_tokens = &.{};
+        self.external_tokens_capacity = 0;
+        if (self.pin_entries_capacity != 0) {
+            self.memory.free(PinEntry, self.pin_entries.ptr[0..self.pin_entries_capacity]);
+        } else if (self.pin_entries.len != 0) {
+            self.memory.free(PinEntry, self.pin_entries);
+        }
+        self.pin_entries = &.{};
+        self.pin_entries_capacity = 0;
 
         self.phase = .none;
     }
 
-    pub fn reportExternalAlloc(self: *Registry, bytes: usize) ExternalMemoryToken {
-        if (bytes == 0) return .{ .registry = self, .bytes = 0 };
+    pub fn reportExternalAlloc(self: *Registry, bytes: usize) !ExternalMemoryToken {
+        if (bytes == 0) return .{};
+        try self.ensureExternalTokenCapacity(self.external_tokens.len + 1);
+        const id = self.nextExternalTokenId();
+        self.external_tokens.ptr[self.external_tokens.len] = .{
+            .id = id,
+            .bytes = bytes,
+        };
+        self.external_tokens = self.external_tokens.ptr[0 .. self.external_tokens.len + 1];
         self.stats.external_bytes = std.math.add(usize, self.stats.external_bytes, bytes) catch std.math.maxInt(usize);
         self.stats.peak_external_bytes = @max(self.stats.peak_external_bytes, self.stats.external_bytes);
         self.stats.external_alloc_count +|= 1;
         const weighted = std.math.mul(usize, bytes, self.policy.external_weight) catch std.math.maxInt(usize);
         self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
-        return .{ .registry = self, .bytes = bytes };
+        return .{
+            .registry = self,
+            .id = id,
+            .bytes = bytes,
+        };
     }
 
     pub fn reportExternalFree(self: *Registry, bytes: usize) void {
         if (bytes == 0) return;
         self.stats.external_bytes -|= bytes;
         self.stats.external_free_count +|= 1;
+    }
+
+    pub fn releaseExternalToken(self: *Registry, id: u64, bytes: usize) void {
+        if (id == 0 or bytes == 0) {
+            if (id != 0 or bytes != 0) self.stats.external_invalid_release_count +|= 1;
+            return;
+        }
+        const index = self.externalTokenIndex(id) orelse {
+            self.stats.external_invalid_release_count +|= 1;
+            return;
+        };
+        const entry = self.external_tokens[index];
+        if (entry.bytes != bytes) {
+            self.stats.external_invalid_release_count +|= 1;
+            return;
+        }
+        self.stats.external_bytes -|= entry.bytes;
+        self.stats.external_free_count +|= 1;
+        if (index + 1 < self.external_tokens.len) {
+            std.mem.copyForwards(
+                ExternalTokenEntry,
+                self.external_tokens[index .. self.external_tokens.len - 1],
+                self.external_tokens[index + 1 ..],
+            );
+        }
+        self.external_tokens = self.external_tokens[0 .. self.external_tokens.len - 1];
     }
 
     pub fn externalMemoryRequestReason(self: Registry) ?RequestReason {
@@ -565,6 +941,28 @@ pub const Registry = struct {
         return .soon;
     }
 
+    pub fn processMemoryRequest(self: Registry, rss_bytes: usize, cgroup_limit_bytes: usize) ?PressureRequest {
+        if (self.policy.rss_hard_limit) |limit| {
+            if (rss_bytes >= limit) return .{ .reason = .rss_pressure, .urgency = .urgent };
+        }
+        if (self.policy.cgroup_hard_ratio_per_mille != 0 and cgroup_limit_bytes != 0 and ratioPerMille(rss_bytes, cgroup_limit_bytes) >= self.policy.cgroup_hard_ratio_per_mille) {
+            return .{ .reason = .rss_pressure, .urgency = .urgent };
+        }
+        if (self.policy.rss_soft_limit) |limit| {
+            if (rss_bytes >= limit) return .{ .reason = .rss_pressure, .urgency = .soon };
+        }
+        if (self.policy.cgroup_soft_ratio_per_mille != 0 and cgroup_limit_bytes != 0 and ratioPerMille(rss_bytes, cgroup_limit_bytes) >= self.policy.cgroup_soft_ratio_per_mille) {
+            return .{ .reason = .rss_pressure, .urgency = .soon };
+        }
+        return null;
+    }
+
+    pub fn decommitEmptyPagesNow(self: *Registry) void {
+        self.old_space.trimFreePages(0);
+        self.large_space.trimFreePages(0);
+        self.refreshSpacePageState();
+    }
+
     pub fn requestGC(self: *Registry, kind: RequestKind, reason: RequestReason, urgency: RequestUrgency) void {
         self.stats.gc_request_count +|= 1;
         self.stats.last_request_reason = reason;
@@ -578,8 +976,12 @@ pub const Registry = struct {
             };
             return;
         }
-        if (urgency == .urgent) slot.urgency = .urgent;
-        if (slot.reason == null or urgency == .urgent) slot.reason = reason;
+        if (urgency == .urgent and slot.urgency != .urgent) {
+            slot.urgency = .urgent;
+            slot.reason = reason;
+            return;
+        }
+        if (slot.reason == null) slot.reason = reason;
     }
 
     pub fn hasPendingRequest(self: Registry) bool {
@@ -627,6 +1029,99 @@ pub const Registry = struct {
         return request;
     }
 
+    pub fn sliceBudgetNs(self: Registry, point: SchedulerPoint) u64 {
+        return switch (point) {
+            .allocation_slow_path => self.policy.allocation_slow_path_budget_ns,
+            .callback_boundary, .safepoint => self.policy.callback_slice_budget_ns,
+            .idle => self.policy.idle_slice_budget_ns,
+            .urgent => self.policy.allocation_slow_path_budget_ns,
+        };
+    }
+
+    pub fn shouldRunMinorAt(self: Registry, point: SchedulerPoint) bool {
+        _ = point;
+        return self.minor_request.pending;
+    }
+
+    pub fn shouldRunMajorAt(self: Registry, point: SchedulerPoint, over_threshold: bool) bool {
+        if (point == .urgent or over_threshold) return true;
+        const request = self.pendingMajorRequest() orelse return false;
+        return switch (point) {
+            .allocation_slow_path, .idle => true,
+            .callback_boundary, .safepoint => request.urgency == .urgent,
+            .urgent => true,
+        };
+    }
+
+    pub fn beginMajorCycle(self: *Registry, reason: RequestReason, start_ns: u64) void {
+        if (self.major_phase != .idle) {
+            if (self.major_reason == null) self.major_reason = reason;
+            return;
+        }
+        self.major_phase = .mark_roots;
+        self.major_reason = reason;
+        self.major_epoch +%= 1;
+        self.major_started_ns = start_ns;
+        self.stats.current_mark_stack_depth = 0;
+        self.old_space.startSweep(self.fragmentationTriggerPerMille());
+        self.large_space.startSweep(self.fragmentationTriggerPerMille());
+    }
+
+    pub fn setMajorPhase(self: *Registry, phase: MajorPhase) void {
+        if (self.major_phase == .idle and phase != .idle) return;
+        self.major_phase = phase;
+    }
+
+    pub fn activeMajorReason(self: Registry) ?RequestReason {
+        return self.major_reason;
+    }
+
+    pub fn abortMajorCycle(self: *Registry) void {
+        self.major_phase = .idle;
+        self.major_reason = null;
+        self.major_started_ns = 0;
+        self.stats.current_mark_stack_depth = 0;
+        self.old_space.cancelSweep(self.fragmentationTriggerPerMille());
+        self.large_space.cancelSweep(self.fragmentationTriggerPerMille());
+    }
+
+    pub fn finishMajorCycle(self: *Registry, result: CollectionResult) void {
+        self.recordIncrementalSlice(result.duration_ns);
+        const swept_pages = self.old_space.sweepAllPages(self.fragmentationTriggerPerMille()) +| self.large_space.sweepAllPages(self.fragmentationTriggerPerMille());
+        self.stats.last_swept_page_count = swept_pages;
+        self.stats.swept_page_count +|= swept_pages;
+        self.stats.sweep_time_ns +|= result.duration_ns;
+        self.major_phase = .idle;
+        self.major_reason = null;
+        self.major_started_ns = 0;
+        self.stats.current_mark_stack_depth = 0;
+    }
+
+    pub fn recordIncrementalSlice(self: *Registry, duration_ns: u64) void {
+        self.stats.last_incremental_slice_ns = duration_ns;
+        self.stats.major_slice_count +|= 1;
+        self.stats.incremental_slice_samples.record(duration_ns);
+    }
+
+    pub fn recordMarkStackDepth(self: *Registry, depth: usize) void {
+        self.stats.current_mark_stack_depth = depth;
+        self.stats.mark_stack_peak = @max(self.stats.mark_stack_peak, depth);
+    }
+
+    pub fn clearMarkStackDepth(self: *Registry) void {
+        self.stats.current_mark_stack_depth = 0;
+    }
+
+    fn refreshSpacePageState(self: *Registry) void {
+        const trigger = self.fragmentationTriggerPerMille();
+        self.old_space.refreshPageState(trigger);
+        self.large_space.refreshPageState(trigger);
+    }
+
+    fn fragmentationTriggerPerMille(self: Registry) usize {
+        return self.policy.old_fragmentation_trigger_per_mille;
+    }
+
     pub fn resetAllocationDebt(self: *Registry) void {
         self.stats.allocation_debt = 0;
     }
@@ -635,6 +1130,31 @@ pub const Registry = struct {
         return .{
             .total_allocated_bytes = self.stats.allocated_bytes,
             .peak_allocated_bytes = self.stats.peak_allocated_bytes,
+            .heap_live_bytes = self.stats.heap_live_bytes,
+            .young_live_bytes = self.stats.young_live_bytes,
+            .old_live_bytes = self.stats.old_live_bytes,
+            .large_object_bytes = self.stats.large_object_bytes,
+            .heap_committed_bytes = self.nursery.committed_bytes +| self.old_space.committed_bytes +| self.large_space.committed_bytes,
+            .young_committed_bytes = self.nursery.committed_bytes,
+            .old_committed_bytes = self.old_space.committed_bytes,
+            .old_empty_page_bytes = self.old_space.free_bytes,
+            .large_committed_bytes = self.large_space.committed_bytes,
+            .large_empty_page_bytes = self.large_space.free_bytes,
+            .empty_page_bytes = self.old_space.free_bytes +| self.large_space.free_bytes,
+            .decommitted_bytes = self.old_space.decommitted_bytes +| self.large_space.decommitted_bytes,
+            .old_fragmentation_ratio = self.old_space.fragmentationPerMille(),
+            .old_page_count = self.old_space.committedPageCount(),
+            .old_allocating_page_count = self.old_space.allocating_page_count,
+            .old_full_page_count = self.old_space.full_page_count,
+            .old_empty_page_count = self.old_space.empty_page_count,
+            .old_decommitted_page_count = self.old_space.decommitted_page_count,
+            .old_needs_sweep_page_count = self.old_space.needs_sweep_page_count,
+            .old_sweep_cursor_page = self.old_space.sweep_cursor_page,
+            .old_evacuation_candidate_page_count = self.old_space.evacuation_candidate_page_count,
+            .large_page_count = self.large_space.committedPageCount(),
+            .large_empty_page_count = self.large_space.empty_page_count,
+            .large_decommitted_page_count = self.large_space.decommitted_page_count,
+            .large_needs_sweep_page_count = self.large_space.needs_sweep_page_count,
             .young_allocated_bytes = self.stats.young_allocated_bytes,
             .young_alloc_count = self.stats.young_alloc_count,
             .old_allocated_bytes = self.stats.old_allocated_bytes,
@@ -651,14 +1171,35 @@ pub const Registry = struct {
             .peak_external_bytes = self.stats.peak_external_bytes,
             .external_alloc_count = self.stats.external_alloc_count,
             .external_free_count = self.stats.external_free_count,
+            .external_token_count = self.external_tokens.len,
+            .external_token_bytes = self.externalTokenBytes(),
+            .external_invalid_release_count = self.stats.external_invalid_release_count,
             .allocation_debt = self.stats.allocation_debt,
             .minor_gc_count = self.stats.minor_gc_count,
             .minor_gc_time_ns = self.stats.minor_gc_time_ns,
             .last_minor_pause_ns = self.stats.last_minor_pause_ns,
+            .minor_pause_ns_p50 = self.stats.minor_pause_samples.percentile(500),
+            .minor_pause_ns_p95 = self.stats.minor_pause_samples.percentile(950),
+            .minor_pause_ns_p99 = self.stats.minor_pause_samples.percentile(990),
             .last_minor_survival_per_mille = self.stats.last_minor_survival_per_mille,
+            .last_promotion_per_mille = self.stats.last_promotion_per_mille,
             .nursery_resize_count = self.stats.nursery_resize_count,
             .major_gc_count = self.stats.cycle_gc_count,
             .major_gc_time_ns = self.stats.cycle_gc_time_ns,
+            .major_phase = self.major_phase,
+            .major_slice_count = self.stats.major_slice_count,
+            .last_incremental_slice_ns = self.stats.last_incremental_slice_ns,
+            .major_pause_ns_p50 = self.stats.major_pause_samples.percentile(500),
+            .major_pause_ns_p95 = self.stats.major_pause_samples.percentile(950),
+            .major_pause_ns_p99 = self.stats.major_pause_samples.percentile(990),
+            .incremental_slice_ns_p50 = self.stats.incremental_slice_samples.percentile(500),
+            .incremental_slice_ns_p95 = self.stats.incremental_slice_samples.percentile(950),
+            .incremental_slice_ns_p99 = self.stats.incremental_slice_samples.percentile(990),
+            .concurrent_mark_time_ns = self.stats.concurrent_mark_time_ns,
+            .sweep_time_ns = self.stats.sweep_time_ns,
+            .swept_page_count = self.stats.swept_page_count,
+            .last_swept_page_count = self.stats.last_swept_page_count,
+            .mark_stack_peak = self.stats.mark_stack_peak,
             .failed_collections = self.stats.failed_collections,
             .last_failure = self.stats.last_failure,
             .freed_objects = self.stats.freed_objects,
@@ -667,6 +1208,7 @@ pub const Registry = struct {
             .remembered_set_size = self.remembered_set.len,
             .dirty_card_count = self.dirty_cards.len,
             .forwarding_entry_count = self.forwarding_entries.len,
+            .pinned_cell_count = self.pin_entries.len,
             .gc_request_count = self.stats.gc_request_count,
             .pending_minor = self.minor_request.pending,
             .pending_major = self.major_request.pending,
@@ -682,13 +1224,24 @@ pub const Registry = struct {
     }
 
     pub fn addWithGeneration(self: *Registry, h: *GCObjectHeader, generation: Generation, bytes: usize) !void {
-        const track_nursery = self.nursery.enabled and generation == .young;
+        const actual_generation = self.classifyGeneration(generation, bytes);
+        const track_nursery = self.nursery.enabled and actual_generation == .young;
         if (track_nursery) try self.ensureNurseryEntryCapacity(self.nursery_entries.len + 1);
+        if (bytes != 0) try self.ensureHeapAllocationCapacity(self.heap_allocations.len + 1);
 
         h.rc = 1;
         h.flags = .{};
-        h.setGeneration(generation);
-        self.recordHeapAlloc(generation, bytes);
+        h.size_class = @intCast(@min(bytes, std.math.maxInt(u16)));
+        h.setGeneration(actual_generation);
+        self.recordHeapAlloc(actual_generation, bytes);
+        if (bytes != 0) {
+            self.heap_allocations.ptr[self.heap_allocations.len] = .{
+                .header = h,
+                .generation = actual_generation,
+                .bytes = bytes,
+            };
+            self.heap_allocations = self.heap_allocations.ptr[0 .. self.heap_allocations.len + 1];
+        }
 
         if (h.kind == .object) {
             const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
@@ -718,10 +1271,18 @@ pub const Registry = struct {
         };
     }
 
+    fn classifyGeneration(self: Registry, requested: Generation, bytes: usize) Generation {
+        if (requested == .immortal or bytes == 0) return requested;
+        if (bytes >= self.policy.large_object_threshold) return .large;
+        return requested;
+    }
+
     fn recordHeapAlloc(self: *Registry, generation: Generation, bytes: usize) void {
         if (bytes == 0) return;
         self.stats.allocated_bytes = std.math.add(usize, self.stats.allocated_bytes, bytes) catch std.math.maxInt(usize);
         self.stats.peak_allocated_bytes = @max(self.stats.peak_allocated_bytes, self.stats.allocated_bytes);
+        self.addLiveHeapBytes(generation, bytes);
+        self.recordSpaceAlloc(generation, bytes);
         const kind_weight = switch (generation) {
             .young => self.policy.young_weight,
             .old, .immortal => self.policy.old_weight,
@@ -754,6 +1315,148 @@ pub const Registry = struct {
         }
     }
 
+    fn recordHeapFree(self: *Registry, header: *GCObjectHeader) void {
+        const index = self.heapAllocationIndex(header) orelse return;
+        const entry = self.heap_allocations[index];
+        self.subtractLiveHeapBytes(entry.generation, entry.bytes);
+        self.recordSpaceFree(entry.generation, entry.bytes);
+        if (index + 1 < self.heap_allocations.len) {
+            std.mem.copyForwards(
+                HeapAllocation,
+                self.heap_allocations[index .. self.heap_allocations.len - 1],
+                self.heap_allocations[index + 1 ..],
+            );
+        }
+        self.heap_allocations = self.heap_allocations[0 .. self.heap_allocations.len - 1];
+        header.size_class = 0;
+    }
+
+    pub fn promoteHeapAllocationToOld(self: *Registry, header: *GCObjectHeader) void {
+        const index = self.heapAllocationIndex(header) orelse return;
+        const entry = &self.heap_allocations[index];
+        if (entry.generation == .old) return;
+        if (entry.generation != .young) return;
+        self.subtractLiveHeapBytes(entry.generation, entry.bytes);
+        self.addLiveHeapBytes(.old, entry.bytes);
+        self.recordSpaceAlloc(.old, entry.bytes);
+        const weighted = std.math.mul(usize, entry.bytes, self.policy.promotion_weight) catch std.math.maxInt(usize);
+        self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
+        if (self.stats.allocation_debt >= self.policy.major_debt_threshold) {
+            self.requestGC(.major, .allocation_debt, .soon);
+        }
+        entry.generation = .old;
+    }
+
+    pub fn promoteYoungHeaderToOld(self: *Registry, header: *GCObjectHeader) void {
+        if (header.generation() != .young) return;
+        const nursery_bytes = blk: {
+            for (self.nursery_entries) |entry| {
+                if (entry.header == header) break :blk entry.bytes;
+            }
+            break :blk @as(usize, 0);
+        };
+        self.promoteHeapAllocationToOld(header);
+        header.setGeneration(.old);
+        self.removeNurseryEntry(header);
+        self.nursery.used_bytes -|= nursery_bytes;
+    }
+
+    pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
+        if (self.pinEntryIndex(header)) |index| {
+            self.pin_entries[index].count +|= 1;
+            return;
+        }
+        try self.ensurePinEntryCapacity(self.pin_entries.len + 1);
+        self.pin_entries.ptr[self.pin_entries.len] = .{
+            .header = header,
+            .count = 1,
+        };
+        self.pin_entries = self.pin_entries.ptr[0 .. self.pin_entries.len + 1];
+        header.setPinned(true);
+        self.promoteYoungHeaderToOld(header);
+    }
+
+    pub fn unpinHeader(self: *Registry, header: *GCObjectHeader) void {
+        const index = self.pinEntryIndex(header) orelse return;
+        if (self.pin_entries[index].count > 1) {
+            self.pin_entries[index].count -= 1;
+            return;
+        }
+        if (index + 1 < self.pin_entries.len) {
+            std.mem.copyForwards(
+                PinEntry,
+                self.pin_entries[index .. self.pin_entries.len - 1],
+                self.pin_entries[index + 1 ..],
+            );
+        }
+        self.pin_entries = self.pin_entries[0 .. self.pin_entries.len - 1];
+        header.setPinned(false);
+    }
+
+    fn addLiveHeapBytes(self: *Registry, generation: Generation, bytes: usize) void {
+        self.stats.heap_live_bytes = std.math.add(usize, self.stats.heap_live_bytes, bytes) catch std.math.maxInt(usize);
+        switch (generation) {
+            .young => self.stats.young_live_bytes = std.math.add(usize, self.stats.young_live_bytes, bytes) catch std.math.maxInt(usize),
+            .old, .immortal => self.stats.old_live_bytes = std.math.add(usize, self.stats.old_live_bytes, bytes) catch std.math.maxInt(usize),
+            .large => self.stats.large_object_bytes = std.math.add(usize, self.stats.large_object_bytes, bytes) catch std.math.maxInt(usize),
+        }
+    }
+
+    fn subtractLiveHeapBytes(self: *Registry, generation: Generation, bytes: usize) void {
+        self.stats.heap_live_bytes -|= bytes;
+        switch (generation) {
+            .young => self.stats.young_live_bytes -|= bytes,
+            .old, .immortal => self.stats.old_live_bytes -|= bytes,
+            .large => self.stats.large_object_bytes -|= bytes,
+        }
+    }
+
+    fn recordSpaceAlloc(self: *Registry, generation: Generation, bytes: usize) void {
+        switch (generation) {
+            .young => {},
+            .old, .immortal => self.old_space.recordAlloc(bytes),
+            .large => self.large_space.recordAlloc(bytes),
+        }
+        self.refreshSpacePageState();
+    }
+
+    fn recordSpaceFree(self: *Registry, generation: Generation, bytes: usize) void {
+        switch (generation) {
+            .young => {},
+            .old, .immortal => self.old_space.recordFree(bytes, self.policy.retain_hot_empty_pages, self.policy.decommit_empty_pages),
+            .large => self.large_space.recordFree(bytes, 0, self.policy.decommit_empty_pages),
+        }
+        self.refreshSpacePageState();
+    }
+
+    fn heapAllocationIndex(self: Registry, header: *const GCObjectHeader) ?usize {
+        for (self.heap_allocations, 0..) |entry, index| {
+            if (entry.header == header) return index;
+        }
+        return null;
+    }
+
+    fn externalTokenIndex(self: Registry, id: u64) ?usize {
+        for (self.external_tokens, 0..) |entry, index| {
+            if (entry.id == id) return index;
+        }
+        return null;
+    }
+
+    fn nextExternalTokenId(self: *Registry) u64 {
+        const id = self.next_external_token_id;
+        self.next_external_token_id +%= 1;
+        if (self.next_external_token_id == 0) self.next_external_token_id = 1;
+        return id;
+    }
+
+    fn pinEntryIndex(self: Registry, header: *const GCObjectHeader) ?usize {
+        for (self.pin_entries, 0..) |entry, index| {
+            if (entry.header == header) return index;
+        }
+        return null;
+    }
+
     pub fn nurseryUsedBytes(self: Registry) usize {
         return self.nursery.used_bytes;
     }
@@ -765,6 +1468,14 @@ pub const Registry = struct {
     pub fn nurseryTrackedBytes(self: Registry) usize {
         var total: usize = 0;
         for (self.nursery_entries) |entry| {
+            total = std.math.add(usize, total, entry.bytes) catch std.math.maxInt(usize);
+        }
+        return total;
+    }
+
+    pub fn externalTokenBytes(self: Registry) usize {
+        var total: usize = 0;
+        for (self.external_tokens) |entry| {
             total = std.math.add(usize, total, entry.bytes) catch std.math.maxInt(usize);
         }
         return total;
@@ -794,15 +1505,14 @@ pub const Registry = struct {
     pub fn finishMinorCollection(self: *Registry, result: CollectionResult) void {
         const nursery_allocated = self.nursery.used_bytes;
         const promoted_bytes = @min(result.promoted_young_bytes, nursery_allocated);
-        const survival_per_mille = if (nursery_allocated == 0)
-            @as(usize, 0)
-        else
-            (promoted_bytes * 1000) / nursery_allocated;
+        const survival_per_mille = ratioPerMille(promoted_bytes, nursery_allocated);
 
         self.stats.minor_gc_count +|= 1;
         self.stats.minor_gc_time_ns +|= result.duration_ns;
         self.stats.last_minor_pause_ns = result.duration_ns;
+        self.stats.minor_pause_samples.record(result.duration_ns);
         self.stats.last_minor_survival_per_mille = survival_per_mille;
+        self.stats.last_promotion_per_mille = survival_per_mille;
         self.stats.promoted_young_objects +|= result.promoted_young_objects;
         self.stats.promoted_young_bytes +|= result.promoted_young_bytes;
         self.tuneNurseryAfterMinor(survival_per_mille, result.duration_ns);
@@ -810,6 +1520,7 @@ pub const Registry = struct {
         self.clearNurseryEntries();
         self.clearRememberedSet();
         self.clearForwarding();
+        self.clearMarkStackDepth();
     }
 
     fn tuneNurseryAfterMinor(self: *Registry, survival_per_mille: usize, pause_ns: u64) void {
@@ -837,6 +1548,7 @@ pub const Registry = struct {
     }
 
     pub fn unlinkObject(self: *Registry, h: *GCObjectHeader) void {
+        self.recordHeapFree(h);
         h.setRemembered(false);
         self.removeNurseryEntry(h);
         if (h.kind == .object) {
@@ -1039,6 +1751,54 @@ pub const Registry = struct {
         self.nursery_entries_capacity = new_capacity;
     }
 
+    fn ensureHeapAllocationCapacity(self: *Registry, required: usize) !void {
+        if (required <= self.heap_allocations_capacity) return;
+        var new_capacity = if (self.heap_allocations_capacity == 0) @as(usize, 8) else self.heap_allocations_capacity * 2;
+        while (new_capacity < required) new_capacity *= 2;
+        const next = try self.memory.alloc(HeapAllocation, new_capacity);
+        errdefer self.memory.free(HeapAllocation, next);
+        @memcpy(next[0..self.heap_allocations.len], self.heap_allocations);
+        if (self.heap_allocations_capacity != 0) {
+            self.memory.free(HeapAllocation, self.heap_allocations.ptr[0..self.heap_allocations_capacity]);
+        } else if (self.heap_allocations.len != 0) {
+            self.memory.free(HeapAllocation, self.heap_allocations);
+        }
+        self.heap_allocations = next[0..self.heap_allocations.len];
+        self.heap_allocations_capacity = new_capacity;
+    }
+
+    fn ensureExternalTokenCapacity(self: *Registry, required: usize) !void {
+        if (required <= self.external_tokens_capacity) return;
+        var new_capacity = if (self.external_tokens_capacity == 0) @as(usize, 8) else self.external_tokens_capacity * 2;
+        while (new_capacity < required) new_capacity *= 2;
+        const next = try self.memory.alloc(ExternalTokenEntry, new_capacity);
+        errdefer self.memory.free(ExternalTokenEntry, next);
+        @memcpy(next[0..self.external_tokens.len], self.external_tokens);
+        if (self.external_tokens_capacity != 0) {
+            self.memory.free(ExternalTokenEntry, self.external_tokens.ptr[0..self.external_tokens_capacity]);
+        } else if (self.external_tokens.len != 0) {
+            self.memory.free(ExternalTokenEntry, self.external_tokens);
+        }
+        self.external_tokens = next[0..self.external_tokens.len];
+        self.external_tokens_capacity = new_capacity;
+    }
+
+    fn ensurePinEntryCapacity(self: *Registry, required: usize) !void {
+        if (required <= self.pin_entries_capacity) return;
+        var new_capacity = if (self.pin_entries_capacity == 0) @as(usize, 8) else self.pin_entries_capacity * 2;
+        while (new_capacity < required) new_capacity *= 2;
+        const next = try self.memory.alloc(PinEntry, new_capacity);
+        errdefer self.memory.free(PinEntry, next);
+        @memcpy(next[0..self.pin_entries.len], self.pin_entries);
+        if (self.pin_entries_capacity != 0) {
+            self.memory.free(PinEntry, self.pin_entries.ptr[0..self.pin_entries_capacity]);
+        } else if (self.pin_entries.len != 0) {
+            self.memory.free(PinEntry, self.pin_entries);
+        }
+        self.pin_entries = next[0..self.pin_entries.len];
+        self.pin_entries_capacity = new_capacity;
+    }
+
     fn removeNurseryEntry(self: *Registry, header: *GCObjectHeader) void {
         for (self.nursery_entries, 0..) |entry, index| {
             if (entry.header != header) continue;
@@ -1063,6 +1823,7 @@ pub const Registry = struct {
         self.stats.last_collection_time_ns = result.duration_ns;
         self.stats.cycle_gc_count +|= 1;
         self.stats.cycle_gc_time_ns +|= result.duration_ns;
+        self.stats.major_pause_samples.record(result.duration_ns);
         self.stats.freed_objects +|= result.freed_objects;
         self.stats.cycles_collected +|= result.freed_objects;
     }
@@ -1088,6 +1849,81 @@ pub const Registry = struct {
             current = node.next;
         }
         if (previous != self.gc_obj_list_tail) return error.CorruptGcList;
+    }
+
+    pub fn verifyHeapAccounting(self: Registry) InvariantError!void {
+        var heap_live_bytes: usize = 0;
+        var young_live_bytes: usize = 0;
+        var old_live_bytes: usize = 0;
+        var large_object_bytes: usize = 0;
+
+        for (self.heap_allocations, 0..) |entry, index| {
+            for (self.heap_allocations[0..index]) |previous| {
+                if (previous.header == entry.header) return error.DuplicateHeapAllocation;
+            }
+
+            heap_live_bytes = std.math.add(usize, heap_live_bytes, entry.bytes) catch std.math.maxInt(usize);
+            switch (entry.generation) {
+                .young => young_live_bytes = std.math.add(usize, young_live_bytes, entry.bytes) catch std.math.maxInt(usize),
+                .old, .immortal => old_live_bytes = std.math.add(usize, old_live_bytes, entry.bytes) catch std.math.maxInt(usize),
+                .large => large_object_bytes = std.math.add(usize, large_object_bytes, entry.bytes) catch std.math.maxInt(usize),
+            }
+        }
+
+        for (self.pin_entries, 0..) |entry, index| {
+            if (entry.count == 0) return error.EmptyPinEntry;
+            if (!entry.header.pinned()) return error.PinnedHeaderFlagMismatch;
+            for (self.pin_entries[0..index]) |previous| {
+                if (previous.header == entry.header) return error.DuplicatePinEntry;
+            }
+        }
+
+        var external_token_bytes: usize = 0;
+        for (self.external_tokens, 0..) |entry, index| {
+            if (entry.id == 0 or entry.bytes == 0) return error.EmptyExternalMemoryToken;
+            for (self.external_tokens[0..index]) |previous| {
+                if (previous.id == entry.id) return error.DuplicateExternalMemoryToken;
+            }
+            external_token_bytes = std.math.add(usize, external_token_bytes, entry.bytes) catch std.math.maxInt(usize);
+        }
+
+        var current = self.gc_obj_list_head;
+        while (current) |node| {
+            const header = headerFromGcNode(node);
+            if (defaultHeapBytes(header) != 0 and self.heapAllocationIndex(header) == null) {
+                return error.MissingHeapAllocation;
+            }
+            current = node.next;
+        }
+
+        if (heap_live_bytes != self.stats.heap_live_bytes) return error.HeapLiveBytesMismatch;
+        if (young_live_bytes != self.stats.young_live_bytes) return error.YoungLiveBytesMismatch;
+        if (old_live_bytes != self.stats.old_live_bytes) return error.OldLiveBytesMismatch;
+        if (large_object_bytes != self.stats.large_object_bytes) return error.LargeObjectBytesMismatch;
+        if (external_token_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
+        if (old_live_bytes != self.old_space.live_bytes) return error.OldSpaceLiveBytesMismatch;
+        if (large_object_bytes != self.large_space.live_bytes) return error.LargeSpaceLiveBytesMismatch;
+        if (self.old_space.live_bytes +| self.old_space.free_bytes > self.old_space.committed_bytes) return error.OldSpaceCommittedBytesMismatch;
+        if (self.large_space.live_bytes +| self.large_space.free_bytes > self.large_space.committed_bytes) return error.LargeSpaceCommittedBytesMismatch;
+        if (!self.spacePageStateMatches(self.old_space)) return error.OldSpacePageStateMismatch;
+        if (!self.spacePageStateMatches(self.large_space)) return error.LargeSpacePageStateMismatch;
+    }
+
+    pub fn verifyNoExternalTokenLeaks(self: Registry) InvariantError!void {
+        if (self.external_tokens.len != 0) return error.LeakedExternalMemoryToken;
+        if (self.stats.external_bytes != 0) return error.ExternalTokenBytesMismatch;
+    }
+
+    fn spacePageStateMatches(self: Registry, space: SpaceAccount) bool {
+        var expected = space;
+        expected.refreshPageState(self.fragmentationTriggerPerMille());
+        return expected.allocating_page_count == space.allocating_page_count and
+            expected.full_page_count == space.full_page_count and
+            expected.empty_page_count == space.empty_page_count and
+            expected.decommitted_page_count == space.decommitted_page_count and
+            expected.needs_sweep_page_count == space.needs_sweep_page_count and
+            expected.sweep_cursor_page == space.sweep_cursor_page and
+            expected.evacuation_candidate_page_count == space.evacuation_candidate_page_count;
     }
 
     pub fn verifyMinorPostcondition(self: Registry) InvariantError!void {

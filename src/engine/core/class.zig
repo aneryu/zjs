@@ -1,5 +1,6 @@
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
+const builtin = @import("builtin");
 
 comptime {
     @setEvalBranchQuota(5000);
@@ -221,13 +222,14 @@ pub const Table = struct {
         return true;
     }
 
-    pub fn runPayloadFinalizer(
+    pub fn runPayloadFinalizerForTest(
         self: *const Table,
         id: ClassId,
         runtime: *anyopaque,
         object: *anyopaque,
         payload: *Payload,
     ) bool {
+        if (!builtin.is_test) @compileError("runPayloadFinalizerForTest is only available in tests");
         const rec = self.record(id) orelse return false;
         const finalizer = rec.payload_finalizer orelse return false;
         finalizer(runtime, object, payload);

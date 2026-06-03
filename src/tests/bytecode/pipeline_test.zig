@@ -1829,6 +1829,60 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(fb.stack_size, view.stack_size);
 }
 
+test "createFunctionBytecode accounts large finalized payload in large space" {
+    const large_threshold = @sizeOf(bytecode.FunctionBytecode) + 64;
+    const large_weight = 7;
+    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .gc_policy = .{
+            .large_object_threshold = large_threshold,
+            .large_weight = large_weight,
+            .old_weight = 3,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.destroy();
+
+    const name = try rt.internAtom("large_payload_function");
+    defer rt.atoms.free(name);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+
+    const body = [_]u8{bytecode.opcode.op.return_undef};
+    try fd.appendByteCode(&body);
+
+    const source = try rt.memory.alloc(u8, large_threshold);
+    @memset(source, 'x');
+    fd.source_text = source;
+
+    const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
+
+    const heap_bytes = fb.heapByteSize();
+    try std.testing.expect(heap_bytes >= large_threshold);
+    try std.testing.expectEqual(core.gc.Generation.large, fb.header.generation());
+    try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.size_class);
+
+    const stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), stats.large_alloc_count);
+    try std.testing.expectEqual(heap_bytes, stats.large_allocated_bytes);
+    try std.testing.expectEqual(heap_bytes, stats.heap_live_bytes);
+    try std.testing.expectEqual(heap_bytes, stats.large_object_bytes);
+    try std.testing.expect(stats.large_committed_bytes >= heap_bytes);
+    try std.testing.expectEqual(stats.large_committed_bytes, stats.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stats.old_alloc_count);
+    try std.testing.expectEqual(heap_bytes * large_weight, stats.allocation_debt);
+
+    core.JSValue.functionBytecode(&fb.header).free(rt);
+    const after_free = rt.gcStats();
+    try std.testing.expectEqual(heap_bytes, after_free.total_allocated_bytes);
+    try std.testing.expectEqual(heap_bytes, after_free.large_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.large_object_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_free.large_committed_bytes);
+    try std.testing.expect(after_free.decommitted_bytes >= heap_bytes);
+}
+
 test "createFunctionBytecode unwinds registered bytecode on allocation failure" {
     var saw_oom = false;
     var saw_success = false;

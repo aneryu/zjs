@@ -301,7 +301,7 @@ pub const SharedBufferStore = struct {
         errdefer allocator.destroy(store);
         const bytes = try allocator.alloc(u8, byte_length);
         errdefer allocator.free(bytes);
-        var external_memory = rt.reportExternalAlloc(byte_length);
+        var external_memory = try rt.reportExternalAlloc(byte_length);
         errdefer external_memory.release();
         @memset(bytes, 0);
         store.* = .{
@@ -539,6 +539,29 @@ pub const StdFilePayload = struct {
         self.* = .{};
     }
 };
+
+const DeferredStdFileClose = struct {
+    runtime: *JSRuntime,
+    file: *std.c.FILE,
+    is_popen: bool = false,
+
+    fn run(ptr: *anyopaque) void {
+        const job: *DeferredStdFileClose = @ptrCast(@alignCast(ptr));
+        const rt = job.runtime;
+        _ = closeStdFileHandle(job.file, job.is_popen);
+        rt.memory.destroy(DeferredStdFileClose, job);
+    }
+};
+
+fn closeStdFileHandle(file: *std.c.FILE, is_popen: bool) c_int {
+    if (is_popen) {
+        const rc = pclose(file);
+        return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
+    } else {
+        const rc = std.c.fclose(file);
+        return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
+    }
+}
 
 pub const DisposableResourceKind = enum(u8) {
     use,
@@ -862,6 +885,117 @@ pub const ModuleNamespacePayload = struct {
     }
 };
 
+pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKind, payload: *class.Payload) void {
+    const ptr = switch (payload.*) {
+        .external => |stored| stored,
+        .none => return,
+    };
+    payload.* = .none;
+    switch (payload_kind) {
+        .ordinary => {
+            const typed: *OrdinaryPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(OrdinaryPayload, typed);
+        },
+        .iterator => {
+            const typed: *IteratorPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(IteratorPayload, typed);
+        },
+        .collection => {
+            const typed: *CollectionPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(CollectionPayload, typed);
+        },
+        .finalization_registry => {
+            const typed: *FinalizationRegistryPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(FinalizationRegistryPayload, typed);
+        },
+        .std_file => {
+            const typed: *StdFilePayload = @ptrCast(@alignCast(ptr));
+            typed.destroy();
+            rt.memory.destroy(StdFilePayload, typed);
+        },
+        .disposable_stack => {
+            const typed: *DisposableStackPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(DisposableStackPayload, typed);
+        },
+        .realm => {
+            const typed: *RealmPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(RealmPayload, typed);
+        },
+        .buffer => {
+            const typed: *BufferPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(BufferPayload, typed);
+        },
+        .typed_array => {
+            const typed: *TypedArrayPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(TypedArrayPayload, typed);
+        },
+        .regexp => {
+            const typed: *RegExpPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(RegExpPayload, typed);
+        },
+        .bound_function => {
+            const typed: *BoundFunctionPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(BoundFunctionPayload, typed);
+        },
+        .proxy => {
+            const typed: *ProxyPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(ProxyPayload, typed);
+        },
+        .arguments => {
+            const typed: *ArgumentsPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(ArgumentsPayload, typed);
+        },
+        .object_data => {
+            const typed: *ObjectDataPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(ObjectDataPayload, typed);
+        },
+        .var_ref => {
+            const typed: *VarRefPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(VarRefPayload, typed);
+        },
+        .array => {
+            const typed: *ArrayPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(ArrayPayload, typed);
+        },
+        .promise => {
+            const typed: *PromisePayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(PromisePayload, typed);
+        },
+        .generator => {
+            const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(GeneratorPayload, typed);
+        },
+        .function => {
+            const typed: *FunctionPayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(FunctionPayload, typed);
+        },
+        .module_namespace => {
+            const typed: *ModuleNamespacePayload = @ptrCast(@alignCast(ptr));
+            typed.destroy(rt);
+            rt.memory.destroy(ModuleNamespacePayload, typed);
+        },
+        .none => {},
+    }
+}
+
 pub const Object = struct {
     header: gc.GCObjectHeader,
     gc: gc.GcNode = .{},
@@ -884,6 +1018,7 @@ pub const Object = struct {
     length_writable: bool = true,
     is_with_environment: bool = false,
     is_prototype: bool = false,
+    reserved_class_payload_finalizer_slot: bool = false,
     properties: []property.Entry = &.{},
 
     property_capacity: usize = 0,
@@ -905,7 +1040,8 @@ pub const Object = struct {
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
         var class_payload: class.Payload = .none;
         var class_payload_kind: class.PayloadKind = .none;
-        const payload_kind = if (rt.classes.record(class_id)) |record|
+        const class_record = rt.classes.record(class_id);
+        const payload_kind = if (class_record) |record|
             record.payload_kind
         else
             class.standardPayloadKind(class_id);
@@ -1038,6 +1174,14 @@ pub const Object = struct {
             },
             else => {},
         }
+        var reserved_class_payload_finalizer_slot = false;
+        errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
+        if (class_record) |record| {
+            if (record.payload_finalizer != null) {
+                try rt.reserveDeferredClassPayloadFinalizerSlot();
+                reserved_class_payload_finalizer_slot = true;
+            }
+        }
         if (prototype) |proto| {
             gc.retain(&proto.header);
             proto.is_prototype = true;
@@ -1050,9 +1194,11 @@ pub const Object = struct {
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
+            .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
             .shape_ref = shape_ref,
             .prototype = prototype,
         };
+        reserved_class_payload_finalizer_slot = false;
         shape_owned = false;
         initialized = true;
         try rt.registerObject(self);
@@ -1184,21 +1330,36 @@ pub const Object = struct {
         const file = payload.file orelse return 0;
         if (payload.is_stdio) return 0;
         payload.file = null;
-        if (payload.is_popen) {
-            const rc = pclose(file);
-            return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
-        } else {
-            const rc = std.c.fclose(file);
-            return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
-        }
+        return closeStdFileHandle(file, payload.is_popen);
+    }
+
+    fn enqueueDeferredStdFileClose(self: *Object, rt: *JSRuntime) void {
+        const payload = self.stdFilePayload() orelse return;
+        const file = payload.file orelse return;
+        if (payload.is_stdio) return;
+        payload.file = null;
+
+        const job = rt.memory.create(DeferredStdFileClose) catch {
+            _ = closeStdFileHandle(file, payload.is_popen);
+            return;
+        };
+        job.* = .{
+            .runtime = rt,
+            .file = file,
+            .is_popen = payload.is_popen,
+        };
+        rt.enqueueDeferredNativeCleanup(DeferredStdFileClose.run, @ptrCast(job)) catch {
+            _ = closeStdFileHandle(file, payload.is_popen);
+            rt.memory.destroy(DeferredStdFileClose, job);
+        };
     }
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         const self: *Object = @alignCast(@fieldParentPtr("header", header));
         rt.unregisterObject(self);
         clearBorrowedReferencesForDestroyedObject(rt, self);
-        self.closeStdFile();
-        self.runClassPayloadFinalizer(rt);
+        self.enqueueDeferredStdFileClose(rt);
+        self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
         const old_property_capacity = self.property_capacity;
         self.properties = &.{};
@@ -1249,10 +1410,16 @@ pub const Object = struct {
         rt.memory.destroy(Object, self);
     }
 
-    fn runClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
-        if (rt.classes.runPayloadFinalizer(self.class_id, @ptrCast(rt), @ptrCast(self), &self.class_payload) and self.class_payload == .none) {
-            self.class_payload_kind = .none;
-        }
+    fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
+        if (!self.reserved_class_payload_finalizer_slot) return;
+        const payload = self.class_payload;
+        const payload_kind = self.class_payload_kind;
+        const object_identity = @intFromPtr(&self.header) & ~@as(usize, 1);
+        self.reserved_class_payload_finalizer_slot = false;
+        const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, payload, payload_kind, object_identity);
+        if (!enqueued) return;
+        self.class_payload = .none;
+        self.class_payload_kind = .none;
     }
 
     fn clearBorrowedReferencesForDestroyedObject(rt: *JSRuntime, destroyed: *Object) void {
@@ -2259,8 +2426,9 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn installByteStorage(self: *Object, rt: *JSRuntime, bytes: []u8) void {
+    pub fn installByteStorage(self: *Object, rt: *JSRuntime, bytes: []u8) !void {
         if (self.bufferPayload()) |payload| {
+            const external_memory = try rt.reportExternalAlloc(bytes.len);
             if (payload.shared_store) |old_store| {
                 old_store.release();
             } else {
@@ -2269,7 +2437,7 @@ pub const Object = struct {
             }
             payload.shared_store = null;
             payload.bytes = bytes;
-            payload.external_memory = rt.reportExternalAlloc(bytes.len);
+            payload.external_memory = external_memory;
             return;
         }
         std.debug.assert(self.class_payload_kind == .buffer);
@@ -4881,6 +5049,7 @@ pub const Object = struct {
                         const entry = try preserved_set.getOrPut(addr);
                         if (!entry.found_existing) {
                             try object_worklist.append(runtime.memory.persistent_allocator, obj);
+                            runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                         }
                     }
                 } else if (functionBytecodeFromValue(val)) |const_fb| {
@@ -4889,6 +5058,7 @@ pub const Object = struct {
                     const entry = try preserved_bytecodes.getOrPut(addr);
                     if (!entry.found_existing) {
                         try bytecode_worklist.append(runtime.memory.persistent_allocator, fb);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                     }
                 }
             }
@@ -4930,6 +5100,7 @@ pub const Object = struct {
                         const entry = try self.preserved_set.getOrPut(addr);
                         if (!entry.found_existing) {
                             try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
+                            self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
                         }
                     }
                 }
@@ -4978,6 +5149,7 @@ pub const Object = struct {
             while (iterator.next()) |address| {
                 const obj: *Object = @ptrFromInt(address.*);
                 try object_worklist.append(rt.memory.persistent_allocator, obj);
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
             }
         }
 
@@ -4985,6 +5157,7 @@ pub const Object = struct {
         while (object_worklist.items.len > 0 or bytecode_worklist.items.len > 0) {
             while (object_worklist.items.len > 0) {
                 const obj = object_worklist.pop().?;
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 var visitor = ObjectResurrectVisitor{
                     .rt = rt,
                     .visited_set = visited,
@@ -4999,6 +5172,7 @@ pub const Object = struct {
 
             while (bytecode_worklist.items.len > 0) {
                 const fb = bytecode_worklist.pop().?;
+                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 try ResurrectHelper.scanBytecodeChildObjectsAndBytecodes(
                     rt,
                     visited,
@@ -5081,6 +5255,20 @@ pub const Object = struct {
         }
 
         sweepDeadWeakEntries(rt, visited, preserved, &symbol_roots, free_set, &free_internal_bytecodes);
+        const WeakPersistentSweepContext = struct {
+            visited: *const ObjectVisitSet,
+            preserved: *const ObjectVisitSet,
+            symbol_roots: *const SymbolRootSet,
+
+            pub fn isWeakIdentityAlive(self: @This(), identity: usize) bool {
+                return weakEntryKeyIsPreserved(self.visited, self.preserved, self.symbol_roots, identity);
+            }
+        };
+        rt.sweepDeadWeakPersistentSlots(WeakPersistentSweepContext{
+            .visited = visited,
+            .preserved = preserved,
+            .symbol_roots = &symbol_roots,
+        });
         _ = rt.atoms.sweepUnrootedUniqueSymbols(&symbol_roots);
 
         // Decrement protected ref counts back to normal and release any that reached 0.

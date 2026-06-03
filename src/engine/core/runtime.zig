@@ -38,6 +38,7 @@ pub const GCPollMode = enum {
     normal,
     callback_boundary,
     idle,
+    safepoint,
     urgent,
 };
 
@@ -142,6 +143,14 @@ pub const RootSlot = struct {
     value: JSValue = JSValue.undefinedValue(),
 };
 
+pub const WeakPersistentCallback = *const fn (runtime: *JSRuntime, context: ?*anyopaque) void;
+
+pub const WeakRootSlot = struct {
+    identity: ?usize = null,
+    callback: ?WeakPersistentCallback = null,
+    callback_context: ?*anyopaque = null,
+};
+
 pub const FinalizationJob = struct {
     sequence: u64 = 0,
     callback: JSValue = JSValue.undefinedValue(),
@@ -235,6 +244,124 @@ pub const JSValueHandle = struct {
 
 const PersistentValue = JSValueHandle;
 
+pub const LocalHandle = struct {
+    slot: *RootSlot,
+
+    pub fn get(self: LocalHandle) JSValue {
+        return self.slot.value;
+    }
+
+    pub fn valueSlot(self: LocalHandle) *JSValue {
+        return &self.slot.value;
+    }
+};
+
+pub const HandleScope = struct {
+    runtime: *JSRuntime,
+    start: usize,
+    active: bool = true,
+
+    pub fn enter(runtime: *JSRuntime) HandleScope {
+        return .{
+            .runtime = runtime,
+            .start = runtime.local_root_slots.len,
+        };
+    }
+
+    pub fn deinit(self: *HandleScope) void {
+        self.exit();
+    }
+
+    /// Takes ownership of `value`.
+    pub fn local(self: *HandleScope, value: JSValue) !LocalHandle {
+        std.debug.assert(self.active);
+        const slot = self.runtime.createLocalRootSlot(value) catch |err| {
+            value.free(self.runtime);
+            return err;
+        };
+        return .{ .slot = slot };
+    }
+
+    /// Duplicates `value` before storing it.
+    pub fn localDup(self: *HandleScope, value: JSValue) !LocalHandle {
+        return self.local(value.dup());
+    }
+
+    pub fn exit(self: *HandleScope) void {
+        if (!self.active) return;
+        std.debug.assert(self.start <= self.runtime.local_root_slots.len);
+        self.runtime.clearLocalRootSlotsFrom(self.start);
+        self.active = false;
+    }
+};
+
+pub const WeakPersistentValue = struct {
+    runtime: ?*JSRuntime = null,
+    slot: ?*WeakRootSlot = null,
+
+    pub fn init(
+        runtime: *JSRuntime,
+        value: JSValue,
+        callback: ?WeakPersistentCallback,
+        callback_context: ?*anyopaque,
+    ) !WeakPersistentValue {
+        const identity = object_mod.Object.weakIdentityFromValue(value) orelse return error.InvalidWeakTarget;
+        const slot = try runtime.createWeakRootSlot(identity, callback, callback_context);
+        return .{
+            .runtime = runtime,
+            .slot = slot,
+        };
+    }
+
+    pub fn get(self: WeakPersistentValue) JSValue {
+        const runtime = self.runtime orelse return JSValue.undefinedValue();
+        const slot = self.slot orelse return JSValue.undefinedValue();
+        const identity = slot.identity orelse return JSValue.undefinedValue();
+        return runtime.valueFromWeakIdentity(identity);
+    }
+
+    pub fn isAlive(self: WeakPersistentValue) bool {
+        const runtime = self.runtime orelse return false;
+        const slot = self.slot orelse return false;
+        const identity = slot.identity orelse return false;
+        return runtime.weakIdentityIsCurrentlyLive(identity);
+    }
+
+    pub fn deinit(self: *WeakPersistentValue) void {
+        const runtime = self.runtime orelse return;
+        const slot = self.slot orelse return;
+        self.runtime = null;
+        self.slot = null;
+        runtime.destroyWeakRootSlot(slot);
+    }
+
+    pub fn destroy(self: WeakPersistentValue, rt: *JSRuntime) void {
+        if (self.runtime) |runtime| std.debug.assert(runtime == rt);
+        var owned = self;
+        owned.deinit();
+    }
+};
+
+pub const WeakPersistent = WeakPersistentValue;
+
+pub const NativePin = struct {
+    runtime: ?*JSRuntime = null,
+    header: ?*gc.Header = null,
+
+    pub fn release(self: *NativePin) void {
+        const runtime = self.runtime orelse return;
+        const header = self.header orelse return;
+        self.runtime = null;
+        self.header = null;
+        runtime.gc.unpinHeader(header);
+        gc.release(runtime, header);
+    }
+
+    pub fn deinit(self: *NativePin) void {
+        self.release();
+    }
+};
+
 pub const DeferredWeakValueFree = struct {
     value: JSValue,
     prequeued_identity: ?usize = null,
@@ -246,6 +373,53 @@ pub const NativeCleanupJob = struct {
 
     pub fn run(self: NativeCleanupJob) void {
         self.finalizer(self.ptr);
+    }
+};
+
+pub const DeferredClassPayloadFinalizer = struct {
+    class_id: class.ClassId = class.invalid_class_id,
+    finalizer: class.PayloadFinalizer,
+    payload: class.Payload = .none,
+    payload_kind: class.PayloadKind = .none,
+    object_identity: usize = 0,
+
+    pub fn run(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime) void {
+        var payload = self.payload;
+        self.payload = .none;
+        self.finalizer(@ptrCast(rt), @ptrCast(&self.object_identity), &payload);
+        object_mod.destroyDetachedClassPayload(rt, self.payload_kind, &payload);
+    }
+
+    pub fn traceRoots(self: *DeferredClassPayloadFinalizer, rt: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
+        if (self.payload == .none) return;
+        const PayloadTraceAdaptor = struct {
+            root_visitor: *RootVisitor,
+            err: ?RootTraceError = null,
+
+            pub fn visitValue(context: *anyopaque, value_ptr: *anyopaque) void {
+                const adaptor: *@This() = @ptrCast(@alignCast(context));
+                const value: *JSValue = @ptrCast(@alignCast(value_ptr));
+                adaptor.root_visitor.value(value) catch |err| {
+                    adaptor.err = err;
+                };
+            }
+
+            pub fn visitObject(context: *anyopaque, object_ptr: *anyopaque) void {
+                const adaptor: *@This() = @ptrCast(@alignCast(context));
+                const object: *?*Object = @ptrCast(@alignCast(object_ptr));
+                adaptor.root_visitor.optionalObject(object) catch |err| {
+                    adaptor.err = err;
+                };
+            }
+        };
+        var adaptor = PayloadTraceAdaptor{ .root_visitor = visitor };
+        var payload_visitor = class.PayloadVisitor{
+            .context = @ptrCast(&adaptor),
+            .visit_value = PayloadTraceAdaptor.visitValue,
+            .visit_object = PayloadTraceAdaptor.visitObject,
+        };
+        _ = rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(&self.object_identity), &self.payload, &payload_visitor);
+        if (adaptor.err) |err| return err;
     }
 };
 
@@ -284,8 +458,12 @@ pub const JSRuntime = struct {
     borrowed_reference_holders_capacity: usize = 0,
     root_providers: []RootProvider = &.{},
     root_providers_capacity: usize = 0,
+    local_root_slots: []*RootSlot = &.{},
+    local_root_slots_capacity: usize = 0,
     persistent_root_slots: []*RootSlot = &.{},
     persistent_root_slots_capacity: usize = 0,
+    weak_root_slots: []*WeakRootSlot = &.{},
+    weak_root_slots_capacity: usize = 0,
     external_symbol_roots: []atom.Atom = &.{},
     external_symbol_roots_capacity: usize = 0,
     external_value_roots: []JSValue = &.{},
@@ -298,6 +476,11 @@ pub const JSRuntime = struct {
     deferred_native_cleanups_capacity: usize = 0,
     draining_deferred_native_cleanups: bool = false,
     deferred_native_cleanup_run_count: usize = 0,
+    deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = &.{},
+    deferred_class_payload_finalizers_capacity: usize = 0,
+    reserved_deferred_class_payload_finalizer_slots: usize = 0,
+    draining_deferred_class_payload_finalizers: bool = false,
+    deferred_class_payload_finalizer_run_count: usize = 0,
     deferred_weak_value_frees: []DeferredWeakValueFree = &.{},
     deferred_weak_value_frees_capacity: usize = 0,
     draining_deferred_weak_value_frees: bool = false,
@@ -414,8 +597,12 @@ pub const JSRuntime = struct {
         rt.borrowed_reference_holders_capacity = 0;
         rt.root_providers = &.{};
         rt.root_providers_capacity = 0;
+        rt.local_root_slots = &.{};
+        rt.local_root_slots_capacity = 0;
         rt.persistent_root_slots = &.{};
         rt.persistent_root_slots_capacity = 0;
+        rt.weak_root_slots = &.{};
+        rt.weak_root_slots_capacity = 0;
         rt.external_symbol_roots = &.{};
         rt.external_symbol_roots_capacity = 0;
         rt.external_value_roots = &.{};
@@ -428,6 +615,11 @@ pub const JSRuntime = struct {
         rt.deferred_native_cleanups_capacity = 0;
         rt.draining_deferred_native_cleanups = false;
         rt.deferred_native_cleanup_run_count = 0;
+        rt.deferred_class_payload_finalizers = &.{};
+        rt.deferred_class_payload_finalizers_capacity = 0;
+        rt.reserved_deferred_class_payload_finalizer_slots = 0;
+        rt.draining_deferred_class_payload_finalizers = false;
+        rt.deferred_class_payload_finalizer_run_count = 0;
         rt.deferred_weak_value_frees = &.{};
         rt.deferred_weak_value_frees_capacity = 0;
         rt.draining_deferred_weak_value_frees = false;
@@ -524,39 +716,53 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| stored.free(self);
         }
+        self.clearLocalRootSlots();
         self.clearPersistentRootSlots();
+        self.clearWeakRootSlots(false);
         self.clearExternalSymbolRoots();
         self.clearExternalValueRoots();
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
+        self.drainDeferredClassPayloadFinalizers();
         self.modules.deinit(self);
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
+        self.drainDeferredClassPayloadFinalizers();
         self.clearPendingFinalizationJobs();
         Object.releaseCallbackOwnedFunctionBytecodeCycles(self);
         _ = self.runObjectCycleRemoval();
         self.drainDeferredWeakValueFrees();
         self.drainDeferredNativeCleanups();
+        self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
         self.clearPendingFinalizationJobs();
         self.gc.deinit(self);
+        self.drainDeferredNativeCleanups();
+        self.drainDeferredClassPayloadFinalizers();
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
         const borrowed_reference_holders: []*Object = if (self.borrowed_reference_holders_capacity != 0) self.borrowed_reference_holders.ptr[0..self.borrowed_reference_holders_capacity] else self.borrowed_reference_holders[0..0];
         const root_providers: []RootProvider = if (self.root_providers_capacity != 0) self.root_providers.ptr[0..self.root_providers_capacity] else self.root_providers[0..0];
+        const local_root_slots: []*RootSlot = if (self.local_root_slots_capacity != 0) self.local_root_slots.ptr[0..self.local_root_slots_capacity] else self.local_root_slots[0..0];
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
+        const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
         const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
         const external_value_roots: []JSValue = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
         const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
+        const deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = if (self.deferred_class_payload_finalizers_capacity != 0) self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity] else self.deferred_class_payload_finalizers[0..0];
         self.borrowed_reference_holders = &.{};
         self.borrowed_reference_holders_capacity = 0;
         self.root_providers = &.{};
         self.root_providers_capacity = 0;
+        self.local_root_slots = &.{};
+        self.local_root_slots_capacity = 0;
         self.persistent_root_slots = &.{};
         self.persistent_root_slots_capacity = 0;
+        self.weak_root_slots = &.{};
+        self.weak_root_slots_capacity = 0;
         self.external_symbol_roots = &.{};
         self.external_symbol_roots_capacity = 0;
         self.external_value_roots = &.{};
@@ -565,13 +771,19 @@ pub const JSRuntime = struct {
         self.external_host_functions_capacity = 0;
         self.deferred_native_cleanups = &.{};
         self.deferred_native_cleanups_capacity = 0;
+        self.deferred_class_payload_finalizers = &.{};
+        self.deferred_class_payload_finalizers_capacity = 0;
+        self.reserved_deferred_class_payload_finalizer_slots = 0;
         if (borrowed_reference_holders.len != 0) self.memory.free(*Object, borrowed_reference_holders);
         if (root_providers.len != 0) self.memory.free(RootProvider, root_providers);
+        if (local_root_slots.len != 0) self.memory.free(*RootSlot, local_root_slots);
         if (persistent_root_slots.len != 0) self.memory.free(*RootSlot, persistent_root_slots);
+        if (weak_root_slots.len != 0) self.memory.free(*WeakRootSlot, weak_root_slots);
         if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
         if (external_value_roots.len != 0) self.memory.free(JSValue, external_value_roots);
         if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
+        if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
         if (self.owns_self_allocation) {
             std.debug.assert(self.memory.allocation_count == 1);
             std.debug.assert(self.memory.allocated_bytes == @sizeOf(JSRuntime));
@@ -631,6 +843,8 @@ pub const JSRuntime = struct {
     }
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
+        const notify = self.gc.phase != .deinit;
+        self.clearWeakPersistentIdentity(@intFromPtr(&object.header) & ~@as(usize, 1), notify);
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObject(&object.header);
     }
@@ -702,12 +916,18 @@ pub const JSRuntime = struct {
         for (&self.internal_destructuring_helpers) |*maybe_helper| {
             try visitor.optionalValue(maybe_helper);
         }
+        for (self.local_root_slots) |slot| {
+            try visitor.value(&slot.value);
+        }
         for (self.persistent_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
         try visitor.values(self.external_value_roots);
         for (self.pending_finalization_jobs) |*job| {
             try job.traceRoots(visitor);
+        }
+        for (self.deferred_class_payload_finalizers) |*job| {
+            try job.traceRoots(self, visitor);
         }
         try self.job_queue.traceRoots(visitor);
         for (self.root_providers) |provider| {
@@ -739,6 +959,40 @@ pub const JSRuntime = struct {
     }
 
     fn createPersistentRootSlot(self: *JSRuntime, value: JSValue) !*RootSlot {
+        return self.createRootSlot(value, &self.persistent_root_slots, &self.persistent_root_slots_capacity);
+    }
+
+    fn createLocalRootSlot(self: *JSRuntime, value: JSValue) !*RootSlot {
+        return self.createRootSlot(value, &self.local_root_slots, &self.local_root_slots_capacity);
+    }
+
+    fn createWeakRootSlot(
+        self: *JSRuntime,
+        identity: usize,
+        callback: ?WeakPersistentCallback,
+        callback_context: ?*anyopaque,
+    ) !*WeakRootSlot {
+        const saved_trigger_fn = self.memory.trigger_gc_fn;
+        const saved_trigger_ctx = self.memory.trigger_gc_ctx;
+        self.memory.trigger_gc_fn = null;
+        self.memory.trigger_gc_ctx = null;
+        defer {
+            self.memory.trigger_gc_fn = saved_trigger_fn;
+            self.memory.trigger_gc_ctx = saved_trigger_ctx;
+        }
+
+        const slot = try self.memory.create(WeakRootSlot);
+        errdefer self.memory.destroy(WeakRootSlot, slot);
+        slot.* = .{
+            .identity = identity,
+            .callback = callback,
+            .callback_context = callback_context,
+        };
+        try appendRuntimeWeakRootSlot(&self.memory, &self.weak_root_slots, &self.weak_root_slots_capacity, slot);
+        return slot;
+    }
+
+    fn createRootSlot(self: *JSRuntime, value: JSValue, slots: *[]*RootSlot, capacity: *usize) !*RootSlot {
         const saved_trigger_fn = self.memory.trigger_gc_fn;
         const saved_trigger_ctx = self.memory.trigger_gc_ctx;
         self.memory.trigger_gc_fn = null;
@@ -751,9 +1005,36 @@ pub const JSRuntime = struct {
         const slot = try self.memory.create(RootSlot);
         errdefer self.memory.destroy(RootSlot, slot);
         slot.* = .{ .value = JSValue.undefinedValue() };
-        try appendRuntimeRootSlot(&self.memory, &self.persistent_root_slots, &self.persistent_root_slots_capacity, slot);
+        try appendRuntimeRootSlot(&self.memory, slots, capacity, slot);
         slot.value = value;
         return slot;
+    }
+
+    fn destroyWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot) void {
+        self.removeWeakRootSlot(slot);
+        slot.* = .{};
+        self.memory.destroy(WeakRootSlot, slot);
+    }
+
+    fn removeWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot) void {
+        var found: ?usize = null;
+        for (self.weak_root_slots, 0..) |registered, index| {
+            if (registered == slot) {
+                found = index;
+                break;
+            }
+        }
+        const index = found orelse unreachable;
+        if (index + 1 < self.weak_root_slots.len) {
+            std.mem.copyForwards(*WeakRootSlot, self.weak_root_slots[index .. self.weak_root_slots.len - 1], self.weak_root_slots[index + 1 ..]);
+        }
+        self.weak_root_slots = self.weak_root_slots[0 .. self.weak_root_slots.len - 1];
+        if (self.weak_root_slots.len == 0 and self.weak_root_slots_capacity != 0) {
+            const old_slots = self.weak_root_slots.ptr[0..self.weak_root_slots_capacity];
+            self.weak_root_slots = &.{};
+            self.weak_root_slots_capacity = 0;
+            self.memory.free(*WeakRootSlot, old_slots);
+        }
     }
 
     fn destroyPersistentRootSlot(self: *JSRuntime, slot: *RootSlot) void {
@@ -805,6 +1086,115 @@ pub const JSRuntime = struct {
         if (capacity != 0) self.memory.free(*RootSlot, slots.ptr[0..capacity]);
     }
 
+    fn clearWeakRootSlots(self: *JSRuntime, notify: bool) void {
+        const slots = self.weak_root_slots;
+        const capacity = self.weak_root_slots_capacity;
+        self.weak_root_slots = &.{};
+        self.weak_root_slots_capacity = 0;
+
+        for (slots) |slot| {
+            self.clearWeakRootSlot(slot, notify);
+            self.memory.destroy(WeakRootSlot, slot);
+        }
+        if (capacity != 0) self.memory.free(*WeakRootSlot, slots.ptr[0..capacity]);
+    }
+
+    fn clearWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot, notify: bool) void {
+        if (slot.identity == null) return;
+        slot.identity = null;
+        if (notify) {
+            if (slot.callback) |callback| callback(self, slot.callback_context);
+        }
+    }
+
+    pub fn sweepDeadWeakPersistentSlots(self: *JSRuntime, live_context: anytype) void {
+        for (self.weak_root_slots) |slot| {
+            const identity = slot.identity orelse continue;
+            if (!live_context.isWeakIdentityAlive(identity)) {
+                self.clearWeakRootSlot(slot, true);
+            }
+        }
+    }
+
+    pub fn clearWeakPersistentIdentity(self: *JSRuntime, identity: usize, notify: bool) void {
+        for (self.weak_root_slots) |slot| {
+            const slot_identity = slot.identity orelse continue;
+            if (slot_identity == identity) self.clearWeakRootSlot(slot, notify);
+        }
+    }
+
+    fn weakIdentityIsCurrentlyLive(self: *JSRuntime, identity: usize) bool {
+        if ((identity & 1) != 0) {
+            const atom_id = identity >> 1;
+            if (atom_id > std.math.maxInt(atom.Atom)) return false;
+            return self.atoms.kind(@intCast(atom_id)) == .symbol;
+        }
+        return self.liveObjectFromWeakIdentity(identity) != null;
+    }
+
+    fn valueFromWeakIdentity(self: *JSRuntime, identity: usize) JSValue {
+        if ((identity & 1) != 0) {
+            const atom_id = identity >> 1;
+            if (atom_id > std.math.maxInt(atom.Atom)) return JSValue.undefinedValue();
+            const symbol_atom: atom.Atom = @intCast(atom_id);
+            return if (self.atoms.kind(symbol_atom) == .symbol) JSValue.symbol(symbol_atom) else JSValue.undefinedValue();
+        }
+        const object = self.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
+        return object.value().dup();
+    }
+
+    fn liveObjectFromWeakIdentity(self: *JSRuntime, identity: usize) ?*Object {
+        if ((identity & 1) != 0) return null;
+        var current = self.gc.gc_obj_list_head;
+        while (current) |node| {
+            const next = node.next;
+            const header = gc.headerFromGcNode(node);
+            if (header.rc > 0 and header.kind == .object and (@intFromPtr(header) & ~@as(usize, 1)) == identity) {
+                return @alignCast(@fieldParentPtr("header", header));
+            }
+            current = next;
+        }
+        return null;
+    }
+
+    fn clearLocalRootSlots(self: *JSRuntime) void {
+        self.clearLocalRootSlotsFrom(0);
+    }
+
+    fn clearLocalRootSlotsFrom(self: *JSRuntime, start: usize) void {
+        std.debug.assert(start <= self.local_root_slots.len);
+        var index = self.local_root_slots.len;
+        while (index > start) {
+            index -= 1;
+            const slot = self.local_root_slots[index];
+            const value = slot.value;
+            slot.value = JSValue.undefinedValue();
+            value.free(self);
+            self.memory.destroy(RootSlot, slot);
+        }
+        self.local_root_slots = self.local_root_slots[0..start];
+        if (self.local_root_slots.len == 0 and self.local_root_slots_capacity != 0) {
+            const old_slots = self.local_root_slots.ptr[0..self.local_root_slots_capacity];
+            self.local_root_slots = &.{};
+            self.local_root_slots_capacity = 0;
+            self.memory.free(*RootSlot, old_slots);
+        }
+    }
+
+    pub fn enterHandleScope(self: *JSRuntime) HandleScope {
+        return HandleScope.enter(self);
+    }
+
+    pub fn localRootCountForTest(self: JSRuntime) usize {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.local_root_slots.len;
+    }
+
+    pub fn weakRootCountForTest(self: JSRuntime) usize {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.weak_root_slots.len;
+    }
+
     pub fn persistentRootCountForTest(self: JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.persistent_root_slots.len;
@@ -854,6 +1244,36 @@ pub const JSRuntime = struct {
 
     pub fn createPersistentValue(self: *JSRuntime, value: JSValue) !JSValueHandle {
         return self.createValueHandle(value);
+    }
+
+    pub fn createWeakPersistentValue(
+        self: *JSRuntime,
+        value: JSValue,
+        callback: ?WeakPersistentCallback,
+        callback_context: ?*anyopaque,
+    ) !WeakPersistentValue {
+        return WeakPersistentValue.init(self, value, callback, callback_context);
+    }
+
+    pub fn pinValueForNative(self: *JSRuntime, value: JSValue) !?NativePin {
+        const header = value.refHeader() orelse value.objectHeader() orelse return null;
+        gc.retain(header);
+        errdefer gc.release(self, header);
+        try self.gc.pinHeader(header);
+        return NativePin{
+            .runtime = self,
+            .header = header,
+        };
+    }
+
+    pub fn pinHeaderForNative(self: *JSRuntime, header: *gc.Header) !NativePin {
+        gc.retain(header);
+        errdefer gc.release(self, header);
+        try self.gc.pinHeader(header);
+        return NativePin{
+            .runtime = self,
+            .header = header,
+        };
     }
 
     pub fn unregisterExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) void {
@@ -974,20 +1394,28 @@ pub const JSRuntime = struct {
         if (self.gc_running) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
-        defer if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
+        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
+        defer if (builtin.mode == .Debug) {
+            self.gc.verifyIntrusiveList() catch unreachable;
+            self.gc.verifyHeapAccounting() catch unreachable;
+        };
         self.gc_running = true;
         defer self.gc_running = false;
 
         const start_ns = profile.nowNanos();
+        self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual, start_ns);
+        self.gc.setMajorPhase(.mark_incremental);
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.PayloadMarkFailed => error.PayloadMarkFailed,
             };
             self.gc.recordFailure(mapped);
+            self.gc.abortMajorCycle();
             self.gc.requestGC(.major, .collection_failed, .soon);
             return mapped;
         };
+        self.gc.setMajorPhase(.sweep);
 
         const result = gc.CollectionResult{
             .freed_objects = freed,
@@ -997,6 +1425,7 @@ pub const JSRuntime = struct {
             },
         };
         self.gc.recordSuccess(result);
+        self.gc.finishMajorCycle(result);
         self.resetGCThreshold();
         return result;
     }
@@ -1009,7 +1438,11 @@ pub const JSRuntime = struct {
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
         if (builtin.mode == .Debug) self.verifyRememberedSetCoverage() catch unreachable;
-        defer if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
+        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
+        defer if (builtin.mode == .Debug) {
+            self.gc.verifyIntrusiveList() catch unreachable;
+            self.gc.verifyHeapAccounting() catch unreachable;
+        };
         self.gc_running = true;
         defer self.gc_running = false;
 
@@ -1057,6 +1490,7 @@ pub const JSRuntime = struct {
 
                 if (self_visitor.rt.gc.forwardedHeader(header)) |forwarded| {
                     if (forwarded != header) {
+                        self_visitor.rt.gc.promoteHeapAllocationToOld(header);
                         header.setGeneration(.old);
                         return;
                     }
@@ -1074,14 +1508,17 @@ pub const JSRuntime = struct {
                     .object => {
                         const obj: *Object = @alignCast(@fieldParentPtr("header", header));
                         try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, obj);
+                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
                     },
                     .function_bytecode => {
                         const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
                         try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
+                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
                     },
                     .string, .big_int => {},
                 }
 
+                self_visitor.rt.gc.promoteHeapAllocationToOld(header);
                 header.setGeneration(.old);
                 self_visitor.promoted_young_objects +|= 1;
                 self_visitor.promoted_young_bytes +|= promotedSize(header);
@@ -1195,7 +1632,10 @@ pub const JSRuntime = struct {
             },
         };
         self.gc.finishMinorCollection(result);
-        if (builtin.mode == .Debug) self.gc.verifyMinorPostcondition() catch unreachable;
+        if (builtin.mode == .Debug) {
+            self.gc.verifyMinorPostcondition() catch unreachable;
+            self.gc.verifyHeapAccounting() catch unreachable;
+        }
         return result;
     }
 
@@ -1205,24 +1645,37 @@ pub const JSRuntime = struct {
         mode: GCPollMode,
     ) gc.CollectionError!gc.CollectionResult {
         if (self.gc_running) return .{};
+        const scheduler_point: gc.SchedulerPoint = switch (mode) {
+            .normal => .allocation_slow_path,
+            .callback_boundary => .callback_boundary,
+            .idle => .idle,
+            .safepoint => .safepoint,
+            .urgent => .urgent,
+        };
+        switch (scheduler_point) {
+            .allocation_slow_path, .idle, .urgent => self.requestGCForProcessMemoryPressure(),
+            .callback_boundary, .safepoint => {},
+        }
         const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
-        const pending_minor = self.gc.hasPendingMinorRequest();
-        const pending_major = self.gc.hasPendingMajorRequest();
-        if (mode != .urgent and !pending_minor and !pending_major and !over_threshold) return .{};
+        const run_minor = self.gc.shouldRunMinorAt(scheduler_point);
+        const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
+        if (!run_minor and !run_major) return .{};
 
         var result: gc.CollectionResult = .{};
-        if (pending_minor) {
+        if (run_minor) {
             result = try self.tryCollectMinorNonMoving(roots orelse self.active_value_roots);
         }
 
         const major_request = self.gc.pendingMajorRequest();
-        const run_major = mode == .urgent or over_threshold or switch (mode) {
-            .normal, .idle => pending_major,
-            .callback_boundary => if (major_request) |request| request.urgency == .urgent else false,
-            .urgent => true,
-        };
         if (run_major) {
-            if (pending_major) _ = self.gc.clearMajorRequest();
+            if (major_request != null) _ = self.gc.clearMajorRequest();
+            const reason = if (major_request) |request|
+                request.reason orelse gc.RequestReason.manual
+            else if (over_threshold)
+                gc.RequestReason.allocation_threshold
+            else
+                gc.RequestReason.manual;
+            self.gc.beginMajorCycle(reason, profile.nowNanos());
             const major_result = try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
             result.freed_objects +|= major_result.freed_objects;
             result.freed_bytecodes +|= major_result.freed_bytecodes;
@@ -1231,6 +1684,38 @@ pub const JSRuntime = struct {
             result.duration_ns +|= major_result.duration_ns;
         }
         return result;
+    }
+
+    pub fn gcSafepoint(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        return self.pollGC(roots, .safepoint);
+    }
+
+    pub fn afterCallbackBoundaryGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        const result = try self.pollGC(roots, .callback_boundary);
+        _ = self.runDeferredNativeCleanupBudgeted(self.gc.policy.native_cleanup_slice_jobs);
+        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.policy.native_cleanup_slice_jobs);
+        return result;
+    }
+
+    pub fn beforeEventLoopIdleGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        const result = try self.pollGC(roots, .idle);
+        _ = self.runDeferredNativeCleanupBudgeted(self.gc.policy.native_cleanup_slice_jobs);
+        _ = self.runDeferredClassPayloadFinalizerBudgeted(self.gc.policy.native_cleanup_slice_jobs);
+        return result;
+    }
+
+    pub fn forceGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        self.gc.requestGC(.major, .manual, .urgent);
+        return self.pollGC(roots, .urgent);
+    }
+
+    pub fn forceMajorGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        return self.forceGC(roots);
+    }
+
+    pub fn forceMinorGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
+        self.gc.requestGC(.minor, .manual, .urgent);
+        return self.pollGC(roots, .normal);
     }
 
     pub fn requestGCForTest(self: *JSRuntime) void {
@@ -1269,11 +1754,12 @@ pub const JSRuntime = struct {
         return self.memory.getLimit();
     }
 
-    pub fn reportExternalAlloc(self: *JSRuntime, bytes: usize) gc.ExternalMemoryToken {
-        const token = self.gc.reportExternalAlloc(bytes);
+    pub fn reportExternalAlloc(self: *JSRuntime, bytes: usize) !gc.ExternalMemoryToken {
+        const token = try self.gc.reportExternalAlloc(bytes);
         if (self.gc.externalMemoryRequestReason()) |reason| {
             self.gc.requestGC(.major, reason, self.gc.externalMemoryRequestUrgency());
         }
+        self.requestGCForProcessMemoryPressure();
         return token;
     }
 
@@ -1291,10 +1777,79 @@ pub const JSRuntime = struct {
 
     pub fn gcStats(self: JSRuntime) gc.Stats {
         var stats = self.gc.statsSnapshot();
+        stats.weak_ref_count = self.weakReferenceCount();
+        stats.finalizer_queue_length = self.pending_finalization_jobs.len;
         stats.pending_finalization_job_count = self.pending_finalization_jobs.len;
         stats.deferred_native_cleanup_count = self.deferred_native_cleanups.len;
         stats.deferred_native_cleanup_run_count = self.deferred_native_cleanup_run_count;
+        stats.deferred_class_payload_finalizer_count = self.deferred_class_payload_finalizers.len;
+        stats.deferred_class_payload_finalizer_run_count = self.deferred_class_payload_finalizer_run_count;
+        stats.rss_bytes = currentRssBytes();
+        stats.cgroup_limit_bytes = cgroupLimitBytes();
         return stats;
+    }
+
+    fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
+        const rss_bytes = currentRssBytes();
+        const cgroup_limit_bytes = cgroupLimitBytes();
+        if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {
+            if (request.urgency == .urgent) self.gc.decommitEmptyPagesNow();
+            self.gc.requestGC(.major, request.reason, request.urgency);
+        }
+    }
+
+    fn weakReferenceCount(self: JSRuntime) usize {
+        var count = self.weak_root_slots.len;
+        var current = self.gc.gc_obj_list_head;
+        while (current) |node| {
+            const header = gc.headerFromGcNode(node);
+            if (header.kind == .object) {
+                const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                count +|= obj.weakCollectionEntries().len;
+                count +|= obj.finalizationRegistryCells().len;
+            }
+            current = node.next;
+        }
+        return count;
+    }
+
+    fn currentRssBytes() usize {
+        if (builtin.os.tag != .linux) return 0;
+        var buf: [128]u8 = undefined;
+        const contents = readLinuxFile("/proc/self/statm", &buf) orelse return 0;
+        var tokens = std.mem.tokenizeAny(u8, contents, " \t\r\n");
+        _ = tokens.next() orelse return 0;
+        const resident_pages = parseUnsignedToken(tokens.next() orelse return 0) orelse return 0;
+        return std.math.mul(usize, resident_pages, std.heap.pageSize()) catch std.math.maxInt(usize);
+    }
+
+    fn cgroupLimitBytes() usize {
+        if (builtin.os.tag != .linux) return 0;
+        var buf: [128]u8 = undefined;
+        if (readLinuxFile("/sys/fs/cgroup/memory.max", &buf)) |contents| {
+            if (parseUnsignedToken(firstToken(contents))) |limit| return limit;
+        }
+        if (readLinuxFile("/sys/fs/cgroup/memory/memory.limit_in_bytes", &buf)) |contents| {
+            if (parseUnsignedToken(firstToken(contents))) |limit| return limit;
+        }
+        return 0;
+    }
+
+    fn readLinuxFile(path: []const u8, buf: []u8) ?[]const u8 {
+        const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+        defer _ = std.os.linux.close(fd);
+        const len = std.posix.read(fd, buf) catch return null;
+        return buf[0..len];
+    }
+
+    fn firstToken(contents: []const u8) []const u8 {
+        var tokens = std.mem.tokenizeAny(u8, contents, " \t\r\n");
+        return tokens.next() orelse "";
+    }
+
+    fn parseUnsignedToken(token: []const u8) ?usize {
+        if (token.len == 0 or std.mem.eql(u8, token, "max")) return null;
+        return std.fmt.parseInt(usize, token, 10) catch null;
     }
 
     pub fn rewriteForwardedValueSlot(self: *JSRuntime, slot: *JSValue) void {
@@ -1678,8 +2233,60 @@ pub const JSRuntime = struct {
         };
     }
 
+    pub fn enqueueDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) !bool {
+        const record = self.classes.record(class_id) orelse return false;
+        const finalizer = record.payload_finalizer orelse return false;
+        const index = self.deferred_class_payload_finalizers.len;
+        try self.ensureDeferredClassPayloadFinalizerCapacity(index + self.reserved_deferred_class_payload_finalizer_slots + 1);
+        self.deferred_class_payload_finalizers = self.deferred_class_payload_finalizers.ptr[0 .. index + 1];
+        self.deferred_class_payload_finalizers[index] = .{
+            .class_id = class_id,
+            .finalizer = finalizer,
+            .payload = payload,
+            .payload_kind = payload_kind,
+            .object_identity = object_identity,
+        };
+        return true;
+    }
+
+    pub fn reserveDeferredClassPayloadFinalizerSlot(self: *JSRuntime) !void {
+        try self.ensureDeferredClassPayloadFinalizerCapacity(self.deferred_class_payload_finalizers.len + self.reserved_deferred_class_payload_finalizer_slots + 1);
+        self.reserved_deferred_class_payload_finalizer_slots +|= 1;
+    }
+
+    pub fn releaseDeferredClassPayloadFinalizerSlot(self: *JSRuntime) void {
+        std.debug.assert(self.reserved_deferred_class_payload_finalizer_slots != 0);
+        self.reserved_deferred_class_payload_finalizer_slots -= 1;
+        self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+    }
+
+    pub fn enqueueReservedDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) bool {
+        std.debug.assert(self.reserved_deferred_class_payload_finalizer_slots != 0);
+        self.reserved_deferred_class_payload_finalizer_slots -= 1;
+
+        const record = self.classes.record(class_id) orelse {
+            self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+            return false;
+        };
+        const finalizer = record.payload_finalizer orelse {
+            self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+            return false;
+        };
+        const index = self.deferred_class_payload_finalizers.len;
+        std.debug.assert(index + 1 <= self.deferred_class_payload_finalizers_capacity);
+        self.deferred_class_payload_finalizers = self.deferred_class_payload_finalizers.ptr[0 .. index + 1];
+        self.deferred_class_payload_finalizers[index] = .{
+            .class_id = class_id,
+            .finalizer = finalizer,
+            .payload = payload,
+            .payload_kind = payload_kind,
+            .object_identity = object_identity,
+        };
+        return true;
+    }
+
     pub fn hasDeferredNativeCleanups(self: *const JSRuntime) bool {
-        return self.deferred_native_cleanups.len != 0;
+        return self.deferred_native_cleanups.len != 0 or self.deferred_class_payload_finalizers.len != 0;
     }
 
     pub fn runDeferredNativeCleanupBudgeted(self: *JSRuntime, max_jobs: usize) usize {
@@ -1704,14 +2311,46 @@ pub const JSRuntime = struct {
         return ran;
     }
 
+    pub fn runDeferredClassPayloadFinalizerBudgeted(self: *JSRuntime, max_jobs: usize) usize {
+        if (max_jobs == 0) return 0;
+        if (self.draining_deferred_class_payload_finalizers) return 0;
+        self.draining_deferred_class_payload_finalizers = true;
+        defer self.draining_deferred_class_payload_finalizers = false;
+
+        var ran: usize = 0;
+        while (ran < max_jobs and self.deferred_class_payload_finalizers.len != 0) : (ran += 1) {
+            var job = self.deferred_class_payload_finalizers[0];
+            const old_len = self.deferred_class_payload_finalizers.len;
+            if (old_len > 1) {
+                @memmove(self.deferred_class_payload_finalizers[0 .. old_len - 1], self.deferred_class_payload_finalizers[1..old_len]);
+            }
+            self.deferred_class_payload_finalizers = self.deferred_class_payload_finalizers.ptr[0 .. old_len - 1];
+            job.run(self);
+            self.deferred_class_payload_finalizer_run_count +|= 1;
+        }
+
+        self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+        return ran;
+    }
+
     pub fn drainDeferredNativeCleanups(self: *JSRuntime) void {
         while (self.runDeferredNativeCleanupBudgeted(std.math.maxInt(usize)) != 0) {}
         self.releaseEmptyDeferredNativeCleanupBuffer();
     }
 
+    pub fn drainDeferredClassPayloadFinalizers(self: *JSRuntime) void {
+        while (self.runDeferredClassPayloadFinalizerBudgeted(std.math.maxInt(usize)) != 0) {}
+        self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+    }
+
     pub fn pendingDeferredNativeCleanupCountForTest(self: JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.deferred_native_cleanups.len;
+    }
+
+    pub fn pendingDeferredClassPayloadFinalizerCountForTest(self: JSRuntime) usize {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.deferred_class_payload_finalizers.len;
     }
 
     fn ensureDeferredNativeCleanupCapacity(self: *JSRuntime, min_capacity: usize) !void {
@@ -1740,6 +2379,35 @@ pub const JSRuntime = struct {
         self.deferred_native_cleanups = &.{};
         self.deferred_native_cleanups_capacity = 0;
         self.memory.free(NativeCleanupJob, old_items);
+    }
+
+    fn ensureDeferredClassPayloadFinalizerCapacity(self: *JSRuntime, min_capacity: usize) !void {
+        if (self.deferred_class_payload_finalizers_capacity >= min_capacity) return;
+        var next_capacity = if (self.deferred_class_payload_finalizers_capacity == 0) @as(usize, 8) else self.deferred_class_payload_finalizers_capacity * 2;
+        while (next_capacity < min_capacity) next_capacity *= 2;
+        const next = try self.memory.alloc(DeferredClassPayloadFinalizer, next_capacity);
+        errdefer self.memory.free(DeferredClassPayloadFinalizer, next);
+        const old_items = self.deferred_class_payload_finalizers;
+        const old_capacity = self.deferred_class_payload_finalizers_capacity;
+        @memcpy(next[0..old_items.len], old_items);
+        self.deferred_class_payload_finalizers = next[0..old_items.len];
+        self.deferred_class_payload_finalizers_capacity = next_capacity;
+        if (old_capacity != 0) {
+            self.memory.free(DeferredClassPayloadFinalizer, old_items.ptr[0..old_capacity]);
+        }
+    }
+
+    fn releaseEmptyDeferredClassPayloadFinalizerBuffer(self: *JSRuntime) void {
+        if (self.deferred_class_payload_finalizers.len != 0) return;
+        if (self.reserved_deferred_class_payload_finalizer_slots != 0) return;
+        if (self.deferred_class_payload_finalizers_capacity == 0) {
+            self.deferred_class_payload_finalizers = &.{};
+            return;
+        }
+        const old_items = self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity];
+        self.deferred_class_payload_finalizers = &.{};
+        self.deferred_class_payload_finalizers_capacity = 0;
+        self.memory.free(DeferredClassPayloadFinalizer, old_items);
     }
 
     pub fn enqueueDeferredWeakValueFree(self: *JSRuntime, value: JSValue) !void {
@@ -2086,6 +2754,23 @@ fn appendRuntimeRootSlot(account: *memory.MemoryAccount, slice: *[]*RootSlot, ca
     slice.*[len] = item;
 }
 
+fn appendRuntimeWeakRootSlot(account: *memory.MemoryAccount, slice: *[]*WeakRootSlot, capacity: *usize, item: *WeakRootSlot) !void {
+    if (slice.*.len == capacity.*) {
+        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
+        const next = try account.alloc(*WeakRootSlot, next_capacity);
+        errdefer account.free(*WeakRootSlot, next);
+        @memcpy(next[0..slice.*.len], slice.*);
+        const old_capacity = capacity.*;
+        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
+        slice.* = next[0..slice.*.len];
+        capacity.* = next_capacity;
+        if (old_capacity != 0) account.free(*WeakRootSlot, old);
+    }
+    const len = slice.*.len;
+    slice.* = slice.*.ptr[0 .. len + 1];
+    slice.*[len] = item;
+}
+
 fn appendRuntimeAtom(account: *memory.MemoryAccount, slice: *[]atom.Atom, capacity: *usize, item: atom.Atom) !void {
     if (slice.*.len == capacity.*) {
         const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
@@ -2136,9 +2821,12 @@ test "external memory accounting records debt and requests GC" {
     try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
     try std.testing.expect(!rt.gcPendingForTest());
 
-    var token = rt.reportExternalAlloc(8);
+    var token = try rt.reportExternalAlloc(8);
+    var duplicate_token = token;
     try std.testing.expectEqual(@as(usize, 8), rt.externalMemoryBytes());
     try std.testing.expectEqual(@as(usize, 16), rt.allocationDebtBytes());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_token_count);
+    try std.testing.expectEqual(@as(usize, 8), rt.gcStats().external_token_bytes);
     try std.testing.expect(rt.gcPendingForTest());
     try std.testing.expectEqual(@as(?gc.RequestReason, gc.RequestReason.allocation_debt), rt.gcLastRequestReasonForTest());
 
@@ -2150,8 +2838,12 @@ test "external memory accounting records debt and requests GC" {
 
     token.release();
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
-    token.release();
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
+    duplicate_token.release();
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_invalid_release_count);
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
+    token.release();
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().external_invalid_release_count);
 }
 
 test "external hard memory pressure requests urgent major gc" {
@@ -2164,7 +2856,7 @@ test "external hard memory pressure requests urgent major gc" {
     });
     defer rt.deinit();
 
-    var token = rt.reportExternalAlloc(8);
+    var token = try rt.reportExternalAlloc(8);
     defer token.release();
 
     const pending = rt.gcStats();
@@ -2174,5 +2866,6 @@ test "external hard memory pressure requests urgent major gc" {
 
     _ = try rt.pollGC(null, .callback_boundary);
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     try std.testing.expect(!rt.gcPendingForTest());
 }

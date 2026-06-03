@@ -47654,7 +47654,7 @@ pub fn drainPendingPromiseJobs(
 }
 
 fn pollGCSafePoint(ctx: *core.JSContext) !void {
-    _ = ctx.runtime.pollGC(ctx.runtime.active_value_roots, .normal) catch |err| switch (err) {
+    _ = ctx.runtime.gcSafepoint(ctx.runtime.active_value_roots) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.PayloadMarkFailed => return error.OutOfMemory,
     };

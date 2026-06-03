@@ -1,7 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
+
+extern "c" fn tmpfile() ?*std.c.FILE;
 
 test "QuickJS value tag constants are locked" {
     try std.testing.expectEqual(@as(i32, -9), core.Tag.first);
@@ -660,6 +663,8 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
     const held_symbol = try rt.atoms.newValueSymbol("gc-finalization-job-held-symbol");
 
     try rt.enqueueFinalizationJob(core.JSValue.symbol(callback_symbol), core.JSValue.symbol(held_symbol));
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pending_finalization_job_count);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().finalizer_queue_length);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(callback_symbol) != null);
@@ -668,6 +673,8 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
     var job = rt.takePendingFinalizationJob().?;
     var job_alive = true;
     defer if (job_alive) job.deinit(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pending_finalization_job_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().finalizer_queue_length);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(callback_symbol) != null);
@@ -955,6 +962,16 @@ fn dummyExternalHostCall(_: *anyopaque, _: core.host_function.ExternalCall) anye
     return core.JSValue.undefinedValue();
 }
 
+fn expectOneDeferredClassPayloadFinalizer(rt: *core.JSRuntime) !void {
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().deferred_class_payload_finalizer_count);
+}
+
+fn runOneDeferredClassPayloadFinalizer(rt: *core.JSRuntime) !void {
+    try std.testing.expectEqual(@as(usize, 1), rt.runDeferredClassPayloadFinalizerBudgeted(1));
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+}
+
 fn countPayloadFinalizer(_: *anyopaque, _: *anyopaque, payload: *core.class.Payload) void {
     payload_finalizer_calls += 1;
     payload.* = .none;
@@ -1153,10 +1170,10 @@ test "class finalizers and context prototype slots are wired" {
 
     payload_finalizer_calls = 0;
     var payload: core.class.Payload = .none;
-    try std.testing.expect(rt.classes.runPayloadFinalizer(dynamic_id, @ptrCast(rt), @ptrCast(ctx), &payload));
+    try std.testing.expect(rt.classes.runPayloadFinalizerForTest(dynamic_id, @ptrCast(rt), @ptrCast(ctx), &payload));
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(core.class.Payload.none, payload);
-    try std.testing.expect(!rt.classes.runPayloadFinalizer(core.class.ids.object, @ptrCast(rt), @ptrCast(ctx), &payload));
+    try std.testing.expect(!rt.classes.runPayloadFinalizerForTest(core.class.ids.object, @ptrCast(rt), @ptrCast(ctx), &payload));
 
     payload_mark_calls = 0;
     var visited_values: usize = 0;
@@ -1171,7 +1188,7 @@ test "class finalizers and context prototype slots are wired" {
     try std.testing.expect(!rt.classes.markPayload(core.class.ids.object, @ptrCast(rt), @ptrCast(ctx), &payload, &visitor));
 }
 
-test "object destruction runs class payload finalizers" {
+test "object destruction defers class payload finalizers" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1184,7 +1201,12 @@ test "object destruction runs class payload finalizers" {
     payload_finalizer_calls = 0;
     const payloadless = try core.Object.create(rt, payloadless_id, null);
     try std.testing.expect(payloadless.class_payload == .none);
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
     payloadless.value().free(rt);
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 
     const external_id = rt.newClassId(core.class.invalid_class_id);
@@ -1198,11 +1220,16 @@ test "object destruction runs class payload finalizers" {
     const payload = try rt.memory.create(TestExternalPayload);
     payload.* = .{};
     external.class_payload = .{ .external = @ptrCast(payload) };
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
     external.value().free(rt);
+    rt.setMemoryLimit(null);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
-test "strong collection clear tolerates value finalizer reentry" {
+test "strong collection clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1231,12 +1258,17 @@ test "strong collection clear tolerates value finalizer reentry" {
     defer clear_result.free(rt);
 
     try std.testing.expect(clear_result.isUndefined());
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_collection_clear_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 0), map.collectionActiveCount());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_collection_clear_calls);
     try std.testing.expectEqual(@as(usize, 0), map.collectionActiveCount());
 }
 
-test "dense array delete tolerates element finalizer reentry" {
+test "dense array delete defers element finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1261,12 +1293,17 @@ test "dense array delete tolerates element finalizer reentry" {
     }
 
     try std.testing.expect(array.deleteProperty(rt, core.atom.atomFromUInt32(0)));
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_array_delete_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(?core.JSValue, null), array.arrayElements()[0]);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_delete_calls);
     try std.testing.expectEqual(@as(?core.JSValue, null), array.arrayElements()[0]);
 }
 
-test "ordinary property delete tolerates value finalizer reentry" {
+test "ordinary property delete defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1295,6 +1332,13 @@ test "ordinary property delete tolerates value finalizer reentry" {
     }
 
     try std.testing.expect(object.deleteProperty(rt, key));
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_property_delete_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    var before_cleanup = object.getProperty(key);
+    defer before_cleanup.free(rt);
+    try std.testing.expect(before_cleanup.isUndefined());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_property_delete_calls);
     const after = object.getProperty(key);
@@ -1302,7 +1346,7 @@ test "ordinary property delete tolerates value finalizer reentry" {
     try std.testing.expect(after.isUndefined());
 }
 
-test "regexp lastIndex set tolerates value finalizer reentry" {
+test "regexp lastIndex set defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1329,12 +1373,17 @@ test "regexp lastIndex set tolerates value finalizer reentry" {
 
     try regexp.setProperty(rt, core.atom.ids.lastIndex, core.JSValue.int32(7));
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_regexp_last_index_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(?i32, 7), regexp.regexpLastIndex().?.asInt32());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
     try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.asInt32());
 }
 
-test "regexp lastIndex define tolerates value finalizer reentry" {
+test "regexp lastIndex define defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1365,12 +1414,17 @@ test "regexp lastIndex define tolerates value finalizer reentry" {
         core.Descriptor.data(core.JSValue.int32(7), true, false, false),
     );
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_regexp_last_index_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(?i32, 7), regexp.regexpLastIndex().?.asInt32());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_regexp_last_index_calls);
     try std.testing.expectEqual(@as(?i32, 99), regexp.regexpLastIndex().?.asInt32());
 }
 
-test "mapped arguments binding update tolerates value finalizer reentry" {
+test "mapped arguments binding update defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1401,12 +1455,17 @@ test "mapped arguments binding update tolerates value finalizer reentry" {
 
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(?i32, 7), arguments.argumentsVarRefs()[0].asInt32());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
     try std.testing.expectEqual(@as(?i32, 99), arguments.argumentsVarRefs()[0].asInt32());
 }
 
-test "mapped arguments var-ref binding update tolerates value finalizer reentry" {
+test "mapped arguments var-ref binding update defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1439,13 +1498,18 @@ test "mapped arguments var-ref binding update tolerates value finalizer reentry"
 
     try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(?i32, 7), cell.varRefValue().?.asInt32());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
     try std.testing.expectEqual(@as(?i32, 99), cell.varRefValue().?.asInt32());
     cell.value().free(rt);
 }
 
-test "mapped arguments binding delete tolerates value finalizer reentry" {
+test "mapped arguments binding delete defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1479,6 +1543,14 @@ test "mapped arguments binding delete tolerates value finalizer reentry" {
 
     try std.testing.expect(arguments.deleteProperty(rt, key));
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_mapped_arguments_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expect(arguments.argumentsVarRefs()[0].isUninitialized());
+    var before_cleanup = arguments.getProperty(key);
+    defer before_cleanup.free(rt);
+    try std.testing.expect(before_cleanup.isUndefined());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_mapped_arguments_calls);
     try std.testing.expect(arguments.argumentsVarRefs()[0].isUninitialized());
@@ -1487,7 +1559,7 @@ test "mapped arguments binding delete tolerates value finalizer reentry" {
     try std.testing.expectEqual(@as(?i32, 99), after.asInt32());
 }
 
-test "cached iterator next clear tolerates value finalizer reentry" {
+test "cached iterator next clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1513,12 +1585,17 @@ test "cached iterator next clear tolerates value finalizer reentry" {
 
     object.clearCachedIteratorNext(rt);
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_cached_iterator_next_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expect(object.cachedIteratorNext() == null);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_cached_iterator_next_calls);
     try std.testing.expect(object.cachedIteratorNext() == null);
 }
 
-test "exception slot clear tolerates value finalizer reentry" {
+test "exception slot clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1542,12 +1619,17 @@ test "exception slot clear tolerates value finalizer reentry" {
 
     slot.clear(rt);
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_exception_slot_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expect(!slot.hasException());
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_exception_slot_calls);
     try std.testing.expect(!slot.hasException());
 }
 
-test "array iterator target clear tolerates value finalizer reentry" {
+test "array iterator target clear defers value finalizer reentry" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -1575,6 +1657,11 @@ test "array iterator target clear tolerates value finalizer reentry" {
     const result = try engine.builtins.array.methodCall(rt, iterator.value(), 20, &.{});
     defer result.free(rt);
 
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 0), reentrant_array_iterator_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expect(iterator.iteratorTargetSlot().* == null);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 1), reentrant_array_iterator_calls);
     try std.testing.expect(iterator.iteratorTargetSlot().* == null);
@@ -1613,6 +1700,9 @@ test "runtime cycle removal follows class payload mark hooks" {
 
     try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredClassPayloadFinalizerCountForTest());
+    try std.testing.expectEqual(@as(usize, 2), rt.runDeferredClassPayloadFinalizerBudgeted(2));
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
 }
 
@@ -1645,6 +1735,9 @@ test "runtime cycle removal clears class payload object slots before finalizers"
 
     try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
@@ -2874,10 +2967,38 @@ test "gc policy presets do not enable unimplemented concurrent collectors by def
     try std.testing.expect(low_rss.enable_nursery);
     try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), low_rss.nursery_max_size);
     try std.testing.expect(low_rss.external_weight > default_policy.external_weight);
+    try std.testing.expect(low_rss.cgroup_soft_ratio_per_mille != 0);
+    try std.testing.expect(low_rss.cgroup_hard_ratio_per_mille != 0);
 
     const low_latency = core.gc.Policy.forMode(.low_latency);
     try std.testing.expect(low_latency.enable_nursery);
     try std.testing.expect(low_latency.callback_slice_budget_ns < default_policy.callback_slice_budget_ns);
+}
+
+test "gc process memory pressure policy maps rss and cgroup usage to major requests" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .rss_soft_limit = 100,
+            .rss_hard_limit = 200,
+            .cgroup_soft_ratio_per_mille = 800,
+            .cgroup_hard_ratio_per_mille = 950,
+        },
+    });
+    defer rt.deinit();
+
+    try std.testing.expect(rt.gc.processMemoryRequest(99, 0) == null);
+
+    const rss_soft = rt.gc.processMemoryRequest(100, 0).?;
+    try std.testing.expectEqual(core.gc.RequestReason.rss_pressure, rss_soft.reason);
+    try std.testing.expectEqual(core.gc.RequestUrgency.soon, rss_soft.urgency);
+
+    const rss_hard = rt.gc.processMemoryRequest(200, 0).?;
+    try std.testing.expectEqual(core.gc.RequestReason.rss_pressure, rss_hard.reason);
+    try std.testing.expectEqual(core.gc.RequestUrgency.urgent, rss_hard.urgency);
+
+    const cgroup_hard = rt.gc.processMemoryRequest(96, 100).?;
+    try std.testing.expectEqual(core.gc.RequestUrgency.urgent, cgroup_hard.urgency);
 }
 
 test "gc allocated objects default to non-moving old generation" {
@@ -2911,6 +3032,7 @@ test "nursery policy promotes young objects at poll boundary without running maj
     try std.testing.expectEqual(@as(?u8, 0), rt.gc.nurseryObjectAge(&object.header));
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), rt.gc.stats.young_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.young_alloc_count);
+    const debt_before_minor = @as(usize, @sizeOf(core.Object)) * rt.gc.policy.young_weight;
     try std.testing.expect(rt.gcPendingForTest());
     try std.testing.expectEqual(@as(?core.gc.RequestKind, core.gc.RequestKind.minor), rt.gcPendingKindForTest());
     try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.nursery_full), rt.gcLastRequestReasonForTest());
@@ -2919,6 +3041,7 @@ test "nursery policy promotes young objects at poll boundary without running maj
     defer function_object.value().free(&rt);
     try std.testing.expectEqual(core.gc.Generation.old, function_object.header.generation());
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
+    try std.testing.expectEqual(debt_before_minor + @sizeOf(core.Object) * rt.gc.policy.old_weight, rt.allocationDebtBytes());
 
     const minor = try rt.pollGC(null, .normal);
     try std.testing.expectEqual(@as(usize, 0), minor.freed_objects);
@@ -2931,6 +3054,7 @@ test "nursery policy promotes young objects at poll boundary without running maj
     try std.testing.expectEqual(@as(?u8, null), rt.gc.nurseryObjectAge(&object.header));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.minor_gc_count);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.promoted_young_objects);
+    try std.testing.expectEqual(debt_before_minor + @sizeOf(core.Object) * (rt.gc.policy.old_weight + rt.gc.policy.promotion_weight), rt.allocationDebtBytes());
     try std.testing.expect(!rt.gcPendingForTest());
     try rt.gc.verifyMinorPostcondition();
 }
@@ -3150,7 +3274,7 @@ test "runtime exposes stable gc stats snapshot" {
     const child = try core.Object.create(&rt, core.class.ids.object, null);
     defer child.value().free(&rt);
 
-    var token = rt.reportExternalAlloc(32);
+    var token = try rt.reportExternalAlloc(32);
     defer token.release();
 
     const key = try rt.internAtom("statsChild");
@@ -3160,6 +3284,13 @@ test "runtime exposes stable gc stats snapshot" {
     const before_minor = rt.gcStats();
     try std.testing.expect(before_minor.nursery_enabled);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), before_minor.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), before_minor.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), before_minor.young_live_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), before_minor.old_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), before_minor.large_object_bytes);
+    try std.testing.expectEqual(@as(usize, 4 * 1024 + core.gc.logical_page_size), before_minor.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, 4 * 1024), before_minor.young_committed_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), before_minor.old_committed_bytes);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), before_minor.young_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), before_minor.young_alloc_count);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), before_minor.old_allocated_bytes);
@@ -3169,8 +3300,13 @@ test "runtime exposes stable gc stats snapshot" {
     try std.testing.expectEqual(@as(usize, 1), before_minor.nursery_object_count);
     try std.testing.expectEqual(@as(usize, 32), before_minor.external_bytes);
     try std.testing.expectEqual(@as(usize, 1), before_minor.external_alloc_count);
+    try std.testing.expectEqual(@as(usize, 1), before_minor.external_token_count);
+    try std.testing.expectEqual(@as(usize, 32), before_minor.external_token_bytes);
     try std.testing.expectEqual(@as(usize, 1), before_minor.remembered_set_size);
     try std.testing.expectEqual(@as(usize, 1), before_minor.dirty_card_count);
+    try std.testing.expectEqual(@as(usize, 0), before_minor.weak_ref_count);
+    try std.testing.expectEqual(@as(usize, 0), before_minor.finalizer_queue_length);
+    if (builtin.os.tag == .linux) try std.testing.expect(before_minor.rss_bytes != 0);
 
     rt.gc.requestGC(.minor, .manual, .soon);
     const minor = try rt.pollGC(null, .normal);
@@ -3180,6 +3316,17 @@ test "runtime exposes stable gc stats snapshot" {
     try std.testing.expectEqual(@as(usize, 1), after_minor.minor_gc_count);
     try std.testing.expectEqual(@as(usize, 1), after_minor.promoted_young_objects);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), after_minor.promoted_young_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), after_minor.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_minor.young_live_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), after_minor.old_live_bytes);
+    try std.testing.expectEqual(@as(usize, 4 * 1024 + core.gc.logical_page_size), after_minor.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), after_minor.old_committed_bytes);
+    try std.testing.expectEqual(after_minor.last_minor_pause_ns, after_minor.minor_pause_ns_p50);
+    try std.testing.expectEqual(after_minor.last_minor_pause_ns, after_minor.minor_pause_ns_p95);
+    try std.testing.expectEqual(after_minor.last_minor_pause_ns, after_minor.minor_pause_ns_p99);
+    try std.testing.expectEqual(@as(u64, 0), after_minor.incremental_slice_ns_p50);
+    try std.testing.expectEqual(@as(u64, 0), after_minor.incremental_slice_ns_p95);
+    try std.testing.expectEqual(@as(u64, 0), after_minor.incremental_slice_ns_p99);
     try std.testing.expectEqual(@as(usize, 0), after_minor.nursery_used_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_minor.nursery_object_count);
     try std.testing.expectEqual(@as(usize, 0), after_minor.remembered_set_size);
@@ -3189,6 +3336,74 @@ test "runtime exposes stable gc stats snapshot" {
     const after_external_free = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), after_external_free.external_bytes);
     try std.testing.expectEqual(@as(usize, 1), after_external_free.external_free_count);
+    try std.testing.expectEqual(@as(usize, 0), after_external_free.external_token_count);
+    try std.testing.expectEqual(@as(usize, 0), after_external_free.external_token_bytes);
+}
+
+test "gc live heap stats drop when object is released" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+
+    const allocated = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), allocated.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), allocated.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), allocated.young_live_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), allocated.old_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), allocated.large_object_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), allocated.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), allocated.old_committed_bytes);
+
+    object.value().free(rt);
+
+    const released = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), released.total_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), released.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.heap_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.young_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.old_live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), released.large_object_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), released.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), released.empty_page_bytes);
+    try std.testing.expectEqual(@as(usize, 1000), released.old_fragmentation_ratio);
+
+    rt.gc.decommitEmptyPagesNow();
+    const decommitted = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 0), decommitted.heap_committed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), decommitted.empty_page_bytes);
+    try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), decommitted.decommitted_bytes);
+}
+
+test "external memory token registry audits duplicate releases and leaks" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var token = try rt.reportExternalAlloc(64);
+    var duplicate_token = token;
+
+    var stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 64), stats.external_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stats.external_token_count);
+    try std.testing.expectEqual(@as(usize, 64), stats.external_token_bytes);
+    try rt.gc.verifyHeapAccounting();
+    try std.testing.expectError(error.LeakedExternalMemoryToken, rt.gc.verifyNoExternalTokenLeaks());
+
+    token.release();
+    stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 0), stats.external_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stats.external_token_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.external_free_count);
+    try rt.gc.verifyHeapAccounting();
+    try rt.gc.verifyNoExternalTokenLeaks();
+
+    duplicate_token.release();
+    stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 0), stats.external_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stats.external_free_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.external_invalid_release_count);
+    try rt.gc.verifyHeapAccounting();
 }
 
 test "runtime runs deferred native cleanup jobs with a budget" {
@@ -3242,6 +3457,37 @@ test "external host finalizers are deferred through native cleanup queue" {
     try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredNativeCleanupCountForTest());
 }
 
+test "std file object destruction defers native close cleanup" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const file = tmpfile() orelse return error.SkipZigTest;
+    var file_owned_by_test = true;
+    errdefer {
+        if (file_owned_by_test) _ = std.c.fclose(file);
+    }
+
+    const object = try core.Object.create(&rt, core.class.ids.std_file, null);
+    object.stdFileSlot().* = file;
+    object.stdFileIsPopenSlot().* = false;
+    object.stdFileIsStdioSlot().* = false;
+    file_owned_by_test = false;
+
+    object.value().free(&rt);
+
+    var stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredNativeCleanupCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), stats.deferred_native_cleanup_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.deferred_native_cleanup_run_count);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.runDeferredNativeCleanupBudgeted(1));
+    stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingDeferredNativeCleanupCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), stats.deferred_native_cleanup_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.deferred_native_cleanup_run_count);
+}
+
 test "gc callback boundary defers non-urgent major work until idle" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
@@ -3251,11 +3497,20 @@ test "gc callback boundary defers non-urgent major work until idle" {
     const callback_result = try rt.pollGC(null, .callback_boundary);
     try std.testing.expectEqual(@as(usize, 0), callback_result.freed_objects);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().major_gc_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().major_slice_count);
     try std.testing.expect(rt.gcPendingForTest());
     try std.testing.expectEqual(@as(?core.gc.RequestKind, core.gc.RequestKind.major), rt.gcPendingKindForTest());
 
     _ = try rt.pollGC(null, .idle);
-    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
+    const after_idle = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), after_idle.major_gc_count);
+    try std.testing.expectEqual(core.gc.MajorPhase.idle, after_idle.major_phase);
+    try std.testing.expectEqual(@as(usize, 1), after_idle.major_slice_count);
+    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.last_incremental_slice_ns);
+    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.sweep_time_ns);
+    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p50);
+    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p95);
+    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p99);
     try std.testing.expect(!rt.gcPendingForTest());
 }
 
@@ -3303,7 +3558,37 @@ test "gc callback boundary runs urgent major work" {
     _ = try rt.pollGC(null, .callback_boundary);
 
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
     try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "runtime force major gc runs an urgent major poll" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    const result = try rt.forceMajorGC(null);
+    try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_gc_count);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().major_slice_count);
+    try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "runtime force minor gc does not force unrelated major work" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const result = try rt.forceMinorGC(null);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().minor_gc_count);
+    try std.testing.expectEqual(@as(usize, 0), result.freed_objects);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().major_gc_count);
 }
 
 test "runtime verifier catches old to young edges missing remembered set coverage" {
@@ -4296,6 +4581,56 @@ test "gc registry debug verifier accepts linked and unlinked list states" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
+test "gc heap accounting verifier catches live byte drift" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try rt.gc.verifyHeapAccounting();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    try rt.gc.verifyHeapAccounting();
+
+    rt.gc.stats.heap_live_bytes += 1;
+    try std.testing.expectError(error.HeapLiveBytesMismatch, rt.gc.verifyHeapAccounting());
+    rt.gc.stats.heap_live_bytes -= 1;
+    try rt.gc.verifyHeapAccounting();
+
+    obj.value().free(rt);
+    try rt.gc.verifyHeapAccounting();
+}
+
+test "gc heap accounting verifier catches missing allocation entries" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    try rt.gc.verifyHeapAccounting();
+
+    const old_allocations = rt.gc.heap_allocations;
+    rt.gc.heap_allocations = old_allocations[0..0];
+    try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting());
+    rt.gc.heap_allocations = old_allocations;
+    try rt.gc.verifyHeapAccounting();
+}
+
+test "gc heap accounting verifier catches pinned header flag drift" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    const value = obj.value();
+    var pin = (try rt.pinValueForNative(value)).?;
+    defer pin.release();
+    value.free(rt);
+
+    try rt.gc.verifyHeapAccounting();
+    obj.header.setPinned(false);
+    try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting());
+    obj.header.setPinned(true);
+    try rt.gc.verifyHeapAccounting();
+}
+
 test "object traceChildEdgesFallible propagates visitor errors" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4455,6 +4790,210 @@ test "persistent value handle keeps object and nested symbols alive" {
     handle.destroy(rt);
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(key) == null);
+}
+
+test "handle scope local keeps object alive until scope exits" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const value = object.value();
+
+    var scope = rt.enterHandleScope();
+    const local = try scope.localDup(value);
+    value.free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expect(local.get().isObject());
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+
+    scope.exit();
+    try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+}
+
+test "handle scope locals do not clear persistent handles created inside scope" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const local_object = try core.Object.create(rt, core.class.ids.object, null);
+    const persistent_object = try core.Object.create(rt, core.class.ids.object, null);
+    const local_value = local_object.value();
+    const persistent_value = persistent_object.value();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.localDup(local_value);
+    local_value.free(rt);
+
+    const persistent = try rt.createPersistentValue(persistent_value);
+    persistent_value.free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+
+    scope.exit();
+    try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+
+    persistent.destroy(rt);
+    _ = try rt.tryRunObjectCycleRemoval();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+}
+
+test "native pin retains direct object and counts nested pins" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const value = object.value();
+
+    var first_pin = (try rt.pinValueForNative(value)).?;
+    var second_pin = try rt.pinHeaderForNative(&object.header);
+
+    try std.testing.expect(object.header.pinned());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
+    try std.testing.expectEqual(@as(i32, 3), object.header.rc);
+
+    value.free(rt);
+    try std.testing.expectEqual(@as(i32, 2), object.header.rc);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+
+    first_pin.release();
+    try std.testing.expect(object.header.pinned());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
+    try std.testing.expectEqual(@as(i32, 1), object.header.rc);
+
+    second_pin.release();
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+}
+
+test "native pin promotes young object out of nursery tracking" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const object = try core.Object.create(&rt, core.class.ids.object, null);
+    const value = object.value();
+
+    try std.testing.expectEqual(core.gc.Generation.young, object.header.generation());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().nursery_object_count);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), rt.gcStats().young_live_bytes);
+
+    var pin = (try rt.pinValueForNative(value)).?;
+    try std.testing.expect(object.header.pinned());
+    try std.testing.expectEqual(core.gc.Generation.old, object.header.generation());
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().nursery_object_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().young_live_bytes);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), rt.gcStats().old_live_bytes);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
+
+    value.free(&rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+
+    pin.release();
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().pinned_cell_count);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+}
+
+fn weakPersistentCounterCallback(_: *core.JSRuntime, context: ?*anyopaque) void {
+    const counter: *usize = @ptrCast(@alignCast(context.?));
+    counter.* += 1;
+}
+
+test "weak persistent value rejects non-weak targets" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    try std.testing.expectError(
+        error.InvalidWeakTarget,
+        rt.createWeakPersistentValue(core.JSValue.int32(1), null, null),
+    );
+}
+
+test "weak persistent value does not retain direct object target" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    var clear_count: usize = 0;
+    var weak = try rt.createWeakPersistentValue(target.value(), weakPersistentCounterCallback, &clear_count);
+    defer weak.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), rt.weakRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().weak_ref_count);
+    try std.testing.expect(weak.isAlive());
+    {
+        const live = weak.get();
+        defer live.free(rt);
+        try std.testing.expectEqual(&target.header, live.refHeader().?);
+    }
+
+    target.value().free(rt);
+
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expect(!weak.isAlive());
+    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 1), clear_count);
+
+    weak.deinit();
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
+}
+
+test "weak persistent value clears object cycle target during gc" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    const self_key = try rt.internAtom("weak-persistent-cycle-self");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target.value(), true, true, true));
+
+    var clear_count: usize = 0;
+    var weak = try rt.createWeakPersistentValue(target.value(), weakPersistentCounterCallback, &clear_count);
+    defer weak.deinit();
+
+    target.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+
+    try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 1), clear_count);
+}
+
+test "weak persistent value clears unrooted symbol target during gc" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const symbol_atom = try rt.atoms.newValueSymbol("weak-persistent-symbol");
+    var clear_count: usize = 0;
+    var weak = try rt.createWeakPersistentValue(core.JSValue.symbol(symbol_atom), weakPersistentCounterCallback, &clear_count);
+    defer weak.deinit();
+
+    try std.testing.expect(weak.isAlive());
+    try std.testing.expect(weak.get().same(core.JSValue.symbol(symbol_atom)));
+
+    _ = rt.runObjectCycleRemoval();
+
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+    try std.testing.expect(!weak.isAlive());
+    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 1), clear_count);
 }
 
 test "function home object cycle is released by runtime cycle removal" {
@@ -4890,6 +5429,9 @@ test "class payload function bytecode constant object cycle is released by runti
 
     try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
     try std.testing.expect(payload_mark_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+    try runOneDeferredClassPayloadFinalizer(rt);
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
@@ -5789,12 +6331,14 @@ test "weak map cycle sweep clears index after removing dead keys" {
         result.free(rt);
     }
     try std.testing.expectEqual(@as(usize, 8), map.weakCollectionEntries().len);
+    try std.testing.expectEqual(@as(usize, 8), rt.gcStats().weak_ref_count);
     try std.testing.expect(map.collectionBucketHeads().len != 0);
 
     keys[0].value().free(rt);
     first_key_released = true;
     try std.testing.expectEqual(@as(usize, 1), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 7), map.weakCollectionEntries().len);
+    try std.testing.expectEqual(@as(usize, 7), rt.gcStats().weak_ref_count);
     try std.testing.expectEqual(@as(usize, 0), map.collectionBucketHeads().len);
 
     var index: usize = 1;
@@ -5839,10 +6383,12 @@ test "finalization registry live target preserves held value" {
 
     try std.testing.expectEqual(@as(usize, 0), rt.runObjectCycleRemoval());
     try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().weak_ref_count);
     try std.testing.expectEqual(&held.header, registry.finalizationRegistryCells()[0].held_value.refHeader().?);
 
     registry.value().free(rt);
     target.value().free(rt);
+    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
 test "finalization cleanup enqueue OOM leaves cell pending for retry" {

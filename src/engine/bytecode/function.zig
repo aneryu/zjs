@@ -629,6 +629,32 @@ pub const FunctionBytecode = struct {
         self.cpool = &.{};
     }
 
+    pub fn heapByteSize(self: *const FunctionBytecode) usize {
+        var bytes: usize = @sizeOf(FunctionBytecode);
+        bytes = addSliceBytes(bytes, u8, self.byte_code.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.atom_operands.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.arg_names.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.var_names.len);
+        bytes = addSliceBytes(bytes, bool, self.var_is_lexical.len);
+        bytes = addSliceBytes(bytes, bool, self.var_is_const.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.var_ref_names.len);
+        bytes = addSliceBytes(bytes, bool, self.var_ref_is_lexical.len);
+        bytes = addSliceBytes(bytes, bool, self.var_ref_is_const.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.global_var_names.len);
+        bytes = addSliceBytes(bytes, function_def.VarDef, self.vardefs.len);
+        bytes = addSliceBytes(bytes, function_def.ClosureVar, self.closure_var.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.class_instance_fields.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.private_bound_names.len);
+        bytes = addSliceBytes(bytes, atom.Atom, self.class_private_names.len);
+        bytes = addSliceBytes(bytes, JSValue, self.cpool.len);
+        bytes = addSliceBytes(bytes, u8, self.pc2line_buf.len);
+        bytes = addSliceBytes(bytes, ic.Slot, self.ic_slots.len);
+        bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
+        bytes = addSliceBytes(bytes, IcSite, self.ic_sites.len);
+        if (self.source) |source| bytes = addSaturating(bytes, source.len);
+        return bytes;
+    }
+
     pub fn allocateIcSlots(self: *FunctionBytecode) !void {
         self.deinitIcSlots(null);
         if (!build_options.zjs_enable_ic) return;
@@ -710,6 +736,15 @@ pub const FunctionBytecode = struct {
         return sites;
     }
 };
+
+fn addSliceBytes(total: usize, comptime T: type, len: usize) usize {
+    const slice_bytes = std.math.mul(usize, @sizeOf(T), len) catch std.math.maxInt(usize);
+    return addSaturating(total, slice_bytes);
+}
+
+fn addSaturating(a: usize, b: usize) usize {
+    return std.math.add(usize, a, b) catch std.math.maxInt(usize);
+}
 
 fn opcodeHasOwnDataIc(op_id: u8) bool {
     return op_id == opcode.op.get_var or

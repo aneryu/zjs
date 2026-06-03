@@ -13,6 +13,11 @@ pub const JSRuntime = core.JSRuntime;
 pub const JSContext = core.JSContext;
 pub const JSValue = core.JSValue;
 pub const JSValueHandle = core.runtime.JSValueHandle;
+pub const LocalHandle = core.LocalHandle;
+pub const HandleScope = core.HandleScope;
+pub const WeakPersistent = core.WeakPersistent;
+pub const WeakPersistentValue = core.WeakPersistentValue;
+pub const NativePin = core.NativePin;
 pub const GCPolicy = core.GCPolicy;
 pub const GCStats = core.GCStats;
 

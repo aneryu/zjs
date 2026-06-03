@@ -2140,6 +2140,61 @@ JIT write barriers
 JIT call boundary GC protocol
 ```
 
+### 当前中间态 TODO
+
+当前实现应先保持为可构建、可验证的中间态。已落地的方向包括：
+
+```text
+提交边界（2026-06-03）：
+  - 当前状态是可用的中间态，不是完整的新 GC 终态。
+  - 最近一次验证：zig build test --summary all，1726/1726 tests passed。
+  - 最近一次验证：zig build smoke --summary all，88/88 scripts passed。
+  - 最近一次验证：git diff --check passed。
+  - 后续大项按下面 TODO 推进，先完成大项修改，再统一 test / fix。
+```
+
+```text
+HandleScope / Persistent / WeakPersistent 基础 root。
+old -> young remembered set / dirty card barrier。
+external memory accounting、GC request 与 external token registry 审计。
+non-moving nursery promotion path 与 nursery tuning。
+large object classification 和逻辑 old/large page accounting。
+GC scheduler request、callback/idle/safepoint 入口。
+native pin API、RSS/cgroup pressure request、deferred native cleanup queue（external host / std file close / class payload finalizer）。
+heap verifier 覆盖 heap/live bytes、page accounting、pin metadata、remembered set。
+```
+
+剩余 TODO：
+
+```text
+P0:
+  - 将逻辑 old/large page accounting 替换为真实 page allocator、size-class page、free-list 和 mark bitmap。
+
+P1:
+  - 实现真正 moving/copying nursery，而不是当前 non-moving promotion 中间态。
+  - 为移动 young object 补齐 forwarding pointer/table 后的所有 root、slot、handle、dirty card 更新。
+  - 为 array elements、closure env、module namespace、Promise reaction、WeakMap entry 等批量写入补齐 bulk barrier 审计。
+
+P2:
+  - 将 major GC 从当前 STW cycle-collector backend 拆成真正 incremental mark roots / mark some / weak fixpoint / sweep some。
+  - 让 callback boundary / idle poll 按时间预算推进 major slice，而不是只决定是否运行完整 backend。
+  - 将 logical sweep page counters 替换为真实 sweep cursor、lazy sweep 和 page free-list 回收。
+
+P3:
+  - 增加 GC worker、atomic mark bits、concurrent mark stack、concurrent sweep page states。
+  - 增强 incremental marking barrier，保证 black -> white 写入在并发/增量标记中正确 shade。
+  - 增加 safepoint handshake，支持未来 worker/JIT 并发协议。
+
+P4:
+  - 实现真实 page decommit / madvise / cold page trimming，而不是仅记录 logical decommitted bytes。
+  - 增加 large object tail trimming 和 RSS/cgroup pressure 下的强制 decommit 策略。
+  - 做 selective evacuation prototype，并只在 pinned / weak / finalizer 约束满足时启用。
+
+P5:
+  - 增加 JIT stack maps、deopt root map、inline allocation fast path 和 JIT write barrier。
+  - 禁止没有 stack map 的 JIT 帧触发 moving nursery GC。
+```
+
 ---
 
 ## 27. 推荐默认配置

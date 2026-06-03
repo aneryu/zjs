@@ -686,7 +686,7 @@ pub fn arrayBufferResizeLength(rt: *core.JSRuntime, buffer_value: core.JSValue, 
     const copy_len = @min(old.len, new_length);
     if (copy_len != 0) @memcpy(next[0..copy_len], old[0..copy_len]);
     if (new_length > copy_len) @memset(next[copy_len..], 0);
-    buffer.installByteStorage(rt, next);
+    try buffer.installByteStorage(rt, next);
     return core.JSValue.undefinedValue();
 }
 
@@ -889,7 +889,8 @@ fn createArrayBufferWithPrototype(rt: *core.JSRuntime, byte_length: usize, max_b
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
     const bytes = try rt.memory.alloc(u8, byte_length);
-    object.installByteStorage(rt, bytes);
+    errdefer rt.memory.free(u8, bytes);
+    try object.installByteStorage(rt, bytes);
     @memset(object.byteStorage(), 0);
     object.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return object.value();
