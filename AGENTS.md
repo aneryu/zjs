@@ -75,8 +75,8 @@ available only through git history.
 
 ### Regression
 
-- `zig build test --summary all` (defaults to Debug optimization; use for fast compilation during daily local development iteration)
-- `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run before final commits or CI gates to ensure optimized loop safety)
+- `zig build test --summary all` (defaults to Debug optimization; use for fast compilation during daily local development iteration; do NOT run ReleaseSafe tests repeatedly during minor edits to save time)
+- `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
 - `zig build test-oom --summary all` for sampled exec OOM fail-index coverage.
 - `zig build test-oom-exhaustive --summary all` for very slow full exec OOM
   fail-index audits.
@@ -135,7 +135,7 @@ Missing or invalid arguments should print usage and exit non-zero.
 - The relevant failing case was reproduced and understood.
 - The change is limited to the minimum necessary files.
 - Related docs, tracking notes, or matrices are updated.
-- `zig build test --summary all` passes.
-
+- `zig build test --summary all` (daily development verification).
+- `zig build test -Doptimize=ReleaseSafe --summary all` (run ONLY once as a final pre-commit/pre-push gate verification).
 - `git diff --check` passes.
 - No noisy logs, temporary debug output, or unrelated build noise were added.
