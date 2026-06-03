@@ -141,6 +141,13 @@ pub const RootProvider = struct {
 
 pub const RootSlot = struct {
     value: JSValue = JSValue.undefinedValue(),
+
+    pub fn object(self: *RootSlot) ?*Object {
+        if (!self.value.isObject()) return null;
+        const header = self.value.refHeader() orelse return null;
+        std.debug.assert(header.kind == .object);
+        return @alignCast(@fieldParentPtr("header", header));
+    }
 };
 
 pub const WeakPersistentCallback = *const fn (runtime: *JSRuntime, context: ?*anyopaque) void;
@@ -217,6 +224,11 @@ pub const JSValueHandle = struct {
         return slot.value;
     }
 
+    pub fn object(self: JSValueHandle) ?*Object {
+        const slot = self.slot orelse return null;
+        return slot.object();
+    }
+
     pub fn deinit(self: *JSValueHandle) void {
         const runtime = self.runtime orelse return;
         const slot = self.slot orelse return;
@@ -253,6 +265,10 @@ pub const LocalHandle = struct {
 
     pub fn valueSlot(self: LocalHandle) *JSValue {
         return &self.slot.value;
+    }
+
+    pub fn object(self: LocalHandle) ?*Object {
+        return self.slot.object();
     }
 };
 
@@ -1450,6 +1466,7 @@ pub const JSRuntime = struct {
             rt: *JSRuntime,
             object_worklist: std.ArrayList(*Object) = .empty,
             bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode) = .empty,
+            freed_objects: usize = 0,
             promoted_young_objects: usize = 0,
             promoted_young_bytes: usize = 0,
             copied_young_objects: usize = 0,
@@ -1534,20 +1551,23 @@ pub const JSRuntime = struct {
                 self_visitor.promoted_young_bytes +|= moved_bytes;
             }
 
-            fn promoteRemainingInPlace(self_visitor: *@This(), header: *gc.Header) !void {
+            fn collectRemainingUntraced(self_visitor: *@This(), header: *gc.Header) !void {
                 if (header.generation() != .young) return;
                 if (self_visitor.rt.gc.forwardedHeader(header) != null) {
                     try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
                     return;
                 }
 
-                const moved_bytes = promotedSize(header);
-                self_visitor.rt.gc.markNurserySurvivor(header);
-                try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
-                self_visitor.promoted_young_objects +|= 1;
-                self_visitor.promoted_young_bytes +|= moved_bytes;
-                self_visitor.in_place_young_promotions +|= 1;
-                self_visitor.in_place_young_promotion_bytes +|= moved_bytes;
+                switch (header.kind) {
+                    .object => {
+                        const live_before = self_visitor.rt.gc.liveCount();
+                        Object.destroyFromHeader(self_visitor.rt, header);
+                        const live_after = self_visitor.rt.gc.liveCount();
+                        self_visitor.freed_objects +|= live_before -| live_after;
+                    },
+                    .function_bytecode => unreachable,
+                    .string, .big_int => {},
+                }
             }
 
             fn allocateMovedObject(self_visitor: *@This()) !*Object {
@@ -1649,7 +1669,7 @@ pub const JSRuntime = struct {
         };
 
         while (self.gc.nurseryEntryHeader(0)) |header| {
-            visitor.promoteRemainingInPlace(header) catch |err| {
+            visitor.collectRemainingUntraced(header) catch |err| {
                 self.gc.recordFailure(err);
                 self.gc.requestGC(.minor, .collection_failed, .soon);
                 return err;
@@ -1657,6 +1677,7 @@ pub const JSRuntime = struct {
         }
 
         const result = gc.CollectionResult{
+            .freed_objects = visitor.freed_objects,
             .promoted_young_objects = visitor.promoted_young_objects,
             .promoted_young_bytes = visitor.promoted_young_bytes,
             .copied_young_objects = visitor.copied_young_objects,

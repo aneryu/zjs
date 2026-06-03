@@ -1942,6 +1942,7 @@ pub const Registry = struct {
         const survival_per_mille = ratioPerMille(promoted_bytes, nursery_allocated);
 
         self.stats.minor_gc_count +|= 1;
+        self.stats.freed_objects +|= result.freed_objects;
         self.stats.minor_gc_time_ns +|= result.duration_ns;
         self.stats.last_minor_pause_ns = result.duration_ns;
         self.stats.minor_pause_samples.record(result.duration_ns);

@@ -2149,7 +2149,7 @@ JIT call boundary GC protocol
 ```text
 提交边界（2026-06-03）：
   - 当前状态是可用的中间态，不是完整的新 GC 终态。
-  - 最近一次验证：zig build test --summary all，944/944 tests passed。
+  - 最近一次验证：zig build test --summary all，951/951 tests passed。
   - 最近一次验证：zig build zjs --summary all passed。
   - 最近一次验证：git diff --check passed。
   - 当前 build graph 不包含 smoke step；zig build smoke --summary all 会返回 no step named 'smoke'。
@@ -2157,13 +2157,13 @@ JIT call boundary GC protocol
 ```
 
 ```text
-HandleScope / Persistent / WeakPersistent 基础 root。
+HandleScope / Persistent / WeakPersistent 基础 root；Local / Persistent handles 可从移动后 root slot 重新取回 Object，WeakPersistent identity 会随移动更新。
 old -> young remembered set / dirty card barrier。
 external memory accounting、GC request 与 external token registry 审计（包含 SharedBufferStore owner token）。
-minor GC hybrid 中间态：root/remembered tracing 访问到的 young Object 会复制到 old allocation；final nursery pass 剩余条目先原地晋升，保持现有 raw-local `*Object` 调用可用。
+minor GC 默认 strict/full-copying nursery：root/remembered tracing 访问到的 young Object 会复制到 old allocation，untraced nursery entries 会释放；final pass 原地晋升 fallback 已删除。full-copying 路径已覆盖 survivor 复制、untraced nursery entry 释放、untraced nursery object graph 析构释放、untraced owner 析构时 stale child slot release 转发到 moved survivor；scheduler、var-ref、Promise payload、mapped arguments barrier 测试已迁移到 root/handle discipline。
 FunctionBytecode 已明确为 non-moving old/large bytecode space，即使调用方请求 young 也不会进入 nursery。
 moving 后的旧 Object shadow 通过 forwarding table 保留到 runtime deinit，用于 stale raw release 转发。
-GC stats 已拆分 `copied_young_*` 与 `in_place_young_promotion_*`，用于量化 full copying nursery 前还剩多少 fallback。
+GC stats 已拆分 `copied_young_*` 与 `in_place_young_promotion_*`，其中 `in_place_young_promotion_*` 现在用于回归监控，应保持为 0。
 nursery tuning。
 large object classification。
 old/large page metadata allocator、size-class page、free-list、allocation bitmap 与 mark bitmap。
@@ -2180,7 +2180,6 @@ P0:
   - 当前 old/large page metadata allocator 已经是 GC accounting / verifier / sweep cursor 的 authoritative source；物理 payload 地址仍由 MemoryAccount 提供。
 
 P1:
-  - 完成 full copying nursery：移除 final pass 原地晋升 fallback，让未存活 young object 可直接回收。
   - 收敛当前旧 Object shadow + forwarding table 中间方案；优先补齐 HandleScope/Persistent/root slot discipline，再删除 stale raw pointer 兼容层。
   - 为移动 young object 继续补齐 forwarding pointer/table 后的所有 root、slot、handle、dirty card 更新。
   - 为 array elements、closure env、module namespace、Promise reaction、WeakMap entry 等批量写入补齐 bulk barrier 审计。

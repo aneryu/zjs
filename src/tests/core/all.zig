@@ -2966,8 +2966,9 @@ test "nursery policy promotes young objects at poll boundary without running maj
     defer rt.deinit();
 
     const object = try core.Object.create(&rt, core.class.ids.object, null);
-    var object_value = object.value();
-    defer object_value.free(&rt);
+    var scope = rt.enterHandleScope();
+    const local = try scope.local(object.value());
+    defer scope.deinit();
 
     try std.testing.expectEqual(core.gc.Generation.young, object.header.generation());
     try std.testing.expectEqual(@sizeOf(core.Object), rt.gc.nurseryUsedBytes());
@@ -2987,10 +2988,8 @@ test "nursery policy promotes young objects at poll boundary without running maj
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
     try std.testing.expectEqual(debt_before_minor + @sizeOf(core.Object) * rt.gc.policy.old_weight, rt.allocationDebtBytes());
 
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
-    const roots = core.runtime.ValueRootFrame{ .values = &root_values };
-    const minor = try rt.pollGC(&roots, .normal);
-    const moved_object_header = object_value.refHeader().?;
+    const minor = try rt.pollGC(null, .normal);
+    const moved_object_header = &local.object().?.header;
     try std.testing.expectEqual(@as(usize, 0), minor.freed_objects);
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), minor.promoted_young_bytes);
@@ -3093,19 +3092,18 @@ test "nursery tuning shrinks after high survival minor gc" {
     defer rt.deinit();
 
     const object = try core.Object.create(&rt, core.class.ids.object, null);
-    var object_value = object.value();
-    defer object_value.free(&rt);
+    var scope = rt.enterHandleScope();
+    const local = try scope.local(object.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.minor, .manual, .soon);
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
-    const roots = core.runtime.ValueRootFrame{ .values = &root_values };
-    const minor = try rt.pollGC(&roots, .normal);
+    const minor = try rt.pollGC(null, .normal);
     const stats = rt.gcStats();
 
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
     try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
     try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
-    try std.testing.expectEqual(object_value.refHeader().?, rt.gc.forwardedHeader(&object.header).?);
+    try std.testing.expectEqual(&local.object().?.header, rt.gc.forwardedHeader(&object.header).?);
     try std.testing.expectEqual(@as(usize, 1000), stats.last_minor_survival_per_mille);
     try std.testing.expectEqual(@as(usize, 2 * 1024), stats.nursery_committed_bytes);
     try std.testing.expectEqual(@as(usize, 1), stats.nursery_resize_count);
@@ -3138,7 +3136,7 @@ test "nursery tuning grows after low survival minor gc" {
     try std.testing.expectEqual(@as(usize, 1), stats.nursery_resize_count);
 }
 
-test "minor gc fallback promotes unrooted nursery entries in place" {
+test "strict minor gc frees untraced nursery entries" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
         .gc_policy = .{
@@ -3149,24 +3147,143 @@ test "minor gc fallback promotes unrooted nursery entries in place" {
     });
     defer rt.deinit();
 
-    const first = try core.Object.create(&rt, core.class.ids.object, null);
-    defer first.value().free(&rt);
-    const second = try core.Object.create(&rt, core.class.ids.object, null);
-    defer second.value().free(&rt);
+    _ = try core.Object.create(&rt, core.class.ids.object, null);
+    _ = try core.Object.create(&rt, core.class.ids.object, null);
 
     try std.testing.expectEqual(@as(usize, 2), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
     try rt.gc.verifyNurseryCoverage();
 
     rt.gc.requestGC(.minor, .manual, .soon);
     const minor = try rt.pollGC(null, .normal);
 
-    try std.testing.expectEqual(@as(usize, 2), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 2), minor.freed_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.promoted_young_objects);
     try std.testing.expectEqual(@as(usize, 0), minor.copied_young_objects);
-    try std.testing.expectEqual(@as(usize, 2), minor.in_place_young_promotions);
-    try std.testing.expectEqual(core.gc.Generation.old, first.header.generation());
-    try std.testing.expectEqual(core.gc.Generation.old, second.header.generation());
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gcStats().freed_objects);
     try rt.gc.verifyMinorPostcondition();
+}
+
+test "strict minor gc copies survivors and frees untraced entries" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const survivor = try core.Object.create(&rt, core.class.ids.object, null);
+    var scope = rt.enterHandleScope();
+    const local = try scope.local(survivor.value());
+    defer scope.deinit();
+
+    _ = try core.Object.create(&rt, core.class.ids.object, null);
+    _ = try core.Object.create(&rt, core.class.ids.object, null);
+
+    try std.testing.expectEqual(@as(usize, 3), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 3), rt.gc.liveCount());
+    try rt.gc.verifyNurseryCoverage();
+
+    rt.gc.requestGC(.minor, .manual, .soon);
+    const minor = try rt.pollGC(null, .normal);
+
+    const moved = local.object().?;
+    try std.testing.expect(moved != survivor);
+    try std.testing.expectEqual(&moved.header, rt.gc.forwardedHeader(&survivor.header).?);
+    try std.testing.expectEqual(core.gc.Generation.old, moved.header.generation());
+    try std.testing.expectEqual(@as(usize, 2), minor.freed_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gcStats().freed_objects);
+    try rt.gc.verifyMinorPostcondition();
+}
+
+test "strict minor gc frees untraced nursery object graph" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const parent = try core.Object.create(&rt, core.class.ids.object, null);
+    const child = try core.Object.create(&rt, core.class.ids.object, null);
+    const key = try rt.internAtom("strictMinorGraphChild");
+    defer rt.atoms.free(key);
+    try parent.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(&rt);
+
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
+    try rt.gc.verifyNurseryCoverage();
+
+    rt.gc.requestGC(.minor, .manual, .soon);
+    const minor = try rt.pollGC(null, .normal);
+
+    try std.testing.expectEqual(@as(usize, 2), minor.freed_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gcStats().freed_objects);
+    try rt.gc.verifyMinorPostcondition();
+}
+
+test "strict minor gc releases forwarded survivor from untraced owner" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const owner = try core.Object.create(&rt, core.class.ids.object, null);
+    const child = try core.Object.create(&rt, core.class.ids.object, null);
+    var scope = rt.enterHandleScope();
+    const child_local = try scope.local(child.value());
+
+    const key = try rt.internAtom("strictMinorForwardedChild");
+    defer rt.atoms.free(key);
+    try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
+
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
+    try rt.gc.verifyNurseryCoverage();
+
+    rt.gc.requestGC(.minor, .manual, .soon);
+    const minor = try rt.pollGC(null, .normal);
+
+    const moved_child = child_local.object().?;
+    try std.testing.expect(moved_child != child);
+    try std.testing.expectEqual(&moved_child.header, rt.gc.forwardedHeader(&child.header).?);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_child.header.generation());
+    try std.testing.expectEqual(@as(usize, 1), minor.freed_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.liveCount());
+    try std.testing.expectEqual(@as(usize, 1), rt.gcStats().freed_objects);
+    try rt.gc.verifyMinorPostcondition();
+
+    scope.exit();
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
 test "nursery coverage verifier catches untracked young objects" {
@@ -3557,7 +3674,9 @@ test "gc scheduler keeps simultaneous minor and major requests separate" {
     defer rt.deinit();
 
     const object = try core.Object.create(&rt, core.class.ids.object, null);
-    defer object.value().free(&rt);
+    var scope = rt.enterHandleScope();
+    const local = try scope.local(object.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.major, .manual, .soon);
     rt.gc.requestGC(.minor, .nursery_full, .urgent);
@@ -3570,7 +3689,8 @@ test "gc scheduler keeps simultaneous minor and major requests separate" {
 
     const callback_result = try rt.pollGC(null, .callback_boundary);
     try std.testing.expectEqual(@as(usize, 1), callback_result.promoted_young_objects);
-    try std.testing.expectEqual(core.gc.Generation.old, object.header.generation());
+    try std.testing.expectEqual(@as(usize, 1), callback_result.copied_young_objects);
+    try std.testing.expectEqual(core.gc.Generation.old, local.object().?.header.generation());
     try std.testing.expect(!rt.gcStats().pending_minor);
     try std.testing.expect(rt.gcStats().pending_major);
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().major_gc_count);
@@ -4262,11 +4382,14 @@ test "var-ref initialization triggers gc write barrier" {
     });
     defer rt.deinit();
 
-    const cell = try core.Object.create(&rt, core.class.ids.object, null);
-    defer cell.value().free(&rt);
+    const original_cell = try core.Object.create(&rt, core.class.ids.object, null);
+    var scope = rt.enterHandleScope();
+    const cell_local = try scope.local(original_cell.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.minor, .manual, .soon);
     _ = try rt.pollGC(null, .normal);
+    const cell = cell_local.object().?;
     try std.testing.expectEqual(core.gc.Generation.old, cell.header.generation());
 
     const child = try core.Object.create(&rt, core.class.ids.object, null);
@@ -4293,11 +4416,14 @@ test "promise payload writes trigger gc write barrier" {
     });
     defer rt.deinit();
 
-    const promise = try core.Object.create(&rt, core.class.ids.promise, null);
-    defer promise.value().free(&rt);
+    const original_promise = try core.Object.create(&rt, core.class.ids.promise, null);
+    var scope = rt.enterHandleScope();
+    const promise_local = try scope.local(original_promise.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.minor, .manual, .soon);
     _ = try rt.pollGC(null, .normal);
+    const promise = promise_local.object().?;
     try std.testing.expectEqual(core.gc.Generation.old, promise.header.generation());
 
     const child = try core.Object.create(&rt, core.class.ids.object, null);
@@ -4329,11 +4455,14 @@ test "promise ordinary payload writes trigger gc write barrier" {
     });
     defer rt.deinit();
 
-    const object = try core.Object.create(&rt, core.class.ids.object, null);
-    defer object.value().free(&rt);
+    const original_object = try core.Object.create(&rt, core.class.ids.object, null);
+    var scope = rt.enterHandleScope();
+    const object_local = try scope.local(original_object.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.minor, .manual, .soon);
     _ = try rt.pollGC(null, .normal);
+    const object = object_local.object().?;
     try std.testing.expectEqual(core.gc.Generation.old, object.header.generation());
 
     const child = try core.Object.create(&rt, core.class.ids.object, null);
@@ -4485,18 +4614,22 @@ test "mapped arguments value binding writes trigger gc write barrier" {
     });
     defer rt.deinit();
 
-    const arguments = try core.Object.create(&rt, core.class.ids.mapped_arguments, null);
-    defer arguments.value().free(&rt);
+    const original_arguments = try core.Object.create(&rt, core.class.ids.mapped_arguments, null);
 
     const refs = try rt.memory.alloc(core.JSValue, 1);
     refs[0] = core.JSValue.int32(0);
-    arguments.argumentsVarRefsSlot().* = refs;
+    original_arguments.argumentsVarRefsSlot().* = refs;
 
     const key = core.atom.atomFromUInt32(0);
-    try arguments.defineOwnProperty(&rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try original_arguments.defineOwnProperty(&rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+
+    var scope = rt.enterHandleScope();
+    const arguments_local = try scope.local(original_arguments.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.minor, .manual, .soon);
     _ = try rt.pollGC(null, .normal);
+    const arguments = arguments_local.object().?;
     try std.testing.expectEqual(core.gc.Generation.old, arguments.header.generation());
 
     const child = try core.Object.create(&rt, core.class.ids.object, null);
@@ -4518,21 +4651,26 @@ test "mapped arguments var-ref binding writes trigger gc write barrier" {
     });
     defer rt.deinit();
 
-    const arguments = try core.Object.create(&rt, core.class.ids.mapped_arguments, null);
-    defer arguments.value().free(&rt);
-    const cell = try core.Object.create(&rt, core.class.ids.object, null);
-    defer cell.value().free(&rt);
-    try cell.initVarRefPayload(&rt, core.JSValue.int32(0));
+    const original_arguments = try core.Object.create(&rt, core.class.ids.mapped_arguments, null);
+    const original_cell = try core.Object.create(&rt, core.class.ids.object, null);
+    try original_cell.initVarRefPayload(&rt, core.JSValue.int32(0));
 
     const refs = try rt.memory.alloc(core.JSValue, 1);
-    refs[0] = cell.value().dup();
-    arguments.argumentsVarRefsSlot().* = refs;
+    refs[0] = original_cell.value().dup();
+    original_arguments.argumentsVarRefsSlot().* = refs;
 
     const key = core.atom.atomFromUInt32(0);
-    try arguments.defineOwnProperty(&rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try original_arguments.defineOwnProperty(&rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+
+    var scope = rt.enterHandleScope();
+    const arguments_local = try scope.local(original_arguments.value());
+    const cell_local = try scope.local(original_cell.value());
+    defer scope.deinit();
 
     rt.gc.requestGC(.minor, .manual, .soon);
     _ = try rt.pollGC(null, .normal);
+    const arguments = arguments_local.object().?;
+    const cell = cell_local.object().?;
     try std.testing.expectEqual(core.gc.Generation.old, arguments.header.generation());
     try std.testing.expectEqual(core.gc.Generation.old, cell.header.generation());
 
@@ -4849,6 +4987,36 @@ test "persistent value handle keeps object and nested symbols alive" {
     try std.testing.expect(rt.atoms.name(key) == null);
 }
 
+test "persistent value handle object follows minor gc move" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const original = try core.Object.create(&rt, core.class.ids.object, null);
+    try std.testing.expectEqual(core.gc.Generation.young, original.header.generation());
+
+    var handle = try rt.createPersistentValue(original.value());
+    defer handle.deinit();
+
+    rt.gc.requestGC(.minor, .manual, .soon);
+    const minor = try rt.pollGC(null, .normal);
+
+    const moved = handle.object().?;
+    try std.testing.expect(moved != original);
+    try std.testing.expectEqual(&moved.header, handle.get().refHeader().?);
+    try std.testing.expectEqual(&moved.header, rt.gc.forwardedHeader(&original.header).?);
+    try std.testing.expectEqual(core.gc.Generation.old, moved.header.generation());
+    try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+}
+
 test "handle scope local keeps object alive until scope exits" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -4872,6 +5040,36 @@ test "handle scope local keeps object alive until scope exits" {
 
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
+}
+
+test "handle scope local object follows minor gc move" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const original = try core.Object.create(&rt, core.class.ids.object, null);
+    try std.testing.expectEqual(core.gc.Generation.young, original.header.generation());
+
+    var scope = rt.enterHandleScope();
+    const local = try scope.local(original.value());
+    defer scope.deinit();
+
+    rt.gc.requestGC(.minor, .manual, .soon);
+    const minor = try rt.pollGC(null, .normal);
+
+    const moved = local.object().?;
+    try std.testing.expect(moved != original);
+    try std.testing.expectEqual(&moved.header, rt.gc.forwardedHeader(&original.header).?);
+    try std.testing.expectEqual(core.gc.Generation.old, moved.header.generation());
+    try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
 }
 
 test "handle scope locals do not clear persistent handles created inside scope" {
@@ -5009,6 +5207,43 @@ test "weak persistent value does not retain direct object target" {
 
     weak.deinit();
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
+}
+
+test "weak persistent object identity follows minor gc move" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    var clear_count: usize = 0;
+    var weak = try rt.createWeakPersistentValue(target.value(), weakPersistentCounterCallback, &clear_count);
+    defer weak.deinit();
+
+    var scope = rt.enterHandleScope();
+    const local = try scope.local(target.value());
+    defer scope.deinit();
+
+    rt.gc.requestGC(.minor, .manual, .soon);
+    const minor = try rt.pollGC(null, .normal);
+
+    const moved = local.object().?;
+    const weak_value = weak.get();
+    defer weak_value.free(&rt);
+
+    try std.testing.expect(moved != target);
+    try std.testing.expect(weak.isAlive());
+    try std.testing.expectEqual(&moved.header, weak_value.refHeader().?);
+    try std.testing.expectEqual(&moved.header, rt.gc.forwardedHeader(&target.header).?);
+    try std.testing.expectEqual(@as(usize, 0), clear_count);
+    try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
 }
 
 test "weak persistent value clears object cycle target during gc" {
