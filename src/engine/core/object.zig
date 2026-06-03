@@ -296,13 +296,13 @@ pub const SharedBufferStore = struct {
     external_memory: gc.ExternalMemoryToken = .{},
 
     pub fn create(rt: *JSRuntime, byte_length: usize) !*SharedBufferStore {
+        var external_memory = try rt.reportExternalAlloc(byte_length);
+        errdefer external_memory.release();
         const allocator = std.heap.page_allocator;
         const store = try allocator.create(SharedBufferStore);
         errdefer allocator.destroy(store);
         const bytes = try allocator.alloc(u8, byte_length);
         errdefer allocator.free(bytes);
-        var external_memory = try rt.reportExternalAlloc(byte_length);
-        errdefer external_memory.release();
         @memset(bytes, 0);
         store.* = .{
             .ref_count = .init(1),
@@ -320,8 +320,8 @@ pub const SharedBufferStore = struct {
         if (self.ref_count.fetchSub(1, .acq_rel) != 1) return;
         const allocator = std.heap.page_allocator;
         const bytes = self.bytes;
-        self.external_memory.release();
         self.bytes = &.{};
+        self.external_memory.release();
         allocator.free(bytes);
         allocator.destroy(self);
     }
@@ -2016,7 +2016,7 @@ pub const Object = struct {
             if (index < last_idx) {
                 entries.*[index] = entries.*[last_idx];
             }
-            entries.* = entries.*.ptr[0 .. last_idx];
+            entries.* = entries.*.ptr[0..last_idx];
             removed = true;
             removed_cell.destroy(rt);
         }
@@ -5323,6 +5323,7 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+                    rt.gc.unlinkObject(h);
                     bytecode_function.destroyFromHeader(rt, h);
                 }
                 current = next;
@@ -5349,6 +5350,7 @@ pub const Object = struct {
             const next = node.next;
             const h = gc.headerFromGcNode(node);
             unlinkNodeFromList(&tmp_head, &tmp_tail, node);
+            rt.gc.unlinkObject(h);
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
@@ -6211,7 +6213,7 @@ pub const Object = struct {
                     if (index < last_idx) {
                         payload.weak_entries[index] = payload.weak_entries[last_idx];
                     }
-                    payload.weak_entries = payload.weak_entries.ptr[0 .. last_idx];
+                    payload.weak_entries = payload.weak_entries.ptr[0..last_idx];
                     removed_weak_entry = true;
                 }
                 if (removed_weak_entry) current.clearCollectionIndex(rt);
@@ -6247,7 +6249,7 @@ pub const Object = struct {
                 if (index < last_idx) {
                     finalization_payload.cells[index] = finalization_payload.cells[last_idx];
                 }
-                finalization_payload.cells = finalization_payload.cells.ptr[0 .. last_idx];
+                finalization_payload.cells = finalization_payload.cells.ptr[0..last_idx];
             }
             current.pruneBorrowedReferenceHolderIfEmpty(rt);
         }

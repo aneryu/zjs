@@ -242,10 +242,24 @@ pub const Generation = enum(u2) {
     immortal = 3,
 };
 
+const invalid_page_index = std.math.maxInt(usize);
+const invalid_slot_index = std.math.maxInt(usize);
+
+pub const PageSlot = struct {
+    page_index: usize = invalid_page_index,
+    slot_index: usize = invalid_slot_index,
+    slot_size: usize = 0,
+
+    fn isValid(self: PageSlot) bool {
+        return self.page_index != invalid_page_index and self.slot_index != invalid_slot_index;
+    }
+};
+
 pub const HeapAllocation = struct {
     header: *GCObjectHeader,
     generation: Generation,
     bytes: usize = 0,
+    page: PageSlot = .{},
 };
 
 pub const ExternalTokenEntry = struct {
@@ -256,6 +270,203 @@ pub const ExternalTokenEntry = struct {
 pub const PinEntry = struct {
     header: *GCObjectHeader,
     count: usize = 0,
+};
+
+pub const PageKind = enum(u8) {
+    size_class,
+    large,
+};
+
+pub const HeapPage = struct {
+    kind: PageKind = .size_class,
+    state: PageState = .empty,
+    size_class: usize = 0,
+    capacity_bytes: usize = logical_page_size,
+    live_bytes: usize = 0,
+    free_bytes: usize = logical_page_size,
+    slot_count: usize = 0,
+    allocated_count: usize = 0,
+    free_slots: []usize = &.{},
+    free_list_len: usize = 0,
+    allocation_bitmap: []usize = &.{},
+    mark_bitmap: []usize = &.{},
+
+    fn init(account: *memory.MemoryAccount, kind: PageKind, slot_size: usize, capacity_bytes: usize) !HeapPage {
+        if (slot_size == 0 or capacity_bytes == 0) return error.OutOfMemory;
+        const slot_count = switch (kind) {
+            .size_class => capacity_bytes / slot_size,
+            .large => 1,
+        };
+        if (slot_count == 0) return error.OutOfMemory;
+
+        const bitmap_words = bitmapWordCount(slot_count);
+        const free_slots = try account.alloc(usize, slot_count);
+        errdefer account.free(usize, free_slots);
+        const allocation_bitmap = try account.alloc(usize, bitmap_words);
+        errdefer account.free(usize, allocation_bitmap);
+        const mark_bitmap = try account.alloc(usize, bitmap_words);
+        errdefer account.free(usize, mark_bitmap);
+
+        for (free_slots, 0..) |*slot, index| {
+            slot.* = slot_count - 1 - index;
+        }
+        @memset(allocation_bitmap, 0);
+        @memset(mark_bitmap, 0);
+
+        return .{
+            .kind = kind,
+            .state = .empty,
+            .size_class = slot_size,
+            .capacity_bytes = capacity_bytes,
+            .live_bytes = 0,
+            .free_bytes = capacity_bytes,
+            .slot_count = slot_count,
+            .allocated_count = 0,
+            .free_slots = free_slots,
+            .free_list_len = slot_count,
+            .allocation_bitmap = allocation_bitmap,
+            .mark_bitmap = mark_bitmap,
+        };
+    }
+
+    fn deinit(self: *HeapPage, account: *memory.MemoryAccount) void {
+        if (self.free_slots.len != 0) account.free(usize, self.free_slots);
+        if (self.allocation_bitmap.len != 0) account.free(usize, self.allocation_bitmap);
+        if (self.mark_bitmap.len != 0) account.free(usize, self.mark_bitmap);
+        self.* = .{};
+    }
+
+    fn canAllocate(self: HeapPage, kind: PageKind, slot_size: usize, capacity_bytes: usize) bool {
+        if (self.kind != kind) return false;
+        if (self.state == .decommitted and self.live_bytes != 0) return false;
+        if (kind == .size_class and self.size_class != slot_size) return false;
+        if (kind == .large and self.capacity_bytes != capacity_bytes) return false;
+        return self.free_list_len != 0;
+    }
+
+    fn allocateSlot(self: *HeapPage, bytes: usize) ?usize {
+        if (self.free_list_len == 0 or self.state == .decommitted) return null;
+        self.free_list_len -= 1;
+        const slot_index = self.free_slots[self.free_list_len];
+        if (bitmapGet(self.allocation_bitmap, slot_index)) return null;
+        bitmapSet(self.allocation_bitmap, slot_index, true);
+        bitmapSet(self.mark_bitmap, slot_index, false);
+        self.allocated_count += 1;
+        self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);
+        self.free_bytes -|= self.size_class;
+        self.refreshState();
+        return slot_index;
+    }
+
+    fn freeSlot(self: *HeapPage, slot_index: usize, bytes: usize) void {
+        if (slot_index >= self.slot_count) return;
+        if (!bitmapGet(self.allocation_bitmap, slot_index)) return;
+        bitmapSet(self.allocation_bitmap, slot_index, false);
+        bitmapSet(self.mark_bitmap, slot_index, false);
+        self.allocated_count -|= 1;
+        self.live_bytes -|= bytes;
+        self.free_bytes = std.math.add(usize, self.free_bytes, self.size_class) catch std.math.maxInt(usize);
+        if (self.allocated_count == 0) self.free_bytes = self.capacity_bytes;
+        if (self.free_list_len < self.free_slots.len) {
+            self.free_slots[self.free_list_len] = slot_index;
+            self.free_list_len += 1;
+        }
+        self.refreshState();
+    }
+
+    fn recommit(self: *HeapPage) void {
+        if (self.state != .decommitted) return;
+        self.state = .empty;
+        self.live_bytes = 0;
+        self.free_bytes = self.capacity_bytes;
+        self.allocated_count = 0;
+        self.free_list_len = self.slot_count;
+        for (self.free_slots, 0..) |*slot, index| {
+            slot.* = self.slot_count - 1 - index;
+        }
+        self.clearBitmaps();
+    }
+
+    fn decommit(self: *HeapPage) void {
+        if (self.state == .decommitted or self.allocated_count != 0) return;
+        self.state = .decommitted;
+        self.live_bytes = 0;
+        self.free_bytes = 0;
+        self.free_list_len = self.slot_count;
+        for (self.free_slots, 0..) |*slot, index| {
+            slot.* = self.slot_count - 1 - index;
+        }
+        self.clearBitmaps();
+    }
+
+    fn startSweep(self: *HeapPage) void {
+        if (self.state == .decommitted) return;
+        if (self.allocated_count == 0) {
+            self.state = .empty;
+            self.clearMarkBits();
+            return;
+        }
+        @memcpy(self.mark_bitmap, self.allocation_bitmap);
+        self.state = .needs_sweep;
+    }
+
+    fn finishSweep(self: *HeapPage) void {
+        if (self.state == .decommitted) return;
+        self.clearMarkBits();
+        self.refreshState();
+    }
+
+    fn cancelSweep(self: *HeapPage) void {
+        if (self.state == .needs_sweep or self.state == .sweeping or self.state == .marking) {
+            self.clearMarkBits();
+            self.refreshState();
+        }
+    }
+
+    fn markSlot(self: *HeapPage, slot_index: usize) bool {
+        if (slot_index >= self.slot_count) return false;
+        if (!bitmapGet(self.allocation_bitmap, slot_index)) return false;
+        bitmapSet(self.mark_bitmap, slot_index, true);
+        return true;
+    }
+
+    fn isAllocated(self: HeapPage, slot_index: usize) bool {
+        if (slot_index >= self.slot_count) return false;
+        return bitmapGet(self.allocation_bitmap, slot_index);
+    }
+
+    fn isMarked(self: HeapPage, slot_index: usize) bool {
+        if (slot_index >= self.slot_count) return false;
+        return bitmapGet(self.mark_bitmap, slot_index);
+    }
+
+    fn clearBitmaps(self: *HeapPage) void {
+        @memset(self.allocation_bitmap, 0);
+        self.clearMarkBits();
+    }
+
+    fn clearMarkBits(self: *HeapPage) void {
+        @memset(self.mark_bitmap, 0);
+    }
+
+    fn refreshState(self: *HeapPage) void {
+        if (self.state == .decommitted) return;
+        if (self.allocated_count == 0) {
+            self.state = .empty;
+        } else if (self.free_list_len == 0) {
+            self.state = .full;
+        } else {
+            self.state = .allocating;
+        }
+    }
+
+    fn logicalPageCount(self: HeapPage) usize {
+        return @max(@as(usize, 1), self.capacity_bytes / logical_page_size);
+    }
+
+    fn fragmented(self: HeapPage) bool {
+        return self.allocated_count != 0 and self.free_bytes != 0 and self.state != .decommitted;
+    }
 };
 
 pub const SpaceAccount = struct {
@@ -270,39 +481,91 @@ pub const SpaceAccount = struct {
     needs_sweep_page_count: usize = 0,
     evacuation_candidate_page_count: usize = 0,
     sweep_cursor_page: usize = 0,
+    pages: []HeapPage = &.{},
+    pages_capacity: usize = 0,
+    sweep_cursor_index: usize = 0,
 
-    fn recordAlloc(self: *SpaceAccount, bytes: usize) void {
-        if (bytes == 0) return;
-        self.live_bytes = std.math.add(usize, self.live_bytes, bytes) catch std.math.maxInt(usize);
-        if (self.free_bytes >= bytes) {
-            self.free_bytes -= bytes;
-            return;
+    fn deinit(self: *SpaceAccount, account: *memory.MemoryAccount) void {
+        for (self.pages) |*page| page.deinit(account);
+        if (self.pages_capacity != 0) {
+            account.free(HeapPage, self.pages.ptr[0..self.pages_capacity]);
+        } else if (self.pages.len != 0) {
+            account.free(HeapPage, self.pages);
         }
-
-        const needed = bytes - self.free_bytes;
-        self.free_bytes = 0;
-        const committed = alignForwardSaturating(needed, logical_page_size);
-        self.committed_bytes = std.math.add(usize, self.committed_bytes, committed) catch std.math.maxInt(usize);
-        if (committed > needed) {
-            self.free_bytes = std.math.add(usize, self.free_bytes, committed - needed) catch std.math.maxInt(usize);
-        }
+        self.* = .{};
     }
 
-    fn recordFree(self: *SpaceAccount, bytes: usize, retain_hot_empty_pages: usize, decommit_empty_pages: bool) void {
-        if (bytes == 0) return;
-        self.live_bytes -|= bytes;
-        self.free_bytes = std.math.add(usize, self.free_bytes, bytes) catch std.math.maxInt(usize);
+    fn allocateSizeClass(self: *SpaceAccount, account: *memory.MemoryAccount, bytes: usize) !PageSlot {
+        if (bytes == 0) return .{};
+        const slot_size = sizeClassForBytes(bytes);
+        if (slot_size > logical_page_size) return self.allocateLarge(account, bytes);
+
+        for (self.pages, 0..) |*page, index| {
+            if (!page.canAllocate(.size_class, slot_size, logical_page_size)) continue;
+            page.recommit();
+            const slot_index = page.allocateSlot(bytes) orelse continue;
+            self.refreshPageState(0);
+            return .{ .page_index = index, .slot_index = slot_index, .slot_size = slot_size };
+        }
+
+        try self.ensurePageCapacity(account, self.pages.len + 1);
+        var page = try HeapPage.init(account, .size_class, slot_size, logical_page_size);
+        errdefer page.deinit(account);
+        const slot_index = page.allocateSlot(bytes) orelse return error.OutOfMemory;
+        const page_index = self.pages.len;
+        self.pages.ptr[page_index] = page;
+        self.pages = self.pages.ptr[0 .. self.pages.len + 1];
+        self.refreshPageState(0);
+        return .{ .page_index = page_index, .slot_index = slot_index, .slot_size = slot_size };
+    }
+
+    fn allocateLarge(self: *SpaceAccount, account: *memory.MemoryAccount, bytes: usize) !PageSlot {
+        if (bytes == 0) return .{};
+        const capacity = alignForwardSaturating(bytes, logical_page_size);
+        for (self.pages, 0..) |*page, index| {
+            if (!page.canAllocate(.large, bytes, capacity)) continue;
+            page.recommit();
+            page.size_class = bytes;
+            const slot_index = page.allocateSlot(bytes) orelse continue;
+            self.refreshPageState(0);
+            return .{ .page_index = index, .slot_index = slot_index, .slot_size = bytes };
+        }
+
+        try self.ensurePageCapacity(account, self.pages.len + 1);
+        var page = try HeapPage.init(account, .large, bytes, capacity);
+        errdefer page.deinit(account);
+        const slot_index = page.allocateSlot(bytes) orelse return error.OutOfMemory;
+        const page_index = self.pages.len;
+        self.pages.ptr[page_index] = page;
+        self.pages = self.pages.ptr[0 .. self.pages.len + 1];
+        self.refreshPageState(0);
+        return .{ .page_index = page_index, .slot_index = slot_index, .slot_size = bytes };
+    }
+
+    fn freeSlot(self: *SpaceAccount, slot: PageSlot, bytes: usize, retain_hot_empty_pages: usize, decommit_empty_pages: bool) void {
+        if (!slot.isValid() or slot.page_index >= self.pages.len) return;
+        self.pages[slot.page_index].freeSlot(slot.slot_index, bytes);
         if (decommit_empty_pages) self.trimFreePages(retain_hot_empty_pages);
+        self.refreshPageState(0);
+    }
+
+    fn markSlot(self: *SpaceAccount, slot: PageSlot) bool {
+        if (!slot.isValid() or slot.page_index >= self.pages.len) return false;
+        return self.pages[slot.page_index].markSlot(slot.slot_index);
     }
 
     fn trimFreePages(self: *SpaceAccount, retain_hot_empty_pages: usize) void {
-        const retain_bytes = std.math.mul(usize, retain_hot_empty_pages, logical_page_size) catch std.math.maxInt(usize);
-        if (self.free_bytes <= retain_bytes) return;
-        const releasable = alignDown(self.free_bytes - retain_bytes, logical_page_size);
-        if (releasable == 0) return;
-        self.free_bytes -= releasable;
-        self.committed_bytes -|= releasable;
-        self.decommitted_bytes = std.math.add(usize, self.decommitted_bytes, releasable) catch std.math.maxInt(usize);
+        var retained_pages: usize = 0;
+        for (self.pages) |*page| {
+            if (page.state == .decommitted or page.allocated_count != 0) continue;
+            const page_count = page.logicalPageCount();
+            if (retained_pages < retain_hot_empty_pages) {
+                retained_pages = std.math.add(usize, retained_pages, page_count) catch std.math.maxInt(usize);
+                continue;
+            }
+            page.decommit();
+        }
+        self.refreshPageState(0);
     }
 
     fn fragmentationPerMille(self: SpaceAccount) usize {
@@ -310,35 +573,76 @@ pub const SpaceAccount = struct {
     }
 
     fn refreshPageState(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        const committed_pages = self.committedPageCount();
-        const empty_pages = @min(committed_pages, self.free_bytes / logical_page_size);
-        const live_pages = @min(committed_pages, alignForwardSaturating(self.live_bytes, logical_page_size) / logical_page_size);
-        self.empty_page_count = empty_pages;
-        self.decommitted_page_count = self.decommitted_bytes / logical_page_size;
-        self.full_page_count = @min(live_pages, self.live_bytes / logical_page_size);
-        self.allocating_page_count = if (live_pages > self.full_page_count) 1 else 0;
-        const fragmented_pages = committed_pages -| self.full_page_count -| self.empty_page_count -| self.allocating_page_count;
+        self.live_bytes = 0;
+        self.committed_bytes = 0;
+        self.free_bytes = 0;
+        self.decommitted_bytes = 0;
+        self.allocating_page_count = 0;
+        self.full_page_count = 0;
+        self.empty_page_count = 0;
+        self.decommitted_page_count = 0;
+        self.needs_sweep_page_count = 0;
+        self.evacuation_candidate_page_count = 0;
+
+        var fragmented_pages: usize = 0;
+        for (self.pages) |page| {
+            const page_count = page.logicalPageCount();
+            if (page.state == .decommitted) {
+                self.decommitted_bytes = std.math.add(usize, self.decommitted_bytes, page.capacity_bytes) catch std.math.maxInt(usize);
+                self.decommitted_page_count = std.math.add(usize, self.decommitted_page_count, page_count) catch std.math.maxInt(usize);
+                continue;
+            }
+
+            self.live_bytes = std.math.add(usize, self.live_bytes, page.live_bytes) catch std.math.maxInt(usize);
+            self.committed_bytes = std.math.add(usize, self.committed_bytes, page.capacity_bytes) catch std.math.maxInt(usize);
+            self.free_bytes = std.math.add(usize, self.free_bytes, page.free_bytes) catch std.math.maxInt(usize);
+
+            switch (page.state) {
+                .empty => self.empty_page_count = std.math.add(usize, self.empty_page_count, page_count) catch std.math.maxInt(usize),
+                .full => self.full_page_count = std.math.add(usize, self.full_page_count, page_count) catch std.math.maxInt(usize),
+                .needs_sweep, .sweeping => self.needs_sweep_page_count = std.math.add(usize, self.needs_sweep_page_count, page_count) catch std.math.maxInt(usize),
+                .allocating, .marking, .swept => self.allocating_page_count = std.math.add(usize, self.allocating_page_count, page_count) catch std.math.maxInt(usize),
+                .decommitted => unreachable,
+            }
+            if (page.fragmented()) {
+                fragmented_pages = std.math.add(usize, fragmented_pages, page_count) catch std.math.maxInt(usize);
+            }
+        }
+
         self.evacuation_candidate_page_count = if (fragmentation_trigger_per_mille != 0 and self.fragmentationPerMille() >= fragmentation_trigger_per_mille)
             fragmented_pages
         else
             0;
-        if (self.needs_sweep_page_count > committed_pages) self.needs_sweep_page_count = committed_pages;
-        if (self.sweep_cursor_page > committed_pages) self.sweep_cursor_page = committed_pages;
+        if (self.sweep_cursor_index > self.pages.len) self.sweep_cursor_index = self.pages.len;
+        self.sweep_cursor_page = self.sweep_cursor_index;
     }
 
     fn startSweep(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        self.refreshPageState(fragmentation_trigger_per_mille);
-        self.needs_sweep_page_count = self.committedPageCount() -| self.empty_page_count -| self.decommitted_page_count;
+        for (self.pages) |*page| page.startSweep();
+        self.sweep_cursor_index = 0;
         self.sweep_cursor_page = 0;
+        self.refreshPageState(fragmentation_trigger_per_mille);
     }
 
     fn sweepSomePages(self: *SpaceAccount, max_pages: usize, fragmentation_trigger_per_mille: usize) usize {
         if (max_pages == 0 or self.needs_sweep_page_count == 0) return 0;
-        const swept = @min(max_pages, self.needs_sweep_page_count);
-        self.needs_sweep_page_count -= swept;
-        self.sweep_cursor_page +|= swept;
-        if (self.needs_sweep_page_count == 0) self.sweep_cursor_page = 0;
+        var swept: usize = 0;
+        var index = self.sweep_cursor_index;
+        while (index < self.pages.len and swept < max_pages) : (index += 1) {
+            const page = &self.pages[index];
+            if (page.state != .needs_sweep and page.state != .sweeping) continue;
+            const page_count = page.logicalPageCount();
+            if (swept != 0 and swept + page_count > max_pages) break;
+            page.state = .sweeping;
+            page.finishSweep();
+            swept = std.math.add(usize, swept, page_count) catch std.math.maxInt(usize);
+        }
+        self.sweep_cursor_index = index;
         self.refreshPageState(fragmentation_trigger_per_mille);
+        if (self.needs_sweep_page_count == 0) {
+            self.sweep_cursor_index = 0;
+            self.sweep_cursor_page = 0;
+        }
         return swept;
     }
 
@@ -347,7 +651,8 @@ pub const SpaceAccount = struct {
     }
 
     fn cancelSweep(self: *SpaceAccount, fragmentation_trigger_per_mille: usize) void {
-        self.needs_sweep_page_count = 0;
+        for (self.pages) |*page| page.cancelSweep();
+        self.sweep_cursor_index = 0;
         self.sweep_cursor_page = 0;
         self.refreshPageState(fragmentation_trigger_per_mille);
     }
@@ -355,7 +660,62 @@ pub const SpaceAccount = struct {
     fn committedPageCount(self: SpaceAccount) usize {
         return self.committed_bytes / logical_page_size;
     }
+
+    fn pageAllocated(self: SpaceAccount, slot: PageSlot) bool {
+        if (!slot.isValid() or slot.page_index >= self.pages.len) return false;
+        return self.pages[slot.page_index].isAllocated(slot.slot_index);
+    }
+
+    fn pageMarked(self: SpaceAccount, slot: PageSlot) bool {
+        if (!slot.isValid() or slot.page_index >= self.pages.len) return false;
+        return self.pages[slot.page_index].isMarked(slot.slot_index);
+    }
+
+    fn ensurePageCapacity(self: *SpaceAccount, account: *memory.MemoryAccount, required: usize) !void {
+        if (required <= self.pages_capacity) return;
+        var new_capacity = if (self.pages_capacity == 0) @as(usize, 4) else self.pages_capacity * 2;
+        while (new_capacity < required) new_capacity *= 2;
+        const next = try account.alloc(HeapPage, new_capacity);
+        @memcpy(next[0..self.pages.len], self.pages);
+        if (self.pages_capacity != 0) {
+            account.free(HeapPage, self.pages.ptr[0..self.pages_capacity]);
+        } else if (self.pages.len != 0) {
+            account.free(HeapPage, self.pages);
+        }
+        self.pages = next[0..self.pages.len];
+        self.pages_capacity = new_capacity;
+    }
 };
+
+fn sizeClassForBytes(bytes: usize) usize {
+    const min_size_class: usize = 16;
+    if (bytes <= min_size_class) return min_size_class;
+    return alignForwardSaturating(bytes, min_size_class);
+}
+
+const bitmap_word_bits = @bitSizeOf(usize);
+
+fn bitmapWordCount(bit_count: usize) usize {
+    return (bit_count + bitmap_word_bits - 1) / bitmap_word_bits;
+}
+
+fn bitmapSet(bitmap: []usize, bit_index: usize, value: bool) void {
+    const word_index = bit_index / bitmap_word_bits;
+    const shift: std.math.Log2Int(usize) = @intCast(bit_index % bitmap_word_bits);
+    const mask = @as(usize, 1) << shift;
+    if (value) {
+        bitmap[word_index] |= mask;
+    } else {
+        bitmap[word_index] &= ~mask;
+    }
+}
+
+fn bitmapGet(bitmap: []const usize, bit_index: usize) bool {
+    const word_index = bit_index / bitmap_word_bits;
+    const shift: std.math.Log2Int(usize) = @intCast(bit_index % bitmap_word_bits);
+    const mask = @as(usize, 1) << shift;
+    return (bitmap[word_index] & mask) != 0;
+}
 
 fn ratioPerMille(numerator: usize, denominator: usize) usize {
     if (denominator == 0) return 0;
@@ -544,6 +904,13 @@ pub const InvariantError = error{
     MissingDirtyCard,
     DuplicateHeapAllocation,
     MissingHeapAllocation,
+    DuplicatePageSlot,
+    MissingPageAllocation,
+    InvalidPageAllocation,
+    PageLiveBytesMismatch,
+    PageCommittedBytesMismatch,
+    PageFreeBytesMismatch,
+    PageDecommittedBytesMismatch,
     HeapLiveBytesMismatch,
     YoungLiveBytesMismatch,
     OldLiveBytesMismatch,
@@ -866,6 +1233,8 @@ pub const Registry = struct {
         }
         self.pin_entries = &.{};
         self.pin_entries_capacity = 0;
+        self.old_space.deinit(self.memory);
+        self.large_space.deinit(self.memory);
 
         self.phase = .none;
     }
@@ -1228,17 +1597,18 @@ pub const Registry = struct {
         const track_nursery = self.nursery.enabled and actual_generation == .young;
         if (track_nursery) try self.ensureNurseryEntryCapacity(self.nursery_entries.len + 1);
         if (bytes != 0) try self.ensureHeapAllocationCapacity(self.heap_allocations.len + 1);
+        const page = try self.recordHeapAlloc(actual_generation, bytes);
 
         h.rc = 1;
         h.flags = .{};
-        h.size_class = @intCast(@min(bytes, std.math.maxInt(u16)));
+        h.size_class = @intCast(@min(if (page.slot_size != 0) page.slot_size else bytes, std.math.maxInt(u16)));
         h.setGeneration(actual_generation);
-        self.recordHeapAlloc(actual_generation, bytes);
         if (bytes != 0) {
             self.heap_allocations.ptr[self.heap_allocations.len] = .{
                 .header = h,
                 .generation = actual_generation,
                 .bytes = bytes,
+                .page = page,
             };
             self.heap_allocations = self.heap_allocations.ptr[0 .. self.heap_allocations.len + 1];
         }
@@ -1277,12 +1647,12 @@ pub const Registry = struct {
         return requested;
     }
 
-    fn recordHeapAlloc(self: *Registry, generation: Generation, bytes: usize) void {
-        if (bytes == 0) return;
+    fn recordHeapAlloc(self: *Registry, generation: Generation, bytes: usize) !PageSlot {
+        if (bytes == 0) return .{};
+        const page = try self.recordSpaceAlloc(generation, bytes);
         self.stats.allocated_bytes = std.math.add(usize, self.stats.allocated_bytes, bytes) catch std.math.maxInt(usize);
         self.stats.peak_allocated_bytes = @max(self.stats.peak_allocated_bytes, self.stats.allocated_bytes);
         self.addLiveHeapBytes(generation, bytes);
-        self.recordSpaceAlloc(generation, bytes);
         const kind_weight = switch (generation) {
             .young => self.policy.young_weight,
             .old, .immortal => self.policy.old_weight,
@@ -1313,13 +1683,14 @@ pub const Registry = struct {
         if (self.stats.allocation_debt >= self.policy.major_debt_threshold) {
             self.requestGC(.major, .allocation_debt, .soon);
         }
+        return page;
     }
 
     fn recordHeapFree(self: *Registry, header: *GCObjectHeader) void {
         const index = self.heapAllocationIndex(header) orelse return;
         const entry = self.heap_allocations[index];
         self.subtractLiveHeapBytes(entry.generation, entry.bytes);
-        self.recordSpaceFree(entry.generation, entry.bytes);
+        self.recordSpaceFree(entry.generation, entry.bytes, entry.page);
         if (index + 1 < self.heap_allocations.len) {
             std.mem.copyForwards(
                 HeapAllocation,
@@ -1331,23 +1702,25 @@ pub const Registry = struct {
         header.size_class = 0;
     }
 
-    pub fn promoteHeapAllocationToOld(self: *Registry, header: *GCObjectHeader) void {
+    pub fn promoteHeapAllocationToOld(self: *Registry, header: *GCObjectHeader) !void {
         const index = self.heapAllocationIndex(header) orelse return;
         const entry = &self.heap_allocations[index];
         if (entry.generation == .old) return;
         if (entry.generation != .young) return;
+        const page = try self.recordSpaceAlloc(.old, entry.bytes);
         self.subtractLiveHeapBytes(entry.generation, entry.bytes);
         self.addLiveHeapBytes(.old, entry.bytes);
-        self.recordSpaceAlloc(.old, entry.bytes);
         const weighted = std.math.mul(usize, entry.bytes, self.policy.promotion_weight) catch std.math.maxInt(usize);
         self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
         if (self.stats.allocation_debt >= self.policy.major_debt_threshold) {
             self.requestGC(.major, .allocation_debt, .soon);
         }
         entry.generation = .old;
+        entry.page = page;
+        header.size_class = @intCast(@min(if (page.slot_size != 0) page.slot_size else entry.bytes, std.math.maxInt(u16)));
     }
 
-    pub fn promoteYoungHeaderToOld(self: *Registry, header: *GCObjectHeader) void {
+    pub fn promoteYoungHeaderToOld(self: *Registry, header: *GCObjectHeader) !void {
         if (header.generation() != .young) return;
         const nursery_bytes = blk: {
             for (self.nursery_entries) |entry| {
@@ -1355,7 +1728,7 @@ pub const Registry = struct {
             }
             break :blk @as(usize, 0);
         };
-        self.promoteHeapAllocationToOld(header);
+        try self.promoteHeapAllocationToOld(header);
         header.setGeneration(.old);
         self.removeNurseryEntry(header);
         self.nursery.used_bytes -|= nursery_bytes;
@@ -1373,7 +1746,11 @@ pub const Registry = struct {
         };
         self.pin_entries = self.pin_entries.ptr[0 .. self.pin_entries.len + 1];
         header.setPinned(true);
-        self.promoteYoungHeaderToOld(header);
+        errdefer {
+            self.pin_entries = self.pin_entries[0 .. self.pin_entries.len - 1];
+            header.setPinned(false);
+        }
+        try self.promoteYoungHeaderToOld(header);
     }
 
     pub fn unpinHeader(self: *Registry, header: *GCObjectHeader) void {
@@ -1411,20 +1788,21 @@ pub const Registry = struct {
         }
     }
 
-    fn recordSpaceAlloc(self: *Registry, generation: Generation, bytes: usize) void {
-        switch (generation) {
-            .young => {},
-            .old, .immortal => self.old_space.recordAlloc(bytes),
-            .large => self.large_space.recordAlloc(bytes),
-        }
+    fn recordSpaceAlloc(self: *Registry, generation: Generation, bytes: usize) !PageSlot {
+        const slot = switch (generation) {
+            .young => PageSlot{},
+            .old, .immortal => try self.old_space.allocateSizeClass(self.memory, bytes),
+            .large => try self.large_space.allocateLarge(self.memory, bytes),
+        };
         self.refreshSpacePageState();
+        return slot;
     }
 
-    fn recordSpaceFree(self: *Registry, generation: Generation, bytes: usize) void {
+    fn recordSpaceFree(self: *Registry, generation: Generation, bytes: usize, slot: PageSlot) void {
         switch (generation) {
             .young => {},
-            .old, .immortal => self.old_space.recordFree(bytes, self.policy.retain_hot_empty_pages, self.policy.decommit_empty_pages),
-            .large => self.large_space.recordFree(bytes, 0, self.policy.decommit_empty_pages),
+            .old, .immortal => self.old_space.freeSlot(slot, bytes, self.policy.retain_hot_empty_pages, self.policy.decommit_empty_pages),
+            .large => self.large_space.freeSlot(slot, bytes, 0, self.policy.decommit_empty_pages),
         }
         self.refreshSpacePageState();
     }
@@ -1860,7 +2238,11 @@ pub const Registry = struct {
         for (self.heap_allocations, 0..) |entry, index| {
             for (self.heap_allocations[0..index]) |previous| {
                 if (previous.header == entry.header) return error.DuplicateHeapAllocation;
+                if (samePageSpace(entry.generation, previous.generation) and entry.page.isValid() and previous.page.isValid() and entry.page.page_index == previous.page.page_index and entry.page.slot_index == previous.page.slot_index) {
+                    return error.DuplicatePageSlot;
+                }
             }
+            try self.verifyAllocationPage(entry);
 
             heap_live_bytes = std.math.add(usize, heap_live_bytes, entry.bytes) catch std.math.maxInt(usize);
             switch (entry.generation) {
@@ -1903,6 +2285,8 @@ pub const Registry = struct {
         if (external_token_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
         if (old_live_bytes != self.old_space.live_bytes) return error.OldSpaceLiveBytesMismatch;
         if (large_object_bytes != self.large_space.live_bytes) return error.LargeSpaceLiveBytesMismatch;
+        try verifySpacePages(self.old_space);
+        try verifySpacePages(self.large_space);
         if (self.old_space.live_bytes +| self.old_space.free_bytes > self.old_space.committed_bytes) return error.OldSpaceCommittedBytesMismatch;
         if (self.large_space.live_bytes +| self.large_space.free_bytes > self.large_space.committed_bytes) return error.LargeSpaceCommittedBytesMismatch;
         if (!self.spacePageStateMatches(self.old_space)) return error.OldSpacePageStateMismatch;
@@ -1912,6 +2296,73 @@ pub const Registry = struct {
     pub fn verifyNoExternalTokenLeaks(self: Registry) InvariantError!void {
         if (self.external_tokens.len != 0) return error.LeakedExternalMemoryToken;
         if (self.stats.external_bytes != 0) return error.ExternalTokenBytesMismatch;
+    }
+
+    fn verifyAllocationPage(self: Registry, entry: HeapAllocation) InvariantError!void {
+        switch (entry.generation) {
+            .young => {
+                if (entry.page.isValid()) return error.InvalidPageAllocation;
+            },
+            .old, .immortal => try verifyAllocationInSpace(self.old_space, entry, false),
+            .large => try verifyAllocationInSpace(self.large_space, entry, true),
+        }
+    }
+
+    fn verifyAllocationInSpace(space: SpaceAccount, entry: HeapAllocation, require_large_page: bool) InvariantError!void {
+        if (!entry.page.isValid() or entry.page.page_index >= space.pages.len) return error.MissingPageAllocation;
+        const page = space.pages[entry.page.page_index];
+        if (!page.isAllocated(entry.page.slot_index)) return error.MissingPageAllocation;
+        if (require_large_page and page.kind != .large) return error.InvalidPageAllocation;
+        if (!require_large_page and page.kind == .size_class and entry.bytes > page.size_class) return error.InvalidPageAllocation;
+        if (page.kind == .large and page.size_class != entry.bytes) return error.InvalidPageAllocation;
+        if (entry.page.slot_size != page.size_class) return error.InvalidPageAllocation;
+    }
+
+    fn verifySpacePages(space: SpaceAccount) InvariantError!void {
+        var live_bytes: usize = 0;
+        var committed_bytes: usize = 0;
+        var free_bytes: usize = 0;
+        var decommitted_bytes: usize = 0;
+
+        for (space.pages) |page| {
+            var allocated_bits: usize = 0;
+            for (0..page.slot_count) |slot_index| {
+                const allocated = page.isAllocated(slot_index);
+                const marked = page.isMarked(slot_index);
+                if (allocated) allocated_bits += 1;
+                if (marked and !allocated) return error.InvalidPageAllocation;
+            }
+            if (allocated_bits != page.allocated_count) return error.InvalidPageAllocation;
+            if (page.free_list_len + page.allocated_count != page.slot_count) return error.InvalidPageAllocation;
+            for (page.free_slots[0..page.free_list_len], 0..) |slot_index, index| {
+                if (slot_index >= page.slot_count) return error.InvalidPageAllocation;
+                if (page.isAllocated(slot_index)) return error.InvalidPageAllocation;
+                for (page.free_slots[0..index]) |previous| {
+                    if (previous == slot_index) return error.InvalidPageAllocation;
+                }
+            }
+
+            if (page.state == .decommitted) {
+                decommitted_bytes = std.math.add(usize, decommitted_bytes, page.capacity_bytes) catch std.math.maxInt(usize);
+                continue;
+            }
+            live_bytes = std.math.add(usize, live_bytes, page.live_bytes) catch std.math.maxInt(usize);
+            committed_bytes = std.math.add(usize, committed_bytes, page.capacity_bytes) catch std.math.maxInt(usize);
+            free_bytes = std.math.add(usize, free_bytes, page.free_bytes) catch std.math.maxInt(usize);
+        }
+
+        if (live_bytes != space.live_bytes) return error.PageLiveBytesMismatch;
+        if (committed_bytes != space.committed_bytes) return error.PageCommittedBytesMismatch;
+        if (free_bytes != space.free_bytes) return error.PageFreeBytesMismatch;
+        if (decommitted_bytes != space.decommitted_bytes) return error.PageDecommittedBytesMismatch;
+    }
+
+    fn samePageSpace(lhs: Generation, rhs: Generation) bool {
+        return switch (lhs) {
+            .young => rhs == .young,
+            .old, .immortal => rhs == .old or rhs == .immortal,
+            .large => rhs == .large,
+        };
     }
 
     fn spacePageStateMatches(self: Registry, space: SpaceAccount) bool {

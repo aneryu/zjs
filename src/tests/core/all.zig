@@ -443,7 +443,6 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
-
 test "GC sweeps unrooted unique symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2010,7 +2009,6 @@ test "regexp state uses payload storage" {
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
 
-
 test "bound function state uses payload storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -3319,6 +3317,46 @@ test "gc live heap stats drop when object is released" {
     try std.testing.expectEqual(@as(usize, core.gc.logical_page_size), decommitted.decommitted_bytes);
 }
 
+test "old-space page allocator reuses size-class free slots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first = try core.Object.create(rt, core.class.ids.object, null);
+    const second = try core.Object.create(rt, core.class.ids.object, null);
+    defer second.value().free(rt);
+
+    const first_page = blk: {
+        for (rt.gc.heap_allocations) |entry| {
+            if (entry.header == &first.header) break :blk entry.page;
+        }
+        unreachable;
+    };
+
+    var stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), stats.old_page_count);
+    try std.testing.expectEqual(@as(usize, 1), stats.old_allocating_page_count);
+    try rt.gc.verifyHeapAccounting();
+
+    first.value().free(rt);
+    stats = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), stats.old_page_count);
+    try std.testing.expect(stats.old_empty_page_bytes >= first_page.slot_size);
+    try rt.gc.verifyHeapAccounting();
+
+    const third = try core.Object.create(rt, core.class.ids.object, null);
+    defer third.value().free(rt);
+
+    const third_page = blk: {
+        for (rt.gc.heap_allocations) |entry| {
+            if (entry.header == &third.header) break :blk entry.page;
+        }
+        unreachable;
+    };
+    try std.testing.expectEqual(first_page.page_index, third_page.page_index);
+    try std.testing.expectEqual(first_page.slot_index, third_page.slot_index);
+    try rt.gc.verifyHeapAccounting();
+}
+
 test "external memory token registry audits duplicate releases and leaks" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
@@ -4555,6 +4593,25 @@ test "gc heap accounting verifier catches missing allocation entries" {
     rt.gc.heap_allocations = old_allocations[0..0];
     try std.testing.expectError(error.MissingHeapAllocation, rt.gc.verifyHeapAccounting());
     rt.gc.heap_allocations = old_allocations;
+    try rt.gc.verifyHeapAccounting();
+}
+
+test "gc heap accounting verifier catches missing page slots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const obj = try core.Object.create(rt, core.class.ids.object, null);
+    defer obj.value().free(rt);
+    try rt.gc.verifyHeapAccounting();
+
+    const old_page = rt.gc.heap_allocations[0].page;
+    rt.gc.heap_allocations[0].page = .{
+        .page_index = std.math.maxInt(usize),
+        .slot_index = old_page.slot_index,
+        .slot_size = old_page.slot_size,
+    };
+    try std.testing.expectError(error.MissingPageAllocation, rt.gc.verifyHeapAccounting());
+    rt.gc.heap_allocations[0].page = old_page;
     try rt.gc.verifyHeapAccounting();
 }
 
@@ -6150,8 +6207,6 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
-
-
 test "finalization registry unregister preserves pending cleanup cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6504,7 +6559,6 @@ test "function records skip zero-length payload allocations" {
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
 }
-
 
 test "module records retain import export metadata and status" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -6873,7 +6927,6 @@ test "ordinary objects define own data properties and descriptors" {
     const updated = obj.getProperty(key);
     try std.testing.expectEqual(@as(?i32, 7), updated.asInt32());
 }
-
 
 test "define property enforces non-configurable and non-writable invariants" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

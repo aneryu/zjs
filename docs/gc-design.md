@@ -2147,28 +2147,31 @@ JIT call boundary GC protocol
 ```text
 提交边界（2026-06-03）：
   - 当前状态是可用的中间态，不是完整的新 GC 终态。
-  - 最近一次验证：zig build test --summary all，1726/1726 tests passed。
-  - 最近一次验证：zig build smoke --summary all，88/88 scripts passed。
+  - 最近一次验证：zig build test --summary all，944/944 tests passed。
+  - 最近一次验证：zig build zjs --summary all passed。
   - 最近一次验证：git diff --check passed。
+  - 当前 build graph 不包含 smoke step；zig build smoke --summary all 会返回 no step named 'smoke'。
   - 后续大项按下面 TODO 推进，先完成大项修改，再统一 test / fix。
 ```
 
 ```text
 HandleScope / Persistent / WeakPersistent 基础 root。
 old -> young remembered set / dirty card barrier。
-external memory accounting、GC request 与 external token registry 审计。
+external memory accounting、GC request 与 external token registry 审计（包含 SharedBufferStore owner token）。
 non-moving nursery promotion path 与 nursery tuning。
-large object classification 和逻辑 old/large page accounting。
+large object classification。
+old/large page metadata allocator、size-class page、free-list、allocation bitmap 与 mark bitmap。
 GC scheduler request、callback/idle/safepoint 入口。
 native pin API、RSS/cgroup pressure request、deferred native cleanup queue（external host / std file close / class payload finalizer）。
-heap verifier 覆盖 heap/live bytes、page accounting、pin metadata、remembered set。
+heap verifier 覆盖 heap/live bytes、page slot/bitmap/free-list accounting、pin metadata、remembered set。
 ```
 
 剩余 TODO：
 
 ```text
 P0:
-  - 将逻辑 old/large page accounting 替换为真实 page allocator、size-class page、free-list 和 mark bitmap。
+  - 如需让对象物理地址也来自 GC page arena，将 Object / FunctionBytecode allocation ownership 从 MemoryAccount create/alloc 迁移到 page allocator-backed blocks。
+  - 当前 old/large page metadata allocator 已经是 GC accounting / verifier / sweep cursor 的 authoritative source；物理 payload 地址仍由 MemoryAccount 提供。
 
 P1:
   - 实现真正 moving/copying nursery，而不是当前 non-moving promotion 中间态。
@@ -2178,7 +2181,7 @@ P1:
 P2:
   - 将 major GC 从当前 STW cycle-collector backend 拆成真正 incremental mark roots / mark some / weak fixpoint / sweep some。
   - 让 callback boundary / idle poll 按时间预算推进 major slice，而不是只决定是否运行完整 backend。
-  - 将 logical sweep page counters 替换为真实 sweep cursor、lazy sweep 和 page free-list 回收。
+  - 将当前 STW sweep-all page cursor 拆成 lazy sweep 和预算化 page 回收 slice。
 
 P3:
   - 增加 GC worker、atomic mark bits、concurrent mark stack、concurrent sweep page states。

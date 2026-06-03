@@ -1490,7 +1490,7 @@ pub const JSRuntime = struct {
 
                 if (self_visitor.rt.gc.forwardedHeader(header)) |forwarded| {
                     if (forwarded != header) {
-                        self_visitor.rt.gc.promoteHeapAllocationToOld(header);
+                        try self_visitor.rt.gc.promoteHeapAllocationToOld(header);
                         header.setGeneration(.old);
                         return;
                     }
@@ -1518,7 +1518,7 @@ pub const JSRuntime = struct {
                     .string, .big_int => {},
                 }
 
-                self_visitor.rt.gc.promoteHeapAllocationToOld(header);
+                try self_visitor.rt.gc.promoteHeapAllocationToOld(header);
                 header.setGeneration(.old);
                 self_visitor.promoted_young_objects +|= 1;
                 self_visitor.promoted_young_bytes +|= promotedSize(header);
