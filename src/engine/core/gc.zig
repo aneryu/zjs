@@ -1475,6 +1475,52 @@ pub const Registry = struct {
         self.stats.current_mark_stack_depth = 0;
     }
 
+    pub fn finishMajorMarkSlice(self: *Registry, result: CollectionResult) void {
+        self.recordIncrementalSlice(result.duration_ns);
+        self.stats.current_mark_stack_depth = 0;
+        if (self.hasPendingMajorSweep()) {
+            self.major_phase = .sweep;
+            return;
+        }
+        self.major_phase = .idle;
+        self.major_reason = null;
+        self.major_started_ns = 0;
+    }
+
+    pub fn hasActiveMajorCycle(self: Registry) bool {
+        return self.major_phase != .idle;
+    }
+
+    pub fn hasPendingMajorSweep(self: Registry) bool {
+        return self.old_space.needs_sweep_page_count != 0 or self.large_space.needs_sweep_page_count != 0;
+    }
+
+    pub fn sweepMajorPages(self: *Registry, max_pages: usize) usize {
+        if (self.major_phase != .sweep or max_pages == 0) return 0;
+        const swept_old = self.old_space.sweepSomePages(max_pages, self.fragmentationTriggerPerMille());
+        const remaining = if (max_pages == std.math.maxInt(usize))
+            std.math.maxInt(usize)
+        else
+            max_pages -| swept_old;
+        const swept_large = self.large_space.sweepSomePages(remaining, self.fragmentationTriggerPerMille());
+        return swept_old +| swept_large;
+    }
+
+    pub fn finishMajorSweepSlice(self: *Registry, swept_pages: usize, duration_ns: u64) CollectionResult {
+        self.recordIncrementalSlice(duration_ns);
+        self.stats.last_swept_page_count = swept_pages;
+        self.stats.swept_page_count +|= swept_pages;
+        self.stats.sweep_time_ns +|= duration_ns;
+        self.stats.cycle_gc_time_ns +|= duration_ns;
+        if (!self.hasPendingMajorSweep()) {
+            self.major_phase = .idle;
+            self.major_reason = null;
+            self.major_started_ns = 0;
+            self.stats.current_mark_stack_depth = 0;
+        }
+        return .{ .duration_ns = duration_ns };
+    }
+
     pub fn recordIncrementalSlice(self: *Registry, duration_ns: u64) void {
         self.stats.last_incremental_slice_ns = duration_ns;
         self.stats.major_slice_count +|= 1;

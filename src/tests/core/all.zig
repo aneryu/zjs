@@ -3644,11 +3644,55 @@ test "gc callback boundary defers non-urgent major work until idle" {
     try std.testing.expectEqual(core.gc.MajorPhase.idle, after_idle.major_phase);
     try std.testing.expectEqual(@as(usize, 1), after_idle.major_slice_count);
     try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.last_incremental_slice_ns);
-    try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.sweep_time_ns);
+    try std.testing.expectEqual(@as(u64, 0), after_idle.sweep_time_ns);
+    try std.testing.expectEqual(@as(usize, 0), after_idle.last_swept_page_count);
     try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p50);
     try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p95);
     try std.testing.expectEqual(after_idle.major_gc_time_ns, after_idle.major_pause_ns_p99);
     try std.testing.expect(!rt.gcPendingForTest());
+}
+
+test "major gc sweep advances across callback boundary slices" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .callback_slice_budget_ns = 1,
+            .idle_slice_budget_ns = 1,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var scope = rt.enterHandleScope();
+    defer scope.deinit();
+
+    var index: usize = 0;
+    while (index < 128) : (index += 1) {
+        const object = try core.Object.create(&rt, core.class.ids.object, null);
+        _ = try scope.local(object.value());
+    }
+
+    const before = rt.gcStats();
+    try std.testing.expect(before.old_page_count > 1);
+
+    rt.gc.requestGC(.major, .manual, .soon);
+    _ = try rt.pollGC(null, .idle);
+
+    const after_mark = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 1), after_mark.major_gc_count);
+    try std.testing.expectEqual(@as(usize, 1), after_mark.major_slice_count);
+    try std.testing.expectEqual(core.gc.MajorPhase.sweep, after_mark.major_phase);
+    try std.testing.expect(after_mark.old_needs_sweep_page_count > 1);
+    try std.testing.expectEqual(@as(usize, 0), after_mark.last_swept_page_count);
+    try std.testing.expect(!rt.gcPendingForTest());
+
+    _ = try rt.pollGC(null, .callback_boundary);
+
+    const after_sweep = rt.gcStats();
+    try std.testing.expectEqual(@as(usize, 2), after_sweep.major_slice_count);
+    try std.testing.expectEqual(@as(usize, 1), after_sweep.last_swept_page_count);
+    try std.testing.expect(after_sweep.old_needs_sweep_page_count < after_mark.old_needs_sweep_page_count);
+    try std.testing.expect(after_sweep.sweep_time_ns == after_sweep.last_incremental_slice_ns);
 }
 
 test "gc scheduler keeps simultaneous minor and major requests separate" {

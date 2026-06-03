@@ -32707,6 +32707,102 @@ test "qjsPromiseReactionJob roots reaction and value while allocating job" {
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
 
+test "qjsPromiseReactionJobCall roots resolve function across handler minor gc" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var ctx: core.JSContext = undefined;
+    try ctx.init(&rt, .{});
+    defer ctx.deinit();
+
+    const global = try core.Object.create(&rt, core.class.ids.object, null);
+    var global_pin = try rt.pinHeaderForNative(&global.header);
+    defer {
+        global_pin.release();
+        global.value().free(&rt);
+    }
+
+    const ForceMinorHandler = struct {
+        fn call(_: *anyopaque, external: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const external_ctx: *core.JSContext = @ptrCast(@alignCast(external.ctx));
+            external_ctx.runtime.gc.requestGC(.minor, .manual, .soon);
+            _ = try external_ctx.runtime.pollGC(null, .normal);
+            return external.args[0].dup();
+        }
+    };
+    const handler_id = try rt.registerExternalHostFunction(.{
+        .ptr = &rt,
+        .call = ForceMinorHandler.call,
+    });
+
+    const ResolveState = struct {
+        called: bool = false,
+        arg_header: ?*core.gc.Header = null,
+
+        fn call(ptr: *anyopaque, external: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const state: *@This() = @ptrCast(@alignCast(ptr));
+            state.called = true;
+            state.arg_header = external.args[0].refHeader();
+            return core.JSValue.undefinedValue();
+        }
+    };
+    var resolve_state = ResolveState{};
+    const resolve_id = try rt.registerExternalHostFunction(.{
+        .ptr = &resolve_state,
+        .call = ResolveState.call,
+    });
+
+    const handler = try core.Object.create(&rt, core.class.ids.c_function, null);
+    handler.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    handler.externalHostFunctionIdSlot().* = handler_id;
+    var handler_handle = try rt.takeValueHandle(handler.value());
+    defer handler_handle.deinit();
+
+    const resolve = try core.Object.create(&rt, core.class.ids.c_function, null);
+    resolve.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    resolve.externalHostFunctionIdSlot().* = resolve_id;
+    var resolve_handle = try rt.takeValueHandle(resolve.value());
+    defer resolve_handle.deinit();
+
+    const payload = try core.Object.create(&rt, core.class.ids.object, null);
+    const original_payload_header = &payload.header;
+    var payload_handle = try rt.takeValueHandle(payload.value());
+    defer payload_handle.deinit();
+
+    const reaction_value = try qjsPromiseReactionRecord(
+        &rt,
+        handler_handle.get(),
+        core.JSValue.undefinedValue(),
+        resolve_handle.get(),
+        core.JSValue.undefinedValue(),
+    );
+    var reaction_handle = try rt.takeValueHandle(reaction_value);
+    defer reaction_handle.deinit();
+    const reaction = reaction_handle.object().?;
+
+    const job_value = try qjsPromiseReactionJob(&rt, global, reaction, payload_handle.get(), false);
+    var job_handle = try rt.takeValueHandle(job_value);
+    defer job_handle.deinit();
+    const job_object = job_handle.object().?;
+
+    const result = try qjsPromiseReactionJobCall(&ctx, null, global, job_object, null, null);
+    defer if (result) |value| value.free(&rt);
+
+    try std.testing.expect(resolve_state.called);
+    const moved_payload_header = payload_handle.get().refHeader().?;
+    try std.testing.expect(moved_payload_header != original_payload_header);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_payload_header.generation());
+    try std.testing.expectEqual(moved_payload_header, resolve_state.arg_header.?);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
+}
+
 const PreparedPromiseReactionJobs = struct {
     jobs: []core.JSValue = &.{},
     initialized: usize = 0,
@@ -33150,6 +33246,68 @@ test "qjsPromiseThenableJob roots direct function bytecode then callback while c
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
+test "qjsPromiseThenableJobCall roots resolving functions across then callback minor gc" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var ctx: core.JSContext = undefined;
+    try ctx.init(&rt, .{});
+    defer ctx.deinit();
+
+    const global = try core.Object.create(&rt, core.class.ids.object, null);
+    var global_pin = try rt.pinHeaderForNative(&global.header);
+    defer {
+        global_pin.release();
+        global.value().free(&rt);
+    }
+
+    const ForceMinorThen = struct {
+        fn call(_: *anyopaque, external: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const external_ctx: *core.JSContext = @ptrCast(@alignCast(external.ctx));
+            external_ctx.runtime.gc.requestGC(.minor, .manual, .soon);
+            _ = try external_ctx.runtime.pollGC(null, .normal);
+            return core.JSValue.undefinedValue();
+        }
+    };
+    const external_id = try rt.registerExternalHostFunction(.{
+        .ptr = &rt,
+        .call = ForceMinorThen.call,
+    });
+
+    const then_callback = try core.Object.create(&rt, core.class.ids.c_function, null);
+    then_callback.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    then_callback.externalHostFunctionIdSlot().* = external_id;
+    var then_handle = try rt.takeValueHandle(then_callback.value());
+    defer then_handle.deinit();
+
+    const target = try core.Object.create(&rt, core.class.ids.promise, null);
+    const original_target = target;
+    var target_handle = try rt.takeValueHandle(target.value());
+    defer target_handle.deinit();
+
+    try std.testing.expectEqual(core.gc.Generation.young, target.header.generation());
+
+    const job_value = try qjsPromiseThenableJob(&rt, global, target_handle.get(), core.JSValue.undefinedValue(), then_handle.get());
+    var job_handle = try rt.takeValueHandle(job_value);
+    defer job_handle.deinit();
+    const job_object = job_handle.object().?;
+
+    const result = try qjsPromiseThenableJobCall(&ctx, null, global, job_object, null, null);
+    defer if (result) |value| value.free(&rt);
+
+    const moved_target = target_handle.object().?;
+    try std.testing.expect(moved_target != original_target);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_target.header.generation());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
+}
+
 fn qjsPromiseThenableJobPending(callback: core.JSValue) bool {
     const callback_object = objectFromValue(callback) orelse return false;
     return callback_object.functionPromiseThenableTarget() != null;
@@ -33159,12 +33317,23 @@ fn qjsSettlePendingThenableJobs(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    promise: *core.Object,
+    input_promise: *core.Object,
 ) !void {
-    while (promise.promiseResultSlot().* == null) {
-        const callback = promise.promiseReactionCallback() orelse break;
+    var promise: ?*core.Object = input_promise;
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &promise },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .objects = &root_objects,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    while (promise.?.promiseResultSlot().* == null) {
+        const callback = promise.?.promiseReactionCallback() orelse break;
         if (!qjsPromiseThenableJobPending(callback)) break;
-        try settlePendingPromiseReaction(ctx, output, global, promise);
+        try settlePendingPromiseReaction(ctx, output, global, promise.?);
     }
 }
 
@@ -33176,14 +33345,29 @@ pub fn qjsPromiseThenableJobCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const target_value = function_object.functionPromiseThenableTarget() orelse return null;
-    const thenable_value = function_object.functionPromiseThenableThis() orelse return error.TypeError;
-    const then_value = function_object.functionPromiseThenableThen() orelse return error.TypeError;
+    var target_value = function_object.functionPromiseThenableTarget() orelse return null;
+    var thenable_value = function_object.functionPromiseThenableThis() orelse return error.TypeError;
+    var then_value = function_object.functionPromiseThenableThen() orelse return error.TypeError;
+    var resolve = core.JSValue.undefinedValue();
+    var reject_value = core.JSValue.undefinedValue();
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &target_value },
+        .{ .value = &thenable_value },
+        .{ .value = &then_value },
+        .{ .value = &resolve },
+        .{ .value = &reject_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
 
     const resolving = try createPromiseResolvingPair(ctx.runtime, global, target_value);
-    const resolve = resolving.resolve;
+    resolve = resolving.resolve;
     defer resolve.free(ctx.runtime);
-    const reject_value = resolving.reject;
+    reject_value = resolving.reject;
     defer reject_value.free(ctx.runtime);
 
     const then_result = callValueOrBytecode(ctx, output, global, thenable_value, then_value, &.{ resolve, reject_value }, caller_function, caller_frame) catch |err| {
@@ -33205,16 +33389,33 @@ pub fn qjsPromiseReactionJobCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const reaction_value = function_object.functionPromiseReactionRecord() orelse return null;
+    var reaction_value = function_object.functionPromiseReactionRecord() orelse return null;
     const reaction = objectFromValue(reaction_value) orelse return error.TypeError;
 
-    const payload = function_object.functionPromiseReactionValue() orelse core.JSValue.undefinedValue();
+    var payload = function_object.functionPromiseReactionValue() orelse core.JSValue.undefinedValue();
     const rejected = function_object.functionPromiseReactionIsRejected();
     const handler_value = if (rejected) reaction.promiseReactionOnRejected() else reaction.promiseReactionOnFulfilled();
-    const handler = handler_value orelse core.JSValue.undefinedValue();
+    var handler = handler_value orelse core.JSValue.undefinedValue();
 
-    const resolve_value = reaction.promiseReactionResolve() orelse return error.TypeError;
-    const reject_value = reaction.promiseReactionReject() orelse return error.TypeError;
+    var resolve_value = reaction.promiseReactionResolve() orelse return error.TypeError;
+    var reject_value = reaction.promiseReactionReject() orelse return error.TypeError;
+    var callback_result = core.JSValue.undefinedValue();
+    var callback_result_owned = false;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &reaction_value },
+        .{ .value = &payload },
+        .{ .value = &handler },
+        .{ .value = &resolve_value },
+        .{ .value = &reject_value },
+        .{ .value = &callback_result },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+    defer if (callback_result_owned) callback_result.free(ctx.runtime);
 
     if (!isCallableValue(handler)) {
         const settle = if (rejected) reject_value else resolve_value;
@@ -33223,15 +33424,15 @@ pub fn qjsPromiseReactionJobCall(
         return core.JSValue.undefinedValue();
     }
 
-    const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), handler, &.{payload}, caller_function, caller_frame) catch |err| {
+    callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), handler, &.{payload}, caller_function, caller_frame) catch |err| {
         const reason = try qjsPromiseErrorValue(ctx, global, err);
         defer reason.free(ctx.runtime);
         const reject_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{reason}, caller_function, caller_frame);
         reject_result.free(ctx.runtime);
         return core.JSValue.undefinedValue();
     };
+    callback_result_owned = true;
     if (rejected) clearHandledRejectionException(ctx);
-    defer callback_result.free(ctx.runtime);
     const resolve_result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{callback_result}, caller_function, caller_frame);
     resolve_result.free(ctx.runtime);
     return core.JSValue.undefinedValue();
@@ -33316,12 +33517,56 @@ pub fn qjsPromiseCombinatorElementCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    function_object: *core.Object,
+    input_function_object: *core.Object,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const mode: PromiseCombinatorCallbackMode = switch (function_object.functionPromiseCombinatorMode()) {
+    var function_object: ?*core.Object = input_function_object;
+    var state: ?*core.Object = null;
+    var values: ?*core.Object = null;
+    var keys: ?*core.Object = null;
+    var state_value = core.JSValue.undefinedValue();
+    var values_value = core.JSValue.undefinedValue();
+    var payload = core.JSValue.undefinedValue();
+    var resolve_value = core.JSValue.undefinedValue();
+    var reject_value = core.JSValue.undefinedValue();
+    var keys_value = core.JSValue.undefinedValue();
+    var record = core.JSValue.undefinedValue();
+    var keyed_result = core.JSValue.undefinedValue();
+    var aggregate_error = core.JSValue.undefinedValue();
+    var record_owned = false;
+    var keyed_result_owned = false;
+    var aggregate_error_owned = false;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &state_value },
+        .{ .value = &values_value },
+        .{ .value = &payload },
+        .{ .value = &resolve_value },
+        .{ .value = &reject_value },
+        .{ .value = &keys_value },
+        .{ .value = &record },
+        .{ .value = &keyed_result },
+        .{ .value = &aggregate_error },
+    };
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &function_object },
+        .{ .object = &state },
+        .{ .object = &values },
+        .{ .object = &keys },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+        .objects = &root_objects,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+    defer if (record_owned) record.free(ctx.runtime);
+    defer if (keyed_result_owned) keyed_result.free(ctx.runtime);
+    defer if (aggregate_error_owned) aggregate_error.free(ctx.runtime);
+
+    const mode: PromiseCombinatorCallbackMode = switch (function_object.?.functionPromiseCombinatorMode()) {
         0 => return null,
         @intFromEnum(PromiseCombinatorCallbackMode.all_resolve) => .all_resolve,
         @intFromEnum(PromiseCombinatorCallbackMode.all_settled_fulfill) => .all_settled_fulfill,
@@ -33333,35 +33578,35 @@ pub fn qjsPromiseCombinatorElementCall(
         else => return error.TypeError,
     };
 
-    if (function_object.functionPromiseCombinatorCalled()) return core.JSValue.undefinedValue();
-    function_object.functionPromiseCombinatorCalledSlot().* = true;
+    if (function_object.?.functionPromiseCombinatorCalled()) return core.JSValue.undefinedValue();
+    function_object.?.functionPromiseCombinatorCalledSlot().* = true;
 
-    const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
-    const state = objectFromValue(state_value) orelse return error.TypeError;
-    const values_value = state.promiseCombinatorValues() orelse return error.TypeError;
-    const values = objectFromValue(values_value) orelse return error.TypeError;
+    state_value = function_object.?.functionPromiseCombinatorState() orelse return error.TypeError;
+    state = objectFromValue(state_value) orelse return error.TypeError;
+    values_value = state.?.promiseCombinatorValues() orelse return error.TypeError;
+    values = objectFromValue(values_value) orelse return error.TypeError;
 
-    const index = function_object.functionPromiseCombinatorIndex();
-    const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const index = function_object.?.functionPromiseCombinatorIndex();
+    payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
 
     switch (mode) {
-        .all_resolve, .all_keyed_resolve => try qjsPromiseSetArrayIndex(ctx.runtime, values, index, payload),
+        .all_resolve, .all_keyed_resolve => try qjsPromiseSetArrayIndex(ctx.runtime, values.?, index, payload),
         .all_settled_fulfill, .all_settled_reject, .all_settled_keyed_fulfill, .all_settled_keyed_reject => {
             const rejected = mode == .all_settled_reject or mode == .all_settled_keyed_reject;
-            const record = try qjsPromiseSettlementRecord(ctx.runtime, rejected, payload);
-            defer record.free(ctx.runtime);
-            try qjsPromiseSetArrayIndex(ctx.runtime, values, index, record);
+            record = try qjsPromiseSettlementRecord(ctx.runtime, rejected, payload);
+            record_owned = true;
+            try qjsPromiseSetArrayIndex(ctx.runtime, values.?, index, record);
         },
-        .any_reject => try qjsPromiseSetArrayIndex(ctx.runtime, values, index, payload),
+        .any_reject => try qjsPromiseSetArrayIndex(ctx.runtime, values.?, index, payload),
     }
 
-    const remaining = state.promiseCombinatorRemaining();
+    const remaining = state.?.promiseCombinatorRemaining();
     const next_remaining = remaining - 1;
-    (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
+    (try state.?.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
     if (next_remaining != 0) return core.JSValue.undefinedValue();
 
-    const resolve_value = state.promiseCombinatorResolve() orelse return error.TypeError;
-    const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
+    resolve_value = state.?.promiseCombinatorResolve() orelse return error.TypeError;
+    reject_value = state.?.promiseCombinatorReject() orelse return error.TypeError;
     switch (mode) {
         .all_resolve, .all_settled_fulfill, .all_settled_reject => {
             const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{values_value}, caller_function, caller_frame) catch |err| {
@@ -33373,10 +33618,10 @@ pub fn qjsPromiseCombinatorElementCall(
             result.free(ctx.runtime);
         },
         .all_keyed_resolve, .all_settled_keyed_fulfill, .all_settled_keyed_reject => {
-            const keys_value = state.promiseCombinatorKeys() orelse return error.TypeError;
-            const keys = objectFromValue(keys_value) orelse return error.TypeError;
-            const keyed_result = try qjsPromiseKeyedResult(ctx.runtime, keys, values);
-            defer keyed_result.free(ctx.runtime);
+            keys_value = state.?.promiseCombinatorKeys() orelse return error.TypeError;
+            keys = objectFromValue(keys_value) orelse return error.TypeError;
+            keyed_result = try qjsPromiseKeyedResult(ctx.runtime, keys.?, values.?);
+            keyed_result_owned = true;
             const result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), resolve_value, &.{keyed_result}, caller_function, caller_frame) catch |err| {
                 const reason = try qjsPromiseErrorValue(ctx, global, err);
                 defer reason.free(ctx.runtime);
@@ -33386,8 +33631,8 @@ pub fn qjsPromiseCombinatorElementCall(
             result.free(ctx.runtime);
         },
         .any_reject => {
-            const aggregate_error = try qjsPromiseAggregateError(ctx.runtime, global, values);
-            defer aggregate_error.free(ctx.runtime);
+            aggregate_error = try qjsPromiseAggregateError(ctx.runtime, global, values.?);
+            aggregate_error_owned = true;
             const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error}, caller_function, caller_frame);
             result.free(ctx.runtime);
         },
@@ -33449,8 +33694,24 @@ fn qjsPromiseCapability(
 }
 
 fn qjsPromiseSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try property_ops.defineDataProperty(rt, array, core.atom.atomFromUInt32(index), value);
-    if (array.length <= index) array.length = index + 1;
+    var rooted_array: ?*core.Object = array;
+    var rooted_value = value;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_value },
+    };
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &rooted_array },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+        .objects = &root_objects,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    try property_ops.defineDataProperty(rt, rooted_array.?, core.atom.atomFromUInt32(index), rooted_value);
+    if (rooted_array.?.length <= index) rooted_array.?.length = index + 1;
 }
 
 fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core.Object) !core.JSValue {
@@ -33681,6 +33942,93 @@ fn qjsPromiseCombinatorCallback(
     callback_object.functionPromiseCombinatorIndexSlot().* = index;
     callback_object.functionPromiseCombinatorCalledSlot().* = false;
     return callback;
+}
+
+test "qjsPromiseCombinatorElementCall roots state values and payload across resolve minor gc" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var ctx: core.JSContext = undefined;
+    try ctx.init(&rt, .{});
+    defer ctx.deinit();
+
+    const global = try core.Object.create(&rt, core.class.ids.object, null);
+    var global_pin = try rt.pinHeaderForNative(&global.header);
+    defer {
+        global_pin.release();
+        global.value().free(&rt);
+    }
+
+    const ResolveState = struct {
+        called: bool = false,
+        values_header: ?*core.gc.Header = null,
+
+        fn call(ptr: *anyopaque, external: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const state: *@This() = @ptrCast(@alignCast(ptr));
+            const external_ctx: *core.JSContext = @ptrCast(@alignCast(external.ctx));
+            external_ctx.runtime.gc.requestGC(.minor, .manual, .soon);
+            _ = try external_ctx.runtime.pollGC(null, .normal);
+            state.called = true;
+            state.values_header = external.args[0].refHeader();
+            return core.JSValue.undefinedValue();
+        }
+    };
+    var resolve_state = ResolveState{};
+    const resolve_id = try rt.registerExternalHostFunction(.{
+        .ptr = &resolve_state,
+        .call = ResolveState.call,
+    });
+
+    const resolve = try core.Object.create(&rt, core.class.ids.c_function, null);
+    resolve.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    resolve.externalHostFunctionIdSlot().* = resolve_id;
+    var resolve_handle = try rt.takeValueHandle(resolve.value());
+    defer resolve_handle.deinit();
+
+    const values = try core.Object.create(&rt, core.class.ids.array, null);
+    const original_values = values;
+    var values_handle = try rt.takeValueHandle(values.value());
+    defer values_handle.deinit();
+
+    const payload = try core.Object.create(&rt, core.class.ids.object, null);
+    const original_payload_header = &payload.header;
+    var payload_handle = try rt.takeValueHandle(payload.value());
+    defer payload_handle.deinit();
+
+    const state = try qjsPromiseCombinatorState(&rt, resolve_handle.get(), core.JSValue.undefinedValue(), values);
+    var state_handle = try rt.takeValueHandle(state.value());
+    defer state_handle.deinit();
+
+    const callback_value = try qjsPromiseCombinatorCallback(&rt, global, .all_resolve, state, 0);
+    var callback_handle = try rt.takeValueHandle(callback_value);
+    defer callback_handle.deinit();
+    const callback = callback_handle.object().?;
+
+    try std.testing.expectEqual(core.gc.Generation.young, values.header.generation());
+    try std.testing.expectEqual(core.gc.Generation.young, payload.header.generation());
+
+    const result = try qjsPromiseCombinatorElementCall(&ctx, null, global, callback, &.{payload_handle.get()}, null, null);
+    defer if (result) |value| value.free(&rt);
+
+    try std.testing.expect(resolve_state.called);
+    const moved_values = values_handle.object().?;
+    try std.testing.expect(moved_values != original_values);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_values.header.generation());
+    try std.testing.expectEqual(&moved_values.header, resolve_state.values_header.?);
+    const moved_payload_header = payload_handle.get().refHeader().?;
+    try std.testing.expect(moved_payload_header != original_payload_header);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_payload_header.generation());
+    const stored = moved_values.getProperty(core.atom.atomFromUInt32(0));
+    defer stored.free(&rt);
+    try std.testing.expectEqual(moved_payload_header, stored.refHeader().?);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
 }
 
 fn qjsPromiseRejectCapability(
@@ -44761,18 +45109,33 @@ fn qjsAsyncIteratorAsyncDispose(
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
     }
 
-    const result = callValueOrBytecode(ctx, output, global, receiver, return_method, &.{core.JSValue.undefinedValue()}, caller_function, caller_frame) catch |err| {
+    var result = callValueOrBytecode(ctx, output, global, receiver, return_method, &.{core.JSValue.undefinedValue()}, caller_function, caller_frame) catch |err| {
         return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
     };
     defer result.free(ctx.runtime);
-    const result_object = objectFromValue(result) orelse {
+    var result_object: ?*core.Object = null;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &result },
+    };
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &result_object },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+        .objects = &root_objects,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    result_object = objectFromValue(result) orelse {
         return try rejectedPromiseForRuntimeError(ctx, global, error.TypeError, promisePrototypeFromGlobal(ctx.runtime, global));
     };
-    if (result_object.class_id == core.class.ids.promise) {
-        try settlePendingPromiseReaction(ctx, output, global, result_object);
-        if (result_object.promiseResult() == null) try awaitPendingPromise(ctx, output, global, result_object);
-        if (result_object.promiseIsRejected()) {
-            const reason = if (result_object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
+    if (result_object.?.class_id == core.class.ids.promise) {
+        try settlePendingPromiseReaction(ctx, output, global, result_object.?);
+        if (result_object.?.promiseResult() == null) try awaitPendingPromise(ctx, output, global, result_object.?);
+        if (result_object.?.promiseIsRejected()) {
+            const reason = if (result_object.?.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             defer reason.free(ctx.runtime);
             return try builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promisePrototypeFromGlobal(ctx.runtime, global));
         }
@@ -46718,30 +47081,42 @@ pub fn settlePendingPromiseReaction(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    promise: *core.Object,
+    input_promise: *core.Object,
 ) !void {
-    const callback = promise.promiseReactionCallback() orelse return;
-    const callback_is_thenable_job = qjsPromiseThenableJobPending(callback);
-    var callback_value = callback.dup();
-    defer callback_value.free(ctx.runtime);
-    var arg = if (promise.promiseReactionArg()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    defer arg.free(ctx.runtime);
+    var promise: ?*core.Object = input_promise;
+    var callback_value = core.JSValue.undefinedValue();
+    var arg = core.JSValue.undefinedValue();
+    var callback_result = core.JSValue.undefinedValue();
+    var callback_result_owned = false;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &callback_value },
         .{ .value = &arg },
+        .{ .value = &callback_result },
+    };
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &promise },
     };
     const root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
         .values = &root_values,
+        .objects = &root_objects,
     };
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
+    defer callback_value.free(ctx.runtime);
+    defer arg.free(ctx.runtime);
+    defer if (callback_result_owned) callback_result.free(ctx.runtime);
 
-    try promise.setPromiseReactionCallback(ctx.runtime, null);
-    try promise.setPromiseReactionArg(ctx.runtime, null);
+    const callback = promise.?.promiseReactionCallback() orelse return;
+    const callback_is_thenable_job = qjsPromiseThenableJobPending(callback);
+    callback_value = callback.dup();
+    arg = if (promise.?.promiseReactionArg()) |stored| stored.dup() else core.JSValue.undefinedValue();
+
+    try promise.?.setPromiseReactionCallback(ctx.runtime, null);
+    try promise.?.setPromiseReactionArg(ctx.runtime, null);
 
     const callback_args = [_]core.JSValue{arg};
-    const callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback_value, &callback_args, null, null) catch |err| {
+    callback_result = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback_value, &callback_args, null, null) catch |err| {
         const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
         defer rejected.free(ctx.runtime);
         const rejected_object = objectFromValue(rejected) orelse return error.TypeError;
@@ -46749,45 +47124,45 @@ pub fn settlePendingPromiseReaction(
         const next_result = if (rejected_object.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
         var next_result_owned = true;
         defer if (next_result_owned) next_result.free(ctx.runtime);
-        var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, next_result, is_rejected);
+        var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise.?, next_result, is_rejected);
         errdefer prepared_reactions.deinit(ctx.runtime);
         var prepared_root: PreparedPromiseReactionJobsRoot = .{};
         prepared_root.init(ctx.runtime, &prepared_reactions);
         defer prepared_root.deinit();
-        promise.promiseIsRejectedSlot().* = is_rejected;
-        try promise.setPromiseResult(ctx.runtime, next_result);
+        promise.?.promiseIsRejectedSlot().* = is_rejected;
+        try promise.?.setPromiseResult(ctx.runtime, next_result);
         next_result_owned = false;
-        prepared_reactions.commit(ctx, promise);
+        prepared_reactions.commit(ctx, promise.?);
         return;
     };
-    defer callback_result.free(ctx.runtime);
-    if (callback_is_thenable_job or promise.promiseResult() != null or promise.promiseReactionCallback() != null) return;
-    if (promise.promiseResult()) |stored| stored.free(ctx.runtime);
+    callback_result_owned = true;
+    if (callback_is_thenable_job or promise.?.promiseResult() != null or promise.?.promiseReactionCallback() != null) return;
+    if (promise.?.promiseResult()) |stored| stored.free(ctx.runtime);
     if (objectFromValue(callback_result)) |result_promise| {
         if (result_promise.class_id == core.class.ids.promise and result_promise.promiseIsRejected()) {
             const next_result = if (result_promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             var next_result_owned = true;
             defer if (next_result_owned) next_result.free(ctx.runtime);
-            var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, next_result, true);
+            var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise.?, next_result, true);
             errdefer prepared_reactions.deinit(ctx.runtime);
             var prepared_root: PreparedPromiseReactionJobsRoot = .{};
             prepared_root.init(ctx.runtime, &prepared_reactions);
             defer prepared_root.deinit();
-            try promise.setPromiseResult(ctx.runtime, next_result);
+            try promise.?.setPromiseResult(ctx.runtime, next_result);
             next_result_owned = false;
-            promise.promiseIsRejectedSlot().* = true;
-            prepared_reactions.commit(ctx, promise);
+            promise.?.promiseIsRejectedSlot().* = true;
+            prepared_reactions.commit(ctx, promise.?);
             return;
         }
     }
-    var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise, callback_result, false);
+    var prepared_reactions = try qjsPreparePromiseReactionJobs(ctx, global, promise.?, callback_result, false);
     errdefer prepared_reactions.deinit(ctx.runtime);
     var prepared_root: PreparedPromiseReactionJobsRoot = .{};
     prepared_root.init(ctx.runtime, &prepared_reactions);
     defer prepared_root.deinit();
-    try promise.setPromiseResult(ctx.runtime, callback_result.dup());
-    promise.promiseIsRejectedSlot().* = false;
-    prepared_reactions.commit(ctx, promise);
+    try promise.?.setPromiseResult(ctx.runtime, callback_result.dup());
+    promise.?.promiseIsRejectedSlot().* = false;
+    prepared_reactions.commit(ctx, promise.?);
 }
 
 test "settlePendingPromiseReaction roots callback and arg after clearing promise slots" {
@@ -46841,20 +47216,97 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     try std.testing.expect(rt.atoms.name(arg_symbol) == null);
 }
 
+test "settlePendingPromiseReaction rewrites young promise and callback result across callback minor gc" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    var ctx: core.JSContext = undefined;
+    try ctx.init(&rt, .{});
+    defer ctx.deinit();
+
+    const global = try core.Object.create(&rt, core.class.ids.object, null);
+    var global_pin = try rt.pinHeaderForNative(&global.header);
+    defer {
+        global_pin.release();
+        global.value().free(&rt);
+    }
+
+    const ForceMinorHost = struct {
+        fn call(_: *anyopaque, external: core.host_function.ExternalCall) anyerror!core.JSValue {
+            const external_ctx: *core.JSContext = @ptrCast(@alignCast(external.ctx));
+            external_ctx.runtime.gc.requestGC(.minor, .manual, .soon);
+            _ = try external_ctx.runtime.pollGC(null, .normal);
+            return external.args[0].dup();
+        }
+    };
+    const external_id = try rt.registerExternalHostFunction(.{
+        .ptr = &rt,
+        .call = ForceMinorHost.call,
+    });
+
+    const callback = try core.Object.create(&rt, core.class.ids.c_function, null);
+    callback.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    callback.externalHostFunctionIdSlot().* = external_id;
+    var callback_handle = try rt.createPersistentValue(callback.value());
+    defer callback_handle.deinit();
+
+    const promise = try core.Object.create(&rt, core.class.ids.promise, null);
+    const original_promise = promise;
+    var promise_handle = try rt.createPersistentValue(promise.value());
+    defer promise_handle.deinit();
+
+    const arg = try core.Object.create(&rt, core.class.ids.object, null);
+    const original_arg_header = &arg.header;
+    try std.testing.expectEqual(core.gc.Generation.young, promise.header.generation());
+    try std.testing.expectEqual(core.gc.Generation.young, arg.header.generation());
+
+    try promise.setPromiseReactionCallback(&rt, callback_handle.get().dup());
+    try promise.setPromiseReactionArg(&rt, arg.value());
+
+    try settlePendingPromiseReaction(&ctx, null, global, promise);
+
+    const moved_promise = promise_handle.object().?;
+    try std.testing.expect(moved_promise != original_promise);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_promise.header.generation());
+    const result = moved_promise.promiseResult() orelse return error.TypeError;
+    const moved_arg_header = result.refHeader().?;
+    try std.testing.expect(moved_arg_header != original_arg_header);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_arg_header.generation());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
+}
+
 pub fn awaitPendingPromise(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    promise: *core.Object,
+    input_promise: *core.Object,
 ) !void {
+    var promise: ?*core.Object = input_promise;
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &promise },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .objects = &root_objects,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
     if (!ctx.runtime.canBlock()) return;
-    if (!qjsAtomicsWaitAsyncPromise(ctx.runtime, promise)) return;
+    if (!qjsAtomicsWaitAsyncPromise(ctx.runtime, promise.?)) return;
 
     const io = atomicsWaiterIo();
-    while (promise.promiseResultSlot().* == null) {
+    while (promise.?.promiseResultSlot().* == null) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
         try processExpiredAtomicsWaiters(ctx);
-        try settlePendingPromiseReaction(ctx, output, global, promise);
+        try settlePendingPromiseReaction(ctx, output, global, promise.?);
     }
 }
 
@@ -46892,6 +47344,15 @@ pub fn drainPendingPromiseJobs(
 
             var pending_job = ctx.takePendingPromiseJob().?;
             defer pending_job.deinit(ctx.runtime);
+            var pending_job_root_values = [_]core.runtime.ValueRootValue{
+                .{ .value = &pending_job.value },
+            };
+            const pending_job_root_frame = core.runtime.ValueRootFrame{
+                .previous = ctx.runtime.active_value_roots,
+                .values = &pending_job_root_values,
+            };
+            ctx.runtime.active_value_roots = &pending_job_root_frame;
+            defer ctx.runtime.active_value_roots = pending_job_root_frame.previous;
             const job = pending_job.value;
             const promise = objectFromValue(job) orelse {
                 if (isCallableValue(job)) {

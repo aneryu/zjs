@@ -179,14 +179,29 @@ pub fn awaitValue(
     comptime awaitThenableValue: anytype,
     comptime saveGeneratorExecutionState: anytype,
 ) !Result {
-    const awaited = try stack.pop();
+    var awaited = try stack.pop();
     defer awaited.free(ctx.runtime);
+    var promise: ?*core.Object = null;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &awaited },
+    };
+    var root_objects = [_]core.runtime.ObjectRootValue{
+        .{ .object = &promise },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+        .objects = &root_objects,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
     if (suspend_mode == .raw) {
         if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited, saveGeneratorExecutionState)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     }
-    const promise = objectFromValue(awaited) orelse {
+    promise = objectFromValue(awaited) orelse {
         if (try awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
             if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, saveGeneratorExecutionState)) |result| return result;
@@ -197,7 +212,7 @@ pub fn awaitValue(
         try stack.push(awaited);
         return .continue_loop;
     };
-    if (promise.class_id != core.class.ids.promise) {
+    if (promise.?.class_id != core.class.ids.promise) {
         if (try awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
             if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, saveGeneratorExecutionState)) |result| return result;
@@ -208,12 +223,12 @@ pub fn awaitValue(
         try stack.push(awaited);
         return .continue_loop;
     }
-    try settlePendingPromiseReaction(ctx, output, global, promise);
-    if ((suspend_mode == .settled or suspend_mode == .drain) and promise.promiseResult() == null) try drainPendingPromiseJobs(ctx, output, global);
-    if (promise.promiseResult() == null) try awaitPendingPromise(ctx, output, global, promise);
-    const result = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
+    try settlePendingPromiseReaction(ctx, output, global, promise.?);
+    if ((suspend_mode == .settled or suspend_mode == .drain) and promise.?.promiseResult() == null) try drainPendingPromiseJobs(ctx, output, global);
+    if (promise.?.promiseResult() == null) try awaitPendingPromise(ctx, output, global, promise.?);
+    const result = if (promise.?.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer result.free(ctx.runtime);
-    if (promise.promiseIsRejected()) {
+    if (promise.?.promiseIsRejected()) {
         _ = ctx.throwValue(result.dup());
         return error.Test262Error;
     }
@@ -305,4 +320,3 @@ fn testSetGeneratorYieldStarSuspended(rt: *core.JSRuntime, generator: *core.Obje
     _ = rt;
     generator.generatorYieldStarSuspendedSlot().* = value;
 }
-

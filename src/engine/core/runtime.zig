@@ -1480,6 +1480,67 @@ pub const JSRuntime = struct {
         return result;
     }
 
+    fn tryRunMajorMarkSliceWithValueRoots(
+        self: *JSRuntime,
+        roots: ?*const ValueRootFrame,
+        reason: gc.RequestReason,
+    ) gc.CollectionError!gc.CollectionResult {
+        if (self.gc_running) return .{};
+        if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
+        if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
+        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
+        defer if (builtin.mode == .Debug) {
+            self.gc.verifyIntrusiveList() catch unreachable;
+            self.gc.verifyHeapAccounting() catch unreachable;
+        };
+        self.gc_running = true;
+        defer self.gc_running = false;
+
+        const start_ns = profile.nowNanos();
+        self.gc.beginMajorCycle(reason, start_ns);
+        self.gc.setMajorPhase(.mark_incremental);
+        const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
+            const mapped: gc.CollectionError = switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.PayloadMarkFailed => error.PayloadMarkFailed,
+            };
+            self.gc.recordFailure(mapped);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return mapped;
+        };
+        self.gc.setMajorPhase(.sweep);
+
+        const result = gc.CollectionResult{
+            .freed_objects = freed,
+            .duration_ns = blk: {
+                const end_ns = profile.nowNanos();
+                break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
+            },
+        };
+        self.gc.recordSuccess(result);
+        self.gc.finishMajorMarkSlice(result);
+        self.resetGCThreshold();
+        return result;
+    }
+
+    fn runMajorSweepSlice(self: *JSRuntime, point: gc.SchedulerPoint) gc.CollectionResult {
+        if (self.gc_running or self.gcStats().major_phase != .sweep) return .{};
+        const max_pages = self.majorSweepPageBudget(point);
+        if (max_pages == 0) return .{};
+        const start_ns = profile.nowNanos();
+        const swept_pages = self.gc.sweepMajorPages(max_pages);
+        const end_ns = profile.nowNanos();
+        const duration_ns = if (end_ns > start_ns) end_ns - start_ns else 0;
+        return self.gc.finishMajorSweepSlice(swept_pages, duration_ns);
+    }
+
+    fn majorSweepPageBudget(self: *JSRuntime, point: gc.SchedulerPoint) usize {
+        if (point == .urgent) return std.math.maxInt(usize);
+        const budget_ns = self.gc.sliceBudgetNs(point);
+        return @max(@as(usize, 1), @as(usize, @intCast(budget_ns / 100_000)));
+    }
+
     fn tryCollectMinorMoving(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
@@ -1744,7 +1805,8 @@ pub const JSRuntime = struct {
         const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
         const run_minor = self.gc.shouldRunMinorAt(scheduler_point);
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
-        if (!run_minor and !run_major) return .{};
+        const run_major_sweep = self.gc.hasActiveMajorCycle();
+        if (!run_minor and !run_major and !run_major_sweep) return .{};
 
         var result: gc.CollectionResult = .{};
         if (run_minor) {
@@ -1752,7 +1814,7 @@ pub const JSRuntime = struct {
         }
 
         const major_request = self.gc.pendingMajorRequest();
-        if (run_major) {
+        if (run_major and !self.gc.hasActiveMajorCycle()) {
             if (major_request != null) _ = self.gc.clearMajorRequest();
             const reason = if (major_request) |request|
                 request.reason orelse gc.RequestReason.manual
@@ -1760,8 +1822,7 @@ pub const JSRuntime = struct {
                 gc.RequestReason.allocation_threshold
             else
                 gc.RequestReason.manual;
-            self.gc.beginMajorCycle(reason, profile.nowNanos());
-            const major_result = try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
+            const major_result = try self.tryRunMajorMarkSliceWithValueRoots(roots orelse self.active_value_roots, reason);
             result.freed_objects +|= major_result.freed_objects;
             result.freed_bytecodes +|= major_result.freed_bytecodes;
             result.promoted_young_objects +|= major_result.promoted_young_objects;
@@ -1769,6 +1830,9 @@ pub const JSRuntime = struct {
             result.copied_young_objects +|= major_result.copied_young_objects;
             result.copied_young_bytes +|= major_result.copied_young_bytes;
             result.duration_ns +|= major_result.duration_ns;
+        } else if (run_major_sweep) {
+            const sweep_result = self.runMajorSweepSlice(scheduler_point);
+            result.duration_ns +|= sweep_result.duration_ns;
         }
         return result;
     }
