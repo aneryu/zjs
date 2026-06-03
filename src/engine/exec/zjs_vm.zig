@@ -304,6 +304,27 @@ pub fn runWithArgsState(
         const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
         for (var_refs, 0..) |value, idx| owned_refs[idx] = value.dup();
         frame.var_refs = owned_refs;
+    } else if (function.var_ref_names.len > 0) {
+        const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
+        errdefer ctx.runtime.memory.free(core.JSValue, owned_refs);
+        var initialized: usize = 0;
+        errdefer {
+            for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
+        }
+        for (function.var_ref_names, 0..) |var_name, idx| {
+            const val = if (shared_vm.globalLexicalValue(ctx, var_name)) |lex_val|
+                lex_val
+            else blk: {
+                const prop_val = global.getProperty(var_name);
+                break :blk prop_val;
+            };
+            const cell = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+            errdefer core.Object.destroyFromHeader(ctx.runtime, &cell.header);
+            try cell.initVarRefPayload(ctx.runtime, val);
+            owned_refs[idx] = cell.value();
+            initialized += 1;
+        }
+        frame.var_refs = owned_refs;
     }
 
     var resume_throw_on_entry = false;

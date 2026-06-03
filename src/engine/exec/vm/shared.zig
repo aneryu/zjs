@@ -35868,8 +35868,10 @@ pub fn qjsTypedArraySliceSubarrayCall(
             return error.TypeError;
         }
         const src_byte_offset = object.typedArrayByteOffset();
-        if (src_byte_offset > buffer.byteStorage().len) return error.RangeError;
-        if (src_byte_offset == buffer.byteStorage().len and count > 0) return error.RangeError;
+        if (!buffer.arrayBufferDetached()) {
+            if (src_byte_offset > buffer.byteStorage().len) return error.RangeError;
+            if (src_byte_offset == buffer.byteStorage().len and count > 0) return error.RangeError;
+        }
         const begin_byte_offset = src_byte_offset + start * object.typedArrayElementSize();
         if (object.typedArrayFixedLength() == null and (args.len < 2 or args[1].isUndefined())) {
             break :blk try constructValueOrBytecode(ctx, output, global, constructor_value, &.{ buffer_value, lengthIndexValue(begin_byte_offset) }, null, null);
