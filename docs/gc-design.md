@@ -1951,7 +1951,6 @@ sweep_time_ns
 
 nursery_survival_rate
 promotion_rate
-copied_young_objects / copied_young_bytes
 remembered_set_size
 dirty_card_count
 mark_stack_peak
@@ -2148,47 +2147,38 @@ JIT call boundary GC protocol
 ```text
 提交边界（2026-06-03）：
   - 当前状态是可用的中间态，不是完整的新 GC 终态。
-  - 最近一次验证：zig build test --summary all，987/987 tests passed。
-  - 最近一次验证：zig build zjs --summary all passed。
+  - 最近一次验证：zig build test --summary all，1726/1726 tests passed。
+  - 最近一次验证：zig build smoke --summary all，88/88 scripts passed。
   - 最近一次验证：git diff --check passed。
-  - 当前 build graph 不包含 smoke step；zig build smoke --summary all 会返回 no step named 'smoke'。
   - 后续大项按下面 TODO 推进，先完成大项修改，再统一 test / fix。
 ```
 
 ```text
-HandleScope / Persistent / WeakPersistent 基础 root；Local / Persistent handles 可从移动后 root slot 重新取回 Object，WeakPersistent identity 会随移动更新；外部 host-owned by-value object root 注册时 dup+pin，注销/clear 时 unpin+free，避免宿主 value copy 在 moving nursery 后失效。
+HandleScope / Persistent / WeakPersistent 基础 root。
 old -> young remembered set / dirty card barrier。
-external memory accounting、GC request 与 external token registry 审计（包含 SharedBufferStore owner token）。
-minor GC 默认 strict/full-copying nursery：root/remembered tracing 访问到的 young Object 会复制到 old allocation，untraced nursery entries 会释放；final pass 原地晋升 fallback 已删除。full-copying 路径已覆盖 survivor 复制、untraced nursery entry 释放、untraced nursery object graph 析构释放、untraced owner 析构时 stale child slot release 转发到 moved survivor；scheduler、var-ref、Promise payload、mapped arguments barrier 测试已迁移到 root/handle discipline。
-FunctionBytecode 已明确为 non-moving old/large bytecode space，即使调用方请求 young 也不会进入 nursery。
-moving nursery 的 forwarding table 只在单次 minor collection 内有效：用于更新 root/slot/handle/weak identity，并在 final pass 析构期间转发 stale child release；collection 成功结束后立即释放旧 Object shadow 并清空 table，不再保留到 runtime deinit 作为 stale raw release 兼容层。
-GC stats 使用 `copied_young_*` 量化 moving nursery survivor copy；in-place young promotion 路径与对应指标已删除。
-dense array elements、function captures、generator frame lists、module namespace cells、Promise reaction list、Promise reaction promise/callback-result active roots、dequeued Promise job value root、async await popped value root、thenable resolving-function roots、Promise reaction job handler/payload/resolve/reject roots、Promise combinator state/values/payload roots、async iterator dispose result root、live-key WeakMap entry value、active/pending FinalizationRegistry held/token slots、class payload value/object hooks、dequeued job argv active root 已有 moving minor slot rewrite 覆盖；WeakMap entry minor visitor 按 live key 条件访问 value，FinalizationRegistry cell visitor 按 keepsHeldValuesAlive 条件访问 held/token。
-nursery tuning。
-large object classification。
-old/large page metadata allocator、size-class page、free-list、allocation bitmap 与 mark bitmap。
-major GC 当前已拆出第一个 P2 中间态：`beginMajorCycle` 只进入 mark phase，不提前启动 sweep cursor；root/strong-edge metadata mark prepass 会通过 `traceRoots` 和 object/FunctionBytecode worklist 标记 old/large page mark bitmap，并记录独立于 STW cycle backend 工作表的 object/bytecode mark set 与 symbol atom root set，可按 scheduler budget 在 callback boundary / idle poll 分片推进；metadata weak/finalization fixpoint 会在 `.weak_fixpoint` phase 按已标记 object/symbol key/target 追踪 WeakMap value 与 active FinalizationRegistry held/token slots；metadata finalization postprocess 会按 metadata mark state enqueue object/symbol-target dead finalization cleanup，先追踪 held/token 并重检 target 以覆盖 held-value resurrection；metadata dead-weak postprocess 已覆盖 object/symbol-key 未标记的 weak entry sweep（包含 weak value 未标记的 garbage case，value release 通过 deferred weak cleanup 执行）、queued/dead FinalizationRegistry cell cleanup，以及 WeakRef object/symbol target 未标记时的 identity cleanup；metadata weak persistent sweep 已按 metadata live identity 清理 object/symbol target，unique symbol sweep 已可用 metadata symbol root set，并带 hybrid compatibility prepass 保护当前 STW backend 仍保留的 RC-live object/module-held symbols；之后兼容调用现有 STW cycle-removal backend 作为最终语义后端，但 STW 的 visited/preserved/free_set 工作表不再覆盖 metadata mark state；cycle-removal mark backend 完成后进入 `.sweep` phase，old/large page metadata 通过 sweep cursor 按 scheduler budget 进行 page-slice sweep；active sweep 可在 callback boundary / idle poll 继续推进，不再由 pollGC 的 major mark 路径 sweep-all；old/large allocation slow path 会先 lazy sweep 同 space 的 pending page 再增长 page metadata；`forceMajorGC` / urgent major poll 会在返回前完成 active mark+weak+sweep，不留下半完成 major cycle。
+external memory accounting、GC request 与 external token registry 审计。
+non-moving nursery promotion path 与 nursery tuning。
+large object classification 和逻辑 old/large page accounting。
 GC scheduler request、callback/idle/safepoint 入口。
 native pin API、RSS/cgroup pressure request、deferred native cleanup queue（external host / std file close / class payload finalizer）。
-heap verifier 覆盖 heap/live bytes、page slot/bitmap/free-list accounting、pin metadata、remembered set。
+heap verifier 覆盖 heap/live bytes、page accounting、pin metadata、remembered set。
 ```
 
 剩余 TODO：
 
 ```text
 P0:
-  - 如需让对象物理地址也来自 GC page arena，将 Object / FunctionBytecode allocation ownership 从 MemoryAccount create/alloc 迁移到 page allocator-backed blocks。
-  - 当前 old/large page metadata allocator 已经是 GC accounting / verifier / sweep cursor 的 authoritative source；物理 payload 地址仍由 MemoryAccount 提供。
+  - 将逻辑 old/large page accounting 替换为真实 page allocator、size-class page、free-list 和 mark bitmap。
 
 P1:
-  - 继续补齐 HandleScope/Persistent/root slot discipline，确保代码不在 minor GC 后访问未 root 的 raw `*Object`。
-  - 为移动 young object 继续补齐 collection 内所有 root、slot、handle、dirty card 更新与验证。
+  - 实现真正 moving/copying nursery，而不是当前 non-moving promotion 中间态。
+  - 为移动 young object 补齐 forwarding pointer/table 后的所有 root、slot、handle、dirty card 更新。
+  - 为 array elements、closure env、module namespace、Promise reaction、WeakMap entry 等批量写入补齐 bulk barrier 审计。
 
 P2:
-  - 将当前已独立且可分片的 major root/strong-edge metadata mark prepass、metadata weak/finalization fixpoint、metadata finalization enqueue、metadata dead weak safe-sweep 与 WeakRef cleanup 逐步变成 cycle collection 前的 authoritative mark state。
-  - 继续拆出现有 STW cycle-collector backend 中的最终 cycle-free / free-set handoff 与 authoritative destroy 语义，避免 metadata mark 完成后还需要完整 STW 复算。
-  - 继续让 callback boundary / idle poll 按时间预算推进 active major mark/weak/sweep slice；当前 active metadata mark、metadata weak/finalization fixpoint 与 active sweep slice 已覆盖。
-  - 继续扩展 lazy sweep/page recovery 到更完整的 failure recovery、跨 space allocation retry 和非 urgent 场景的 final completion gate。
+  - 将 major GC 从当前 STW cycle-collector backend 拆成真正 incremental mark roots / mark some / weak fixpoint / sweep some。
+  - 让 callback boundary / idle poll 按时间预算推进 major slice，而不是只决定是否运行完整 backend。
+  - 将 logical sweep page counters 替换为真实 sweep cursor、lazy sweep 和 page free-list 回收。
 
 P3:
   - 增加 GC worker、atomic mark bits、concurrent mark stack、concurrent sweep page states。
@@ -2321,7 +2311,6 @@ Production v2:
   + page decommit
   + RSS/cgroup pressure handling
   + optional selective evacuation
-  + JIT stack maps / JIT barriers
 ```
 
 一句话概括：

@@ -296,13 +296,13 @@ pub const SharedBufferStore = struct {
     external_memory: gc.ExternalMemoryToken = .{},
 
     pub fn create(rt: *JSRuntime, byte_length: usize) !*SharedBufferStore {
-        var external_memory = try rt.reportExternalAlloc(byte_length);
-        errdefer external_memory.release();
         const allocator = std.heap.page_allocator;
         const store = try allocator.create(SharedBufferStore);
         errdefer allocator.destroy(store);
         const bytes = try allocator.alloc(u8, byte_length);
         errdefer allocator.free(bytes);
+        var external_memory = try rt.reportExternalAlloc(byte_length);
+        errdefer external_memory.release();
         @memset(bytes, 0);
         store.* = .{
             .ref_count = .init(1),
@@ -320,8 +320,8 @@ pub const SharedBufferStore = struct {
         if (self.ref_count.fetchSub(1, .acq_rel) != 1) return;
         const allocator = std.heap.page_allocator;
         const bytes = self.bytes;
-        self.bytes = &.{};
         self.external_memory.release();
+        self.bytes = &.{};
         allocator.free(bytes);
         allocator.destroy(self);
     }
@@ -1706,71 +1706,6 @@ pub const Object = struct {
         }
     }
 
-    pub fn rewriteMovedObjectIdentity(self: *Object, old_header_identity: usize, old_object_identity: usize, new_object: *Object) void {
-        const new_header_identity = @intFromPtr(&new_object.header) & ~@as(usize, 1);
-        const new_object_identity = @intFromPtr(new_object);
-        self.rewriteWeakIdentities(old_header_identity, new_header_identity);
-        self.rewriteRealmGlobalPtrs(old_header_identity, new_object);
-        self.rewriteAutoInitRealmGlobals(old_object_identity, new_object_identity);
-    }
-
-    fn rewriteWeakIdentities(self: *Object, old_identity: usize, new_identity: usize) void {
-        if (self.objectDataPayload()) |payload| {
-            if (payload.weak_target_identity == old_identity) payload.weak_target_identity = new_identity;
-        }
-
-        if (self.collectionPayload()) |payload| {
-            for (payload.weak_entries) |*entry| {
-                if (entry.key_identity == old_identity) entry.key_identity = new_identity;
-            }
-        }
-
-        if (self.finalizationRegistryPayload()) |payload| {
-            for (payload.cells) |*cell| {
-                if (cell.target_identity == old_identity) cell.target_identity = new_identity;
-            }
-        }
-    }
-
-    fn rewriteRealmGlobalPtrs(self: *Object, old_identity: usize, new_object: *Object) void {
-        if (self.ordinaryPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.iteratorPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.collectionPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.bufferPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.typedArrayPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.regExpPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.boundFunctionPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.proxyPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.argumentsPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.objectDataPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.varRefPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.finalizationRegistryPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.stdFilePayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.disposableStackPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.arrayPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.promisePayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.generatorPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.functionPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-        if (self.moduleNamespacePayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
-    }
-
-    fn rewriteObjectPtr(slot: *?*Object, old_identity: usize, new_object: *Object) void {
-        const stored = slot.* orelse return;
-        const identity = @intFromPtr(&stored.header) & ~@as(usize, 1);
-        if (identity == old_identity) slot.* = new_object;
-    }
-
-    fn rewriteAutoInitRealmGlobals(self: *Object, old_object_identity: usize, new_object_identity: usize) void {
-        for (self.properties) |*entry| {
-            switch (entry.slot) {
-                .auto_init => |*info| {
-                    if (info.host_function_realm_global == old_object_identity) info.host_function_realm_global = new_object_identity;
-                },
-                else => {},
-            }
-        }
-    }
-
     pub const post_a_object_size_baseline: usize = 432;
     comptime {
         std.debug.assert(@sizeOf(Object) <= post_a_object_size_baseline / 2);
@@ -1999,20 +1934,6 @@ pub const Object = struct {
         return &.{};
     }
 
-    pub fn removeWeakCollectionEntryAt(self: *Object, rt: *JSRuntime, index: usize) void {
-        const entries_slot = self.weakCollectionEntriesSlot();
-        std.debug.assert(index < entries_slot.*.len);
-
-        const removed = entries_slot.*[index];
-        deferWeakEntryValueFree(rt, removed);
-
-        const last_index = entries_slot.*.len - 1;
-        if (index < last_index) entries_slot.*[index] = entries_slot.*[last_index];
-        entries_slot.* = entries_slot.*.ptr[0..last_index];
-        self.clearCollectionIndex(rt);
-        self.pruneBorrowedReferenceHolderIfEmpty(rt);
-    }
-
     pub fn ensureWeakCollectionEntryCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
         const payload = self.collectionPayload() orelse {
             std.debug.assert(self.class_payload_kind == .collection);
@@ -2071,19 +1992,6 @@ pub const Object = struct {
         return count;
     }
 
-    pub fn removeFinalizationRegistryCellAt(self: *Object, rt: *JSRuntime, index: usize) void {
-        std.debug.assert(self.class_id == class.ids.finalization_registry);
-        const entries = self.finalizationRegistryCellsSlot();
-        std.debug.assert(index < entries.*.len);
-
-        const removed_cell = entries.*[index];
-        const last_index = entries.*.len - 1;
-        if (index < last_index) entries.*[index] = entries.*[last_index];
-        entries.* = entries.*.ptr[0..last_index];
-        removed_cell.destroy(rt);
-        self.pruneBorrowedReferenceHolderIfEmpty(rt);
-    }
-
     pub fn unregisterFinalizationRegistryCells(self: *Object, rt: *JSRuntime, token: JSValue) bool {
         std.debug.assert(self.class_id == class.ids.finalization_registry);
         const token_stable = token.dup();
@@ -2108,7 +2016,7 @@ pub const Object = struct {
             if (index < last_idx) {
                 entries.*[index] = entries.*[last_idx];
             }
-            entries.* = entries.*.ptr[0..last_idx];
+            entries.* = entries.*.ptr[0 .. last_idx];
             removed = true;
             removed_cell.destroy(rt);
         }
@@ -2868,17 +2776,6 @@ pub const Object = struct {
     pub fn objectData(self: *const Object) ?JSValue {
         if (self.objectDataPayloadConst()) |payload| return payload.data;
         return null;
-    }
-
-    pub fn weakRefTargetIdentity(self: *const Object) ?usize {
-        if (self.objectDataPayloadConst()) |payload| return payload.weak_target_identity;
-        return null;
-    }
-
-    pub fn clearWeakRefTargetIdentity(self: *Object, rt: *JSRuntime) void {
-        const payload = self.objectDataPayload() orelse return;
-        payload.weak_target_identity = null;
-        self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     pub fn setWeakRefTarget(self: *Object, rt: *JSRuntime, target: JSValue) !void {
@@ -5426,7 +5323,6 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                    rt.gc.unlinkObject(h);
                     bytecode_function.destroyFromHeader(rt, h);
                 }
                 current = next;
@@ -5453,7 +5349,6 @@ pub const Object = struct {
             const next = node.next;
             const h = gc.headerFromGcNode(node);
             unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-            rt.gc.unlinkObject(h);
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
@@ -6316,7 +6211,7 @@ pub const Object = struct {
                     if (index < last_idx) {
                         payload.weak_entries[index] = payload.weak_entries[last_idx];
                     }
-                    payload.weak_entries = payload.weak_entries.ptr[0..last_idx];
+                    payload.weak_entries = payload.weak_entries.ptr[0 .. last_idx];
                     removed_weak_entry = true;
                 }
                 if (removed_weak_entry) current.clearCollectionIndex(rt);
@@ -6352,7 +6247,7 @@ pub const Object = struct {
                 if (index < last_idx) {
                     finalization_payload.cells[index] = finalization_payload.cells[last_idx];
                 }
-                finalization_payload.cells = finalization_payload.cells.ptr[0..last_idx];
+                finalization_payload.cells = finalization_payload.cells.ptr[0 .. last_idx];
             }
             current.pruneBorrowedReferenceHolderIfEmpty(rt);
         }

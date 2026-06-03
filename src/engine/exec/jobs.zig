@@ -45,18 +45,7 @@ pub const Job = struct {
     }
 
     pub fn run(self: *Job) core.JSValue {
-        var args = self.argv[0..self.argc];
-        var root_slices = [_]core.runtime.ValueRootSlice{
-            .{ .mutable = &args },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = self.context.runtime.active_value_roots,
-            .slices = &root_slices,
-        };
-        self.context.runtime.active_value_roots = &root_frame;
-        defer self.context.runtime.active_value_roots = root_frame.previous;
-
-        return self.func(self.context, args);
+        return self.func(self.context, self.argv[0..self.argc]);
     }
 
     pub fn traceRoots(self: *Job, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {

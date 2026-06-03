@@ -639,51 +639,6 @@ test "job queue symbol roots preserve weak map values" {
     try std.testing.expectEqual(@as(usize, 0), weak_map.weakCollectionEntries().len);
 }
 
-fn forceMinorAndReturnFirstJob(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
-    ctx.runtime.gc.requestGC(.minor, .manual, .soon);
-    _ = ctx.runtime.pollGC(null, .normal) catch return core.JSValue.exception();
-    return args[0].dup();
-}
-
-test "job run roots dequeued argv across minor gc" {
-    var rt: core.JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{
-        .gc_policy = .{
-            .enable_nursery = true,
-            .nursery_initial_size = 4 * 1024,
-            .major_debt_threshold = std.math.maxInt(usize),
-        },
-    });
-    defer rt.deinit();
-
-    var ctx: core.JSContext = undefined;
-    try ctx.init(&rt, .{});
-    defer ctx.deinit();
-
-    const original = try core.Object.create(&rt, core.class.ids.object, null);
-    const original_header = &original.header;
-    try std.testing.expectEqual(core.gc.Generation.young, original.header.generation());
-
-    var job = engine.exec.jobs.Job{
-        .context = &ctx,
-        .func = forceMinorAndReturnFirstJob,
-        .argc = 1,
-    };
-    job.argv[0] = original.value();
-    defer job.deinit();
-
-    const result = job.run();
-    defer result.free(&rt);
-
-    try std.testing.expect(!result.isException());
-    const moved_header = result.refHeader().?;
-    try std.testing.expect(moved_header != original_header);
-    try std.testing.expectEqual(core.gc.Generation.old, moved_header.generation());
-    try std.testing.expectEqual(moved_header, job.argv[0].refHeader().?);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
-    try std.testing.expect(rt.active_value_roots == null);
-}
-
 test "Engine eval executes simple variable assignment and print" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

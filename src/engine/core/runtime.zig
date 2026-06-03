@@ -141,17 +141,6 @@ pub const RootProvider = struct {
 
 pub const RootSlot = struct {
     value: JSValue = JSValue.undefinedValue(),
-
-    pub fn object(self: *RootSlot) ?*Object {
-        if (!self.value.isObject()) return null;
-        const header = self.value.refHeader() orelse return null;
-        std.debug.assert(header.kind == .object);
-        return @alignCast(@fieldParentPtr("header", header));
-    }
-};
-
-const ExternalValueRoot = struct {
-    value: JSValue = JSValue.undefinedValue(),
 };
 
 pub const WeakPersistentCallback = *const fn (runtime: *JSRuntime, context: ?*anyopaque) void;
@@ -228,11 +217,6 @@ pub const JSValueHandle = struct {
         return slot.value;
     }
 
-    pub fn object(self: JSValueHandle) ?*Object {
-        const slot = self.slot orelse return null;
-        return slot.object();
-    }
-
     pub fn deinit(self: *JSValueHandle) void {
         const runtime = self.runtime orelse return;
         const slot = self.slot orelse return;
@@ -269,10 +253,6 @@ pub const LocalHandle = struct {
 
     pub fn valueSlot(self: LocalHandle) *JSValue {
         return &self.slot.value;
-    }
-
-    pub fn object(self: LocalHandle) ?*Object {
-        return self.slot.object();
     }
 };
 
@@ -486,7 +466,7 @@ pub const JSRuntime = struct {
     weak_root_slots_capacity: usize = 0,
     external_symbol_roots: []atom.Atom = &.{},
     external_symbol_roots_capacity: usize = 0,
-    external_value_roots: []ExternalValueRoot = &.{},
+    external_value_roots: []JSValue = &.{},
     external_value_roots_capacity: usize = 0,
     active_value_roots: ?*const ValueRootFrame = null,
     pending_finalization_jobs: []FinalizationJob = &.{},
@@ -769,7 +749,7 @@ pub const JSRuntime = struct {
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
         const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
         const external_symbol_roots: []atom.Atom = if (self.external_symbol_roots_capacity != 0) self.external_symbol_roots.ptr[0..self.external_symbol_roots_capacity] else self.external_symbol_roots[0..0];
-        const external_value_roots: []ExternalValueRoot = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
+        const external_value_roots: []JSValue = if (self.external_value_roots_capacity != 0) self.external_value_roots.ptr[0..self.external_value_roots_capacity] else self.external_value_roots[0..0];
         const external_host_functions: []host_function.ExternalRecord = if (self.external_host_functions_capacity != 0) self.external_host_functions.ptr[0..self.external_host_functions_capacity] else self.external_host_functions[0..0];
         const deferred_native_cleanups: []NativeCleanupJob = if (self.deferred_native_cleanups_capacity != 0) self.deferred_native_cleanups.ptr[0..self.deferred_native_cleanups_capacity] else self.deferred_native_cleanups[0..0];
         const deferred_class_payload_finalizers: []DeferredClassPayloadFinalizer = if (self.deferred_class_payload_finalizers_capacity != 0) self.deferred_class_payload_finalizers.ptr[0..self.deferred_class_payload_finalizers_capacity] else self.deferred_class_payload_finalizers[0..0];
@@ -800,7 +780,7 @@ pub const JSRuntime = struct {
         if (persistent_root_slots.len != 0) self.memory.free(*RootSlot, persistent_root_slots);
         if (weak_root_slots.len != 0) self.memory.free(*WeakRootSlot, weak_root_slots);
         if (external_symbol_roots.len != 0) self.memory.free(atom.Atom, external_symbol_roots);
-        if (external_value_roots.len != 0) self.memory.free(ExternalValueRoot, external_value_roots);
+        if (external_value_roots.len != 0) self.memory.free(JSValue, external_value_roots);
         if (external_host_functions.len != 0) self.memory.free(host_function.ExternalRecord, external_host_functions);
         if (deferred_native_cleanups.len != 0) self.memory.free(NativeCleanupJob, deferred_native_cleanups);
         if (deferred_class_payload_finalizers.len != 0) self.memory.free(DeferredClassPayloadFinalizer, deferred_class_payload_finalizers);
@@ -942,13 +922,7 @@ pub const JSRuntime = struct {
         for (self.persistent_root_slots) |slot| {
             try visitor.value(&slot.value);
         }
-        for (self.external_value_roots) |*root| {
-            try visitor.value(&root.value);
-        }
-        for (self.external_symbol_roots) |atom_id| {
-            var value = JSValue.symbol(atom_id);
-            try visitor.value(&value);
-        }
+        try visitor.values(self.external_value_roots);
         for (self.pending_finalization_jobs) |*job| {
             try job.traceRoots(visitor);
         }
@@ -1226,11 +1200,6 @@ pub const JSRuntime = struct {
         return self.persistent_root_slots.len;
     }
 
-    pub fn externalValueRootCountForTest(self: JSRuntime) usize {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.external_value_roots.len;
-    }
-
     pub fn registerExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) !void {
         if (self.atoms.kind(atom_id) != .symbol) return;
         const retained = self.atoms.dup(atom_id);
@@ -1245,19 +1214,14 @@ pub const JSRuntime = struct {
     /// 1. Values registered with `registerExternalValueSymbolRoot` must be unregistered with
     ///    `unregisterExternalValueSymbolRoot` when the host no longer needs them.
     /// 2. If a registered JSValue is a Symbol atom, it is retained via the atom subsystem.
-    /// 3. Registered value roots are retained and pinned until unregister/clear because the host
-    ///    owns a by-value JSValue copy that cannot be rewritten by moving nursery GC.
+    /// 3. Registered value roots are preserved across cycle-collection GC passes.
     pub fn registerExternalValueSymbolRoot(self: *JSRuntime, value: JSValue) !bool {
         if (value.asSymbolAtom()) |atom_id| {
             try self.registerExternalSymbolRoot(atom_id);
             return true;
         }
         if (!valueMayContainNestedSymbolRoots(value)) return false;
-        var root = ExternalValueRoot{ .value = value.dup() };
-        errdefer root.value.free(self);
-        try self.pinExternalValueRoot(&root);
-        errdefer self.unpinExternalValueRoot(root);
-        try appendRuntimeExternalValueRoot(&self.memory, &self.external_value_roots, &self.external_value_roots_capacity, root);
+        try appendRuntimeValue(&self.memory, &self.external_value_roots, &self.external_value_roots_capacity, value);
         return true;
     }
 
@@ -1356,23 +1320,21 @@ pub const JSRuntime = struct {
     fn unregisterExternalValueRoot(self: *JSRuntime, value: JSValue) void {
         var found: ?usize = null;
         for (self.external_value_roots, 0..) |registered, index| {
-            if (registered.value.same(value)) {
+            if (registered.same(value)) {
                 found = index;
                 break;
             }
         }
         const index = found orelse return;
-        const root = self.external_value_roots[index];
         if (index + 1 < self.external_value_roots.len) {
-            std.mem.copyForwards(ExternalValueRoot, self.external_value_roots[index .. self.external_value_roots.len - 1], self.external_value_roots[index + 1 ..]);
+            std.mem.copyForwards(JSValue, self.external_value_roots[index .. self.external_value_roots.len - 1], self.external_value_roots[index + 1 ..]);
         }
         self.external_value_roots = self.external_value_roots[0 .. self.external_value_roots.len - 1];
-        self.releaseExternalValueRoot(root);
         if (self.external_value_roots.len == 0 and self.external_value_roots_capacity != 0) {
             const old_roots = self.external_value_roots.ptr[0..self.external_value_roots_capacity];
             self.external_value_roots = &.{};
             self.external_value_roots_capacity = 0;
-            self.memory.free(ExternalValueRoot, old_roots);
+            self.memory.free(JSValue, old_roots);
         }
     }
 
@@ -1381,23 +1343,7 @@ pub const JSRuntime = struct {
         const capacity = self.external_value_roots_capacity;
         self.external_value_roots = &.{};
         self.external_value_roots_capacity = 0;
-        for (roots) |root| self.releaseExternalValueRoot(root);
-        if (capacity != 0) self.memory.free(ExternalValueRoot, roots.ptr[0..capacity]);
-    }
-
-    fn pinExternalValueRoot(self: *JSRuntime, root: *ExternalValueRoot) !void {
-        const header = root.value.refHeader() orelse root.value.objectHeader() orelse return;
-        try self.gc.pinHeader(header);
-    }
-
-    fn unpinExternalValueRoot(self: *JSRuntime, root: ExternalValueRoot) void {
-        const header = root.value.refHeader() orelse root.value.objectHeader() orelse return;
-        self.gc.unpinHeader(header);
-    }
-
-    fn releaseExternalValueRoot(self: *JSRuntime, root: ExternalValueRoot) void {
-        self.unpinExternalValueRoot(root);
-        root.value.free(self);
+        if (capacity != 0) self.memory.free(JSValue, roots.ptr[0..capacity]);
     }
 
     pub fn registerExternalHostFunction(self: *JSRuntime, record: host_function.ExternalRecord) !u32 {
@@ -1459,32 +1405,6 @@ pub const JSRuntime = struct {
         const start_ns = profile.nowNanos();
         self.gc.beginMajorCycle(self.gc.activeMajorReason() orelse .manual, start_ns);
         self.gc.setMajorPhase(.mark_incremental);
-        self.tryRunMajorTraceMarkToCompletion(roots) catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return err;
-        };
-        self.gc.beginMajorWeakFixpoint();
-        self.tryRunMajorWeakFixpointToCompletion() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return err;
-        };
-        self.runMajorFinalizationMetadataPostprocess() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return err;
-        };
-        self.runMajorDeadWeakMetadataPostprocess();
-        self.runMajorWeakPersistentAndSymbolMetadataPostprocess() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return err;
-        };
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1510,532 +1430,7 @@ pub const JSRuntime = struct {
         return result;
     }
 
-    fn mapRootTraceError(err: RootTraceError) gc.CollectionError {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.PayloadMarkFailed => error.PayloadMarkFailed,
-        };
-    }
-
-    fn tryRunMajorTraceMarkSome(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-        include_roots: bool,
-        max_items: usize,
-        scan_weak_edges: bool,
-    ) gc.CollectionError!bool {
-        const MajorTraceVisitor = struct {
-            rt: *JSRuntime,
-            scan_weak_edges: bool = false,
-            err: ?RootTraceError = null,
-
-            fn rootVisitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
-                const visitor: *@This() = @ptrCast(@alignCast(context));
-                try visitor.visitValue(slot);
-            }
-
-            fn rootVisitObject(context: *anyopaque, slot: *?*Object) RootTraceError!void {
-                const visitor: *@This() = @ptrCast(@alignCast(context));
-                try visitor.visitObject(slot);
-            }
-
-            pub fn visitObject(visitor: *@This(), slot: *?*Object) RootTraceError!void {
-                const obj = slot.* orelse return;
-                _ = try visitor.rt.gc.enqueueMajorTraceHeader(&obj.header);
-            }
-
-            pub fn visitValue(visitor: *@This(), slot: *JSValue) RootTraceError!void {
-                if (slot.asSymbolAtom()) |atom_id| {
-                    _ = try visitor.rt.gc.markMajorTraceSymbol(atom_id);
-                    return;
-                }
-                if (slot.refHeader()) |header| {
-                    try visitor.visitHeader(header);
-                }
-                if (slot.objectHeader()) |header| {
-                    try visitor.visitHeader(header);
-                }
-            }
-
-            pub fn visitSymbol(visitor: *@This(), symbol: *atom.Atom) RootTraceError!void {
-                if (visitor.rt.atoms.kind(symbol.*) != .symbol) return;
-                _ = try visitor.rt.gc.markMajorTraceSymbol(symbol.*);
-            }
-
-            pub fn visitWeakCollectionEntry(visitor: *@This(), entry: *object_mod.WeakCollectionEntry) RootTraceError!void {
-                if (!visitor.scan_weak_edges) return;
-                if (!visitor.rt.gc.majorTraceIdentityMarked(entry.key_identity)) return;
-                var value = entry.value;
-                try visitor.visitValue(&value);
-            }
-
-            pub fn visitFinalizationCell(visitor: *@This(), entry: *object_mod.FinalizationRegistryCell) RootTraceError!void {
-                if (!visitor.scan_weak_edges) return;
-                if (!entry.isActive()) return;
-                const target_identity = entry.target_identity orelse return;
-                if (!visitor.rt.gc.majorTraceIdentityMarked(target_identity)) return;
-                var held = entry.held_value;
-                try visitor.visitValue(&held);
-                var token = entry.unregister_token;
-                try visitor.visitValue(&token);
-            }
-
-            fn visitHeader(visitor: *@This(), header: *gc.Header) RootTraceError!void {
-                _ = try visitor.rt.gc.enqueueMajorTraceHeader(header);
-            }
-
-            fn drainSome(visitor: *@This(), max_items_inner: usize) RootTraceError!usize {
-                var processed: usize = 0;
-                while (processed < max_items_inner and visitor.rt.gc.hasMajorTraceWork()) {
-                    while (visitor.rt.gc.popMajorTraceObject()) |obj| {
-                        try obj.traceChildEdgesFallible(visitor.rt, visitor);
-                        processed += 1;
-                        if (processed >= max_items_inner) return processed;
-                    }
-                    while (visitor.rt.gc.popMajorTraceBytecode()) |fb| {
-                        try visitor.traceFunctionBytecode(fb);
-                        processed += 1;
-                        if (processed >= max_items_inner) return processed;
-                    }
-                }
-                return processed;
-            }
-
-            fn traceFunctionBytecode(visitor: *@This(), fb: *bytecode_function.FunctionBytecode) RootTraceError!void {
-                if (fb.class_fields_init) |*stored| try visitor.visitValue(stored);
-                for (fb.cpool) |*stored| try visitor.visitValue(stored);
-            }
-        };
-
-        var visitor = MajorTraceVisitor{ .rt = self, .scan_weak_edges = scan_weak_edges };
-        if (include_roots) {
-            self.gc.resetMajorTraceMark();
-            self.gc.setMajorPhase(.mark_roots);
-
-            var root_visitor = RootVisitor{
-                .context = &visitor,
-                .visit_value = MajorTraceVisitor.rootVisitValue,
-                .visit_object = MajorTraceVisitor.rootVisitObject,
-            };
-            self.traceRoots(roots orelse self.active_value_roots, &root_visitor) catch |err| return mapRootTraceError(err);
-        }
-
-        self.gc.setMajorPhase(if (scan_weak_edges or (!include_roots and self.gcStats().major_phase == .weak_fixpoint)) .weak_fixpoint else .mark_incremental);
-        _ = visitor.drainSome(max_items) catch |err| return mapRootTraceError(err);
-        return !self.gc.hasMajorTraceWork();
-    }
-
-    fn tryRunMajorTraceMarkToCompletion(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-    ) gc.CollectionError!void {
-        _ = try self.tryRunMajorTraceMarkSome(roots, true, std.math.maxInt(usize), false);
-    }
-
-    fn tryRunMajorWeakFixpointSome(self: *JSRuntime, max_items: usize) gc.CollectionError!bool {
-        self.gc.seedMajorWeakFixpoint() catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-        };
-        return self.tryRunMajorTraceMarkSome(null, false, max_items, true);
-    }
-
-    fn tryRunMajorWeakFixpointToCompletion(self: *JSRuntime) gc.CollectionError!void {
-        _ = try self.tryRunMajorWeakFixpointSome(std.math.maxInt(usize));
-    }
-
-    fn runMajorFinalizationMetadataPostprocess(self: *JSRuntime) gc.CollectionError!void {
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
-            if (header.kind != .object) {
-                current = next;
-                continue;
-            }
-            if (!self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1))) {
-                current = next;
-                continue;
-            }
-            const registry: *Object = @alignCast(@fieldParentPtr("header", header));
-            if (registry.finalizationRegistryCells().len == 0) {
-                current = next;
-                continue;
-            }
-
-            const cleanup_callback = registry.finalizationRegistryCleanupCallback();
-            const cells_slot = registry.finalizationRegistryCellsSlot();
-            for (cells_slot.*) |*cell| {
-                if (!cell.isActive() and !cell.isPending()) continue;
-                const target_identity = cell.target_identity orelse continue;
-                if (self.gc.majorTraceIdentityMarked(target_identity)) {
-                    cell.state = .active;
-                    continue;
-                }
-
-                cell.state = .pending_enqueue;
-                var held = cell.held_value;
-                try self.enqueueMajorMetadataValue(&held);
-                var token = cell.unregister_token;
-                try self.enqueueMajorMetadataValue(&token);
-                _ = try self.tryRunMajorTraceMarkSome(null, false, std.math.maxInt(usize), false);
-                if (self.gc.majorTraceIdentityMarked(target_identity)) {
-                    cell.state = .active;
-                    continue;
-                }
-
-                if (cleanup_callback) |callback| try self.enqueueFinalizationJob(callback, cell.held_value);
-                cell.state = .queued;
-            }
-            current = next;
-        }
-    }
-
-    fn runMajorDeadWeakMetadataPostprocess(self: *JSRuntime) void {
-        const started_borrowed_cleanup = !self.borrowedWeakCleanupActive();
-        if (started_borrowed_cleanup) self.beginBorrowedWeakCleanup();
-        defer if (started_borrowed_cleanup) self.endBorrowedWeakCleanup();
-        defer if (started_borrowed_cleanup) Object.drainBorrowedWeakCleanup(self);
-
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
-            if (header.kind != .object) {
-                current = next;
-                continue;
-            }
-            if (!self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1))) {
-                current = next;
-                continue;
-            }
-            const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-            if (obj.weakCollectionEntries().len != 0) {
-                const entries_slot = obj.weakCollectionEntriesSlot();
-                var removed_entry = false;
-                var index: usize = 0;
-                while (index < entries_slot.*.len) {
-                    const entry = &entries_slot.*[index];
-                    if (self.gc.majorTraceIdentityMarked(entry.key_identity)) {
-                        index += 1;
-                        continue;
-                    }
-
-                    obj.removeWeakCollectionEntryAt(self, index);
-                    removed_entry = true;
-                }
-                if (removed_entry) obj.clearCollectionIndex(self);
-            }
-            if (obj.weakRefTargetIdentity()) |identity| {
-                if (!self.gc.majorTraceIdentityMarked(identity)) {
-                    obj.clearWeakRefTargetIdentity(self);
-                }
-            }
-            if (obj.finalizationRegistryCells().len != 0) {
-                const cells_slot = obj.finalizationRegistryCellsSlot();
-                var index: usize = 0;
-                while (index < cells_slot.*.len) {
-                    const cell = &cells_slot.*[index];
-                    if (cell.isPending()) {
-                        index += 1;
-                        continue;
-                    }
-                    if (cell.isActive()) {
-                        const target_identity = cell.target_identity orelse {
-                            obj.removeFinalizationRegistryCellAt(self, index);
-                            continue;
-                        };
-                        if (self.gc.majorTraceIdentityMarked(target_identity)) {
-                            index += 1;
-                            continue;
-                        }
-                    }
-
-                    obj.removeFinalizationRegistryCellAt(self, index);
-                }
-            }
-            current = next;
-        }
-    }
-
-    fn runMajorWeakPersistentAndSymbolMetadataPostprocess(self: *JSRuntime) gc.CollectionError!void {
-        const WeakPersistentMetadataContext = struct {
-            rt: *JSRuntime,
-
-            pub fn isWeakIdentityAlive(context: @This(), identity: usize) bool {
-                return context.rt.gc.majorTraceIdentityMarked(identity);
-            }
-        };
-        self.sweepDeadWeakPersistentSlots(WeakPersistentMetadataContext{ .rt = self });
-        try self.seedMajorHybridSymbolRoots();
-        _ = self.atoms.sweepUnrootedUniqueSymbols(self.gc.majorTraceSymbolRoots());
-    }
-
-    fn seedMajorHybridSymbolRoots(self: *JSRuntime) gc.CollectionError!void {
-        const HybridSymbolVisitor = struct {
-            rt: *JSRuntime,
-            objects: std.AutoHashMap(usize, void),
-            bytecodes: std.AutoHashMap(usize, void),
-            err: ?RootTraceError = null,
-
-            fn init(rt: *JSRuntime) @This() {
-                return .{
-                    .rt = rt,
-                    .objects = std.AutoHashMap(usize, void).init(rt.memory.allocator),
-                    .bytecodes = std.AutoHashMap(usize, void).init(rt.memory.allocator),
-                };
-            }
-
-            fn deinit(visitor: *@This()) void {
-                visitor.objects.deinit();
-                visitor.bytecodes.deinit();
-            }
-
-            pub fn visitObject(visitor: *@This(), slot: *?*Object) RootTraceError!void {
-                const obj = slot.* orelse return;
-                try visitor.scanObject(obj);
-            }
-
-            pub fn visitValue(visitor: *@This(), slot: *JSValue) RootTraceError!void {
-                if (slot.asSymbolAtom()) |atom_id| {
-                    try visitor.markSymbol(atom_id);
-                    return;
-                }
-                if (slot.refHeader()) |header| try visitor.scanHeader(header);
-                if (slot.objectHeader()) |header| try visitor.scanHeader(header);
-            }
-
-            pub fn visitSymbol(visitor: *@This(), symbol: *atom.Atom) RootTraceError!void {
-                try visitor.markSymbol(symbol.*);
-            }
-
-            pub fn visitWeakCollectionEntry(visitor: *@This(), entry: *object_mod.WeakCollectionEntry) RootTraceError!void {
-                _ = visitor;
-                _ = entry;
-            }
-
-            pub fn visitFinalizationCell(visitor: *@This(), entry: *object_mod.FinalizationRegistryCell) RootTraceError!void {
-                if (!entry.keepsHeldValuesAlive()) return;
-                var held = entry.held_value;
-                try visitor.visitValue(&held);
-                var token = entry.unregister_token;
-                try visitor.visitValue(&token);
-            }
-
-            fn markSymbol(visitor: *@This(), atom_id: atom.Atom) RootTraceError!void {
-                if (visitor.rt.atoms.kind(atom_id) != .symbol) return;
-                _ = try visitor.rt.gc.markMajorTraceSymbol(atom_id);
-            }
-
-            fn scanHeader(visitor: *@This(), header: *gc.Header) RootTraceError!void {
-                switch (header.kind) {
-                    .object => {
-                        const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                        try visitor.scanObject(obj);
-                    },
-                    .function_bytecode => {
-                        const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                        try visitor.scanFunctionBytecode(fb);
-                    },
-                    .string, .big_int => {},
-                }
-            }
-
-            fn scanObject(visitor: *@This(), obj: *Object) RootTraceError!void {
-                const entry = try visitor.objects.getOrPut(@intFromPtr(obj));
-                if (entry.found_existing) return;
-                try obj.traceChildEdgesFallible(visitor.rt, visitor);
-            }
-
-            fn scanFunctionBytecode(visitor: *@This(), fb: *bytecode_function.FunctionBytecode) RootTraceError!void {
-                const entry = try visitor.bytecodes.getOrPut(@intFromPtr(fb));
-                if (entry.found_existing) return;
-                if (fb.class_fields_init) |*stored| try visitor.visitValue(stored);
-                for (fb.cpool) |*stored| try visitor.visitValue(stored);
-            }
-        };
-
-        var visitor = HybridSymbolVisitor.init(self);
-        defer visitor.deinit();
-
-        for (self.modules.modules) |record| {
-            if (record.import_meta) |stored| {
-                var value = stored;
-                visitor.visitValue(&value) catch |err| return mapRootTraceError(err);
-            }
-            for (record.local_bindings) |binding| {
-                var value = binding.cell;
-                visitor.visitValue(&value) catch |err| return mapRootTraceError(err);
-            }
-        }
-
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const header = gc.headerFromGcNode(node);
-            if (header.rc > 0) {
-                visitor.scanHeader(header) catch |err| return mapRootTraceError(err);
-            }
-            current = node.next;
-        }
-    }
-
-    fn enqueueMajorMetadataValue(self: *JSRuntime, slot: *JSValue) gc.CollectionError!void {
-        if (slot.asSymbolAtom()) |atom_id| {
-            _ = self.gc.markMajorTraceSymbol(atom_id) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-            };
-            return;
-        }
-        if (slot.refHeader()) |header| {
-            _ = self.gc.enqueueMajorTraceHeader(header) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-            };
-        }
-        if (slot.objectHeader()) |header| {
-            _ = self.gc.enqueueMajorTraceHeader(header) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-            };
-        }
-    }
-
-    pub fn runMajorTraceMarkForTest(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        try self.tryRunMajorTraceMarkToCompletion(roots);
-    }
-
-    pub fn runMajorWeakFixpointForTest(self: *JSRuntime) gc.CollectionError!void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        self.gc.beginMajorWeakFixpoint();
-        try self.tryRunMajorWeakFixpointToCompletion();
-    }
-
-    pub fn runMajorFinalizationMetadataPostprocessForTest(self: *JSRuntime) gc.CollectionError!void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        try self.runMajorFinalizationMetadataPostprocess();
-    }
-
-    pub fn runMajorDeadWeakMetadataPostprocessForTest(self: *JSRuntime) void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        self.runMajorDeadWeakMetadataPostprocess();
-    }
-
-    pub fn runMajorWeakPersistentAndSymbolMetadataPostprocessForTest(self: *JSRuntime) gc.CollectionError!void {
-        if (!builtin.is_test) @compileError("test-only helper");
-        try self.runMajorWeakPersistentAndSymbolMetadataPostprocess();
-    }
-
-    fn tryRunMajorMarkSliceWithValueRoots(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-        reason: gc.RequestReason,
-        point: gc.SchedulerPoint,
-    ) gc.CollectionError!gc.CollectionResult {
-        if (self.gc_running) return .{};
-        if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
-        defer if (builtin.mode == .Debug) {
-            self.gc.verifyIntrusiveList() catch unreachable;
-            self.gc.verifyHeapAccounting() catch unreachable;
-        };
-        self.gc_running = true;
-        defer self.gc_running = false;
-
-        const start_ns = profile.nowNanos();
-        const start_new_cycle = !self.gc.hasActiveMajorCycle();
-        if (start_new_cycle) self.gc.beginMajorCycle(reason, start_ns);
-        switch (self.gcStats().major_phase) {
-            .mark_roots, .mark_incremental => {
-                const trace_done = self.tryRunMajorTraceMarkSome(roots, start_new_cycle, self.majorMarkObjectBudget(point), false) catch |err| {
-                    self.gc.recordFailure(err);
-                    self.gc.abortMajorCycle();
-                    self.gc.requestGC(.major, .collection_failed, .soon);
-                    return err;
-                };
-                if (!trace_done) {
-                    const end_ns = profile.nowNanos();
-                    return self.gc.finishMajorTraceSlice(if (end_ns > start_ns) end_ns - start_ns else 0);
-                }
-                self.gc.beginMajorWeakFixpoint();
-            },
-            .weak_fixpoint => {},
-            .sweep, .finalize_mark, .idle => {},
-        }
-
-        if (self.gcStats().major_phase == .weak_fixpoint) {
-            const weak_done = self.tryRunMajorWeakFixpointSome(self.majorMarkObjectBudget(point)) catch |err| {
-                self.gc.recordFailure(err);
-                self.gc.abortMajorCycle();
-                self.gc.requestGC(.major, .collection_failed, .soon);
-                return err;
-            };
-            if (!weak_done) {
-                const end_ns = profile.nowNanos();
-                return self.gc.finishMajorTraceSlice(if (end_ns > start_ns) end_ns - start_ns else 0);
-            }
-        }
-        self.runMajorFinalizationMetadataPostprocess() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return err;
-        };
-        self.runMajorDeadWeakMetadataPostprocess();
-        self.runMajorWeakPersistentAndSymbolMetadataPostprocess() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return err;
-        };
-
-        const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
-            const mapped: gc.CollectionError = switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.PayloadMarkFailed => error.PayloadMarkFailed,
-            };
-            self.gc.recordFailure(mapped);
-            self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
-            return mapped;
-        };
-        self.gc.setMajorPhase(.sweep);
-
-        const result = gc.CollectionResult{
-            .freed_objects = freed,
-            .duration_ns = blk: {
-                const end_ns = profile.nowNanos();
-                break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
-            },
-        };
-        self.gc.recordSuccess(result);
-        self.gc.finishMajorMarkSlice(result);
-        self.resetGCThreshold();
-        return result;
-    }
-
-    fn runMajorSweepSlice(self: *JSRuntime, point: gc.SchedulerPoint) gc.CollectionResult {
-        if (self.gc_running or self.gcStats().major_phase != .sweep) return .{};
-        const max_pages = self.majorSweepPageBudget(point);
-        if (max_pages == 0) return .{};
-        const start_ns = profile.nowNanos();
-        const swept_pages = self.gc.sweepMajorPages(max_pages);
-        const end_ns = profile.nowNanos();
-        const duration_ns = if (end_ns > start_ns) end_ns - start_ns else 0;
-        return self.gc.finishMajorSweepSlice(swept_pages, duration_ns);
-    }
-
-    fn majorSweepPageBudget(self: *JSRuntime, point: gc.SchedulerPoint) usize {
-        if (point == .urgent) return std.math.maxInt(usize);
-        const budget_ns = self.gc.sliceBudgetNs(point);
-        return @max(@as(usize, 1), @as(usize, @intCast(budget_ns / 100_000)));
-    }
-
-    fn majorMarkObjectBudget(self: *JSRuntime, point: gc.SchedulerPoint) usize {
-        if (point == .urgent) return std.math.maxInt(usize);
-        const budget_ns = self.gc.sliceBudgetNs(point);
-        return @max(@as(usize, 1), @as(usize, @intCast(budget_ns / 100_000)));
-    }
-
-    fn tryCollectMinorMoving(
+    fn tryCollectMinorNonMoving(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
     ) gc.CollectionError!gc.CollectionResult {
@@ -2054,15 +1449,14 @@ pub const JSRuntime = struct {
         const MinorPromotionVisitor = struct {
             rt: *JSRuntime,
             object_worklist: std.ArrayList(*Object) = .empty,
-            freed_objects: usize = 0,
+            bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode) = .empty,
             promoted_young_objects: usize = 0,
             promoted_young_bytes: usize = 0,
-            copied_young_objects: usize = 0,
-            copied_young_bytes: usize = 0,
             err: ?gc.CollectionError = null,
 
             fn deinit(self_visitor: *@This()) void {
                 self_visitor.object_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
+                self_visitor.bytecode_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
             }
 
             fn rootVisitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
@@ -2075,14 +1469,13 @@ pub const JSRuntime = struct {
                 try self_visitor.visitObject(slot);
             }
 
-            pub fn visitObject(self_visitor: *@This(), slot: *?*Object) !void {
+            fn visitObject(self_visitor: *@This(), slot: *?*Object) !void {
                 self_visitor.rt.rewriteForwardedObjectSlot(slot);
                 const obj = slot.* orelse return;
                 try self_visitor.evacuateHeader(&obj.header);
-                self_visitor.rt.rewriteForwardedObjectSlot(slot);
             }
 
-            pub fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
+            fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
                 self_visitor.rt.rewriteForwardedValueSlot(slot);
                 if (slot.refHeader()) |header| {
                     try self_visitor.evacuateHeader(header);
@@ -2090,85 +1483,45 @@ pub const JSRuntime = struct {
                 if (slot.objectHeader()) |header| {
                     try self_visitor.evacuateHeader(header);
                 }
-                self_visitor.rt.rewriteForwardedValueSlot(slot);
-            }
-
-            pub fn visitWeakCollectionEntry(self_visitor: *@This(), entry: *object_mod.WeakCollectionEntry) !void {
-                if (!self_visitor.rt.weakIdentityIsCurrentlyLive(entry.key_identity)) return;
-                try self_visitor.visitValue(&entry.value);
-            }
-
-            pub fn visitFinalizationCell(self_visitor: *@This(), entry: *object_mod.FinalizationRegistryCell) !void {
-                if (!entry.keepsHeldValuesAlive()) return;
-                try self_visitor.visitValue(&entry.held_value);
-                try self_visitor.visitValue(&entry.unregister_token);
             }
 
             fn evacuateHeader(self_visitor: *@This(), header: *gc.Header) !void {
                 if (header.generation() != .young) return;
 
-                if (self_visitor.rt.gc.forwardedHeader(header) != null) return;
-                try self_visitor.copyToOld(header);
+                if (self_visitor.rt.gc.forwardedHeader(header)) |forwarded| {
+                    if (forwarded != header) {
+                        self_visitor.rt.gc.promoteHeapAllocationToOld(header);
+                        header.setGeneration(.old);
+                        return;
+                    }
+                } else {
+                    try self_visitor.rt.gc.recordForwarding(header, header);
+                }
+
+                try self_visitor.promoteInPlace(header);
             }
 
-            fn copyToOld(self_visitor: *@This(), header: *gc.Header) !void {
+            fn promoteInPlace(self_visitor: *@This(), header: *gc.Header) !void {
                 std.debug.assert(header.generation() == .young);
-                const moved_bytes = promotedSize(header);
                 self_visitor.rt.gc.markNurserySurvivor(header);
                 switch (header.kind) {
                     .object => {
-                        const old_obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                        const new_obj = try self_visitor.allocateMovedObject();
-                        var moved = false;
-                        errdefer if (!moved) self_visitor.rt.memory.destroy(Object, new_obj);
-                        new_obj.* = old_obj.*;
-                        try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, new_obj);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len);
-                        try self_visitor.rt.gc.recordForwarding(header, &new_obj.header);
-                        try self_visitor.rt.gc.moveYoungAllocationToOld(header, &new_obj.header);
-                        self_visitor.rt.gc.replaceNode(&old_obj.gc, &new_obj.gc);
-                        self_visitor.rt.rewriteMovedObjectAddress(old_obj, new_obj);
-                        moved = true;
-                        self_visitor.copied_young_objects +|= 1;
-                        self_visitor.copied_young_bytes +|= moved_bytes;
+                        const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                        try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, obj);
+                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
                     },
-                    .function_bytecode => unreachable,
+                    .function_bytecode => {
+                        const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                        try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
+                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
+                    },
                     .string, .big_int => {},
                 }
 
+                self_visitor.rt.gc.promoteHeapAllocationToOld(header);
+                header.setGeneration(.old);
                 self_visitor.promoted_young_objects +|= 1;
-                self_visitor.promoted_young_bytes +|= moved_bytes;
-            }
-
-            fn collectRemainingUntraced(self_visitor: *@This(), header: *gc.Header) !void {
-                if (header.generation() != .young) return;
-                if (self_visitor.rt.gc.forwardedHeader(header) != null) {
-                    try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
-                    return;
-                }
-
-                switch (header.kind) {
-                    .object => {
-                        const live_before = self_visitor.rt.gc.liveCount();
-                        Object.destroyFromHeader(self_visitor.rt, header);
-                        const live_after = self_visitor.rt.gc.liveCount();
-                        self_visitor.freed_objects +|= live_before -| live_after;
-                    },
-                    .function_bytecode => unreachable,
-                    .string, .big_int => {},
-                }
-            }
-
-            fn allocateMovedObject(self_visitor: *@This()) !*Object {
-                const saved_trigger_fn = self_visitor.rt.memory.trigger_gc_fn;
-                const saved_trigger_ctx = self_visitor.rt.memory.trigger_gc_ctx;
-                self_visitor.rt.memory.trigger_gc_fn = null;
-                self_visitor.rt.memory.trigger_gc_ctx = null;
-                defer {
-                    self_visitor.rt.memory.trigger_gc_fn = saved_trigger_fn;
-                    self_visitor.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-                }
-                return self_visitor.rt.memory.create(Object);
+                self_visitor.promoted_young_bytes +|= promotedSize(header);
             }
 
             fn promotedSize(header: *const gc.Header) usize {
@@ -2181,9 +1534,16 @@ pub const JSRuntime = struct {
 
             fn drain(self_visitor: *@This()) !void {
                 var object_index: usize = 0;
-                while (object_index < self_visitor.object_worklist.items.len) : (object_index += 1) {
-                    const obj = self_visitor.object_worklist.items[object_index];
-                    try obj.traceChildEdgesFallible(self_visitor.rt, self_visitor);
+                var bytecode_index: usize = 0;
+                while (object_index < self_visitor.object_worklist.items.len or bytecode_index < self_visitor.bytecode_worklist.items.len) {
+                    while (object_index < self_visitor.object_worklist.items.len) : (object_index += 1) {
+                        const obj = self_visitor.object_worklist.items[object_index];
+                        try obj.traceChildEdgesFallible(self_visitor.rt, self_visitor);
+                    }
+                    while (bytecode_index < self_visitor.bytecode_worklist.items.len) : (bytecode_index += 1) {
+                        const fb = self_visitor.bytecode_worklist.items[bytecode_index];
+                        try self_visitor.traceFunctionBytecode(fb);
+                    }
                 }
             }
 
@@ -2203,7 +1563,6 @@ pub const JSRuntime = struct {
         };
 
         const start_ns = profile.nowNanos();
-        const nursery_allocated_bytes = self.gc.nurseryUsedBytes();
         _ = self.gc.clearMinorRequest();
         errdefer self.gc.clearForwarding();
 
@@ -2250,28 +1609,29 @@ pub const JSRuntime = struct {
             return err;
         };
 
-        while (self.gc.nurseryEntryHeader(0)) |header| {
-            visitor.collectRemainingUntraced(header) catch |err| {
+        var nursery_index: usize = 0;
+        while (self.gc.nurseryEntryHeader(nursery_index)) |header| : (nursery_index += 1) {
+            visitor.evacuateHeader(header) catch |err| {
                 self.gc.recordFailure(err);
                 self.gc.requestGC(.minor, .collection_failed, .soon);
                 return err;
             };
         }
+        visitor.drain() catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.requestGC(.minor, .collection_failed, .soon);
+            return err;
+        };
 
         const result = gc.CollectionResult{
-            .freed_objects = visitor.freed_objects,
             .promoted_young_objects = visitor.promoted_young_objects,
             .promoted_young_bytes = visitor.promoted_young_bytes,
-            .copied_young_objects = visitor.copied_young_objects,
-            .copied_young_bytes = visitor.copied_young_bytes,
-            .nursery_allocated_bytes = nursery_allocated_bytes,
             .duration_ns = blk: {
                 const end_ns = profile.nowNanos();
                 break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
             },
         };
         self.gc.finishMinorCollection(result);
-        self.gc.releaseForwardingShadows(self);
         if (builtin.mode == .Debug) {
             self.gc.verifyMinorPostcondition() catch unreachable;
             self.gc.verifyHeapAccounting() catch unreachable;
@@ -2299,16 +1659,15 @@ pub const JSRuntime = struct {
         const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
         const run_minor = self.gc.shouldRunMinorAt(scheduler_point);
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
-        const run_active_major = self.gc.hasActiveMajorCycle();
-        if (!run_minor and !run_major and !run_active_major) return .{};
+        if (!run_minor and !run_major) return .{};
 
         var result: gc.CollectionResult = .{};
         if (run_minor) {
-            result = try self.tryCollectMinorMoving(roots orelse self.active_value_roots);
+            result = try self.tryCollectMinorNonMoving(roots orelse self.active_value_roots);
         }
 
         const major_request = self.gc.pendingMajorRequest();
-        if (run_major and !self.gc.hasActiveMajorCycle()) {
+        if (run_major) {
             if (major_request != null) _ = self.gc.clearMajorRequest();
             const reason = if (major_request) |request|
                 request.reason orelse gc.RequestReason.manual
@@ -2316,42 +1675,13 @@ pub const JSRuntime = struct {
                 gc.RequestReason.allocation_threshold
             else
                 gc.RequestReason.manual;
-            const major_result = try self.tryRunMajorMarkSliceWithValueRoots(roots orelse self.active_value_roots, reason, scheduler_point);
+            self.gc.beginMajorCycle(reason, profile.nowNanos());
+            const major_result = try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
             result.freed_objects +|= major_result.freed_objects;
             result.freed_bytecodes +|= major_result.freed_bytecodes;
             result.promoted_young_objects +|= major_result.promoted_young_objects;
             result.promoted_young_bytes +|= major_result.promoted_young_bytes;
-            result.copied_young_objects +|= major_result.copied_young_objects;
-            result.copied_young_bytes +|= major_result.copied_young_bytes;
             result.duration_ns +|= major_result.duration_ns;
-            if (scheduler_point == .urgent and self.gc.hasActiveMajorCycle()) {
-                const sweep_result = self.runMajorSweepSlice(scheduler_point);
-                result.duration_ns +|= sweep_result.duration_ns;
-            }
-        } else if (run_active_major) {
-            switch (self.gcStats().major_phase) {
-                .mark_roots, .mark_incremental, .weak_fixpoint => {
-                    const reason = self.gc.activeMajorReason() orelse gc.RequestReason.manual;
-                    const major_result = try self.tryRunMajorMarkSliceWithValueRoots(roots orelse self.active_value_roots, reason, scheduler_point);
-                    result.freed_objects +|= major_result.freed_objects;
-                    result.freed_bytecodes +|= major_result.freed_bytecodes;
-                    result.promoted_young_objects +|= major_result.promoted_young_objects;
-                    result.promoted_young_bytes +|= major_result.promoted_young_bytes;
-                    result.copied_young_objects +|= major_result.copied_young_objects;
-                    result.copied_young_bytes +|= major_result.copied_young_bytes;
-                    result.duration_ns +|= major_result.duration_ns;
-                    if (scheduler_point == .urgent and self.gc.hasActiveMajorCycle()) {
-                        const sweep_result = self.runMajorSweepSlice(scheduler_point);
-                        result.duration_ns +|= sweep_result.duration_ns;
-                    }
-                },
-                .sweep => {
-                    const sweep_result = self.runMajorSweepSlice(scheduler_point);
-                    result.duration_ns +|= sweep_result.duration_ns;
-                },
-                .finalize_mark => {},
-                .idle => {},
-            }
         }
         return result;
     }
@@ -2533,41 +1863,6 @@ pub const JSRuntime = struct {
         const forwarded = self.gc.forwardedHeader(&obj.header) orelse return;
         std.debug.assert(forwarded.kind == .object);
         slot.* = @alignCast(@fieldParentPtr("header", forwarded));
-    }
-
-    fn rewriteMovedObjectAddress(self: *JSRuntime, old_object: *Object, new_object: *Object) void {
-        const old_header_identity = @intFromPtr(&old_object.header) & ~@as(usize, 1);
-        const new_header_identity = @intFromPtr(&new_object.header) & ~@as(usize, 1);
-        const old_object_identity = @intFromPtr(old_object);
-        const new_object_identity = @intFromPtr(new_object);
-
-        for (self.weak_root_slots) |slot| {
-            if (slot.identity == old_header_identity) slot.identity = new_header_identity;
-        }
-        for (self.borrowed_reference_holders) |*holder| {
-            if (holder.* == old_object) holder.* = new_object;
-        }
-        for (self.borrowed_weak_cleanup_identities) |*identity| {
-            if (identity.* == old_header_identity) identity.* = new_header_identity;
-        }
-        for (self.borrowed_weak_cleanup_realm_identities) |*identity| {
-            if (identity.* == old_header_identity) identity.* = new_header_identity;
-        }
-        if (self.current_deferred_weak_value_free_identity == old_header_identity) {
-            self.current_deferred_weak_value_free_identity = new_header_identity;
-        }
-
-        self.shapes.rewritePrototypeIdentity(old_object_identity, new_object_identity);
-
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const header = gc.headerFromGcNode(node);
-            if (header.kind == .object) {
-                const object: *Object = @alignCast(@fieldParentPtr("header", header));
-                object.rewriteMovedObjectIdentity(old_header_identity, old_object_identity, new_object);
-            }
-            current = node.next;
-        }
     }
 
     pub fn writeBarrierValue(self: *JSRuntime, owner: *gc.GCObjectHeader, value: JSValue) !void {
@@ -3415,17 +2710,17 @@ fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capaci
     slice.*[len] = item;
 }
 
-fn appendRuntimeExternalValueRoot(account: *memory.MemoryAccount, slice: *[]ExternalValueRoot, capacity: *usize, item: ExternalValueRoot) !void {
+fn appendRuntimeValue(account: *memory.MemoryAccount, slice: *[]JSValue, capacity: *usize, item: JSValue) !void {
     if (slice.*.len == capacity.*) {
         const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(ExternalValueRoot, next_capacity);
-        errdefer account.free(ExternalValueRoot, next);
+        const next = try account.alloc(JSValue, next_capacity);
+        errdefer account.free(JSValue, next);
         @memcpy(next[0..slice.*.len], slice.*);
         const old_capacity = capacity.*;
         const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(ExternalValueRoot, old);
+        if (old_capacity != 0) account.free(JSValue, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];
