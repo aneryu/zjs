@@ -859,6 +859,10 @@ pub const CollectionResult = struct {
     freed_bytecodes: usize = 0,
     promoted_young_objects: usize = 0,
     promoted_young_bytes: usize = 0,
+    copied_young_objects: usize = 0,
+    copied_young_bytes: usize = 0,
+    in_place_young_promotions: usize = 0,
+    in_place_young_promotion_bytes: usize = 0,
     nursery_allocated_bytes: usize = 0,
     duration_ns: u64 = 0,
 };
@@ -952,6 +956,10 @@ pub const GeStats = struct {
     nursery_resize_count: usize = 0,
     promoted_young_objects: usize = 0,
     promoted_young_bytes: usize = 0,
+    copied_young_objects: usize = 0,
+    copied_young_bytes: usize = 0,
+    in_place_young_promotions: usize = 0,
+    in_place_young_promotion_bytes: usize = 0,
     major_pause_samples: PauseSamples = .{},
     incremental_slice_samples: PauseSamples = .{},
     last_incremental_slice_ns: u64 = 0,
@@ -1074,6 +1082,10 @@ pub const Stats = struct {
 
     promoted_young_objects: usize = 0,
     promoted_young_bytes: usize = 0,
+    copied_young_objects: usize = 0,
+    copied_young_bytes: usize = 0,
+    in_place_young_promotions: usize = 0,
+    in_place_young_promotion_bytes: usize = 0,
     remembered_set_size: usize = 0,
     dirty_card_count: usize = 0,
     forwarding_entry_count: usize = 0,
@@ -1577,6 +1589,10 @@ pub const Registry = struct {
             .freed_objects = self.stats.freed_objects,
             .promoted_young_objects = self.stats.promoted_young_objects,
             .promoted_young_bytes = self.stats.promoted_young_bytes,
+            .copied_young_objects = self.stats.copied_young_objects,
+            .copied_young_bytes = self.stats.copied_young_bytes,
+            .in_place_young_promotions = self.stats.in_place_young_promotions,
+            .in_place_young_promotion_bytes = self.stats.in_place_young_promotion_bytes,
             .remembered_set_size = self.remembered_set.len,
             .dirty_card_count = self.dirty_cards.len,
             .forwarding_entry_count = self.forwarding_entries.len,
@@ -1596,7 +1612,8 @@ pub const Registry = struct {
     }
 
     pub fn addWithGeneration(self: *Registry, h: *GCObjectHeader, generation: Generation, bytes: usize) !void {
-        const actual_generation = self.classifyGeneration(generation, bytes);
+        const requested_generation = if (h.kind == .function_bytecode and generation == .young) .old else generation;
+        const actual_generation = self.classifyGeneration(requested_generation, bytes);
         const track_nursery = self.nursery.enabled and actual_generation == .young;
         if (track_nursery) try self.ensureNurseryEntryCapacity(self.nursery_entries.len + 1);
         if (bytes != 0) try self.ensureHeapAllocationCapacity(self.heap_allocations.len + 1);
@@ -1932,6 +1949,10 @@ pub const Registry = struct {
         self.stats.last_promotion_per_mille = survival_per_mille;
         self.stats.promoted_young_objects +|= result.promoted_young_objects;
         self.stats.promoted_young_bytes +|= result.promoted_young_bytes;
+        self.stats.copied_young_objects +|= result.copied_young_objects;
+        self.stats.copied_young_bytes +|= result.copied_young_bytes;
+        self.stats.in_place_young_promotions +|= result.in_place_young_promotions;
+        self.stats.in_place_young_promotion_bytes +|= result.in_place_young_promotion_bytes;
         self.tuneNurseryAfterMinor(survival_per_mille, result.duration_ns);
         self.nursery.used_bytes = 0;
         self.clearNurseryEntries();

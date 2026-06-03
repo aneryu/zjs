@@ -1452,6 +1452,10 @@ pub const JSRuntime = struct {
             bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode) = .empty,
             promoted_young_objects: usize = 0,
             promoted_young_bytes: usize = 0,
+            copied_young_objects: usize = 0,
+            copied_young_bytes: usize = 0,
+            in_place_young_promotions: usize = 0,
+            in_place_young_promotion_bytes: usize = 0,
             err: ?gc.CollectionError = null,
 
             fn deinit(self_visitor: *@This()) void {
@@ -1469,14 +1473,14 @@ pub const JSRuntime = struct {
                 try self_visitor.visitObject(slot);
             }
 
-            fn visitObject(self_visitor: *@This(), slot: *?*Object) !void {
+            pub fn visitObject(self_visitor: *@This(), slot: *?*Object) !void {
                 self_visitor.rt.rewriteForwardedObjectSlot(slot);
                 const obj = slot.* orelse return;
                 try self_visitor.evacuateHeader(&obj.header);
                 self_visitor.rt.rewriteForwardedObjectSlot(slot);
             }
 
-            fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
+            pub fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
                 self_visitor.rt.rewriteForwardedValueSlot(slot);
                 if (slot.refHeader()) |header| {
                     try self_visitor.evacuateHeader(header);
@@ -1512,12 +1516,16 @@ pub const JSRuntime = struct {
                         self_visitor.rt.gc.replaceNode(&old_obj.gc, &new_obj.gc);
                         self_visitor.rt.rewriteMovedObjectAddress(old_obj, new_obj);
                         moved = true;
+                        self_visitor.copied_young_objects +|= 1;
+                        self_visitor.copied_young_bytes +|= moved_bytes;
                     },
                     .function_bytecode => {
                         const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
                         try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
                         self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
                         try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
+                        self_visitor.in_place_young_promotions +|= 1;
+                        self_visitor.in_place_young_promotion_bytes +|= moved_bytes;
                     },
                     .string, .big_int => {},
                 }
@@ -1538,6 +1546,8 @@ pub const JSRuntime = struct {
                 try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
                 self_visitor.promoted_young_objects +|= 1;
                 self_visitor.promoted_young_bytes +|= moved_bytes;
+                self_visitor.in_place_young_promotions +|= 1;
+                self_visitor.in_place_young_promotion_bytes +|= moved_bytes;
             }
 
             fn allocateMovedObject(self_visitor: *@This()) !*Object {
@@ -1649,6 +1659,10 @@ pub const JSRuntime = struct {
         const result = gc.CollectionResult{
             .promoted_young_objects = visitor.promoted_young_objects,
             .promoted_young_bytes = visitor.promoted_young_bytes,
+            .copied_young_objects = visitor.copied_young_objects,
+            .copied_young_bytes = visitor.copied_young_bytes,
+            .in_place_young_promotions = visitor.in_place_young_promotions,
+            .in_place_young_promotion_bytes = visitor.in_place_young_promotion_bytes,
             .nursery_allocated_bytes = nursery_allocated_bytes,
             .duration_ns = blk: {
                 const end_ns = profile.nowNanos();
@@ -1705,6 +1719,10 @@ pub const JSRuntime = struct {
             result.freed_bytecodes +|= major_result.freed_bytecodes;
             result.promoted_young_objects +|= major_result.promoted_young_objects;
             result.promoted_young_bytes +|= major_result.promoted_young_bytes;
+            result.copied_young_objects +|= major_result.copied_young_objects;
+            result.copied_young_bytes +|= major_result.copied_young_bytes;
+            result.in_place_young_promotions +|= major_result.in_place_young_promotions;
+            result.in_place_young_promotion_bytes +|= major_result.in_place_young_promotion_bytes;
             result.duration_ns +|= major_result.duration_ns;
         }
         return result;

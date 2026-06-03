@@ -1951,6 +1951,8 @@ sweep_time_ns
 
 nursery_survival_rate
 promotion_rate
+copied_young_objects / copied_young_bytes
+in_place_young_promotions / in_place_young_promotion_bytes
 remembered_set_size
 dirty_card_count
 mark_stack_peak
@@ -2159,7 +2161,9 @@ HandleScope / Persistent / WeakPersistent 基础 root。
 old -> young remembered set / dirty card barrier。
 external memory accounting、GC request 与 external token registry 审计（包含 SharedBufferStore owner token）。
 minor GC hybrid 中间态：root/remembered tracing 访问到的 young Object 会复制到 old allocation；final nursery pass 剩余条目先原地晋升，保持现有 raw-local `*Object` 调用可用。
-FunctionBytecode 仍走原地晋升；moving 后的旧 Object shadow 通过 forwarding table 保留到 runtime deinit，用于 stale raw release 转发。
+FunctionBytecode 已明确为 non-moving old/large bytecode space，即使调用方请求 young 也不会进入 nursery。
+moving 后的旧 Object shadow 通过 forwarding table 保留到 runtime deinit，用于 stale raw release 转发。
+GC stats 已拆分 `copied_young_*` 与 `in_place_young_promotion_*`，用于量化 full copying nursery 前还剩多少 fallback。
 nursery tuning。
 large object classification。
 old/large page metadata allocator、size-class page、free-list、allocation bitmap 与 mark bitmap。
@@ -2177,7 +2181,6 @@ P0:
 
 P1:
   - 完成 full copying nursery：移除 final pass 原地晋升 fallback，让未存活 young object 可直接回收。
-  - 将 FunctionBytecode 从当前原地晋升改成与 Object 一致的复制/转发路径，或明确保持 non-moving bytecode space。
   - 收敛当前旧 Object shadow + forwarding table 中间方案；优先补齐 HandleScope/Persistent/root slot discipline，再删除 stale raw pointer 兼容层。
   - 为移动 young object 继续补齐 forwarding pointer/table 后的所有 root、slot、handle、dirty card 更新。
   - 为 array elements、closure env、module namespace、Promise reaction、WeakMap entry 等批量写入补齐 bulk barrier 审计。
@@ -2318,6 +2321,7 @@ Production v2:
   + page decommit
   + RSS/cgroup pressure handling
   + optional selective evacuation
+  + JIT stack maps / JIT barriers
 ```
 
 一句话概括：

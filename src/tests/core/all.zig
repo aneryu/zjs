@@ -1902,7 +1902,8 @@ test "runtime root frame slots are mutable" {
     defer rt.deinit();
 
     const object = try core.Object.create(&rt, core.class.ids.object, null);
-    defer object.value().free(&rt);
+    var object_value = object.value();
+    defer object_value.free(&rt);
 
     var rooted_value = core.JSValue.int32(201);
     var rooted_object: ?*core.Object = object;
@@ -2965,7 +2966,8 @@ test "nursery policy promotes young objects at poll boundary without running maj
     defer rt.deinit();
 
     const object = try core.Object.create(&rt, core.class.ids.object, null);
-    defer object.value().free(&rt);
+    var object_value = object.value();
+    defer object_value.free(&rt);
 
     try std.testing.expectEqual(core.gc.Generation.young, object.header.generation());
     try std.testing.expectEqual(@sizeOf(core.Object), rt.gc.nurseryUsedBytes());
@@ -2985,17 +2987,25 @@ test "nursery policy promotes young objects at poll boundary without running maj
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
     try std.testing.expectEqual(debt_before_minor + @sizeOf(core.Object) * rt.gc.policy.old_weight, rt.allocationDebtBytes());
 
-    const minor = try rt.pollGC(null, .normal);
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
+    const roots = core.runtime.ValueRootFrame{ .values = &root_values };
+    const minor = try rt.pollGC(&roots, .normal);
+    const moved_object_header = object_value.refHeader().?;
     try std.testing.expectEqual(@as(usize, 0), minor.freed_objects);
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), minor.promoted_young_bytes);
-    try std.testing.expectEqual(core.gc.Generation.old, object.header.generation());
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+    try std.testing.expectEqual(moved_object_header, rt.gc.forwardedHeader(&object.header).?);
+    try std.testing.expectEqual(core.gc.Generation.old, moved_object_header.generation());
     try std.testing.expectEqual(core.gc.Generation.old, function_object.header.generation());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryUsedBytes());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
     try std.testing.expectEqual(@as(?u8, null), rt.gc.nurseryObjectAge(&object.header));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.minor_gc_count);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.stats.in_place_young_promotions);
     try std.testing.expectEqual(debt_before_minor + @sizeOf(core.Object) * (rt.gc.policy.old_weight + rt.gc.policy.promotion_weight), rt.allocationDebtBytes());
     try std.testing.expect(!rt.gcPendingForTest());
     try rt.gc.verifyMinorPostcondition();
@@ -3083,13 +3093,19 @@ test "nursery tuning shrinks after high survival minor gc" {
     defer rt.deinit();
 
     const object = try core.Object.create(&rt, core.class.ids.object, null);
-    defer object.value().free(&rt);
+    var object_value = object.value();
+    defer object_value.free(&rt);
 
     rt.gc.requestGC(.minor, .manual, .soon);
-    const minor = try rt.pollGC(null, .normal);
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
+    const roots = core.runtime.ValueRootFrame{ .values = &root_values };
+    const minor = try rt.pollGC(&roots, .normal);
     const stats = rt.gcStats();
 
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+    try std.testing.expectEqual(object_value.refHeader().?, rt.gc.forwardedHeader(&object.header).?);
     try std.testing.expectEqual(@as(usize, 1000), stats.last_minor_survival_per_mille);
     try std.testing.expectEqual(@as(usize, 2 * 1024), stats.nursery_committed_bytes);
     try std.testing.expectEqual(@as(usize, 1), stats.nursery_resize_count);
@@ -3122,7 +3138,7 @@ test "nursery tuning grows after low survival minor gc" {
     try std.testing.expectEqual(@as(usize, 1), stats.nursery_resize_count);
 }
 
-test "minor gc final pass is driven by nursery entries" {
+test "minor gc fallback promotes unrooted nursery entries in place" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
         .gc_policy = .{
@@ -3145,6 +3161,8 @@ test "minor gc final pass is driven by nursery entries" {
     const minor = try rt.pollGC(null, .normal);
 
     try std.testing.expectEqual(@as(usize, 2), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 2), minor.in_place_young_promotions);
     try std.testing.expectEqual(core.gc.Generation.old, first.header.generation());
     try std.testing.expectEqual(core.gc.Generation.old, second.header.generation());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
@@ -3197,6 +3215,32 @@ test "function bytecode registration is old-space accounted" {
     try std.testing.expect(rt.gcPendingForTest());
     try std.testing.expectEqual(@as(?core.gc.RequestKind, core.gc.RequestKind.major), rt.gcPendingKindForTest());
     try std.testing.expectEqual(@as(?core.gc.RequestReason, core.gc.RequestReason.allocation_debt), rt.gcLastRequestReasonForTest());
+}
+
+test "function bytecode is forced out of nursery even when requested young" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .enable_nursery = true,
+            .nursery_initial_size = 4 * 1024,
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const fb_slice = try rt.memory.alloc(engine.bytecode.FunctionBytecode, 1);
+    const fb = &fb_slice[0];
+    fb.* = engine.bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    try rt.gc.addWithGeneration(&fb.header, .young, @sizeOf(engine.bytecode.FunctionBytecode));
+    const value = core.JSValue.functionBytecode(&fb.header);
+    defer value.free(&rt);
+
+    try std.testing.expectEqual(core.gc.Generation.old, fb.header.generation());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryObjectCount());
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryUsedBytes());
+    try std.testing.expectEqual(@as(usize, @sizeOf(engine.bytecode.FunctionBytecode)), rt.gc.stats.old_allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.stats.old_alloc_count);
+    try rt.gc.verifyNurseryCoverage();
 }
 
 test "runtime exposes stable gc stats snapshot" {
@@ -3253,11 +3297,16 @@ test "runtime exposes stable gc stats snapshot" {
     rt.gc.requestGC(.minor, .manual, .soon);
     const minor = try rt.pollGC(null, .normal);
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
 
     const after_minor = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 1), after_minor.minor_gc_count);
     try std.testing.expectEqual(@as(usize, 1), after_minor.promoted_young_objects);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), after_minor.promoted_young_bytes);
+    try std.testing.expectEqual(@as(usize, 1), after_minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), after_minor.copied_young_bytes);
+    try std.testing.expectEqual(@as(usize, 0), after_minor.in_place_young_promotions);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), after_minor.heap_live_bytes);
     try std.testing.expectEqual(@as(usize, 0), after_minor.young_live_bytes);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object) * 2), after_minor.old_live_bytes);
@@ -4005,6 +4054,8 @@ test "minor gc copies rooted young object and rewrites root slots" {
     try std.testing.expect(moved_object != original);
     try std.testing.expect(object_slot.? == moved_object);
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
     try std.testing.expectEqual(core.gc.Generation.old, moved_header.generation());
     try std.testing.expectEqual(core.gc.Generation.old, original.header.generation());
     try std.testing.expectEqual(moved_header, rt.gc.forwardedHeader(&original.header).?);
@@ -4044,6 +4095,11 @@ test "minor gc promotes remembered old to young edges and clears card state" {
 
     try std.testing.expectEqual(@as(usize, 0), minor.freed_objects);
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
+    try std.testing.expectEqual(@as(usize, 1), minor.copied_young_objects);
+    try std.testing.expectEqual(@as(usize, 0), minor.in_place_young_promotions);
+    const moved_child_header = rt.gc.forwardedHeader(&child.header).?;
+    const stored_child = owner.getOwnDataPropertyValue(key).?;
+    try std.testing.expectEqual(moved_child_header, stored_child.refHeader().?);
     try std.testing.expectEqual(core.gc.Generation.old, child.header.generation());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.nurseryUsedBytes());
     try std.testing.expectEqual(@as(usize, 0), rt.gc.rememberedSetLen());
