@@ -42065,10 +42065,17 @@ pub fn qjsEvalGlobalScriptSource(
 
 const Test262Agent = struct {
     source: []u8,
+    owner_runtime: *core.JSRuntime,
+    agent_runtime: ?*core.JSRuntime = null,
     broadcast_store: ?*core.object.SharedBufferStore = null,
     broadcast_max_byte_length: ?usize = null,
     done: bool = false,
     thread_done: bool = false,
+};
+
+const Test262AgentReportEntry = struct {
+    owner_runtime: *core.JSRuntime,
+    bytes: []u8,
 };
 
 const Test262AgentCoordinator = struct {
@@ -42076,7 +42083,7 @@ const Test262AgentCoordinator = struct {
     cond: std.Io.Condition = .init,
     agents: []*Test262Agent = &.{},
     agents_capacity: usize = 0,
-    reports: [][]u8 = &.{},
+    reports: []Test262AgentReportEntry = &.{},
     reports_capacity: usize = 0,
 };
 
@@ -42134,8 +42141,13 @@ var qjs_workers = QjsWorkerCoordinator{};
 threadlocal var current_qjs_worker: ?*QjsWorker = null;
 threadlocal var current_qjs_worker_parent: ?core.JSValue = null;
 
+var test262_gpa = std.heap.DebugAllocator(.{
+    .safety = false,
+    .stack_trace_frames = 0,
+    .thread_safe = true,
+}){};
 fn test262PageAllocator() std.mem.Allocator {
-    return std.heap.page_allocator;
+    return test262_gpa.allocator();
 }
 
 fn test262AgentIo() std.Io {
@@ -42163,19 +42175,19 @@ fn test262AgentAppend(agent: *Test262Agent) !void {
     const io = test262AgentIo();
     test262_agents.mutex.lockUncancelable(io);
     defer test262_agents.mutex.unlock(io);
-    _ = test262AgentSweepCompletedLocked();
+    _ = test262AgentSweepCompletedLocked(agent.owner_runtime);
     try test262AgentEnsureAgentCapacityLocked(test262_agents.agents.len + 1);
     test262_agents.agents = test262_agents.agents.ptr[0 .. test262_agents.agents.len + 1];
     test262_agents.agents[test262_agents.agents.len - 1] = agent;
 }
 
-fn test262AgentEnqueueReport(bytes: []u8) !void {
+fn test262AgentEnqueueReport(owner_runtime: *core.JSRuntime, bytes: []u8) !void {
     const io = test262AgentIo();
     test262_agents.mutex.lockUncancelable(io);
     defer test262_agents.mutex.unlock(io);
     try test262AgentEnsureReportCapacityLocked(test262_agents.reports.len + 1);
     test262_agents.reports = test262_agents.reports.ptr[0 .. test262_agents.reports.len + 1];
-    test262_agents.reports[test262_agents.reports.len - 1] = bytes;
+    test262_agents.reports[test262_agents.reports.len - 1] = .{ .owner_runtime = owner_runtime, .bytes = bytes };
     test262_agents.cond.broadcast(io);
 }
 
@@ -42206,7 +42218,7 @@ fn test262AgentEnsureReportCapacityLocked(min_capacity: usize) !void {
     const allocator = test262PageAllocator();
     var next_capacity = if (test262_agents.reports_capacity == 0) @as(usize, 4) else test262_agents.reports_capacity * 2;
     while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-    const next = try allocator.alloc([]u8, next_capacity);
+    const next = try allocator.alloc(Test262AgentReportEntry, next_capacity);
     @memcpy(next[0..test262_agents.reports.len], test262_agents.reports);
     if (test262_agents.reports_capacity != 0) allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
     test262_agents.reports = next[0..test262_agents.reports.len];
@@ -42242,11 +42254,16 @@ fn test262AgentRemove(agent: *Test262Agent) void {
     }
 }
 
-fn test262AgentSweepCompletedLocked() usize {
+fn test262AgentSweepCompletedLocked(rt: *core.JSRuntime) usize {
     var removed: usize = 0;
     var index: usize = 0;
     while (index < test262_agents.agents.len) {
-        if (!test262_agents.agents[index].thread_done) {
+        const agent = test262_agents.agents[index];
+        if (agent.owner_runtime != rt) {
+            index += 1;
+            continue;
+        }
+        if (!agent.thread_done) {
             index += 1;
             continue;
         }
@@ -42256,27 +42273,121 @@ fn test262AgentSweepCompletedLocked() usize {
     return removed;
 }
 
-fn test262AgentTakeReportLocked() ?[]u8 {
-    if (test262_agents.reports.len == 0) return null;
-    const report = test262_agents.reports[0];
-    const old_len = test262_agents.reports.len;
-    if (old_len == 1) {
-        const allocator = test262PageAllocator();
-        allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
-        test262_agents.reports = &.{};
-        test262_agents.reports_capacity = 0;
-        return report;
+fn test262AgentTakeReportLocked(rt: *core.JSRuntime) ?[]u8 {
+    for (test262_agents.reports, 0..) |entry, index| {
+        if (entry.owner_runtime == rt) {
+            const report = entry.bytes;
+            const old_len = test262_agents.reports.len;
+            if (old_len == 1) {
+                const allocator = test262PageAllocator();
+                allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
+                test262_agents.reports = &.{};
+                test262_agents.reports_capacity = 0;
+                return report;
+            }
+            if (index + 1 < old_len) {
+                @memmove(test262_agents.reports[index .. old_len - 1], test262_agents.reports[index + 1 .. old_len]);
+            }
+            test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
+            return report;
+        }
     }
-    @memmove(test262_agents.reports[0 .. old_len - 1], test262_agents.reports[1..old_len]);
-    test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
-    return report;
+    return null;
 }
 
-pub fn cleanupTest262Agents() usize {
+fn test262AgentSweepReportsLocked(rt: *core.JSRuntime) void {
+    const allocator = test262PageAllocator();
+    var index: usize = 0;
+    while (index < test262_agents.reports.len) {
+        const entry = test262_agents.reports[index];
+        if (entry.owner_runtime == rt) {
+            allocator.free(entry.bytes);
+            const old_len = test262_agents.reports.len;
+            if (old_len == 1) {
+                allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
+                test262_agents.reports = &.{};
+                test262_agents.reports_capacity = 0;
+                break;
+            }
+            if (index + 1 < old_len) {
+                @memmove(test262_agents.reports[index .. old_len - 1], test262_agents.reports[index + 1 .. old_len]);
+            }
+            test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
+        } else {
+            index += 1;
+        }
+    }
+}
+
+pub fn cleanupTest262Agents(rt: *core.JSRuntime) usize {
     const io = test262AgentIo();
+
+    // 1. Signal all agents belonging to rt to finish, and collect their runtimes.
+    var agent_runtimes_buf: [16]*core.JSRuntime = undefined;
+    var agent_runtimes_count: usize = 0;
+
+    test262_agents.mutex.lockUncancelable(io);
+    for (test262_agents.agents) |agent| {
+        if (agent.owner_runtime == rt) {
+            agent.done = true;
+            if (agent.agent_runtime) |art| {
+                if (agent_runtimes_count < agent_runtimes_buf.len) {
+                    agent_runtimes_buf[agent_runtimes_count] = art;
+                    agent_runtimes_count += 1;
+                }
+            }
+        }
+    }
+    test262_agents.cond.broadcast(io);
+    test262_agents.mutex.unlock(io);
+
+    // 2. Wake up all atomics waiters to unblock any agent threads waiting on atomics.
+    const waiter_io = atomicsWaiterIo();
+    atomics_waiter_mutex.lockUncancelable(waiter_io);
+    var cursor = atomics_waiters;
+    while (cursor) |waiter| {
+        if (waiter.ctx) |w_ctx| {
+            var wake_up = false;
+            if (w_ctx.runtime == rt) {
+                wake_up = true;
+            } else {
+                for (agent_runtimes_buf[0..agent_runtimes_count]) |art| {
+                    if (w_ctx.runtime == art) {
+                        wake_up = true;
+                        break;
+                    }
+                }
+            }
+            if (wake_up) {
+                waiter.notified = true;
+                waiter.cond.broadcast(waiter_io);
+            }
+        }
+        cursor = waiter.next;
+    }
+    atomics_waiter_mutex.unlock(waiter_io);
+
+    // 3. Wait for all agent threads belonging to rt to complete execution (up to 500ms).
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        test262_agents.mutex.lockUncancelable(io);
+        var all_done = true;
+        for (test262_agents.agents) |agent| {
+            if (agent.owner_runtime == rt and !agent.thread_done) {
+                all_done = false;
+                break;
+            }
+        }
+        test262_agents.mutex.unlock(io);
+        if (all_done) break;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+
+    // 4. Sweep and destroy all completed agents belonging to rt.
     test262_agents.mutex.lockUncancelable(io);
     defer test262_agents.mutex.unlock(io);
-    return test262AgentSweepCompletedLocked();
+    test262AgentSweepReportsLocked(rt);
+    return test262AgentSweepCompletedLocked(rt);
 }
 
 pub fn test262AgentRecordCountForTests() usize {
@@ -42284,6 +42395,12 @@ pub fn test262AgentRecordCountForTests() usize {
     test262_agents.mutex.lockUncancelable(io);
     defer test262_agents.mutex.unlock(io);
     return test262_agents.agents.len;
+}
+
+fn test262AgentInterruptHandler(rt: *core.JSRuntime, context: ?*anyopaque) bool {
+    _ = rt;
+    const agent: *Test262Agent = @ptrCast(@alignCast(context orelse return false));
+    return agent.done;
 }
 
 fn test262AgentRun(agent: *Test262Agent) void {
@@ -42306,6 +42423,15 @@ fn test262AgentRun(agent: *Test262Agent) void {
     const rt = core.JSRuntime.create(allocator) catch return;
     defer rt.destroy();
     rt.setCanBlock(true);
+    rt.setInterruptHandler(test262AgentInterruptHandler, agent);
+
+    {
+        const io = test262AgentIo();
+        test262_agents.mutex.lockUncancelable(io);
+        agent.agent_runtime = rt;
+        test262_agents.mutex.unlock(io);
+    }
+
     const ctx = core.JSContext.create(rt) catch return;
     defer ctx.destroy();
     defer zjs_vm.cleanupAtomicsWaitersForContext(ctx);
@@ -42344,7 +42470,7 @@ pub fn qjsTest262AgentStart(
     var source_owned = true;
     errdefer if (source_owned) test262PageAllocator().free(source);
     const agent = try test262PageAllocator().create(Test262Agent);
-    agent.* = .{ .source = source };
+    agent.* = .{ .source = source, .owner_runtime = ctx.runtime };
     source_owned = false;
     var agent_owned = true;
     var agent_registered = false;
@@ -42368,7 +42494,6 @@ pub fn qjsTest262AgentBroadcast(
     global: ?*core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    _ = ctx;
     _ = output;
     _ = global;
     if (args.len == 0) return error.TypeError;
@@ -42379,8 +42504,9 @@ pub fn qjsTest262AgentBroadcast(
     const io = test262AgentIo();
     test262_agents.mutex.lockUncancelable(io);
     defer test262_agents.mutex.unlock(io);
-    _ = test262AgentSweepCompletedLocked();
+    _ = test262AgentSweepCompletedLocked(ctx.runtime);
     for (test262_agents.agents) |agent| {
+        if (agent.owner_runtime != ctx.runtime) continue;
         if (agent.done) continue;
         if (agent.broadcast_store) |old| old.release();
         store.retain();
@@ -42433,7 +42559,8 @@ pub fn qjsTest262AgentReport(
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const bytes = try test262AgentStringValue(ctx.runtime, value);
     errdefer test262PageAllocator().free(bytes);
-    try test262AgentEnqueueReport(bytes);
+    const owner_runtime = if (current_test262_agent) |agent| agent.owner_runtime else ctx.runtime;
+    try test262AgentEnqueueReport(owner_runtime, bytes);
     return core.JSValue.undefinedValue();
 }
 
@@ -42449,8 +42576,8 @@ pub fn qjsTest262AgentGetReport(
     const allocator = test262PageAllocator();
     const io = test262AgentIo();
     test262_agents.mutex.lockUncancelable(io);
-    _ = test262AgentSweepCompletedLocked();
-    const report = test262AgentTakeReportLocked() orelse {
+    _ = test262AgentSweepCompletedLocked(ctx.runtime);
+    const report = test262AgentTakeReportLocked(ctx.runtime) orelse {
         test262_agents.mutex.unlock(io);
         return core.JSValue.nullValue();
     };

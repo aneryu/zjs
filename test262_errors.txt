@@ -1,0 +1,6 @@
+test262/test/built-ins/TypedArray/prototype/subarray/byteoffset-with-detached-buffer.js
+test262/test/staging/sm/Function/function-name-binding.js
+test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js
+test262/test/staging/sm/TypedArray/subarray.js
+test262/test/staging/sm/class/newTargetDefaults.js
+test262/test/staging/sm/extensions/TypedArray-subarray-arguments-detaching.js

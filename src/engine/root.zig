@@ -89,7 +89,7 @@ const HarnessEngine = struct {
 
     pub fn deinit(self: *HarnessEngine) void {
         exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
-        _ = exec.zjs_vm.cleanupTest262Agents();
+        _ = exec.zjs_vm.cleanupTest262Agents(self.runtime);
         exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();
         self.runtime.destroy();

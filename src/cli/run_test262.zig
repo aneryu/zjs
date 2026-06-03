@@ -1159,7 +1159,13 @@ fn runSelectedTestsWithReporterMode(
     else
         @intCast(config.threads);
     const worker_count = @max(@as(usize, 1), @min(requested_threads, prepared.tests.items.len));
-    const test_allocator = std.heap.smp_allocator;
+    var test_gpa = std.heap.DebugAllocator(.{
+        .safety = false,
+        .stack_trace_frames = 0,
+        .thread_safe = false,
+    }){};
+    defer _ = test_gpa.deinit();
+    const test_allocator = test_gpa.allocator();
     var next_index: std.atomic.Value(usize) = .init(0);
     if (worker_count == 1) {
         try runWorkerStride(
@@ -1181,6 +1187,17 @@ fn runSelectedTestsWithReporterMode(
             &current_failures,
         );
     } else {
+        var worker_gpas = try allocator.alloc(std.heap.DebugAllocator(.{
+            .safety = false,
+            .stack_trace_frames = 0,
+            .thread_safe = false,
+        }), worker_count);
+        defer allocator.free(worker_gpas);
+        for (worker_gpas) |*gpa| gpa.* = .{};
+        defer for (worker_gpas) |*gpa| {
+            _ = gpa.deinit();
+        };
+
         var results = try allocator.alloc(WorkerResult, worker_count);
         defer allocator.free(results);
         var contexts = try allocator.alloc(WorkerContext, worker_count);
@@ -1188,7 +1205,7 @@ fn runSelectedTestsWithReporterMode(
         var threads = try allocator.alloc(std.Thread, worker_count);
         defer allocator.free(threads);
 
-        for (results) |*result| result.* = WorkerResult.init(test_allocator);
+        for (results, 0..) |*result, i| result.* = WorkerResult.init(worker_gpas[i].allocator());
         defer for (results) |*result| result.deinit();
 
         var spawned: usize = 0;
@@ -1198,7 +1215,7 @@ fn runSelectedTestsWithReporterMode(
         }
         while (spawned < worker_count) : (spawned += 1) {
             contexts[spawned] = .{
-                .allocator = test_allocator,
+                .allocator = worker_gpas[spawned].allocator(),
                 .io = io,
                 .engine_path = engine_path,
                 .use_external_engine = use_external_engine,
@@ -1329,37 +1346,66 @@ fn runWorkerStride(
     while (true) {
         const index = next_index.fetchAdd(1, .monotonic);
         if (index >= tests.len) break;
+        if (index > 0 and index % 1000 == 0) {
+            printError(io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, tests.len, index * 100 / tests.len }) catch {};
+        }
         const test_path = tests[index];
-        var stderr_text: []const u8 = "";
-        var stderr_storage: [stderr_storage_len]u8 = undefined;
-        const result = runOneTest(
-            allocator,
-            io,
-            engine_path,
-            use_external_engine,
-            &harness_cache,
-            harness_prelude,
-            test_path,
-            index,
-            verbose,
-            timeout_ms,
-            global_module,
-            skipped_features,
-            reporter,
-            &stderr_storage,
-            &stderr_text,
-        ) catch |err| {
+
+        var run_err: ?anyerror = null;
+        const result, const is_known = blk: {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const arena_allocator = arena.allocator();
+
+            var stderr_text: []const u8 = "";
+            var stderr_storage: [stderr_storage_len]u8 = undefined;
+            const res = runOneTest(
+                arena_allocator,
+                io,
+                engine_path,
+                use_external_engine,
+                &harness_cache,
+                harness_prelude,
+                test_path,
+                index,
+                verbose,
+                timeout_ms,
+                global_module,
+                skipped_features,
+                reporter,
+                &stderr_storage,
+                &stderr_text,
+            ) catch |err| {
+                run_err = err;
+                break :blk .{ .skipped, false };
+            };
+
+            if (res == .skipped) {
+                break :blk .{ .skipped, false };
+            }
+
+            const known = known_errors.findSortedExact(test_path) != null;
+            if (reporter) |r| {
+                r.recordResult(io, test_path, res, stderr_text, known) catch |err| {
+                    run_err = err;
+                    break :blk .{ .skipped, false };
+                };
+            }
+            break :blk .{ res, known };
+        };
+
+        if (run_err) |err| {
             if (reporter) |r| {
                 r.lockedPrint(io, "test262 worker error: {s}: {s}\n", .{ test_path, @errorName(err) }) catch {};
             }
             return err;
-        };
+        }
+
         if (result == .skipped) {
             summary.selection.skipped_by_feature += 1;
             continue;
         }
-        const is_known = known_errors.findSortedExact(test_path) != null;
-        if (reporter) |r| try r.recordResult(io, test_path, result, stderr_text, is_known);
+
         switch (result) {
             .passed => {
                 if (is_known) {
