@@ -4,7 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zjs_enable_ic = b.option(bool, "zjs_enable_ic", "Enable shape-keyed inline caches") orelse true;
-    const shard_filter = b.option([]const u8, "shard", "Only run the specified zjs test shard");
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
 
@@ -31,16 +30,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zjs", .module = test262_engine_fast_mod },
         },
     });
-    const test262_runner_mod = b.createModule(.{
-        .root_source_file = b.path("src/cli/run_test262.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "quickjs_zig_engine", .module = engine_mod },
-        },
-    });
-
     const zjs_exe = b.addExecutable(.{
         .name = "zjs",
         .root_module = zjs_cli_mod,
@@ -292,196 +281,31 @@ pub fn build(b: *std.Build) void {
     const perf_compare_step = b.step("perf-compare", "Refresh checked-in performance report environment, top-10, and diff summaries");
     perf_compare_step.dependOn(&run_perf_diff.step);
 
-    // 1. Engine tests
-    const engine_root_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/engine/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    engine_root_test_mod.addOptions("build_options", engine_options);
-    const engine_root_tests = b.addTest(.{
-        .root_module = engine_root_test_mod,
-    });
-    const run_engine_root_tests = b.addRunArtifact(engine_root_tests);
-
-    const engine_production_tests = b.addTest(.{
+    // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
+    const unified_tests = b.addTest(.{
+        .name = "unified-tests",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/engine_production.zig"),
+            .root_source_file = b.path("src/all_tests.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
         }),
     });
-    const run_engine_production_tests = b.addRunArtifact(engine_production_tests);
-
-    // 2. Core runtime tests
-    const core_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/core/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-                .{ .name = "zjs_cli", .module = zjs_cli_mod },
-                .{ .name = "test262_runner", .module = test262_runner_mod },
-            },
-        }),
-    });
-    const run_core_tests = b.addRunArtifact(core_tests);
-
-    // 3. GC stress tests
-    const gc_stress_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/gc_stress.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
-        }),
-    });
-    const run_gc_stress_tests = b.addRunArtifact(gc_stress_tests);
-
-    // 4. Bytecode tests
-    const bytecode_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/bytecode/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
-        }),
-    });
-    const run_bytecode_tests = b.addRunArtifact(bytecode_tests);
-
-    // 5. Frontend tests
-    const frontend_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/frontend/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
-        }),
-    });
-    const run_frontend_tests = b.addRunArtifact(frontend_tests);
-
-    // 6. Builtins tests
-    const builtins_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests/builtins/all.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "quickjs_zig_engine", .module = engine_mod },
-        },
-    });
-    const builtins_tests = b.addTest(.{
-        .root_module = builtins_test_mod,
-    });
-    const run_builtins_tests = b.addRunArtifact(builtins_tests);
-
-    // 7. Tools and CLI tests
-    const tools_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/tools/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "test262_runner", .module = test262_runner_mod },
-            },
-        }),
-    });
-    const run_tools_tests = b.addRunArtifact(tools_tests);
-
-    const zjs_cli_tests = b.addTest(.{
-        .name = "zjs-cli",
-        .root_module = zjs_cli_mod,
-    });
-    const run_zjs_cli_tests = b.addRunArtifact(zjs_cli_tests);
-
-    const test262_runner_tests = b.addTest(.{
-        .root_module = test262_runner_mod,
-    });
-    const run_test262_runner_tests = b.addRunArtifact(test262_runner_tests);
-
+    unified_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
+    unified_tests.root_module.addImport("zjs", unified_tests.root_module);
+    unified_tests.root_module.addOptions("build_options", engine_options);
+    const run_unified_tests = b.addRunArtifact(unified_tests);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
 
-    // Expose fine-grained steps as requested (only those selected to be kept)
-    const test_core_step = b.step("test-core", "Run core runtime foundation tests");
-    test_core_step.dependOn(&run_core_tests.step);
-
-    const test_frontend_step = b.step("test-frontend", "Run frontend parser and emitter tests");
-    test_frontend_step.dependOn(&run_frontend_tests.step);
-
-    const gc_stress_step = b.step("gc-stress", "Run deterministic GC stress tests");
-    gc_stress_step.dependOn(&run_gc_stress_tests.step);
-
-
-    // Attach common non-exec tests to main test step
-    test_step.dependOn(&run_engine_root_tests.step);
-    test_step.dependOn(&run_engine_production_tests.step);
-    test_step.dependOn(&run_core_tests.step);
-    test_step.dependOn(&run_gc_stress_tests.step);
-    test_step.dependOn(&run_bytecode_tests.step);
-    test_step.dependOn(&run_frontend_tests.step);
-    test_step.dependOn(&run_builtins_tests.step);
-    test_step.dependOn(&run_tools_tests.step);
-    test_step.dependOn(&run_zjs_cli_tests.step);
-    test_step.dependOn(&run_test262_runner_tests.step);
-
-
-    // Each exec test source compiles into its own binary so the binaries can
-    // be compiled and run in parallel during `zig build test`. Each binary
-    // also re-uses the same `engine_mod` so the engine compile is cached
-    // across the shards. Sharding shapes were introduced in commit 14e37b2
-    // and extended later when individual shards grew too slow.
-    const ExecShard = struct { name: []const u8, path: []const u8 };
-    const exec_shards = [_]ExecShard{
-        .{ .name = "exec-core-native", .path = "src/tests/exec/core_native.zig" },
-        .{ .name = "exec-builtins-async", .path = "src/tests/exec/builtins_async.zig" },
-        .{ .name = "exec-engine-smoke", .path = "src/tests/exec/engine_smoke.zig" },
-        .{ .name = "exec-collection-typedarray", .path = "src/tests/exec/collection_typedarray.zig" },
-    };
-
-    // Exec shards compilation and mapping to test steps
-    inline for (exec_shards) |shard| {
-        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
-        if (matches_filter) {
-            const test_mod = b.createModule(.{
-                .root_source_file = b.path(shard.path),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "quickjs_zig_engine", .module = engine_mod },
-                },
-            });
-            test_mod.addOptions("build_options", engine_options);
-            const tests = b.addTest(.{
-                .name = shard.name,
-                .root_module = test_mod,
-            });
-            const run_tests = b.addRunArtifact(tests);
-            test_step.dependOn(&run_tests.step);
-        }
-    }
+    test_step.dependOn(&run_unified_tests.step);
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
-    engine_production_gate_step.dependOn(gc_stress_step);
     engine_production_gate_step.dependOn(test262_gate_step);
 }

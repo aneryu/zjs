@@ -1019,6 +1019,7 @@ pub const Object = struct {
     is_with_environment: bool = false,
     is_prototype: bool = false,
     reserved_class_payload_finalizer_slot: bool = false,
+    in_weak_cleanup: bool = false,
     properties: []property.Entry = &.{},
 
     property_capacity: usize = 0,
@@ -1449,7 +1450,7 @@ pub const Object = struct {
         while (scanned_identity_count < rt.borrowedWeakCleanupIdentityCount() or rt.hasDeferredWeakValueFrees()) {
             while (scanned_identity_count < rt.borrowedWeakCleanupIdentityCount()) {
                 const pass_end = rt.borrowedWeakCleanupIdentityCount();
-                clearBorrowedReferencesForBorrowedWeakCleanup(rt);
+                clearBorrowedReferencesForBorrowedWeakCleanup(rt, scanned_identity_count);
                 if (rt.takeBorrowedWeakCleanupNeedsRescan()) {
                     scanned_identity_count = pass_end;
                 } else {
@@ -1460,8 +1461,8 @@ pub const Object = struct {
         }
     }
 
-    fn clearBorrowedReferencesForBorrowedWeakCleanup(rt: *JSRuntime) void {
-        clearBorrowedReferencesForMatcher(rt, .runtime_batch);
+    fn clearBorrowedReferencesForBorrowedWeakCleanup(rt: *JSRuntime, start_index: usize) void {
+        clearBorrowedReferencesForMatcher(rt, .{ .runtime_batch = start_index });
     }
 
     fn clearBorrowedReferencesForDestroyedIdentity(rt: *JSRuntime, destroyed_identity: usize) void {
@@ -1481,8 +1482,8 @@ pub const Object = struct {
                 continue;
             }
             gc.retain(&current.header);
-            current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher);
             rt.markBorrowedWeakCleanupHolderSeen();
+            current.clearBorrowedReferencesToDestroyedIdentities(rt, matcher);
             if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
                 current.value().free(rt);
                 if (index < rt.borrowed_reference_holders.len and rt.borrowed_reference_holders[index] == current) {
@@ -1575,12 +1576,12 @@ pub const Object = struct {
 
     const BorrowedIdentityMatcher = union(enum) {
         single: usize,
-        runtime_batch: void,
+        runtime_batch: usize,
 
-        fn matches(self: BorrowedIdentityMatcher, rt: *JSRuntime, identity: usize) bool {
+        inline fn matches(self: BorrowedIdentityMatcher, rt: *JSRuntime, identity: usize) bool {
             return switch (self) {
                 .single => |stored| stored == identity,
-                .runtime_batch => rt.borrowedWeakCleanupIdentityMatches(identity),
+                .runtime_batch => |start_index| rt.borrowedWeakCleanupIdentityMatchesSlice(start_index, identity),
             };
         }
     };
@@ -1920,8 +1921,6 @@ pub const Object = struct {
         const old_heads = heads.*;
         heads.* = &.{};
         if (old_heads.len != 0) rt.memory.free(usize, old_heads);
-        for (self.collectionEntriesSlot().*) |*entry| entry.hash_next = collection_no_entry;
-        for (self.weakCollectionEntriesSlot().*) |*entry| entry.hash_next = collection_no_entry;
     }
 
     pub fn weakCollectionEntriesSlot(self: *Object) *[]WeakCollectionEntry {
@@ -2013,13 +2012,13 @@ pub const Object = struct {
             }
 
             const removed_cell = entry.*;
-            if (index + 1 < entries.*.len) {
-                @memmove(entries.*[index .. entries.*.len - 1], entries.*[index + 1 ..]);
+            const last_idx = entries.*.len - 1;
+            if (index < last_idx) {
+                entries.*[index] = entries.*[last_idx];
             }
-            entries.* = entries.*.ptr[0 .. entries.*.len - 1];
+            entries.* = entries.*.ptr[0 .. last_idx];
             removed = true;
             removed_cell.destroy(rt);
-            index = 0;
         }
         if (removed) self.pruneBorrowedReferenceHolderIfEmpty(rt);
         return removed;
@@ -6208,10 +6207,11 @@ pub const Object = struct {
 
                     clearValueReferenceToVisited(rt, &payload.weak_entries[index].value, free_set, internal_bytecodes);
                     payload.weak_entries[index].destroy(rt);
-                    if (index + 1 < payload.weak_entries.len) {
-                        @memmove(payload.weak_entries[index .. payload.weak_entries.len - 1], payload.weak_entries[index + 1 ..]);
+                    const last_idx = payload.weak_entries.len - 1;
+                    if (index < last_idx) {
+                        payload.weak_entries[index] = payload.weak_entries[last_idx];
                     }
-                    payload.weak_entries = payload.weak_entries.ptr[0 .. payload.weak_entries.len - 1];
+                    payload.weak_entries = payload.weak_entries.ptr[0 .. last_idx];
                     removed_weak_entry = true;
                 }
                 if (removed_weak_entry) current.clearCollectionIndex(rt);
@@ -6243,10 +6243,11 @@ pub const Object = struct {
                 clearValueReferenceToVisited(rt, &finalization_payload.cells[index].held_value, free_set, internal_bytecodes);
                 clearValueReferenceToVisited(rt, &finalization_payload.cells[index].unregister_token, free_set, internal_bytecodes);
                 finalization_payload.cells[index].destroy(rt);
-                if (index + 1 < finalization_payload.cells.len) {
-                    @memmove(finalization_payload.cells[index .. finalization_payload.cells.len - 1], finalization_payload.cells[index + 1 ..]);
+                const last_idx = finalization_payload.cells.len - 1;
+                if (index < last_idx) {
+                    finalization_payload.cells[index] = finalization_payload.cells[last_idx];
                 }
-                finalization_payload.cells = finalization_payload.cells.ptr[0 .. finalization_payload.cells.len - 1];
+                finalization_payload.cells = finalization_payload.cells.ptr[0 .. last_idx];
             }
             current.pruneBorrowedReferenceHolderIfEmpty(rt);
         }

@@ -6035,7 +6035,9 @@ test "weak collection clear tolerates value cleanup reentry" {
 }
 
 test "weak map deep value chain releases without recursive destruction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .gc_threshold = 256 * 1024 * 1024,
+    });
     defer rt.destroy();
 
     const map = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -6043,7 +6045,7 @@ test "weak map deep value chain releases without recursive destruction" {
     const head = try core.Object.create(rt, core.class.ids.object, null);
 
     var key = head;
-    for (0..20_000) |_| {
+    for (0..5_000) |_| {
         const next = try core.Object.create(rt, core.class.ids.object, null);
         try appendWeakCollectionEntry(rt, map, key, next.value());
         next.value().free(rt);

@@ -21,9 +21,6 @@ pub const NativePin = core.NativePin;
 pub const GCPolicy = core.GCPolicy;
 pub const GCStats = core.GCStats;
 
-test "include core object private lifecycle tests" {
-    _ = @import("core/object.zig");
-}
 
 pub const harness = struct {
     pub const Engine = HarnessEngine;

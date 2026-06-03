@@ -1,4 +1,4 @@
-const test262_runner = @import("test262_runner");
+const test262_runner = @import("../../cli/run_test262.zig");
 const std = @import("std");
 
 // ---- CC-1: regression-baseline gate ---------------------------------

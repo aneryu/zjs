@@ -2569,6 +2569,10 @@ pub const JSRuntime = struct {
         try self.ensureBorrowedWeakCleanupIdentityCapacity(index + 1);
         self.borrowed_weak_cleanup_identities = self.borrowed_weak_cleanup_identities.ptr[0 .. index + 1];
         self.borrowed_weak_cleanup_identities[index] = identity;
+        if ((identity & 1) == 0) {
+            const object: *Object = @ptrFromInt(identity);
+            object.in_weak_cleanup = true;
+        }
     }
 
     pub fn enqueueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) !void {
@@ -2590,8 +2594,27 @@ pub const JSRuntime = struct {
     }
 
     pub fn borrowedWeakCleanupIdentityMatches(self: *const JSRuntime, identity: usize) bool {
+        if (identity == 0) return false;
+        if ((identity & 1) == 0) {
+            const object: *const Object = @ptrFromInt(identity);
+            return object.in_weak_cleanup;
+        }
         var index = self.borrowed_weak_cleanup_identities.len;
         while (index != 0) {
+            index -= 1;
+            if (self.borrowed_weak_cleanup_identities[index] == identity) return true;
+        }
+        return false;
+    }
+
+    pub inline fn borrowedWeakCleanupIdentityMatchesSlice(self: *const JSRuntime, start_index: usize, identity: usize) bool {
+        if (identity == 0) return false;
+        if ((identity & 1) == 0) {
+            const object: *const Object = @ptrFromInt(identity);
+            return object.in_weak_cleanup;
+        }
+        var index = self.borrowed_weak_cleanup_identities.len;
+        while (index > start_index) {
             index -= 1;
             if (self.borrowed_weak_cleanup_identities[index] == identity) return true;
         }
@@ -2605,6 +2628,12 @@ pub const JSRuntime = struct {
     pub fn clearBorrowedWeakCleanupIdentities(self: *JSRuntime) void {
         const identities: []usize = if (self.borrowed_weak_cleanup_identities_capacity != 0) self.borrowed_weak_cleanup_identities.ptr[0..self.borrowed_weak_cleanup_identities_capacity] else self.borrowed_weak_cleanup_identities[0..0];
         const realm_identities: []usize = if (self.borrowed_weak_cleanup_realm_identities_capacity != 0) self.borrowed_weak_cleanup_realm_identities.ptr[0..self.borrowed_weak_cleanup_realm_identities_capacity] else self.borrowed_weak_cleanup_realm_identities[0..0];
+        for (self.borrowed_weak_cleanup_identities) |identity| {
+            if ((identity & 1) == 0) {
+                const object: *Object = @ptrFromInt(identity);
+                object.in_weak_cleanup = false;
+            }
+        }
         self.borrowed_weak_cleanup_identities = &.{};
         self.borrowed_weak_cleanup_identities_capacity = 0;
         self.borrowed_weak_cleanup_realm_identities = &.{};

@@ -110,6 +110,7 @@ var shared_engine_baseline_property_count: usize = 0;
 var shared_engine_baseline_shape_prop_count: usize = 0;
 var shared_engine_baseline_shape_hash: u32 = 0;
 var shared_engine_baseline_shape_deleted_count: usize = 0;
+var shared_engine_baseline_properties: ?[]core.property.Entry = null;
 
 pub fn sharedTestEngine() *engine.harness.Engine {
     if (shared_engine_storage == null) {
@@ -136,6 +137,16 @@ pub fn sharedTestEngine() *engine.harness.Engine {
             shared_engine_baseline_shape_prop_count = g.shape_ref.prop_count;
             shared_engine_baseline_shape_hash = g.shape_ref.hash;
             shared_engine_baseline_shape_deleted_count = g.shape_ref.deleted_prop_count;
+
+            // Snapshot the baseline property entries
+            shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.properties.len) catch unreachable;
+            for (g.properties, 0..) |entry, idx| {
+                shared_engine_baseline_properties.?[idx] = entry;
+                shared_engine_baseline_properties.?[idx].slot = entry.slot.dup();
+                if (entry.atom_id != core.atom.null_atom) {
+                    _ = eng.runtime.atoms.dup(entry.atom_id);
+                }
+            }
         }
     }
     return &shared_engine_storage.?;
@@ -193,6 +204,24 @@ pub fn endSharedTest() void {
             }
             global.properties = global.properties.ptr[0..baseline];
         }
+
+        // Restore baseline properties below baseline to their original states
+        if (shared_engine_baseline_properties) |baselines| {
+            // First, destroy current values below baseline
+            for (global.properties[0..baseline]) |entry| {
+                entry.slot.destroy(eng.runtime);
+                if (entry.atom_id != core.atom.null_atom) eng.runtime.atoms.free(entry.atom_id);
+            }
+            // Second, restore baseline values (and dup them so they can be modified/freed again)
+            for (baselines, 0..) |base, idx| {
+                global.properties[idx] = base;
+                global.properties[idx].slot = base.slot.dup();
+                if (base.atom_id != core.atom.null_atom) {
+                    _ = eng.runtime.atoms.dup(base.atom_id);
+                }
+            }
+        }
+
         const shape_baseline = shared_engine_baseline_shape_prop_count;
         if (global.shape_ref.prop_count > shape_baseline) {
             for (global.shape_ref.props[shape_baseline..global.shape_ref.prop_count]) |*prop| {
