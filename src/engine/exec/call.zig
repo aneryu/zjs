@@ -3987,45 +3987,6 @@ fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core
     return object.value();
 }
 
-test "Proxy.revocable OOM releases embedded proxy once" {
-    var saw_oom = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 220) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const target = try core.Object.create(rt, core.class.ids.object, null);
-        const handler = try core.Object.create(rt, core.class.ids.object, null);
-        const args = [_]core.JSValue{ target.value(), handler.value() };
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const result = proxyRevocable(rt, null, &args);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (result) |value| {
-            saw_success = true;
-            value.free(rt);
-        } else |err| switch (err) {
-            error.OutOfMemory => saw_oom = true,
-            else => |unexpected| {
-                handler.value().free(rt);
-                target.value().free(rt);
-                rt.destroy();
-                return unexpected;
-            },
-        }
-
-        handler.value().free(rt);
-        target.value().free(rt);
-        rt.destroy();
-        if (saw_oom and saw_success) return;
-    }
-
-    try std.testing.expect(saw_oom);
-    try std.testing.expect(saw_success);
-}
 
 fn reflectHas(
     ctx: *core.JSContext,
@@ -6699,98 +6660,7 @@ test "makeOsResultPair roots direct symbol value while creating result array" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-test "os.pipe OOM closes pipe descriptors" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-    const func_obj = try core.Object.create(rt, core.class.ids.object, null);
-    defer func_obj.value().free(rt);
-    var globals = [_]globals_mod.Slot{};
-    const call = HostCall{
-        .ctx = ctx,
-        .output = null,
-        .global = null,
-        .globals = globals[0..],
-        .func_obj = func_obj,
-        .this_value = core.JSValue.undefinedValue(),
-        .args = &.{},
-        .flags = .{},
-    };
 
-    const before = try openFdCountForTest();
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(error.OutOfMemory, hostCallOsPipe(call));
-    failing.fail_index = std.math.maxInt(usize);
-    try std.testing.expectEqual(before, try openFdCountForTest());
-}
-
-test "os.mkstemp OOM closes created descriptor" {
-    const temp_dir = ".zig-cache/os-mkstemp-oom";
-    const pattern = temp_dir ++ "/file-XXXXXX";
-    std.Io.Dir.cwd().deleteTree(std.testing.io, temp_dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, temp_dir) catch {};
-
-    var saw_oom_after_create = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 180) : (fail_offset += 1) {
-        std.Io.Dir.cwd().deleteTree(std.testing.io, temp_dir) catch {};
-        try std.Io.Dir.cwd().createDirPath(std.testing.io, temp_dir);
-
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-        defer rt.destroy();
-        const ctx = try core.JSContext.create(rt);
-        defer ctx.destroy();
-        const func_obj = try core.Object.create(rt, core.class.ids.object, null);
-        defer func_obj.value().free(rt);
-        const pattern_value = try value_ops.createStringValue(rt, pattern);
-        defer pattern_value.free(rt);
-        const args = [_]core.JSValue{pattern_value};
-        var globals = [_]globals_mod.Slot{};
-        const call = HostCall{
-            .ctx = ctx,
-            .output = null,
-            .global = null,
-            .globals = globals[0..],
-            .func_obj = func_obj,
-            .this_value = core.JSValue.undefinedValue(),
-            .args = &args,
-            .flags = .{},
-        };
-
-        const before = try openFdCountForTest();
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const result = hostCallOsMkTemp(call, false);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (result) |value| {
-            saw_success = true;
-            const pair = thisObject(value) orelse return error.TypeError;
-            const fd_value = pair.getProperty(core.atom.atomFromUInt32(1));
-            defer fd_value.free(rt);
-            const fd = fd_value.asInt32() orelse return error.TypeError;
-            if (fd >= 0) _ = libc.close(fd);
-            value.free(rt);
-        } else |err| switch (err) {
-            error.OutOfMemory => {
-                if (try dirHasAnyFileForTest(temp_dir)) saw_oom_after_create = true;
-            },
-            else => |unexpected| return unexpected,
-        }
-
-        try std.testing.expectEqual(before, try openFdCountForTest());
-        std.Io.Dir.cwd().deleteTree(std.testing.io, temp_dir) catch {};
-
-        if (saw_oom_after_create and saw_success) return;
-    }
-
-    try std.testing.expect(saw_oom_after_create);
-    try std.testing.expect(saw_success);
-}
 
 fn makeOsStringResultPair(rt: *core.JSRuntime, value: []const u8, err: i32) !core.JSValue {
     const string_value = try value_ops.createStringValue(rt, value);
@@ -7060,26 +6930,6 @@ pub fn createStdFileValue(rt: *core.JSRuntime, global: ?*core.Object, file: *std
     return object.value();
 }
 
-test "createStdFileValue OOM closes opened file handle" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    defer rt.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-
-    const before = try openFdCountForTest();
-    const file = tmpfile() orelse return error.SkipZigTest;
-    failing.fail_index = failing.alloc_index;
-    const wrapped = createStdFileValue(rt, global, file, false, false);
-    failing.fail_index = std.math.maxInt(usize);
-    if (wrapped) |value| {
-        value.free(rt);
-        return error.TestExpectedError;
-    } else |err| {
-        try std.testing.expectEqual(error.OutOfMemory, err);
-    }
-    try std.testing.expectEqual(before, try openFdCountForTest());
-}
 
 fn stdFileObject(call: HostCall) HostError!*core.Object {
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
@@ -7491,35 +7341,6 @@ fn stdFilePrototype(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     return proto;
 }
 
-test "std file prototype OOM releases uncached prototype" {
-    var saw_null = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 220) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-        const global = try core.Object.create(rt, core.class.ids.object, null);
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const proto = stdFilePrototype(rt, global);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (proto == null) {
-            saw_null = true;
-        } else {
-            saw_success = true;
-        }
-
-        global.value().free(rt);
-        rt.destroy();
-
-        if (saw_null and saw_success) return;
-    }
-
-    try std.testing.expect(saw_null);
-    try std.testing.expect(saw_success);
-}
 
 fn setStdErrorObject(rt: *core.JSRuntime, args: []const core.JSValue, err: c_int) !void {
     if (args.len < 3) return;

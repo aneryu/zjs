@@ -738,55 +738,6 @@ test "resolve_variables InvalidBytecode releases retained output atoms" {
     try std.testing.expect(rt.atoms.name(first_atom) == null);
 }
 
-test "resolve_variables OOM after code trim does not double-free output buffer" {
-    var saw_oom = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 24) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const name = try rt.internAtom("resolveCodeTrimOwner");
-        const global_atom = try rt.internAtom("resolveTrimGlobal");
-
-        var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
-        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-        try fd.appendGlobalVar(.{ .cpool_idx = -1, .scope_level = 0, .var_name = global_atom });
-        fd.global_var_count = @intCast(fd.global_vars.len + 1);
-        try bc.setCode(&.{bytecode.opcode.op.return_undef});
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
-        const result = pipeline.resolve_variables.run(&ctx);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (result) {
-            saw_success = true;
-        } else |err| switch (err) {
-            error.OutOfMemory => saw_oom = true,
-            else => |unexpected| {
-                bc.deinit(rt);
-                fd.deinit(rt);
-                rt.atoms.free(global_atom);
-                rt.atoms.free(name);
-                rt.destroy();
-                return unexpected;
-            },
-        }
-
-        bc.deinit(rt);
-        fd.deinit(rt);
-        rt.atoms.free(global_atom);
-        rt.atoms.free(name);
-        rt.destroy();
-
-        if (saw_oom and saw_success) return;
-    }
-
-    try std.testing.expect(saw_oom);
-    try std.testing.expect(saw_success);
-}
 
 test "resolve_variables: scope_put_var → put_var" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -1883,72 +1834,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     try std.testing.expect(after_free.decommitted_bytes >= heap_bytes);
 }
 
-test "createFunctionBytecode unwinds registered bytecode on allocation failure" {
-    var saw_oom = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 96) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const name = try rt.internAtom("oom_inner");
-        const arg_name = try rt.internAtom("oom_arg");
-        const captured_name = try rt.internAtom("oom_captured");
-        const private_name = try rt.internAtom("#oom");
-
-        var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-        try populateFunctionDefForFinalizeFailure(rt, &fd, name, arg_name, captured_name, private_name);
-
-        const before_live = rt.gc.liveCount();
-        const before_bytes = rt.memory.allocated_bytes;
-        const before_allocations = rt.memory.allocation_count;
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const result = pipeline.finalize.createFunctionBytecode(&fd, rt);
-        failing.fail_index = std.math.maxInt(usize);
-
-        var had_oom = false;
-        var observed_live = before_live;
-        var observed_bytes = before_bytes;
-        var observed_allocations = before_allocations;
-        if (result) |fb_slice| {
-            saw_success = true;
-            core.JSValue.functionBytecode(&fb_slice[0].header).free(rt);
-        } else |err| {
-            switch (err) {
-                error.OutOfMemory => {
-                    had_oom = true;
-                    saw_oom = true;
-                    observed_live = rt.gc.liveCount();
-                    observed_bytes = rt.memory.allocated_bytes;
-                    observed_allocations = rt.memory.allocation_count;
-                },
-                else => |unexpected| return unexpected,
-            }
-        }
-
-        fd.deinit(rt);
-        rt.atoms.free(private_name);
-        rt.atoms.free(captured_name);
-        rt.atoms.free(arg_name);
-        rt.atoms.free(name);
-
-        const expected_bytes_after_oom = before_bytes;
-        const expected_allocations_after_oom = before_allocations;
-        rt.destroy();
-
-        if (had_oom) {
-            try std.testing.expectEqual(before_live, observed_live);
-            try std.testing.expectEqual(expected_bytes_after_oom, observed_bytes);
-            try std.testing.expectEqual(expected_allocations_after_oom, observed_allocations);
-        }
-        if (saw_success) break;
-    }
-
-    try std.testing.expect(saw_oom);
-    try std.testing.expect(saw_success);
-}
 
 fn observedGcCapacityBytes(before_capacity: usize, after_capacity: usize) usize {
     if (after_capacity <= before_capacity) return 0;

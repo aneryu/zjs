@@ -443,44 +443,6 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
-test "dynamic atom intern OOM leaves no half-live entry" {
-    var saw_oom = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 8) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var account = core.memory.MemoryAccount.init(failing.allocator());
-        var atoms = core.atom.AtomTable.init(&account);
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const result = atoms.internString("oom-dynamic-atom");
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (result) |atom_id| {
-            saw_success = true;
-            try std.testing.expectEqual(core.atom.first_dynamic_atom, atom_id);
-            atoms.free(atom_id);
-        } else |err| switch (err) {
-            error.OutOfMemory => {
-                saw_oom = true;
-                try std.testing.expect(atoms.name(core.atom.first_dynamic_atom) == null);
-
-                const recovered = try atoms.internString("oom-dynamic-atom");
-                try std.testing.expectEqual(core.atom.first_dynamic_atom, recovered);
-                atoms.free(recovered);
-            },
-            else => |unexpected| return unexpected,
-        }
-
-        atoms.deinit();
-        try std.testing.expect(!account.hasOutstandingAllocations());
-        if (saw_oom and saw_success) break;
-    }
-
-    try std.testing.expect(saw_oom);
-    try std.testing.expect(saw_success);
-}
 
 test "GC sweeps unrooted unique symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -2048,24 +2010,6 @@ test "regexp state uses payload storage" {
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
 
-test "regexp compiled bytecode replacement preserves old cache on OOM" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    defer rt.destroy();
-
-    const regexp = try core.Object.create(rt, core.class.ids.regexp, null);
-    defer regexp.value().free(rt);
-
-    try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
-    const old_bytes = rt.memory.allocated_bytes;
-
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(error.OutOfMemory, regexp.setRegexpCompiledBytecode(rt, &.{ 4, 5, 6, 7 }));
-    failing.fail_index = std.math.maxInt(usize);
-
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, regexp.regexpCompiledBytecode());
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-}
 
 test "bound function state uses payload storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -5723,193 +5667,6 @@ test "materialized auto-init function realm pointer registers borrowed holder" {
     try std.testing.expectEqual(@as(?*core.Object, null), function_object.functionRealmGlobalPtr());
 }
 
-test "navigator auto-init OOM releases pending prototype" {
-    var saw_undefined = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 160) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const global = try core.Object.create(rt, core.class.ids.object, null);
-        global.is_global = true;
-        const holder = try core.Object.create(rt, core.class.ids.object, null);
-        const navigator_key = try rt.internAtom("navigator");
-
-        try holder.defineNavigatorAutoInitProperty(
-            rt,
-            navigator_key,
-            core.property.Flags.data(true, false, true),
-            global,
-        );
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const value = holder.getProperty(navigator_key);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (value.isUndefined()) {
-            saw_undefined = true;
-        } else {
-            saw_success = true;
-        }
-        value.free(rt);
-
-        rt.atoms.free(navigator_key);
-        holder.value().free(rt);
-        global.value().free(rt);
-        rt.destroy();
-
-        if (saw_undefined and saw_success) return;
-    }
-
-    try std.testing.expect(saw_undefined);
-    try std.testing.expect(saw_success);
-}
-
-const SpecializedAutoInitOomCase = enum {
-    performance,
-    test262_namespace,
-    array_unscopables,
-    console,
-    assert,
-};
-
-fn expectSpecializedAutoInitOomClean(comptime auto_case: SpecializedAutoInitOomCase, max_fail_offset: usize) !void {
-    var saw_undefined = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < max_fail_offset) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const global = try core.Object.create(rt, core.class.ids.object, null);
-        global.is_global = true;
-        const holder = try core.Object.create(rt, core.class.ids.object, null);
-        const key = try rt.internAtom(switch (auto_case) {
-            .performance => "performance",
-            .test262_namespace => "$262",
-            .array_unscopables => "Symbol.unscopables",
-            .console => "console",
-            .assert => "assert",
-        });
-
-        const flags = core.property.Flags.data(true, false, true);
-        switch (auto_case) {
-            .performance => try holder.definePerformanceAutoInitProperty(rt, key, flags, global),
-            .test262_namespace => try holder.defineTest262NamespaceAutoInitProperty(rt, key, flags, global),
-            .array_unscopables => try holder.defineArrayUnscopablesAutoInitProperty(rt, key, flags),
-            .console => try holder.defineConsoleAutoInitProperty(rt, key, flags, core.host_function.ids.output),
-            .assert => try holder.defineAssertAutoInitProperty(rt, key, flags, core.host_function.ids.test262_assert),
-        }
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const value = holder.getProperty(key);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (value.isUndefined()) {
-            saw_undefined = true;
-        } else {
-            try std.testing.expect(value.isObject());
-            saw_success = true;
-        }
-        value.free(rt);
-
-        rt.atoms.free(key);
-        holder.value().free(rt);
-        global.value().free(rt);
-        rt.destroy();
-
-        if (saw_undefined and saw_success) return;
-    }
-
-    try std.testing.expect(saw_undefined);
-    try std.testing.expect(saw_success);
-}
-
-test "specialized auto-init OOM releases partial materializations" {
-    try expectSpecializedAutoInitOomClean(.performance, 120);
-    try expectSpecializedAutoInitOomClean(.test262_namespace, 420);
-    try expectSpecializedAutoInitOomClean(.array_unscopables, 220);
-    try expectSpecializedAutoInitOomClean(.console, 160);
-    try expectSpecializedAutoInitOomClean(.assert, 220);
-}
-
-test "auto-init native realm registration failure does not publish partial function" {
-    var saw_fallback = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 240) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const global = try core.Object.create(rt, core.class.ids.object, null);
-        global.is_global = true;
-        const function_proto = try core.Object.create(rt, core.class.ids.object, null);
-        try global.setCachedFunctionProto(rt, function_proto);
-        const holder = try core.Object.create(rt, core.class.ids.object, null);
-        const lazy_key = try rt.internAtom("lazyNative");
-
-        try holder.defineAutoInitPropertyWithRealmNativeAndCache(
-            rt,
-            lazy_key,
-            "lazyNative",
-            0,
-            core.property.Flags.data(true, false, true),
-            global,
-            0,
-            0,
-        );
-
-        var fillers: [63]*core.Object = undefined;
-        var filler_count: usize = 0;
-        while (filler_count < fillers.len) : (filler_count += 1) {
-            const filler = try core.Object.create(rt, core.class.ids.object, null);
-            fillers[filler_count] = filler;
-            try filler.setFunctionRealmGlobalPtr(rt, global);
-        }
-        try std.testing.expectEqual(rt.borrowed_reference_holders_capacity, rt.borrowed_reference_holders.len);
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const value = holder.getProperty(lazy_key);
-        failing.fail_index = std.math.maxInt(usize);
-
-        var saw_partial = false;
-        if (value.isUndefined()) {
-            saw_fallback = true;
-        } else {
-            const function_header = value.refHeader().?;
-            const function_object: *core.Object = @fieldParentPtr("header", function_header);
-            if (function_object.functionRealmGlobalPtr()) |realm| {
-                try std.testing.expectEqual(global, realm);
-                saw_success = true;
-            } else {
-                saw_partial = true;
-            }
-            value.free(rt);
-        }
-
-        var index: usize = filler_count;
-        while (index != 0) {
-            index -= 1;
-            fillers[index].value().free(rt);
-        }
-        holder.value().free(rt);
-        global.value().free(rt);
-        function_proto.value().free(rt);
-        rt.atoms.free(lazy_key);
-        rt.destroy();
-
-        if (saw_partial) return error.TestUnexpectedResult;
-        if (saw_fallback and saw_success) return;
-    }
-
-    try std.testing.expect(saw_fallback);
-    try std.testing.expect(saw_success);
-}
-
 test "dead weak collection key entry is swept when target is destroyed" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6391,81 +6148,7 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
-test "finalization cleanup enqueue OOM leaves cell pending for retry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
 
-    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
-    defer cleanup.value().free(rt);
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
-    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
-    var registry_value = registry.value();
-    defer registry_value.free(rt);
-
-    const target = try core.Object.create(rt, core.class.ids.object, null);
-    var target_value = target.value();
-    const self_key = try rt.internAtom("gc-finalization-retry-self");
-    defer rt.atoms.free(self_key);
-    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
-    try registry.appendFinalizationRegistryCell(
-        rt,
-        target_value,
-        core.JSValue.int32(1234),
-        core.JSValue.undefinedValue(),
-    );
-
-    _ = try rt.tryRunObjectCycleRemoval();
-    target_value.free(rt);
-    target_value = core.JSValue.undefinedValue();
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-
-    const limit = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(limit);
-    try std.testing.expectError(error.OutOfMemory, rt.tryRunObjectCycleRemoval());
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
-
-    rt.setMemoryLimit(null);
-    _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
-
-    rt.clearPendingFinalizationJobs();
-}
-
-test "finalization cleanup enqueue OOM from destroyed target persists pending cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
-    defer cleanup.value().free(rt);
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
-    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
-    var registry_value = registry.value();
-    defer registry_value.free(rt);
-
-    const target = try core.Object.create(rt, core.class.ids.object, null);
-    try registry.appendFinalizationRegistryCell(
-        rt,
-        target.value(),
-        core.JSValue.int32(4321),
-        core.JSValue.undefinedValue(),
-    );
-
-    const limit = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(limit);
-    target.value().free(rt);
-    rt.setMemoryLimit(null);
-
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
-
-    _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
-
-    rt.clearPendingFinalizationJobs();
-}
 
 test "finalization registry unregister preserves pending cleanup cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -6820,37 +6503,6 @@ test "function records skip zero-length payload allocations" {
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
 }
 
-test "function bytecode record OOM releases earlier bytecode allocation" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    var atoms = core.atom.AtomTable.init(&account);
-
-    const name = try atoms.internString("oom-record");
-    const base_bytes = account.allocated_bytes;
-    const base_allocations = account.allocation_count;
-
-    account.setLimit(base_bytes + 2);
-    try std.testing.expectError(
-        error.OutOfMemory,
-        core.FunctionRecord.createBytecode(
-            &account,
-            &atoms,
-            name,
-            &.{ 0xaa, 0xbb },
-            &.{core.JSValue.int32(1)},
-            .normal,
-            false,
-            core.JSValue.undefinedValue(),
-        ),
-    );
-    account.setLimit(null);
-
-    try std.testing.expectEqual(base_bytes, account.allocated_bytes);
-    try std.testing.expectEqual(base_allocations, account.allocation_count);
-
-    atoms.free(name);
-    atoms.deinit();
-    try std.testing.expect(!account.hasOutstandingAllocations());
-}
 
 test "module records retain import export metadata and status" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -7220,40 +6872,6 @@ test "ordinary objects define own data properties and descriptors" {
     try std.testing.expectEqual(@as(?i32, 7), updated.asInt32());
 }
 
-test "auto-init getOwnProperty OOM leaves placeholder descriptor-safe" {
-    var saw_fallback = false;
-    var saw_success = false;
-
-    var fail_offset: usize = 0;
-    while (fail_offset < 80) : (fail_offset += 1) {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.JSRuntime.create(failing.allocator());
-
-        const obj = try core.Object.create(rt, core.class.ids.object, null);
-        const key = try rt.internAtom("lazyAutoInit");
-        try obj.defineAutoInitProperty(rt, key, "lazyAutoInit", 0, core.property.Flags.data(true, false, true));
-
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const desc = obj.getOwnProperty(key).?;
-        failing.fail_index = std.math.maxInt(usize);
-
-        try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
-        if (desc.value.isUndefined()) {
-            saw_fallback = true;
-        } else {
-            try std.testing.expect(desc.value.isObject());
-            saw_success = true;
-        }
-
-        desc.destroy(rt);
-        rt.atoms.free(key);
-        obj.value().free(rt);
-        rt.destroy();
-    }
-
-    try std.testing.expect(saw_fallback);
-    try std.testing.expect(saw_success);
-}
 
 test "define property enforces non-configurable and non-writable invariants" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

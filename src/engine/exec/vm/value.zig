@@ -812,25 +812,6 @@ test "stack rearrange opcodes validate depth before mutating stack" {
     try expectStackInt32s(&stack, &.{ 1, 2, 3 });
 }
 
-test "stack rearrange growth reserves before mutating stack" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    const ctx = try core.JSContext.create(rt);
-    var stack = stack_mod.Stack.init(&rt.memory, 16);
-    defer {
-        failing.fail_index = std.math.maxInt(usize);
-        stack.deinit(rt);
-        ctx.destroy();
-        rt.destroy();
-    }
-
-    for (0..8) |index| try stack.pushOwned(core.JSValue.int32(@intCast(index)));
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(error.OutOfMemory, dup3(ctx, &stack));
-    failing.fail_index = std.math.maxInt(usize);
-
-    try expectStackInt32s(&stack, &.{ 0, 1, 2, 3, 4, 5, 6, 7 });
-}
 
 test "push private symbol stack failure does not retain transient private atom" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

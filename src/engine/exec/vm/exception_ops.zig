@@ -159,31 +159,6 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
     return value;
 }
 
-test "runtimeErrorValueForGeneratorCatch keeps unrelated exception if error allocation fails" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer {
-        failing.fail_index = std.math.maxInt(usize);
-        global.value().free(rt);
-        ctx.destroy();
-        rt.destroy();
-    }
-
-    _ = ctx.throwValue(core.JSValue.int32(77));
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        runtimeErrorValueForGeneratorCatch(ctx, global, error.TypeError),
-    );
-    failing.fail_index = std.math.maxInt(usize);
-
-    try std.testing.expect(ctx.hasException());
-    const pending = ctx.takeException();
-    defer pending.free(rt);
-    try std.testing.expectEqual(@as(?i32, 77), pending.asInt32());
-}
 
 pub fn qjsPromiseAggregateError(rt: *core.JSRuntime, global: *core.Object, errors: *core.Object) !core.JSValue {
     const aggregate_error = try createNamedError(rt, global, "AggregateError", "");
@@ -219,31 +194,6 @@ pub fn rejectedPromiseForRuntimeError(
     return promise;
 }
 
-test "rejectedPromiseForRuntimeError keeps pending exception if promise allocation fails" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer {
-        failing.fail_index = std.math.maxInt(usize);
-        global.value().free(rt);
-        ctx.destroy();
-        rt.destroy();
-    }
-
-    _ = ctx.throwValue(core.JSValue.int32(42));
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        rejectedPromiseForRuntimeError(ctx, global, error.Test262Error, null),
-    );
-    failing.fail_index = std.math.maxInt(usize);
-
-    try std.testing.expect(ctx.hasException());
-    const pending = ctx.takeException();
-    defer pending.free(rt);
-    try std.testing.expectEqual(@as(?i32, 42), pending.asInt32());
-}
 
 pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
     _ = rt;

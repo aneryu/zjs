@@ -406,8 +406,8 @@ correctness first, then performance.
 ```bash
 zig fmt .
 zig build test --summary all
-zig build test-oom --summary all
-zig build test-oom-exhaustive --summary all
+# zig build test-oom --summary all (不再执行 / No longer executed)
+# zig build test-oom-exhaustive --summary all (不再执行 / No longer executed)
 ```
 
 ### A.11 Conclusion

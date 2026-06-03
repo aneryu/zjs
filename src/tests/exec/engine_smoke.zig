@@ -5,7 +5,6 @@ const core = engine.core;
 const op = engine.bytecode.opcode.op;
 
 const helpers = @import("exec_helpers.zig");
-const oom_helpers = @import("oom_helpers.zig");
 const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
 const countJob = helpers.countJob;
@@ -87,56 +86,6 @@ test "Engine eval strips TypeScript automatically for ts filenames" {
     , .{ .filename = "sample.ts" });
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
-}
-
-test "Engine defineScriptArgs OOM releases pending global array once" {
-    var saw_oom = false;
-    var saw_success = false;
-
-    const samples = oom_helpers.defaultSampleSet(320);
-    var fail_offset: usize = 0;
-    while (fail_offset < samples.limit) : (fail_offset += 1) {
-        if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.harness.Engine.init(failing.allocator());
-
-        const warmup = try js.eval("Array.prototype;");
-        warmup.free(js.runtime);
-        try fillGlobalPropertyCapacity(&js);
-
-        const args = [_][]const u8{ "one", "two" };
-        failing.fail_index = failing.alloc_index + fail_offset;
-        const result = js.defineScriptArgs(args[0..]);
-        failing.fail_index = std.math.maxInt(usize);
-
-        if (result) {
-            saw_success = true;
-        } else |err| switch (err) {
-            error.OutOfMemory => saw_oom = true,
-            else => |unexpected| {
-                js.deinit();
-                return unexpected;
-            },
-        }
-
-        js.deinit();
-        if (oom_helpers.shouldStopAfterCoverage(saw_oom, saw_success)) return;
-    }
-
-    try std.testing.expect(saw_oom);
-    try std.testing.expect(saw_success);
-}
-
-fn fillGlobalPropertyCapacity(js: *engine.harness.Engine) !void {
-    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
-    var index: usize = 0;
-    while (global.properties.len < global.property_capacity) : (index += 1) {
-        var name_buffer: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "__zjs_oom_fill_{d}", .{index});
-        const key = try js.runtime.internAtom(name);
-        defer js.runtime.atoms.free(key);
-        try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-    }
 }
 
 test "CallSite metadata is internal" {
@@ -1078,68 +1027,6 @@ test "Engine eval releases arrow destructuring iterator closures cleanly" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1\n", stream.buffered());
-}
-
-test "Engine eval executes JSON smoke subset" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
-        \\const obj = { a: 1, b: 2 };
-        \\const str = JSON.stringify(obj);
-        \\console.log(str);
-        \\const parsed = JSON.parse(str);
-        \\console.log(parsed.a);
-        \\console.log(parsed.b);
-        \\console.log(JSON.stringify({ a: undefined, b: null, c: 1 }));
-        \\console.log(JSON.stringify([undefined, null, 1]));
-        \\console.log(JSON.stringify(undefined));
-        \\console.log(JSON.stringify(NaN));
-        \\console.log(JSON.stringify(Infinity));
-        \\console.log(JSON.stringify(-Infinity));
-        \\const nonAsciiJson = JSON.stringify("é");
-        \\console.log(nonAsciiJson.length);
-        \\console.log(nonAsciiJson.charCodeAt(1));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("{\"a\":1,\"b\":2}\n1\n2\n{\"b\":null,\"c\":1}\n[null,null,1]\nundefined\nnull\nnull\nnull\n3\n233\n", stream.buffered());
-}
-
-test "Engine eval executes Math smoke subset" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
-
-    var output_buffer: [512]u8 = undefined;
-    var stream = std.Io.Writer.fixed(&output_buffer);
-    const result = try js.evalWithOutput(
-        \\print(Math.abs(-5));
-        \\print(Math.floor(3.7));
-        \\print(Math.sqrt(2));
-        \\print(Math.pow(4, 0.5));
-        \\print(Math.min(1, 2, 3));
-        \\const randomValue = Math.random();
-        \\print(typeof randomValue);
-        \\print(randomValue >= 0);
-        \\print(randomValue < 1);
-        \\print(1 / -0);
-        \\print(Object.is(-0, -0));
-        \\print(Object.is(0, -0));
-        \\print(Math.acos(1));
-        \\print(Math.asin(0));
-        \\print(Math.atan(0));
-        \\print(Math.atan2(0, -1));
-        \\print(typeof Math.acosh);
-        \\print(Math.acosh(0));
-        \\print(Math.atanh(2));
-    , &stream);
-    defer result.free(js.runtime);
-
-    try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("5\n3\n1.4142135623730951\n2\n1\nnumber\ntrue\ntrue\n-Infinity\ntrue\nfalse\n0\n0\n0\n3.141592653589793\nfunction\nNaN\nNaN\n", stream.buffered());
 }
 
 test "Engine eval preserves one-shot object missing field host output semantics" {

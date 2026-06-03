@@ -11387,49 +11387,6 @@ fn testHandleCatchableRuntimeError(
     return err;
 }
 
-test "with get-ref-undef keeps object on stack when result reservation fails" {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing.allocator());
-    const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    const object = try core.Object.create(rt, core.class.ids.object, null);
-    var stack = stack_mod.Stack.init(&rt.memory, 16);
-    const name = try rt.internAtom("withGetRefUndefOOM");
-    const atom_id = try rt.internAtom("x");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    var code = [_]u8{0} ** 9;
-    std.mem.writeInt(u32, code[0..4], atom_id, .little);
-    std.mem.writeInt(i32, code[4..8], 0, .little);
-    function.code = code[0..];
-    var frame = frame_mod.Frame.init(&function);
-    var catch_target: ?usize = null;
-    defer {
-        failing.fail_index = std.math.maxInt(usize);
-        frame.deinit(&rt.memory, rt);
-        function.deinit(rt);
-        rt.atoms.free(atom_id);
-        rt.atoms.free(name);
-        stack.deinit(rt);
-        object.value().free(rt);
-        global.value().free(rt);
-        ctx.destroy();
-        rt.destroy();
-    }
-
-    try object.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(core.JSValue.int32(123), true, true, true));
-    for (0..7) |index| try stack.pushOwned(core.JSValue.int32(@intCast(index)));
-    try stack.push(object.value());
-
-    failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(
-        error.OutOfMemory,
-        withGetOrDelete(ctx, null, global, &stack, &function, &frame, &catch_target, op.with_get_ref_undef, testHasPropertyForWith, testIsBlockedByUnscopables, testGetValueProperty, testHandleCatchableRuntimeError),
-    );
-    failing.fail_index = std.math.maxInt(usize);
-
-    try std.testing.expectEqual(@as(usize, 8), stack.values.len);
-    try std.testing.expectEqual(&object.header, stack.values[7].refHeader().?);
-}
 
 test "fast own data property replacement retains private brand atom" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

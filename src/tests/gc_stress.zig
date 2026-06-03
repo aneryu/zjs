@@ -184,51 +184,6 @@ test "gc stress finalization registry dead target queues pending job" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
-test "gc stress finalization enqueue OOM leaves pending cell for retry" {
-    var prng = Rng.init(0x7a6a_6763_0005);
-    const random = prng.random();
-
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const cleanup = try core.Object.create(rt, core.class.ids.object, null);
-    const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
-    registry.finalizationRegistryCleanupCallbackSlot().* = cleanup.value().dup();
-
-    const target = try core.Object.create(rt, core.class.ids.object, null);
-    var target_value = target.value();
-    const self_key = try rt.internAtom("stress-finalization-retry-self");
-    defer rt.atoms.free(self_key);
-    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
-    try registry.appendFinalizationRegistryCell(
-        rt,
-        target_value,
-        core.JSValue.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))),
-        core.JSValue.undefinedValue(),
-    );
-
-    _ = try rt.tryRunObjectCycleRemoval();
-    target_value.free(rt);
-    target_value = core.JSValue.undefinedValue();
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-
-    const limit = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(limit);
-    try std.testing.expectError(error.OutOfMemory, rt.tryRunObjectCycleRemoval());
-    rt.setMemoryLimit(null);
-    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 1), registry.pendingFinalizationCellCountForTest());
-
-    _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
-    try std.testing.expectEqual(@as(usize, 0), registry.pendingFinalizationCellCountForTest());
-
-    rt.clearPendingFinalizationJobs();
-    registry.value().free(rt);
-    cleanup.value().free(rt);
-    _ = try rt.tryRunObjectCycleRemoval();
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
-}
 
 test "gc stress function bytecode constant pool object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0006);

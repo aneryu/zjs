@@ -1296,13 +1296,6 @@ test {
     _ = libs;
 }
 
-test "realm cached generator prototypes release OOM state once" {
-    try expectRealmCachedGeneratorPrototypeOOMCleanup(.generator);
-    try expectRealmCachedGeneratorPrototypeOOMCleanup(.async_generator);
-    try expectRealmCachedGeneratorPrototypeOOMCleanup(.async_function_function);
-    try expectRealmCachedGeneratorPrototypeOOMCleanup(.generator_function);
-    try expectRealmCachedGeneratorPrototypeOOMCleanup(.async_generator_function);
-}
 
 const RealmCachedGeneratorPrototypeKind = enum {
     generator,

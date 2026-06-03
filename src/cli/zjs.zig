@@ -141,9 +141,6 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
-
-
-
     var read_source_ns: u64 = 0;
     const source_text = switch (command) {
         .eval => |eval| eval.source,
@@ -483,7 +480,6 @@ fn isIdentifierContinue(byte: u8) bool {
     return isIdentifierStart(byte) or (byte >= '0' and byte <= '9');
 }
 
-
 fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *zjs.Engine) !void {
     const rt = runtime.runtime;
     var live_dynamic_atoms: usize = 0;
@@ -714,8 +710,6 @@ fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRo
     return lhs.opcode < rhs.opcode;
 }
 
-
-
 fn takePendingRejectionOrException(runtime: *zjs.Engine) zjs.core.JSValue {
     if (runtime.context.hasUnhandledRejection()) {
         const rejection = runtime.context.takeUnhandledRejection();
@@ -891,9 +885,6 @@ test "zjs args accept file script arguments" {
     try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
 }
 
-
-
-
 test "zjs args accept runtime limits" {
     const command = try parseArgs(&.{ "--memory-limit", "7", "--stack-size", "9", "input.js" });
     try std.testing.expectEqual(@as(?usize, 7 * 1024), command.file.options.memory_limit);
@@ -913,24 +904,18 @@ test "zjs args accept std exposure flag" {
     const command = try parseArgs(&.{ "--std", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.expose_std);
-
-
 }
 
 test "zjs args accept memory dump flag" {
     const command = try parseArgs(&.{ "-d", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.dump_memory);
-
-
 }
 
 test "zjs args accept memory trace flag" {
     const command = try parseArgs(&.{ "-T", "input.js" });
     try std.testing.expect(command == .file);
     try std.testing.expect(command.file.options.trace_memory);
-
-
 }
 
 test "zjs args accept opcode profile flag" {
@@ -941,8 +926,6 @@ test "zjs args accept opcode profile flag" {
     const eval_command = try parseArgs(&.{ "--profile-opcodes", "-e", "1" });
     try std.testing.expect(eval_command == .eval);
     try std.testing.expect(eval_command.eval.options.profile_opcodes);
-
-
 }
 
 test "zjs args accept perf json flag for eval and files only" {

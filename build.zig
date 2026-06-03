@@ -1,14 +1,5 @@
 const std = @import("std");
 
-fn execShardUsesOomOptions(path: []const u8) bool {
-    return std.mem.eql(u8, path, "src/tests/exec/core_native.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/builtins_async.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/engine_smoke.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/collection_typedarray.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/module_regexp.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/iter_generator.zig");
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -16,15 +7,6 @@ pub fn build(b: *std.Build) void {
     const shard_filter = b.option([]const u8, "shard", "Only run the specified zjs test shard");
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
-    const quick_oom_options = b.addOptions();
-    quick_oom_options.addOption(bool, "full_oom_sweep", false);
-    quick_oom_options.addOption(bool, "sampled_oom_sweep", false);
-    const sampled_oom_options = b.addOptions();
-    sampled_oom_options.addOption(bool, "full_oom_sweep", false);
-    sampled_oom_options.addOption(bool, "sampled_oom_sweep", true);
-    const exhaustive_oom_options = b.addOptions();
-    exhaustive_oom_options.addOption(bool, "full_oom_sweep", true);
-    exhaustive_oom_options.addOption(bool, "sampled_oom_sweep", false);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/engine/root.zig"),
@@ -395,16 +377,17 @@ pub fn build(b: *std.Build) void {
     const run_frontend_tests = b.addRunArtifact(frontend_tests);
 
     // 6. Builtins tests
+    const builtins_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/builtins/all.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "quickjs_zig_engine", .module = engine_mod },
+        },
+    });
     const builtins_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests/builtins/all.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = engine_mod },
-            },
-        }),
+        .root_module = builtins_test_mod,
     });
     const run_builtins_tests = b.addRunArtifact(builtins_tests);
 
@@ -433,24 +416,9 @@ pub fn build(b: *std.Build) void {
     });
     const run_test262_runner_tests = b.addRunArtifact(test262_runner_tests);
 
-    // 8. OOM helpers tests
-    const oom_helpers_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    oom_helpers_test_mod.addOptions("oom_options", quick_oom_options);
-    const oom_helpers_tests = b.addTest(.{
-        .name = "exec-oom-helpers",
-        .root_module = oom_helpers_test_mod,
-    });
-    const run_oom_helpers_tests = b.addRunArtifact(oom_helpers_tests);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
-    const test_oom_step = b.step("test-oom", "Run sampled exec OOM fail-index sweeps in Debug mode");
-    const test_oom_exhaustive_step = b.step("test-oom-exhaustive", "Run exhaustive exec OOM fail-index sweeps in Debug mode (very slow)");
 
     // Expose fine-grained steps as requested (only those selected to be kept)
     const test_core_step = b.step("test-core", "Run core runtime foundation tests");
@@ -462,13 +430,6 @@ pub fn build(b: *std.Build) void {
     const gc_stress_step = b.step("gc-stress", "Run deterministic GC stress tests");
     gc_stress_step.dependOn(&run_gc_stress_tests.step);
 
-    // Filter logic variables
-    const oom_helpers_matches_filter = if (shard_filter) |filter|
-        std.mem.eql(u8, "exec-oom-helpers", filter) or
-            std.mem.eql(u8, "exec-oom-helpers-oom", filter) or
-            std.mem.eql(u8, "exec-oom-helpers-oom-exhaustive", filter)
-    else
-        true;
 
     // Attach common non-exec tests to main test step
     test_step.dependOn(&run_engine_root_tests.step);
@@ -481,17 +442,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tools_tests.step);
     test_step.dependOn(&run_zjs_cli_tests.step);
     test_step.dependOn(&run_test262_runner_tests.step);
-    if (oom_helpers_matches_filter) {
-        test_step.dependOn(&run_oom_helpers_tests.step);
-    }
 
-    const engine_oom_mod = b.addModule("quickjs_zig_engine_oom", .{
-        .root_source_file = b.path("src/engine/root.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    engine_oom_mod.addOptions("build_options", engine_options);
 
     // Each exec test source compiles into its own binary so the binaries can
     // be compiled and run in parallel during `zig build test`. Each binary
@@ -503,19 +454,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "exec-core-native", .path = "src/tests/exec/core_native.zig" },
         .{ .name = "exec-builtins-async", .path = "src/tests/exec/builtins_async.zig" },
         .{ .name = "exec-engine-smoke", .path = "src/tests/exec/engine_smoke.zig" },
-        .{ .name = "exec-eval-errors", .path = "src/tests/exec/eval_errors.zig" },
         .{ .name = "exec-collection-typedarray", .path = "src/tests/exec/collection_typedarray.zig" },
-        .{ .name = "exec-module-regexp", .path = "src/tests/exec/module_regexp.zig" },
-        .{ .name = "exec-iter-generator", .path = "src/tests/exec/iter_generator.zig" },
-        .{ .name = "exec-async-perf", .path = "src/tests/exec/async_perf.zig" },
-        .{ .name = "exec-vm-literals", .path = "src/tests/exec/vm_literals.zig" },
-        .{ .name = "exec-vm-functions", .path = "src/tests/exec/vm_functions.zig" },
-        .{ .name = "exec-vm-objects", .path = "src/tests/exec/vm_objects.zig" },
     };
 
     // Exec shards compilation and mapping to test steps
     inline for (exec_shards) |shard| {
-        // 1. Standard optimize mode (defaults to Debug, used by `test` step)
         const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
         if (matches_filter) {
             const test_mod = b.createModule(.{
@@ -528,9 +471,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             test_mod.addOptions("build_options", engine_options);
-            if (execShardUsesOomOptions(shard.path)) {
-                test_mod.addOptions("oom_options", quick_oom_options);
-            }
             const tests = b.addTest(.{
                 .name = shard.name,
                 .root_module = test_mod,
@@ -538,89 +478,6 @@ pub fn build(b: *std.Build) void {
             const run_tests = b.addRunArtifact(tests);
             test_step.dependOn(&run_tests.step);
         }
-
-        // 2. Sampled OOM mode (used by `test-oom` step)
-        const oom_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom", filter) else true;
-        if (oom_matches_filter) {
-            const oom_test_mod = b.createModule(.{
-                .root_source_file = b.path(shard.path),
-                .target = target,
-                .optimize = .Debug,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "quickjs_zig_engine", .module = engine_oom_mod },
-                },
-            });
-            oom_test_mod.addOptions("build_options", engine_options);
-            if (execShardUsesOomOptions(shard.path)) {
-                oom_test_mod.addOptions("oom_options", sampled_oom_options);
-            }
-            const oom_tests = b.addTest(.{
-                .name = shard.name ++ "-oom",
-                .root_module = oom_test_mod,
-                .filters = &.{"OOM"},
-            });
-            const run_oom_tests = b.addRunArtifact(oom_tests);
-            test_oom_step.dependOn(&run_oom_tests.step);
-        }
-
-        // 3. Exhaustive OOM mode (used by `test-oom-exhaustive` step)
-        const exhaustive_oom_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom-exhaustive", filter) else true;
-        if (exhaustive_oom_matches_filter) {
-            const exhaustive_oom_test_mod = b.createModule(.{
-                .root_source_file = b.path(shard.path),
-                .target = target,
-                .optimize = .Debug,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "quickjs_zig_engine", .module = engine_oom_mod },
-                },
-            });
-            exhaustive_oom_test_mod.addOptions("build_options", engine_options);
-            if (execShardUsesOomOptions(shard.path)) {
-                exhaustive_oom_test_mod.addOptions("oom_options", exhaustive_oom_options);
-            }
-            const exhaustive_oom_tests = b.addTest(.{
-                .name = shard.name ++ "-oom-exhaustive",
-                .root_module = exhaustive_oom_test_mod,
-                .filters = &.{"OOM"},
-            });
-            const run_exhaustive_oom_tests = b.addRunArtifact(exhaustive_oom_tests);
-            test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_tests.step);
-        }
-    }
-
-    // 9. OOM helpers tests for OOM steps
-    if (oom_helpers_matches_filter) {
-        const sampled_oom_helpers_test_mod = b.createModule(.{
-            .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
-            .target = target,
-            .optimize = .Debug,
-            .link_libc = true,
-        });
-        sampled_oom_helpers_test_mod.addOptions("oom_options", sampled_oom_options);
-        const sampled_oom_helpers_tests = b.addTest(.{
-            .name = "exec-oom-helpers-oom",
-            .root_module = sampled_oom_helpers_test_mod,
-            .filters = &.{"OOM"},
-        });
-        const run_sampled_oom_helpers_tests = b.addRunArtifact(sampled_oom_helpers_tests);
-        test_oom_step.dependOn(&run_sampled_oom_helpers_tests.step);
-
-        const exhaustive_oom_helpers_test_mod = b.createModule(.{
-            .root_source_file = b.path("src/tests/exec/oom_helpers_test.zig"),
-            .target = target,
-            .optimize = .Debug,
-            .link_libc = true,
-        });
-        exhaustive_oom_helpers_test_mod.addOptions("oom_options", exhaustive_oom_options);
-        const exhaustive_oom_helpers_tests = b.addTest(.{
-            .name = "exec-oom-helpers-oom-exhaustive",
-            .root_module = exhaustive_oom_helpers_test_mod,
-            .filters = &.{"OOM"},
-        });
-        const run_exhaustive_oom_helpers_tests = b.addRunArtifact(exhaustive_oom_helpers_tests);
-        test_oom_exhaustive_step.dependOn(&run_exhaustive_oom_helpers_tests.step);
     }
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");

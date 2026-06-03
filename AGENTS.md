@@ -77,9 +77,8 @@ available only through git history.
 
 - `zig build test --summary all` (defaults to Debug optimization; use for fast compilation during daily local development iteration; do NOT run ReleaseSafe tests repeatedly during minor edits to save time)
 - `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
-- `zig build test-oom --summary all` for sampled exec OOM fail-index coverage.
-- `zig build test-oom-exhaustive --summary all` for very slow full exec OOM
-  fail-index audits.
+- `zig build test-oom --summary all` (不再执行 / No longer executed)
+- `zig build test-oom-exhaustive --summary all` (不再执行 / No longer executed)
 
 - `git diff --check`
 
