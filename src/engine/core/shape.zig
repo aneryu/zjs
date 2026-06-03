@@ -199,6 +199,15 @@ pub const Registry = struct {
         shape.version +%= 1;
     }
 
+    pub fn rewritePrototypeIdentity(self: *Registry, old_proto_id: usize, new_proto_id: usize) void {
+        var index: usize = 0;
+        while (index < self.shapes.len) : (index += 1) {
+            const current = self.shapes[index];
+            if (current.proto_id != old_proto_id) continue;
+            self.updatePrototype(current, new_proto_id);
+        }
+    }
+
     pub fn addProperty(self: *Registry, shape: *Shape, atom_id: atom.Atom, flags: u6) !void {
         try self.appendProperty(shape, atom_id, flags);
         const old_hash = shape.hash;

@@ -859,6 +859,7 @@ pub const CollectionResult = struct {
     freed_bytecodes: usize = 0,
     promoted_young_objects: usize = 0,
     promoted_young_bytes: usize = 0,
+    nursery_allocated_bytes: usize = 0,
     duration_ns: u64 = 0,
 };
 
@@ -1177,6 +1178,8 @@ pub const Registry = struct {
 
         self.gc_obj_list_head = null;
         self.gc_obj_list_tail = null;
+
+        self.freeForwardingShadows(rt);
 
         self.visited.deinit();
         self.preserved.deinit();
@@ -1734,6 +1737,42 @@ pub const Registry = struct {
         self.nursery.used_bytes -|= nursery_bytes;
     }
 
+    pub fn moveYoungAllocationToOld(self: *Registry, from: *GCObjectHeader, to: *GCObjectHeader) !void {
+        std.debug.assert(from.generation() == .young);
+        std.debug.assert(from.kind == to.kind);
+        std.debug.assert(!from.pinned());
+        const index = self.heapAllocationIndex(from) orelse return;
+        const entry = &self.heap_allocations[index];
+        if (entry.generation != .young) return;
+        const nursery_bytes = blk: {
+            for (self.nursery_entries) |nursery_entry| {
+                if (nursery_entry.header == from) break :blk nursery_entry.bytes;
+            }
+            break :blk @as(usize, 0);
+        };
+
+        const page = try self.recordSpaceAlloc(.old, entry.bytes);
+        self.subtractLiveHeapBytes(.young, entry.bytes);
+        self.addLiveHeapBytes(.old, entry.bytes);
+        const weighted = std.math.mul(usize, entry.bytes, self.policy.promotion_weight) catch std.math.maxInt(usize);
+        self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
+        if (self.stats.allocation_debt >= self.policy.major_debt_threshold) {
+            self.requestGC(.major, .allocation_debt, .soon);
+        }
+
+        entry.header = to;
+        entry.generation = .old;
+        entry.page = page;
+        to.setGeneration(.old);
+        to.setRemembered(false);
+        to.size_class = @intCast(@min(if (page.slot_size != 0) page.slot_size else entry.bytes, std.math.maxInt(u16)));
+        from.setGeneration(.old);
+        from.setRemembered(false);
+        from.size_class = to.size_class;
+        self.removeNurseryEntry(from);
+        self.nursery.used_bytes -|= nursery_bytes;
+    }
+
     pub fn pinHeader(self: *Registry, header: *GCObjectHeader) !void {
         if (self.pinEntryIndex(header)) |index| {
             self.pin_entries[index].count +|= 1;
@@ -1881,7 +1920,7 @@ pub const Registry = struct {
     }
 
     pub fn finishMinorCollection(self: *Registry, result: CollectionResult) void {
-        const nursery_allocated = self.nursery.used_bytes;
+        const nursery_allocated = result.nursery_allocated_bytes;
         const promoted_bytes = @min(result.promoted_young_bytes, nursery_allocated);
         const survival_per_mille = ratioPerMille(promoted_bytes, nursery_allocated);
 
@@ -1897,7 +1936,6 @@ pub const Registry = struct {
         self.nursery.used_bytes = 0;
         self.clearNurseryEntries();
         self.clearRememberedSet();
-        self.clearForwarding();
         self.clearMarkStackDepth();
     }
 
@@ -2007,6 +2045,24 @@ pub const Registry = struct {
         } else {
             self.forwarding_entries = self.forwarding_entries.ptr[0..0];
         }
+    }
+
+    fn freeForwardingShadows(self: *Registry, rt: anytype) void {
+        for (self.forwarding_entries) |entry| {
+            if (entry.from == entry.to) continue;
+            switch (entry.from.kind) {
+                .object => {
+                    const old_obj: *object.Object = @alignCast(@fieldParentPtr("header", entry.from));
+                    rt.memory.destroy(object.Object, old_obj);
+                },
+                .function_bytecode => {
+                    const old_fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", entry.from));
+                    rt.memory.free(bytecode_function.FunctionBytecode, old_fb[0..1]);
+                },
+                .string, .big_int => {},
+            }
+        }
+        self.clearForwarding();
     }
 
     pub fn clearNurseryEntries(self: *Registry) void {
@@ -2437,6 +2493,26 @@ pub const Registry = struct {
         node.next = null;
     }
 
+    pub fn replaceNode(self: *Registry, old_node: *GcNode, new_node: *GcNode) void {
+        new_node.prev = old_node.prev;
+        new_node.next = old_node.next;
+        new_node.tmp_rc = old_node.tmp_rc;
+        new_node.color = old_node.color;
+        new_node._pad = old_node._pad;
+        if (old_node.prev) |prev| {
+            prev.next = new_node;
+        } else {
+            self.gc_obj_list_head = new_node;
+        }
+        if (old_node.next) |next| {
+            next.prev = new_node;
+        } else {
+            self.gc_obj_list_tail = new_node;
+        }
+        old_node.prev = null;
+        old_node.next = null;
+    }
+
     pub fn liveCount(self: Registry) usize {
         var count: usize = 0;
         var current = self.gc_obj_list_head;
@@ -2493,6 +2569,12 @@ pub fn retain(header: *Header) void {
 }
 
 pub fn release(rt: anytype, header: *Header) void {
+    if (rt.gc.forwardedHeader(header)) |forwarded| {
+        if (forwarded != header) {
+            release(rt, forwarded);
+            return;
+        }
+    }
     std.debug.assert(header.rc > 0);
     header.rc -= 1;
     rt.gc.stats.rc_dec += 1;

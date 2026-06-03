@@ -2158,7 +2158,9 @@ JIT call boundary GC protocol
 HandleScope / Persistent / WeakPersistent 基础 root。
 old -> young remembered set / dirty card barrier。
 external memory accounting、GC request 与 external token registry 审计（包含 SharedBufferStore owner token）。
-non-moving nursery promotion path 与 nursery tuning。
+minor GC hybrid 中间态：root/remembered tracing 访问到的 young Object 会复制到 old allocation；final nursery pass 剩余条目先原地晋升，保持现有 raw-local `*Object` 调用可用。
+FunctionBytecode 仍走原地晋升；moving 后的旧 Object shadow 通过 forwarding table 保留到 runtime deinit，用于 stale raw release 转发。
+nursery tuning。
 large object classification。
 old/large page metadata allocator、size-class page、free-list、allocation bitmap 与 mark bitmap。
 GC scheduler request、callback/idle/safepoint 入口。
@@ -2174,8 +2176,10 @@ P0:
   - 当前 old/large page metadata allocator 已经是 GC accounting / verifier / sweep cursor 的 authoritative source；物理 payload 地址仍由 MemoryAccount 提供。
 
 P1:
-  - 实现真正 moving/copying nursery，而不是当前 non-moving promotion 中间态。
-  - 为移动 young object 补齐 forwarding pointer/table 后的所有 root、slot、handle、dirty card 更新。
+  - 完成 full copying nursery：移除 final pass 原地晋升 fallback，让未存活 young object 可直接回收。
+  - 将 FunctionBytecode 从当前原地晋升改成与 Object 一致的复制/转发路径，或明确保持 non-moving bytecode space。
+  - 收敛当前旧 Object shadow + forwarding table 中间方案；优先补齐 HandleScope/Persistent/root slot discipline，再删除 stale raw pointer 兼容层。
+  - 为移动 young object 继续补齐 forwarding pointer/table 后的所有 root、slot、handle、dirty card 更新。
   - 为 array elements、closure env、module namespace、Promise reaction、WeakMap entry 等批量写入补齐 bulk barrier 审计。
 
 P2:

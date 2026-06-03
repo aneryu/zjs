@@ -1473,6 +1473,7 @@ pub const JSRuntime = struct {
                 self_visitor.rt.rewriteForwardedObjectSlot(slot);
                 const obj = slot.* orelse return;
                 try self_visitor.evacuateHeader(&obj.header);
+                self_visitor.rt.rewriteForwardedObjectSlot(slot);
             }
 
             fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
@@ -1483,45 +1484,72 @@ pub const JSRuntime = struct {
                 if (slot.objectHeader()) |header| {
                     try self_visitor.evacuateHeader(header);
                 }
+                self_visitor.rt.rewriteForwardedValueSlot(slot);
             }
 
             fn evacuateHeader(self_visitor: *@This(), header: *gc.Header) !void {
                 if (header.generation() != .young) return;
 
-                if (self_visitor.rt.gc.forwardedHeader(header)) |forwarded| {
-                    if (forwarded != header) {
-                        try self_visitor.rt.gc.promoteHeapAllocationToOld(header);
-                        header.setGeneration(.old);
-                        return;
-                    }
-                } else {
-                    try self_visitor.rt.gc.recordForwarding(header, header);
-                }
-
-                try self_visitor.promoteInPlace(header);
+                if (self_visitor.rt.gc.forwardedHeader(header) != null) return;
+                try self_visitor.copyToOld(header);
             }
 
-            fn promoteInPlace(self_visitor: *@This(), header: *gc.Header) !void {
+            fn copyToOld(self_visitor: *@This(), header: *gc.Header) !void {
                 std.debug.assert(header.generation() == .young);
+                const moved_bytes = promotedSize(header);
                 self_visitor.rt.gc.markNurserySurvivor(header);
                 switch (header.kind) {
                     .object => {
-                        const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                        try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, obj);
+                        const old_obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                        const new_obj = try self_visitor.allocateMovedObject();
+                        var moved = false;
+                        errdefer if (!moved) self_visitor.rt.memory.destroy(Object, new_obj);
+                        new_obj.* = old_obj.*;
+                        try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, new_obj);
                         self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
+                        try self_visitor.rt.gc.recordForwarding(header, &new_obj.header);
+                        try self_visitor.rt.gc.moveYoungAllocationToOld(header, &new_obj.header);
+                        self_visitor.rt.gc.replaceNode(&old_obj.gc, &new_obj.gc);
+                        self_visitor.rt.rewriteMovedObjectAddress(old_obj, new_obj);
+                        moved = true;
                     },
                     .function_bytecode => {
                         const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
                         try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
                         self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
+                        try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
                     },
                     .string, .big_int => {},
                 }
 
-                try self_visitor.rt.gc.promoteHeapAllocationToOld(header);
-                header.setGeneration(.old);
                 self_visitor.promoted_young_objects +|= 1;
-                self_visitor.promoted_young_bytes +|= promotedSize(header);
+                self_visitor.promoted_young_bytes +|= moved_bytes;
+            }
+
+            fn promoteRemainingInPlace(self_visitor: *@This(), header: *gc.Header) !void {
+                if (header.generation() != .young) return;
+                if (self_visitor.rt.gc.forwardedHeader(header) != null) {
+                    try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
+                    return;
+                }
+
+                const moved_bytes = promotedSize(header);
+                self_visitor.rt.gc.markNurserySurvivor(header);
+                try self_visitor.rt.gc.promoteYoungHeaderToOld(header);
+                self_visitor.promoted_young_objects +|= 1;
+                self_visitor.promoted_young_bytes +|= moved_bytes;
+            }
+
+            fn allocateMovedObject(self_visitor: *@This()) !*Object {
+                const saved_trigger_fn = self_visitor.rt.memory.trigger_gc_fn;
+                const saved_trigger_ctx = self_visitor.rt.memory.trigger_gc_ctx;
+                self_visitor.rt.memory.trigger_gc_fn = null;
+                self_visitor.rt.memory.trigger_gc_ctx = null;
+                defer {
+                    self_visitor.rt.memory.trigger_gc_fn = saved_trigger_fn;
+                    self_visitor.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+                }
+                return self_visitor.rt.memory.create(Object);
             }
 
             fn promotedSize(header: *const gc.Header) usize {
@@ -1563,6 +1591,7 @@ pub const JSRuntime = struct {
         };
 
         const start_ns = profile.nowNanos();
+        const nursery_allocated_bytes = self.gc.nurseryUsedBytes();
         _ = self.gc.clearMinorRequest();
         errdefer self.gc.clearForwarding();
 
@@ -1609,23 +1638,18 @@ pub const JSRuntime = struct {
             return err;
         };
 
-        var nursery_index: usize = 0;
-        while (self.gc.nurseryEntryHeader(nursery_index)) |header| : (nursery_index += 1) {
-            visitor.evacuateHeader(header) catch |err| {
+        while (self.gc.nurseryEntryHeader(0)) |header| {
+            visitor.promoteRemainingInPlace(header) catch |err| {
                 self.gc.recordFailure(err);
                 self.gc.requestGC(.minor, .collection_failed, .soon);
                 return err;
             };
         }
-        visitor.drain() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return err;
-        };
 
         const result = gc.CollectionResult{
             .promoted_young_objects = visitor.promoted_young_objects,
             .promoted_young_bytes = visitor.promoted_young_bytes,
+            .nursery_allocated_bytes = nursery_allocated_bytes,
             .duration_ns = blk: {
                 const end_ns = profile.nowNanos();
                 break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
@@ -1863,6 +1887,41 @@ pub const JSRuntime = struct {
         const forwarded = self.gc.forwardedHeader(&obj.header) orelse return;
         std.debug.assert(forwarded.kind == .object);
         slot.* = @alignCast(@fieldParentPtr("header", forwarded));
+    }
+
+    fn rewriteMovedObjectAddress(self: *JSRuntime, old_object: *Object, new_object: *Object) void {
+        const old_header_identity = @intFromPtr(&old_object.header) & ~@as(usize, 1);
+        const new_header_identity = @intFromPtr(&new_object.header) & ~@as(usize, 1);
+        const old_object_identity = @intFromPtr(old_object);
+        const new_object_identity = @intFromPtr(new_object);
+
+        for (self.weak_root_slots) |slot| {
+            if (slot.identity == old_header_identity) slot.identity = new_header_identity;
+        }
+        for (self.borrowed_reference_holders) |*holder| {
+            if (holder.* == old_object) holder.* = new_object;
+        }
+        for (self.borrowed_weak_cleanup_identities) |*identity| {
+            if (identity.* == old_header_identity) identity.* = new_header_identity;
+        }
+        for (self.borrowed_weak_cleanup_realm_identities) |*identity| {
+            if (identity.* == old_header_identity) identity.* = new_header_identity;
+        }
+        if (self.current_deferred_weak_value_free_identity == old_header_identity) {
+            self.current_deferred_weak_value_free_identity = new_header_identity;
+        }
+
+        self.shapes.rewritePrototypeIdentity(old_object_identity, new_object_identity);
+
+        var current = self.gc.gc_obj_list_head;
+        while (current) |node| {
+            const header = gc.headerFromGcNode(node);
+            if (header.kind == .object) {
+                const object: *Object = @alignCast(@fieldParentPtr("header", header));
+                object.rewriteMovedObjectIdentity(old_header_identity, old_object_identity, new_object);
+            }
+            current = node.next;
+        }
     }
 
     pub fn writeBarrierValue(self: *JSRuntime, owner: *gc.GCObjectHeader, value: JSValue) !void {

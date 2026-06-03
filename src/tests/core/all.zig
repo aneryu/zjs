@@ -3972,7 +3972,7 @@ test "gc forwarding table rewrites borrowed value and object slots" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
 }
 
-test "minor gc rewrites forwarded root slots before promotion" {
+test "minor gc copies rooted young object and rewrites root slots" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
         .gc_policy = .{
@@ -3983,17 +3983,13 @@ test "minor gc rewrites forwarded root slots before promotion" {
     });
     defer rt.deinit();
 
-    const from = try core.Object.create(&rt, core.class.ids.object, null);
-    defer from.value().free(&rt);
-    const to = try core.Object.create(&rt, core.class.ids.object, null);
-    defer to.value().free(&rt);
+    const original = try core.Object.create(&rt, core.class.ids.object, null);
 
-    try std.testing.expectEqual(core.gc.Generation.young, from.header.generation());
-    try std.testing.expectEqual(core.gc.Generation.young, to.header.generation());
+    try std.testing.expectEqual(core.gc.Generation.young, original.header.generation());
 
-    try rt.gc.recordForwarding(&from.header, &to.header);
-    var value_slot = from.value();
-    var object_slot: ?*core.Object = from;
+    var value_slot = original.value();
+    defer value_slot.free(&rt);
+    var object_slot: ?*core.Object = original;
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &value_slot }};
     var root_objects = [_]core.runtime.ObjectRootValue{.{ .object = &object_slot }};
     const roots = core.runtime.ValueRootFrame{
@@ -4004,11 +4000,15 @@ test "minor gc rewrites forwarded root slots before promotion" {
     rt.gc.requestGC(.minor, .manual, .soon);
     const minor = try rt.pollGC(&roots, .normal);
 
-    try std.testing.expectEqual(&to.header, value_slot.refHeader().?);
-    try std.testing.expect(object_slot.? == to);
+    const moved_header = value_slot.refHeader().?;
+    const moved_object: *core.Object = @alignCast(@fieldParentPtr("header", moved_header));
+    try std.testing.expect(moved_object != original);
+    try std.testing.expect(object_slot.? == moved_object);
     try std.testing.expectEqual(@as(usize, 1), minor.promoted_young_objects);
-    try std.testing.expectEqual(core.gc.Generation.old, to.header.generation());
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.forwardingEntryCount());
+    try std.testing.expectEqual(core.gc.Generation.old, moved_header.generation());
+    try std.testing.expectEqual(core.gc.Generation.old, original.header.generation());
+    try std.testing.expectEqual(moved_header, rt.gc.forwardedHeader(&original.header).?);
+    try std.testing.expectEqual(@as(usize, 1), rt.gc.forwardingEntryCount());
     try rt.gc.verifyMinorPostcondition();
 }
 

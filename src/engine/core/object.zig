@@ -1706,6 +1706,71 @@ pub const Object = struct {
         }
     }
 
+    pub fn rewriteMovedObjectIdentity(self: *Object, old_header_identity: usize, old_object_identity: usize, new_object: *Object) void {
+        const new_header_identity = @intFromPtr(&new_object.header) & ~@as(usize, 1);
+        const new_object_identity = @intFromPtr(new_object);
+        self.rewriteWeakIdentities(old_header_identity, new_header_identity);
+        self.rewriteRealmGlobalPtrs(old_header_identity, new_object);
+        self.rewriteAutoInitRealmGlobals(old_object_identity, new_object_identity);
+    }
+
+    fn rewriteWeakIdentities(self: *Object, old_identity: usize, new_identity: usize) void {
+        if (self.objectDataPayload()) |payload| {
+            if (payload.weak_target_identity == old_identity) payload.weak_target_identity = new_identity;
+        }
+
+        if (self.collectionPayload()) |payload| {
+            for (payload.weak_entries) |*entry| {
+                if (entry.key_identity == old_identity) entry.key_identity = new_identity;
+            }
+        }
+
+        if (self.finalizationRegistryPayload()) |payload| {
+            for (payload.cells) |*cell| {
+                if (cell.target_identity == old_identity) cell.target_identity = new_identity;
+            }
+        }
+    }
+
+    fn rewriteRealmGlobalPtrs(self: *Object, old_identity: usize, new_object: *Object) void {
+        if (self.ordinaryPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.iteratorPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.collectionPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.bufferPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.typedArrayPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.regExpPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.boundFunctionPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.proxyPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.argumentsPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.objectDataPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.varRefPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.finalizationRegistryPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.stdFilePayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.disposableStackPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.arrayPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.promisePayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.generatorPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.functionPayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+        if (self.moduleNamespacePayload()) |payload| rewriteObjectPtr(&payload.realm_global_ptr, old_identity, new_object);
+    }
+
+    fn rewriteObjectPtr(slot: *?*Object, old_identity: usize, new_object: *Object) void {
+        const stored = slot.* orelse return;
+        const identity = @intFromPtr(&stored.header) & ~@as(usize, 1);
+        if (identity == old_identity) slot.* = new_object;
+    }
+
+    fn rewriteAutoInitRealmGlobals(self: *Object, old_object_identity: usize, new_object_identity: usize) void {
+        for (self.properties) |*entry| {
+            switch (entry.slot) {
+                .auto_init => |*info| {
+                    if (info.host_function_realm_global == old_object_identity) info.host_function_realm_global = new_object_identity;
+                },
+                else => {},
+            }
+        }
+    }
+
     pub const post_a_object_size_baseline: usize = 432;
     comptime {
         std.debug.assert(@sizeOf(Object) <= post_a_object_size_baseline / 2);
