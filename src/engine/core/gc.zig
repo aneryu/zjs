@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const memory = @import("memory.zig");
+const atom = @import("atom.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
@@ -1154,6 +1155,8 @@ pub const Registry = struct {
     preserved: std.AutoHashMap(usize, void),
     free_set: std.AutoHashMap(usize, void),
     preserved_bytecodes: std.AutoHashMap(usize, void),
+    major_trace_visited: std.AutoHashMap(usize, void),
+    major_symbol_roots: std.AutoHashMap(atom.Atom, void),
     object_worklist: std.ArrayList(*object.Object),
     bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode),
 
@@ -1172,6 +1175,8 @@ pub const Registry = struct {
             .preserved = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .free_set = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
+            .major_trace_visited = std.AutoHashMap(usize, void).init(account.persistent_allocator),
+            .major_symbol_roots = std.AutoHashMap(atom.Atom, void).init(account.persistent_allocator),
             .object_worklist = std.ArrayList(*object.Object).empty,
             .bytecode_worklist = std.ArrayList(*bytecode_function.FunctionBytecode).empty,
         };
@@ -1203,6 +1208,8 @@ pub const Registry = struct {
         self.preserved.deinit();
         self.free_set.deinit();
         self.preserved_bytecodes.deinit();
+        self.major_trace_visited.deinit();
+        self.major_symbol_roots.deinit();
         self.object_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);
         if (self.remembered_set_capacity != 0) {
@@ -1475,7 +1482,6 @@ pub const Registry = struct {
 
     pub fn resetMajorTraceMark(self: *Registry) void {
         self.clearMajorTraceMark();
-        self.visited.clearRetainingCapacity();
     }
 
     pub fn clearMajorTraceMark(self: *Registry) void {
@@ -1483,13 +1489,15 @@ pub const Registry = struct {
         self.large_space.clearMarkBits();
         self.object_worklist.clearRetainingCapacity();
         self.bytecode_worklist.clearRetainingCapacity();
+        self.major_trace_visited.clearRetainingCapacity();
+        self.major_symbol_roots.clearRetainingCapacity();
         self.major_weak_seeded = false;
         self.stats.current_mark_stack_depth = 0;
     }
 
     pub fn enqueueMajorTraceHeader(self: *Registry, header: *GCObjectHeader) !bool {
         if (header.kind != .object and header.kind != .function_bytecode) return false;
-        const entry = try self.visited.getOrPut(@intFromPtr(header));
+        const entry = try self.major_trace_visited.getOrPut(@intFromPtr(header));
         if (entry.found_existing) return false;
 
         _ = self.markMajorTraceSlot(header);
@@ -1524,6 +1532,11 @@ pub const Registry = struct {
         return self.object_worklist.items.len != 0 or self.bytecode_worklist.items.len != 0;
     }
 
+    pub fn markMajorTraceSymbol(self: *Registry, atom_id: atom.Atom) !bool {
+        const entry = try self.major_symbol_roots.getOrPut(atom_id);
+        return !entry.found_existing;
+    }
+
     pub fn beginMajorWeakFixpoint(self: *Registry) void {
         if (self.major_phase == .idle) return;
         self.major_phase = .weak_fixpoint;
@@ -1535,7 +1548,7 @@ pub const Registry = struct {
 
     pub fn seedMajorWeakFixpoint(self: *Registry) !void {
         if (self.major_weak_seeded) return;
-        var iterator = self.visited.keyIterator();
+        var iterator = self.major_trace_visited.keyIterator();
         while (iterator.next()) |address| {
             const header: *GCObjectHeader = @ptrFromInt(address.*);
             if (header.kind != .object) continue;
@@ -1547,8 +1560,29 @@ pub const Registry = struct {
     }
 
     pub fn majorTraceIdentityMarked(self: Registry, identity: usize) bool {
-        if ((identity & 1) != 0) return false;
-        return self.visited.contains(identity);
+        if ((identity & 1) != 0) {
+            const atom_id = identity >> 1;
+            if (atom_id > std.math.maxInt(atom.Atom)) return false;
+            return self.major_symbol_roots.contains(@intCast(atom_id));
+        }
+        return self.major_trace_visited.contains(identity);
+    }
+
+    pub fn majorTraceSymbolRoots(self: *const Registry) MajorTraceSymbolRoots {
+        return .{ .registry = self };
+    }
+
+    pub const MajorTraceSymbolRoots = struct {
+        registry: *const Registry,
+
+        pub fn contains(self: MajorTraceSymbolRoots, atom_id: atom.Atom) bool {
+            return self.registry.major_symbol_roots.contains(atom_id);
+        }
+    };
+
+    pub fn majorTraceSymbolMarkedForTest(self: Registry, atom_id: atom.Atom) bool {
+        if (!builtin.is_test) @compileError("test-only helper");
+        return self.major_symbol_roots.contains(atom_id);
     }
 
     fn majorTraceWorkDepth(self: Registry) usize {

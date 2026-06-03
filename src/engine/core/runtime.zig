@@ -945,6 +945,10 @@ pub const JSRuntime = struct {
         for (self.external_value_roots) |*root| {
             try visitor.value(&root.value);
         }
+        for (self.external_symbol_roots) |atom_id| {
+            var value = JSValue.symbol(atom_id);
+            try visitor.value(&value);
+        }
         for (self.pending_finalization_jobs) |*job| {
             try job.traceRoots(visitor);
         }
@@ -1475,6 +1479,12 @@ pub const JSRuntime = struct {
             return err;
         };
         self.runMajorDeadWeakMetadataPostprocess();
+        self.runMajorWeakPersistentAndSymbolMetadataPostprocess() catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return err;
+        };
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1535,6 +1545,10 @@ pub const JSRuntime = struct {
             }
 
             pub fn visitValue(visitor: *@This(), slot: *JSValue) RootTraceError!void {
+                if (slot.asSymbolAtom()) |atom_id| {
+                    _ = try visitor.rt.gc.markMajorTraceSymbol(atom_id);
+                    return;
+                }
                 if (slot.refHeader()) |header| {
                     try visitor.visitHeader(header);
                 }
@@ -1544,8 +1558,8 @@ pub const JSRuntime = struct {
             }
 
             pub fn visitSymbol(visitor: *@This(), symbol: *atom.Atom) RootTraceError!void {
-                _ = visitor;
-                _ = symbol;
+                if (visitor.rt.atoms.kind(symbol.*) != .symbol) return;
+                _ = try visitor.rt.gc.markMajorTraceSymbol(symbol.*);
             }
 
             pub fn visitWeakCollectionEntry(visitor: *@This(), entry: *object_mod.WeakCollectionEntry) RootTraceError!void {
@@ -1653,7 +1667,6 @@ pub const JSRuntime = struct {
             for (cells_slot.*) |*cell| {
                 if (!cell.isActive() and !cell.isPending()) continue;
                 const target_identity = cell.target_identity orelse continue;
-                if ((target_identity & 1) != 0) continue;
                 if (self.gc.majorTraceIdentityMarked(target_identity)) {
                     cell.state = .active;
                     continue;
@@ -1678,6 +1691,11 @@ pub const JSRuntime = struct {
     }
 
     fn runMajorDeadWeakMetadataPostprocess(self: *JSRuntime) void {
+        const started_borrowed_cleanup = !self.borrowedWeakCleanupActive();
+        if (started_borrowed_cleanup) self.beginBorrowedWeakCleanup();
+        defer if (started_borrowed_cleanup) self.endBorrowedWeakCleanup();
+        defer if (started_borrowed_cleanup) Object.drainBorrowedWeakCleanup(self);
+
         var current = self.gc.gc_obj_list_head;
         while (current) |node| {
             const next = node.next;
@@ -1697,39 +1715,176 @@ pub const JSRuntime = struct {
                 var index: usize = 0;
                 while (index < entries_slot.*.len) {
                     const entry = &entries_slot.*[index];
-                    if ((entry.key_identity & 1) != 0 or self.gc.majorTraceIdentityMarked(entry.key_identity) or !self.metadataWeakValueSafeToDrop(entry.value)) {
+                    if (self.gc.majorTraceIdentityMarked(entry.key_identity)) {
                         index += 1;
                         continue;
                     }
 
-                    entry.destroy(self);
-                    const last_index = entries_slot.*.len - 1;
-                    if (index < last_index) entries_slot.*[index] = entries_slot.*[last_index];
-                    entries_slot.* = entries_slot.*.ptr[0..last_index];
+                    obj.removeWeakCollectionEntryAt(self, index);
                     removed_entry = true;
                 }
                 if (removed_entry) obj.clearCollectionIndex(self);
             }
             if (obj.weakRefTargetIdentity()) |identity| {
-                if ((identity & 1) == 0 and !self.gc.majorTraceIdentityMarked(identity)) {
+                if (!self.gc.majorTraceIdentityMarked(identity)) {
                     obj.clearWeakRefTargetIdentity(self);
+                }
+            }
+            if (obj.finalizationRegistryCells().len != 0) {
+                const cells_slot = obj.finalizationRegistryCellsSlot();
+                var index: usize = 0;
+                while (index < cells_slot.*.len) {
+                    const cell = &cells_slot.*[index];
+                    if (cell.isPending()) {
+                        index += 1;
+                        continue;
+                    }
+                    if (cell.isActive()) {
+                        const target_identity = cell.target_identity orelse {
+                            obj.removeFinalizationRegistryCellAt(self, index);
+                            continue;
+                        };
+                        if (self.gc.majorTraceIdentityMarked(target_identity)) {
+                            index += 1;
+                            continue;
+                        }
+                    }
+
+                    obj.removeFinalizationRegistryCellAt(self, index);
                 }
             }
             current = next;
         }
     }
 
-    fn metadataWeakValueSafeToDrop(self: *JSRuntime, value: JSValue) bool {
-        if (value.refHeader()) |header| {
-            return self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1));
+    fn runMajorWeakPersistentAndSymbolMetadataPostprocess(self: *JSRuntime) gc.CollectionError!void {
+        const WeakPersistentMetadataContext = struct {
+            rt: *JSRuntime,
+
+            pub fn isWeakIdentityAlive(context: @This(), identity: usize) bool {
+                return context.rt.gc.majorTraceIdentityMarked(identity);
+            }
+        };
+        self.sweepDeadWeakPersistentSlots(WeakPersistentMetadataContext{ .rt = self });
+        try self.seedMajorHybridSymbolRoots();
+        _ = self.atoms.sweepUnrootedUniqueSymbols(self.gc.majorTraceSymbolRoots());
+    }
+
+    fn seedMajorHybridSymbolRoots(self: *JSRuntime) gc.CollectionError!void {
+        const HybridSymbolVisitor = struct {
+            rt: *JSRuntime,
+            objects: std.AutoHashMap(usize, void),
+            bytecodes: std.AutoHashMap(usize, void),
+            err: ?RootTraceError = null,
+
+            fn init(rt: *JSRuntime) @This() {
+                return .{
+                    .rt = rt,
+                    .objects = std.AutoHashMap(usize, void).init(rt.memory.allocator),
+                    .bytecodes = std.AutoHashMap(usize, void).init(rt.memory.allocator),
+                };
+            }
+
+            fn deinit(visitor: *@This()) void {
+                visitor.objects.deinit();
+                visitor.bytecodes.deinit();
+            }
+
+            pub fn visitObject(visitor: *@This(), slot: *?*Object) RootTraceError!void {
+                const obj = slot.* orelse return;
+                try visitor.scanObject(obj);
+            }
+
+            pub fn visitValue(visitor: *@This(), slot: *JSValue) RootTraceError!void {
+                if (slot.asSymbolAtom()) |atom_id| {
+                    try visitor.markSymbol(atom_id);
+                    return;
+                }
+                if (slot.refHeader()) |header| try visitor.scanHeader(header);
+                if (slot.objectHeader()) |header| try visitor.scanHeader(header);
+            }
+
+            pub fn visitSymbol(visitor: *@This(), symbol: *atom.Atom) RootTraceError!void {
+                try visitor.markSymbol(symbol.*);
+            }
+
+            pub fn visitWeakCollectionEntry(visitor: *@This(), entry: *object_mod.WeakCollectionEntry) RootTraceError!void {
+                _ = visitor;
+                _ = entry;
+            }
+
+            pub fn visitFinalizationCell(visitor: *@This(), entry: *object_mod.FinalizationRegistryCell) RootTraceError!void {
+                if (!entry.keepsHeldValuesAlive()) return;
+                var held = entry.held_value;
+                try visitor.visitValue(&held);
+                var token = entry.unregister_token;
+                try visitor.visitValue(&token);
+            }
+
+            fn markSymbol(visitor: *@This(), atom_id: atom.Atom) RootTraceError!void {
+                if (visitor.rt.atoms.kind(atom_id) != .symbol) return;
+                _ = try visitor.rt.gc.markMajorTraceSymbol(atom_id);
+            }
+
+            fn scanHeader(visitor: *@This(), header: *gc.Header) RootTraceError!void {
+                switch (header.kind) {
+                    .object => {
+                        const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                        try visitor.scanObject(obj);
+                    },
+                    .function_bytecode => {
+                        const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                        try visitor.scanFunctionBytecode(fb);
+                    },
+                    .string, .big_int => {},
+                }
+            }
+
+            fn scanObject(visitor: *@This(), obj: *Object) RootTraceError!void {
+                const entry = try visitor.objects.getOrPut(@intFromPtr(obj));
+                if (entry.found_existing) return;
+                try obj.traceChildEdgesFallible(visitor.rt, visitor);
+            }
+
+            fn scanFunctionBytecode(visitor: *@This(), fb: *bytecode_function.FunctionBytecode) RootTraceError!void {
+                const entry = try visitor.bytecodes.getOrPut(@intFromPtr(fb));
+                if (entry.found_existing) return;
+                if (fb.class_fields_init) |*stored| try visitor.visitValue(stored);
+                for (fb.cpool) |*stored| try visitor.visitValue(stored);
+            }
+        };
+
+        var visitor = HybridSymbolVisitor.init(self);
+        defer visitor.deinit();
+
+        for (self.modules.modules) |record| {
+            if (record.import_meta) |stored| {
+                var value = stored;
+                visitor.visitValue(&value) catch |err| return mapRootTraceError(err);
+            }
+            for (record.local_bindings) |binding| {
+                var value = binding.cell;
+                visitor.visitValue(&value) catch |err| return mapRootTraceError(err);
+            }
         }
-        if (value.objectHeader()) |header| {
-            return self.gc.majorTraceIdentityMarked(@intFromPtr(header) & ~@as(usize, 1));
+
+        var current = self.gc.gc_obj_list_head;
+        while (current) |node| {
+            const header = gc.headerFromGcNode(node);
+            if (header.rc > 0) {
+                visitor.scanHeader(header) catch |err| return mapRootTraceError(err);
+            }
+            current = node.next;
         }
-        return true;
     }
 
     fn enqueueMajorMetadataValue(self: *JSRuntime, slot: *JSValue) gc.CollectionError!void {
+        if (slot.asSymbolAtom()) |atom_id| {
+            _ = self.gc.markMajorTraceSymbol(atom_id) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+            };
+            return;
+        }
         if (slot.refHeader()) |header| {
             _ = self.gc.enqueueMajorTraceHeader(header) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
@@ -1761,6 +1916,11 @@ pub const JSRuntime = struct {
     pub fn runMajorDeadWeakMetadataPostprocessForTest(self: *JSRuntime) void {
         if (!builtin.is_test) @compileError("test-only helper");
         self.runMajorDeadWeakMetadataPostprocess();
+    }
+
+    pub fn runMajorWeakPersistentAndSymbolMetadataPostprocessForTest(self: *JSRuntime) gc.CollectionError!void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        try self.runMajorWeakPersistentAndSymbolMetadataPostprocess();
     }
 
     fn tryRunMajorMarkSliceWithValueRoots(
@@ -1820,6 +1980,12 @@ pub const JSRuntime = struct {
             return err;
         };
         self.runMajorDeadWeakMetadataPostprocess();
+        self.runMajorWeakPersistentAndSymbolMetadataPostprocess() catch |err| {
+            self.gc.recordFailure(err);
+            self.gc.abortMajorCycle();
+            self.gc.requestGC(.major, .collection_failed, .soon);
+            return err;
+        };
 
         const freed = Object.destroyRuntimeCyclesWithValueRoots(self, roots) catch |err| {
             const mapped: gc.CollectionError = switch (err) {

@@ -1999,6 +1999,20 @@ pub const Object = struct {
         return &.{};
     }
 
+    pub fn removeWeakCollectionEntryAt(self: *Object, rt: *JSRuntime, index: usize) void {
+        const entries_slot = self.weakCollectionEntriesSlot();
+        std.debug.assert(index < entries_slot.*.len);
+
+        const removed = entries_slot.*[index];
+        deferWeakEntryValueFree(rt, removed);
+
+        const last_index = entries_slot.*.len - 1;
+        if (index < last_index) entries_slot.*[index] = entries_slot.*[last_index];
+        entries_slot.* = entries_slot.*.ptr[0..last_index];
+        self.clearCollectionIndex(rt);
+        self.pruneBorrowedReferenceHolderIfEmpty(rt);
+    }
+
     pub fn ensureWeakCollectionEntryCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
         const payload = self.collectionPayload() orelse {
             std.debug.assert(self.class_payload_kind == .collection);
@@ -2055,6 +2069,19 @@ pub const Object = struct {
             if (cell.isPending()) count += 1;
         }
         return count;
+    }
+
+    pub fn removeFinalizationRegistryCellAt(self: *Object, rt: *JSRuntime, index: usize) void {
+        std.debug.assert(self.class_id == class.ids.finalization_registry);
+        const entries = self.finalizationRegistryCellsSlot();
+        std.debug.assert(index < entries.*.len);
+
+        const removed_cell = entries.*[index];
+        const last_index = entries.*.len - 1;
+        if (index < last_index) entries.*[index] = entries.*[last_index];
+        entries.* = entries.*.ptr[0..last_index];
+        removed_cell.destroy(rt);
+        self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
     pub fn unregisterFinalizationRegistryCells(self: *Object, rt: *JSRuntime, token: JSValue) bool {

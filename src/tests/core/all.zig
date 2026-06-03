@@ -225,6 +225,10 @@ fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.Backtrace
 }
 
 fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
+    try appendWeakCollectionValueEntry(rt, collection, key.value(), value);
+}
+
+fn appendWeakCollectionValueEntry(rt: *core.JSRuntime, collection: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
@@ -236,7 +240,7 @@ fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key:
     errdefer refreshed_entries.* = refreshed_entries.*[0..index];
     try rt.writeBarrierValueAt(&collection.header, value, &refreshed_entries.*[index].value);
     refreshed_entries.*[index] = .{
-        .key_identity = @intFromPtr(&key.header) & ~@as(usize, 1),
+        .key_identity = core.Object.weakIdentityFromValue(key).?,
         .value = value.dup(),
     };
 }
@@ -3717,6 +3721,42 @@ test "major trace mark prepass marks roots and strong child edges" {
     try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&child.header));
 }
 
+test "major metadata mark survives cycle backend worktables" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const parent = try core.Object.create(&rt, core.class.ids.object, null);
+    const child = try core.Object.create(&rt, core.class.ids.object, null);
+    const key = try rt.internAtom("majorTraceSurvivesCycleBackend");
+    defer rt.atoms.free(key);
+    try parent.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
+    child.value().free(&rt);
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(parent.value());
+    defer scope.deinit();
+
+    const parent_identity = @intFromPtr(&parent.header) & ~@as(usize, 1);
+    const child_identity = @intFromPtr(&child.header) & ~@as(usize, 1);
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceIdentityMarked(parent_identity));
+    try std.testing.expect(rt.gc.majorTraceIdentityMarked(child_identity));
+
+    try std.testing.expectEqual(@as(usize, 0), try core.Object.destroyRuntimeCyclesWithValueRoots(&rt, null));
+
+    try std.testing.expect(rt.gc.majorTraceIdentityMarked(parent_identity));
+    try std.testing.expect(rt.gc.majorTraceIdentityMarked(child_identity));
+
+    rt.gc.abortMajorCycle();
+}
+
 test "major metadata weak fixpoint marks weakmap value for marked object key" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
@@ -3749,6 +3789,49 @@ test "major metadata weak fixpoint marks weakmap value for marked object key" {
 
     const after_weak = rt.gcStats();
     try std.testing.expectEqual(core.gc.MajorPhase.weak_fixpoint, after_weak.major_phase);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata weak fixpoint marks weakmap value for marked symbol key" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weakmap = try core.Object.create(&rt, core.class.ids.weakmap, null);
+    const symbol_atom = try rt.atoms.newValueSymbol("majorMetadataWeakSymbolKey");
+    var symbol_value = core.JSValue.symbol(symbol_atom);
+    const value = try core.Object.create(&rt, core.class.ids.object, null);
+
+    try appendWeakCollectionValueEntry(&rt, weakmap, symbol_value, value.value());
+    value.value().free(&rt);
+
+    var weakmap_value = weakmap.value();
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &weakmap_value },
+        .{ .value = &symbol_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weakmap.header));
+    try std.testing.expect(rt.gc.majorTraceSymbolMarkedForTest(symbol_atom));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&value.header));
+
+    try rt.runMajorWeakFixpointForTest();
+
     try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
 
     rt.gc.abortMajorCycle();
@@ -3840,6 +3923,140 @@ test "major metadata finalization postprocess enqueues dead target cleanup" {
     rt.gc.abortMajorCycle();
 }
 
+test "major metadata finalization postprocess keeps target alive when held value reaches it" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const registry = try core.Object.create(&rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = core.JSValue.int32(19);
+
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const held = try core.Object.create(&rt, core.class.ids.object, null);
+    const held_target_key = try rt.internAtom("majorMetadataFinalizationHeldTarget");
+    defer rt.atoms.free(held_target_key);
+    try held.defineOwnProperty(&rt, held_target_key, core.Descriptor.data(target_value, true, true, true));
+
+    try registry.appendFinalizationRegistryCell(&rt, target_value, held.value(), core.JSValue.undefinedValue());
+    held.value().free(&rt);
+    target_value.free(&rt);
+    target_value = core.JSValue.undefinedValue();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(registry.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&registry.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&held.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&target.header));
+
+    try rt.runMajorWeakFixpointForTest();
+    try rt.runMajorFinalizationMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(core.object.FinalizationRegistryCellState.active, registry.finalizationRegistryCells()[0].state);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&held.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&target.header));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata finalization postprocess enqueues dead symbol target cleanup" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const registry = try core.Object.create(&rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = core.JSValue.int32(23);
+
+    const target_atom = try rt.atoms.newValueSymbol("majorMetadataFinalizationSymbolTarget");
+    const target_value = core.JSValue.symbol(target_atom);
+    const held = try core.Object.create(&rt, core.class.ids.object, null);
+    try registry.appendFinalizationRegistryCell(&rt, target_value, held.value(), core.JSValue.undefinedValue());
+    held.value().free(&rt);
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(registry.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&registry.header));
+    try std.testing.expect(!rt.gc.majorTraceSymbolMarkedForTest(target_atom));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&held.header));
+
+    try rt.runMajorWeakFixpointForTest();
+    try rt.runMajorFinalizationMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(core.object.FinalizationRegistryCellState.queued, registry.finalizationRegistryCells()[0].state);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&held.header));
+
+    rt.clearPendingFinalizationJobs();
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata dead weak sweep removes queued finalization cell" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const registry = try core.Object.create(&rt, core.class.ids.finalization_registry, null);
+    registry.finalizationRegistryCleanupCallbackSlot().* = core.JSValue.int32(29);
+
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const self_key = try rt.internAtom("majorMetadataFinalizationSweepSelf");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(&rt, self_key, core.Descriptor.data(target_value, true, true, true));
+
+    const held = try core.Object.create(&rt, core.class.ids.object, null);
+    try registry.appendFinalizationRegistryCell(&rt, target_value, held.value(), core.JSValue.undefinedValue());
+    held.value().free(&rt);
+    target_value.free(&rt);
+    target_value = core.JSValue.undefinedValue();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(registry.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try rt.runMajorWeakFixpointForTest();
+    try rt.runMajorFinalizationMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
+    try std.testing.expectEqual(core.object.FinalizationRegistryCellState.queued, registry.finalizationRegistryCells()[0].state);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&held.header));
+
+    rt.runMajorDeadWeakMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
+    try std.testing.expect(!rt.borrowedReferenceHolderRegistered(registry));
+
+    const job = rt.takePendingFinalizationJob().?;
+    defer job.deinit(&rt);
+    try std.testing.expectEqual(&held.header, job.held_value.refHeader().?);
+    try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
+    rt.gc.abortMajorCycle();
+}
+
 test "major metadata dead weak sweep removes dead object key entry with marked value" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{
@@ -3871,6 +4088,90 @@ test "major metadata dead weak sweep removes dead object key entry with marked v
     try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weakmap.header));
     try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
     try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&key.header));
+    try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
+
+    try rt.runMajorWeakFixpointForTest();
+    rt.runMajorDeadWeakMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata dead weak sweep removes dead object key entry with unmarked value" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weakmap = try core.Object.create(&rt, core.class.ids.weakmap, null);
+    const key = try core.Object.create(&rt, core.class.ids.object, null);
+    var key_value = key.value();
+    const key_self = try rt.internAtom("majorMetadataDeadWeakUnmarkedKeySelf");
+    defer rt.atoms.free(key_self);
+    try key.defineOwnProperty(&rt, key_self, core.Descriptor.data(key_value, true, true, true));
+
+    const value = try core.Object.create(&rt, core.class.ids.object, null);
+    var value_value = value.value();
+    const value_self = try rt.internAtom("majorMetadataDeadWeakUnmarkedValueSelf");
+    defer rt.atoms.free(value_self);
+    try value.defineOwnProperty(&rt, value_self, core.Descriptor.data(value_value, true, true, true));
+
+    try appendWeakCollectionEntry(&rt, weakmap, key, value_value);
+    key_value.free(&rt);
+    key_value = core.JSValue.undefinedValue();
+    value_value.free(&rt);
+    value_value = core.JSValue.undefinedValue();
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(weakmap.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weakmap.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&key.header));
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&value.header));
+    try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
+
+    try rt.runMajorWeakFixpointForTest();
+    rt.runMajorDeadWeakMetadataPostprocessForTest();
+
+    try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
+    try std.testing.expect(!rt.borrowedReferenceHolderRegistered(weakmap));
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata dead weak sweep removes dead symbol key entry with marked value" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weakmap = try core.Object.create(&rt, core.class.ids.weakmap, null);
+    const symbol_atom = try rt.atoms.newValueSymbol("majorMetadataDeadWeakSymbolKey");
+    const symbol_value = core.JSValue.symbol(symbol_atom);
+    const value = try core.Object.create(&rt, core.class.ids.object, null);
+    try appendWeakCollectionValueEntry(&rt, weakmap, symbol_value, value.value());
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(weakmap.value());
+    _ = try scope.local(value.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weakmap.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&value.header));
+    try std.testing.expect(!rt.gc.majorTraceSymbolMarkedForTest(symbol_atom));
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
 
     try rt.runMajorWeakFixpointForTest();
@@ -3920,6 +4221,127 @@ test "major metadata dead weak sweep clears dead weakref object target" {
     rt.runMajorDeadWeakMetadataPostprocessForTest();
 
     try std.testing.expect(weak_ref.weakRefDeref(&rt).isUndefined());
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata dead weak sweep clears dead weakref symbol target" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const weak_ref = try core.Object.create(&rt, core.class.ids.weak_ref, null);
+    const symbol_atom = try rt.atoms.newValueSymbol("majorMetadataDeadWeakRefSymbolTarget");
+    try weak_ref.setWeakRefTarget(&rt, core.JSValue.symbol(symbol_atom));
+
+    var scope = rt.enterHandleScope();
+    _ = try scope.local(weak_ref.value());
+    defer scope.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&weak_ref.header));
+    try std.testing.expect(!rt.gc.majorTraceSymbolMarkedForTest(symbol_atom));
+    try std.testing.expectEqual(symbol_atom, weak_ref.weakRefDeref(&rt).asSymbolAtom().?);
+
+    try rt.runMajorWeakFixpointForTest();
+    rt.runMajorDeadWeakMetadataPostprocessForTest();
+
+    try std.testing.expect(weak_ref.weakRefDeref(&rt).isUndefined());
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata weak persistent sweep clears dead object cycle target" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const target = try core.Object.create(&rt, core.class.ids.object, null);
+    var target_value = target.value();
+    const self_key = try rt.internAtom("majorMetadataWeakPersistentSelf");
+    defer rt.atoms.free(self_key);
+    try target.defineOwnProperty(&rt, self_key, core.Descriptor.data(target_value, true, true, true));
+
+    var clear_count: usize = 0;
+    var weak = try rt.createWeakPersistentValue(target_value, weakPersistentCounterCallback, &clear_count);
+    defer weak.deinit();
+
+    target_value.free(&rt);
+    target_value = core.JSValue.undefinedValue();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(!rt.gc.majorTraceMarkedForTest(&target.header));
+    try std.testing.expect(weak.isAlive());
+
+    try rt.runMajorWeakPersistentAndSymbolMetadataPostprocessForTest();
+
+    try std.testing.expect(!weak.isAlive());
+    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 1), clear_count);
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata symbol sweep clears unrooted weak persistent symbol target" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const symbol_atom = try rt.atoms.newValueSymbol("majorMetadataWeakPersistentSymbol");
+    var clear_count: usize = 0;
+    var weak = try rt.createWeakPersistentValue(core.JSValue.symbol(symbol_atom), weakPersistentCounterCallback, &clear_count);
+    defer weak.deinit();
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(!rt.gc.majorTraceSymbolMarkedForTest(symbol_atom));
+    try std.testing.expect(weak.isAlive());
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+
+    try rt.runMajorWeakPersistentAndSymbolMetadataPostprocessForTest();
+
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+    try std.testing.expect(!weak.isAlive());
+    try std.testing.expect(weak.get().isUndefined());
+    try std.testing.expectEqual(@as(usize, 1), clear_count);
+
+    rt.gc.abortMajorCycle();
+}
+
+test "major metadata symbol sweep keeps external symbol root" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const symbol_atom = try rt.atoms.newValueSymbol("majorMetadataExternalSymbolRoot");
+    try rt.registerExternalSymbolRoot(symbol_atom);
+    defer rt.unregisterExternalSymbolRoot(symbol_atom);
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceSymbolMarkedForTest(symbol_atom));
+
+    try rt.runMajorWeakPersistentAndSymbolMetadataPostprocessForTest();
+
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
     rt.gc.abortMajorCycle();
 }
