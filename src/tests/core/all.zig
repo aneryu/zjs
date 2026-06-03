@@ -3757,6 +3757,52 @@ test "major metadata mark survives cycle backend worktables" {
     rt.gc.abortMajorCycle();
 }
 
+test "major metadata mark rescues borrowed object root from cycle backend" {
+    var rt: core.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{
+        .gc_policy = .{
+            .major_debt_threshold = std.math.maxInt(usize),
+        },
+    });
+    defer rt.deinit();
+
+    const left = try core.Object.create(&rt, core.class.ids.object, null);
+    const right = try core.Object.create(&rt, core.class.ids.object, null);
+    const left_key = try rt.internAtom("majorTraceRescueLeft");
+    defer rt.atoms.free(left_key);
+    const right_key = try rt.internAtom("majorTraceRescueRight");
+    defer rt.atoms.free(right_key);
+
+    try left.defineOwnProperty(&rt, right_key, core.Descriptor.data(right.value(), true, true, true));
+    try right.defineOwnProperty(&rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+
+    var borrowed_left: ?*core.Object = left;
+    var object_roots = [_]core.runtime.ObjectRootValue{
+        .{ .object = &borrowed_left },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .objects = &object_roots,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    left.value().free(&rt);
+    right.value().free(&rt);
+
+    rt.gc.beginMajorCycle(.manual, 0);
+    try rt.runMajorTraceMarkForTest(null);
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&left.header));
+    try std.testing.expect(rt.gc.majorTraceMarkedForTest(&right.header));
+
+    try std.testing.expectEqual(@as(usize, 0), try core.Object.destroyRuntimeCyclesWithValueRoots(&rt, &root_frame));
+    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
+
+    rt.gc.abortMajorCycle();
+    borrowed_left = null;
+    try std.testing.expectEqual(@as(usize, 2), rt.runObjectCycleRemoval());
+}
+
 test "major metadata weak fixpoint marks weakmap value for marked object key" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{

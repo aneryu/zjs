@@ -5131,6 +5131,13 @@ pub const Object = struct {
         defer symbol_roots.deinit();
         try seedSymbolRootsFromRuntimeHeldValues(rt, roots, &symbol_roots);
 
+        var preserved_bytecode_set = &rt.gc.preserved_bytecodes;
+        preserved_bytecode_set.clearRetainingCapacity();
+
+        if (rt.gc.canUseMajorTraceForCycleRescue()) {
+            try seedPreservedFromMajorTraceCandidates(rt, tmp_head, preserved, preserved_bytecode_set);
+        }
+
         try scanPreservedWeakAndFinalizationEdges(rt, visited, preserved, &symbol_roots);
 
         const ResurrectHelper = struct {
@@ -5236,9 +5243,6 @@ pub const Object = struct {
             }
         };
 
-        var preserved_bytecodes = &rt.gc.preserved_bytecodes;
-        preserved_bytecodes.clearRetainingCapacity();
-
         var object_worklist = &rt.gc.object_worklist;
         object_worklist.clearRetainingCapacity();
 
@@ -5264,7 +5268,7 @@ pub const Object = struct {
                     .rt = rt,
                     .visited_set = visited,
                     .preserved_set = preserved,
-                    .preserved_bytecodes = preserved_bytecodes,
+                    .preserved_bytecodes = preserved_bytecode_set,
                     .symbol_roots_set = &symbol_roots,
                     .object_worklist = object_worklist,
                     .bytecode_worklist = bytecode_worklist,
@@ -5279,7 +5283,7 @@ pub const Object = struct {
                     rt,
                     visited,
                     preserved,
-                    preserved_bytecodes,
+                    preserved_bytecode_set,
                     &symbol_roots,
                     object_worklist,
                     bytecode_worklist,
@@ -5303,7 +5307,7 @@ pub const Object = struct {
                     }
                 } else if (h.kind == .function_bytecode) {
                     const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                    if (preserved_bytecodes.contains(@intFromPtr(fb))) {
+                    if (preserved_bytecode_set.contains(@intFromPtr(fb))) {
                         unlinkNodeFromList(&tmp_head, &tmp_tail, node);
                         linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
                         h.flags.mark = false;
@@ -5349,7 +5353,7 @@ pub const Object = struct {
             }
         }
         {
-            var iterator = preserved_bytecodes.keyIterator();
+            var iterator = preserved_bytecode_set.keyIterator();
             while (iterator.next()) |address| {
                 const fb: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
                 fb.header.rc += 1;
@@ -5386,7 +5390,7 @@ pub const Object = struct {
             }
         }
         {
-            var iterator = preserved_bytecodes.keyIterator();
+            var iterator = preserved_bytecode_set.keyIterator();
             while (iterator.next()) |address| {
                 const fb: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
                 fb.header.rc -= 1;
@@ -6009,6 +6013,36 @@ pub const Object = struct {
         };
         try rt.traceRoots(roots, &context_root_visitor);
         try scanSymbolRootModuleRegistry(rt, symbol_roots, &function_bytecodes);
+    }
+
+    fn seedPreservedFromMajorTraceCandidates(
+        rt: *JSRuntime,
+        candidate_head: ?*gc.GcNode,
+        preserved: *ObjectVisitSet,
+        preserved_bytecodes: *ObjectVisitSet,
+    ) ObjectGraphError!void {
+        var current = candidate_head;
+        while (current) |node| {
+            const header = gc.headerFromGcNode(node);
+            const identity = @intFromPtr(header) & ~@as(usize, 1);
+            if (!rt.gc.majorTraceIdentityMarked(identity)) {
+                current = node.next;
+                continue;
+            }
+
+            switch (header.kind) {
+                .object => {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
+                    try preserved.put(@intFromPtr(obj), {});
+                },
+                .function_bytecode => {
+                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                    try preserved_bytecodes.put(@intFromPtr(fb), {});
+                },
+                .string, .big_int => {},
+            }
+            current = node.next;
+        }
     }
 
     fn scanSymbolRootModuleRegistry(

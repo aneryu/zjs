@@ -1645,6 +1645,13 @@ pub const Registry = struct {
         return self.major_phase != .idle;
     }
 
+    pub fn canUseMajorTraceForCycleRescue(self: Registry) bool {
+        return switch (self.major_phase) {
+            .mark_roots, .mark_incremental, .weak_fixpoint, .finalize_mark => true,
+            .idle, .sweep => false,
+        };
+    }
+
     pub fn hasPendingMajorSweep(self: Registry) bool {
         return self.old_space.needs_sweep_page_count != 0 or self.large_space.needs_sweep_page_count != 0;
     }
