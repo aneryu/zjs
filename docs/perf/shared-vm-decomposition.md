@@ -1,12 +1,12 @@
 # `vm/shared.zig` Decomposition Map
 
-`src/engine/exec/vm/shared.zig` remains large and should continue to shrink in
+`src/exec/vm/shared.zig` remains large and should continue to shrink in
 small behavior-preserving moves. This map is a refactor aid, not a status
 ledger.
 
 ## Existing VM Shards
 
-Current files under `src/engine/exec/vm/` include:
+Current files under `src/exec/vm/` include:
 
 - `arith.zig`: arithmetic opcode helpers.
 - `call.zig`: call and construct related opcode helpers.

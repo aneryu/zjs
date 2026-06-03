@@ -9,7 +9,7 @@
 //!    revision.
 //!
 //! When `tests/fixtures/quickjs-opcode.h` legitimately changes, regenerate
-//! `src/engine/bytecode/opcodes_generated.zig` and bump the SHA constant below
+//! `src/bytecode/opcodes_generated.zig` and bump the SHA constant below
 //! to match the new file.
 
 const std = @import("std");

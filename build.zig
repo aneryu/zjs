@@ -8,14 +8,14 @@ pub fn build(b: *std.Build) void {
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
-        .root_source_file = b.path("src/engine/root.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
     const test262_engine_fast_mod = b.createModule(.{
-        .root_source_file = b.path("src/engine/root.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,

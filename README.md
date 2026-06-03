@@ -120,17 +120,17 @@ zig build perf-benchmark --summary all
 
 ## Repository Layout
 
-- `src/engine/root.zig`: public engine entrypoint.
-- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+- `src/root.zig`: public engine entrypoint.
+- `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, GC, and core ownership.
-- `src/engine/frontend/`: lexer, parser, source positions, and frontend
+- `src/frontend/`: lexer, parser, source positions, and frontend
   parsing.
-- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata,
+- `src/bytecode/`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
-- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, modules,
+- `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
   promises, and job queue.
-- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
-- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/builtins/`: ECMAScript built-in objects and constructors.
+- `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
 - `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.

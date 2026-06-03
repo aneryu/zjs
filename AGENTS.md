@@ -52,15 +52,15 @@ available only through git history.
 
 ## Repository Layout
 
-- `src/engine/root.zig`: public engine entrypoint.
-- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+- `src/root.zig`: public engine entrypoint.
+- `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, and core ownership.
-- `src/engine/frontend/`: lexer, parser, source positions, and frontend parsing.
-- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata, and
+- `src/frontend/`: lexer, parser, source positions, and frontend parsing.
+- `src/bytecode/`: bytecode, constants, scopes, module metadata, and
   emitter.
-- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
-- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
-- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
+- `src/builtins/`: ECMAScript built-in objects and constructors.
+- `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
 - `src/tests/`: Zig unit and integration test entrypoints.
 - `test262/`: test262 checkout used by the local gate.
@@ -119,13 +119,14 @@ Missing or invalid arguments should print usage and exit non-zero.
 ## Where To Look
 
 - Core values, runtime/context, atoms, strings, objects, properties, and arrays:
-  `src/engine/core/`.
-- Lexer, parser, and early errors: `src/engine/frontend/`.
-- Bytecode emission, scopes, and module metadata: `src/engine/bytecode/`.
+- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
+  `src/core/`.
+- Lexer, parser, and early errors: `src/frontend/`.
+- Bytecode emission, scopes, and module metadata: `src/bytecode/`.
 - Execution semantics, calls, exceptions, eval, and job queue:
-  `src/engine/exec/`.
-- Built-in object behavior: `src/engine/builtins/`.
-- RegExp, Unicode, BigInt, and number formatting: `src/engine/libs/`.
+  `src/exec/`.
+- Built-in object behavior: `src/builtins/`.
+- RegExp, Unicode, BigInt, and number formatting: `src/libs/`.
 - CLI behavior: `src/cli/`.
 - test262 runner behavior: `src/cli/run_test262.zig`.
 

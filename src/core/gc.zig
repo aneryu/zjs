@@ -1,5 +1,5 @@
 //! Z-GE (Garbage Engine) Core Implementation
-//! Governing Layer: third_party/zjs/src/engine/core/gc.zig
+//! Governing Layer: third_party/zjs/src/core/gc.zig
 //! Following Z-GE Architecture Contract v1.0
 
 const std = @import("std");

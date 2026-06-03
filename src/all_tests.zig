@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const engine = @import("engine/root.zig");
+const engine = @import("root.zig");
 
 pub const core = engine.core;
 pub const frontend = engine.frontend;

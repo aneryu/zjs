@@ -5,10 +5,10 @@ not a phase plan.
 
 Primary owners:
 
-- `src/engine/bytecode/ic.zig`
-- `src/engine/bytecode/function.zig`
-- `src/engine/exec/vm/property.zig`
-- `src/engine/core/profile.zig`
+- `src/bytecode/ic.zig`
+- `src/bytecode/function.zig`
+- `src/exec/vm/property.zig`
+- `src/core/profile.zig`
 
 Inline caches are enabled by default and can be disabled with:
 
