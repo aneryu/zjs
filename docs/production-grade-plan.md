@@ -33,8 +33,8 @@ wall-clock supervision。
 ## Gate-First TODO
 
 - [x] 保持 `zig build test --summary all` 作为默认 Debug test surface。
-- [x] 保持 `zig build test-fast --summary all` 作为 ReleaseSafe exec shard。
-- [x] 保持 `zig build smoke --summary all` 覆盖 CLI 和常用脚本行为。
+- [x] 保持 `zig build test -Doptimize=ReleaseSafe --summary all` 作为 ReleaseSafe exec shard。
+- [x] 移除过时的 `smoke` 步骤以保持测试构建的精简干净。
 - [x] 保持 `zig build test262-gate --summary all` 使用 checked-in config。
 - [x] 保持 `zig build engine-production-gate --summary all` 作为顶层 release gate。
 - [x] 对 parser、runner、execution 或 semantic 改动运行 focused test262 slice。

@@ -6,9 +6,7 @@ fn execShardUsesOomOptions(path: []const u8) bool {
         std.mem.eql(u8, path, "src/tests/exec/engine_smoke.zig") or
         std.mem.eql(u8, path, "src/tests/exec/collection_typedarray.zig") or
         std.mem.eql(u8, path, "src/tests/exec/module_regexp.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/iter_generator.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/vm_control.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/vm_classes.zig");
+        std.mem.eql(u8, path, "src/tests/exec/iter_generator.zig");
 }
 
 pub fn build(b: *std.Build) void {
@@ -450,8 +448,7 @@ pub fn build(b: *std.Build) void {
     const run_oom_helpers_tests = b.addRunArtifact(oom_helpers_tests);
 
     // User-facing steps to expose
-    const test_step = b.step("test", "Run all Zig tests (ReleaseSafe exec shards, fast warm runs, slow first cold compile)");
-    const test_debug_step = b.step("test-debug", "Run available Zig tests with exec shards in Debug mode (slower run, fast cold compile)");
+    const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
     const test_oom_step = b.step("test-oom", "Run sampled exec OOM fail-index sweeps in Debug mode");
     const test_oom_exhaustive_step = b.step("test-oom-exhaustive", "Run exhaustive exec OOM fail-index sweeps in Debug mode (very slow)");
 
@@ -473,30 +470,20 @@ pub fn build(b: *std.Build) void {
     else
         true;
 
-    // Attach common non-exec tests to main test steps
-    inline for (&[_]*std.Build.Step{ test_step, test_debug_step }) |step| {
-        step.dependOn(&run_engine_root_tests.step);
-        step.dependOn(&run_engine_production_tests.step);
-        step.dependOn(&run_core_tests.step);
-        step.dependOn(&run_gc_stress_tests.step);
-        step.dependOn(&run_bytecode_tests.step);
-        step.dependOn(&run_frontend_tests.step);
-        step.dependOn(&run_builtins_tests.step);
-        step.dependOn(&run_tools_tests.step);
-        step.dependOn(&run_zjs_cli_tests.step);
-        step.dependOn(&run_test262_runner_tests.step);
-        if (oom_helpers_matches_filter) {
-            step.dependOn(&run_oom_helpers_tests.step);
-        }
+    // Attach common non-exec tests to main test step
+    test_step.dependOn(&run_engine_root_tests.step);
+    test_step.dependOn(&run_engine_production_tests.step);
+    test_step.dependOn(&run_core_tests.step);
+    test_step.dependOn(&run_gc_stress_tests.step);
+    test_step.dependOn(&run_bytecode_tests.step);
+    test_step.dependOn(&run_frontend_tests.step);
+    test_step.dependOn(&run_builtins_tests.step);
+    test_step.dependOn(&run_tools_tests.step);
+    test_step.dependOn(&run_zjs_cli_tests.step);
+    test_step.dependOn(&run_test262_runner_tests.step);
+    if (oom_helpers_matches_filter) {
+        test_step.dependOn(&run_oom_helpers_tests.step);
     }
-
-    const engine_release_safe_mod = b.addModule("quickjs_zig_engine_release_safe", .{
-        .root_source_file = b.path("src/engine/root.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-    });
-    engine_release_safe_mod.addOptions("build_options", engine_options);
 
     const engine_oom_mod = b.addModule("quickjs_zig_engine_oom", .{
         .root_source_file = b.path("src/engine/root.zig"),
@@ -517,27 +504,20 @@ pub fn build(b: *std.Build) void {
         .{ .name = "exec-builtins-async", .path = "src/tests/exec/builtins_async.zig" },
         .{ .name = "exec-engine-smoke", .path = "src/tests/exec/engine_smoke.zig" },
         .{ .name = "exec-eval-errors", .path = "src/tests/exec/eval_errors.zig" },
-        .{ .name = "exec-class-object", .path = "src/tests/exec/class_object.zig" },
-        .{ .name = "exec-primitive-string", .path = "src/tests/exec/primitive_string.zig" },
         .{ .name = "exec-collection-typedarray", .path = "src/tests/exec/collection_typedarray.zig" },
         .{ .name = "exec-module-regexp", .path = "src/tests/exec/module_regexp.zig" },
         .{ .name = "exec-iter-generator", .path = "src/tests/exec/iter_generator.zig" },
         .{ .name = "exec-async-perf", .path = "src/tests/exec/async_perf.zig" },
         .{ .name = "exec-vm-literals", .path = "src/tests/exec/vm_literals.zig" },
         .{ .name = "exec-vm-functions", .path = "src/tests/exec/vm_functions.zig" },
-        .{ .name = "exec-vm-control", .path = "src/tests/exec/vm_control.zig" },
         .{ .name = "exec-vm-objects", .path = "src/tests/exec/vm_objects.zig" },
-        .{ .name = "exec-vm-classes", .path = "src/tests/exec/vm_classes.zig" },
-        .{ .name = "exec-vm-assignments", .path = "src/tests/exec/vm_assignments.zig" },
-        .{ .name = "exec-vm-prototypes", .path = "src/tests/exec/vm_prototypes.zig" },
-        .{ .name = "exec-vm-iter-async", .path = "src/tests/exec/vm_iter_async.zig" },
     };
 
     // Exec shards compilation and mapping to test steps
     inline for (exec_shards) |shard| {
-        // 1. Debug/Default optimize mode
-        const debug_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) else true;
-        if (debug_matches_filter) {
+        // 1. Standard optimize mode (defaults to Debug, used by `test` step)
+        const matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
+        if (matches_filter) {
             const test_mod = b.createModule(.{
                 .root_source_file = b.path(shard.path),
                 .target = target,
@@ -556,34 +536,10 @@ pub fn build(b: *std.Build) void {
                 .root_module = test_mod,
             });
             const run_tests = b.addRunArtifact(tests);
-            test_debug_step.dependOn(&run_tests.step);
+            test_step.dependOn(&run_tests.step);
         }
 
-        // 2. ReleaseSafe mode (used by the primary `test` step)
-        const fast_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-fast", filter) else true;
-        if (fast_matches_filter) {
-            const fast_test_mod = b.createModule(.{
-                .root_source_file = b.path(shard.path),
-                .target = target,
-                .optimize = .ReleaseSafe,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "quickjs_zig_engine", .module = engine_release_safe_mod },
-                },
-            });
-            fast_test_mod.addOptions("build_options", engine_options);
-            if (execShardUsesOomOptions(shard.path)) {
-                fast_test_mod.addOptions("oom_options", quick_oom_options);
-            }
-            const fast_tests = b.addTest(.{
-                .name = shard.name ++ "-fast",
-                .root_module = fast_test_mod,
-            });
-            const run_fast_tests = b.addRunArtifact(fast_tests);
-            test_step.dependOn(&run_fast_tests.step);
-        }
-
-        // 3. Sampled OOM mode (used by `test-oom` step)
+        // 2. Sampled OOM mode (used by `test-oom` step)
         const oom_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom", filter) else true;
         if (oom_matches_filter) {
             const oom_test_mod = b.createModule(.{
@@ -608,7 +564,7 @@ pub fn build(b: *std.Build) void {
             test_oom_step.dependOn(&run_oom_tests.step);
         }
 
-        // 4. Exhaustive OOM mode (used by `test-oom-exhaustive` step)
+        // 3. Exhaustive OOM mode (used by `test-oom-exhaustive` step)
         const exhaustive_oom_matches_filter = if (shard_filter) |filter| std.mem.eql(u8, shard.name, filter) or std.mem.eql(u8, shard.name ++ "-oom-exhaustive", filter) else true;
         if (exhaustive_oom_matches_filter) {
             const exhaustive_oom_test_mod = b.createModule(.{

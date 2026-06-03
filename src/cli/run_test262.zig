@@ -1,6 +1,8 @@
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
+extern "c" fn getpid() c_int;
+
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
@@ -258,7 +260,6 @@ pub fn parseArgs(args: []const []const u8) RunnerArgsError!Config {
             config.reports_dir = try nextValue(args, &i);
         } else if (std.mem.eql(u8, arg, "--engine")) {
             config.engine_path = try nextValue(args, &i);
-
         } else if (std.mem.eql(u8, arg, "--regression-baseline")) {
             config.regression_baseline = try nextValue(args, &i);
         } else if (std.mem.eql(u8, arg, "--enable-feature")) {
@@ -1380,8 +1381,6 @@ fn runWorkerStride(
     }
 }
 
-
-
 pub fn prepareSelection(allocator: std.mem.Allocator, io: std.Io, config: Config) !PreparedSelection {
     var loaded = if (config.config_path) |path| try loadConfigFile(allocator, io, path) else LoadedConfig.init(allocator);
     defer loaded.deinit(allocator);
@@ -1856,7 +1855,7 @@ pub fn moduleTempTestPath(buffer: []u8, test_path: []const u8, test_index: usize
     const basename = std.fs.path.basename(test_path);
     return std.fmt.bufPrint(buffer, "{s}/.zjs-module-{d}-{d}-{x}/{s}", .{
         dir,
-        std.os.linux.getpid(),
+        getpid(),
         test_index,
         hash,
         basename,
@@ -1871,7 +1870,7 @@ pub fn moduleTempTestPath(buffer: []u8, test_path: []const u8, test_index: usize
 pub fn tempTestPathShm(buffer: []u8, test_path: []const u8, test_index: usize) ![]const u8 {
     const hash = std.hash.Wyhash.hash(test_index, test_path);
     return std.fmt.bufPrint(buffer, "/dev/shm/zjs-{d}-{d}-{x}.js", .{
-        std.os.linux.getpid(), test_index, hash,
+        getpid(), test_index, hash,
     });
 }
 
@@ -2333,8 +2332,6 @@ test "test262 args parse external engine path" {
     try std.testing.expectEqual(@as(?usize, 20), config.stop_index);
 }
 
-
-
 test "test262 args parse feature overrides" {
     const config = try parseArgs(&.{
         "--enable-feature", "await-dictionary",
@@ -2348,8 +2345,6 @@ test "test262 args parse feature overrides" {
     try std.testing.expectEqual(FeatureOverrideKind.skip, config.feature_overrides.get(1).kind);
     try std.testing.expectEqualStrings("Temporal", config.feature_overrides.get(1).name);
 }
-
-
 
 test "test262 args parse QuickJS index span" {
     const config = try parseArgs(&.{ "-c", "test262.conf", "0", "20" });

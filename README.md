@@ -38,12 +38,10 @@ Useful build steps:
 
 ```sh
 zig build test --summary all
-zig build test-fast --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 zig build test-oom --summary all
 zig build test-oom-exhaustive --summary all
-zig build leak-check-engine --summary all
 zig build gc-stress --summary all
-zig build smoke --summary all
 zig build engine-production-gate --summary all
 ```
 

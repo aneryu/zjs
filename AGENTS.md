@@ -75,8 +75,8 @@ available only through git history.
 
 ### Regression
 
-- `zig build test --summary all` (defaults to ReleaseSafe exec shards, fast warm runs)
-- `zig build test-debug --summary all` for slow Debug test runs with heavy allocator tracking.
+- `zig build test --summary all` (defaults to Debug optimization; use for fast compilation during daily local development iteration)
+- `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run before final commits or CI gates to ensure optimized loop safety)
 - `zig build test-oom --summary all` for sampled exec OOM fail-index coverage.
 - `zig build test-oom-exhaustive --summary all` for very slow full exec OOM
   fail-index audits.

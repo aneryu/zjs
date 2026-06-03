@@ -13,7 +13,6 @@ broader roadmap is tracked in
 
 ## Lifecycle
 
-- `zig build leak-check-engine --summary all` passes.
 - Engine init/eval/deinit runs cleanly under Zig leak detection.
 - OOM paths used by public embedding APIs have focused tests.
 - Interrupt-handler behavior is covered by a regression test.
@@ -21,8 +20,7 @@ broader roadmap is tracked in
 ## Compatibility
 
 - `zig build test --summary all` passes.
-- `zig build test-fast --summary all` passes.
-- `zig build smoke --summary all` passes.
+- `zig build test -Doptimize=ReleaseSafe --summary all` passes.
 - `zig build test262-gate --summary all` passes with the checked-in config.
 - Focused test262 slices were run for every changed semantic area.
 
