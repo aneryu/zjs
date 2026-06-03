@@ -9,110 +9,81 @@ pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;
 pub const EngineError = RuntimeError;
 
+pub const JSRuntime = core.JSRuntime;
+pub const JSContext = core.JSContext;
+pub const JSValue = core.JSValue;
+pub const JSValueHandle = core.runtime.JSValueHandle;
+pub const GCPolicy = core.GCPolicy;
+pub const GCStats = core.GCStats;
+
 test "include core object private lifecycle tests" {
     _ = @import("core/object.zig");
 }
 
-pub const Limits = struct {
+pub const harness = struct {
+    pub const Engine = HarnessEngine;
+};
+
+const Limits = struct {
     memory_bytes: ?usize = null,
     stack_bytes: ?usize = null,
     gc_threshold_bytes: ?usize = null,
 };
 
-pub const EngineOptions = struct {
+const EngineOptions = struct {
     allocator: std.mem.Allocator,
     trace_writer: ?*std.Io.Writer = null,
     limits: Limits = .{},
 };
 
-pub const EvalOptions = struct {
-    mode: frontend.parser.Mode = .script,
-    filename: []const u8 = "<eval>",
-    source_kind: frontend.parser.SourceKind = .auto,
-    output: ?*std.Io.Writer = null,
-    parse_strict: bool = false,
-    runtime_strict: bool = false,
-    timing: ?*EvalTiming = null,
-};
-
-pub const ValueHandle = struct {
-    runtime: ?*core.Runtime,
-    value: core.Value,
-
-    pub fn init(runtime: *core.Runtime, value: core.Value) ValueHandle {
-        return .{
-            .runtime = runtime,
-            .value = value,
-        };
-    }
-
-    pub fn deinit(self: *ValueHandle) void {
-        if (self.runtime) |runtime| {
-            self.value.free(runtime);
-            self.runtime = null;
-            self.value = core.Value.undefinedValue();
-        }
-    }
-
-    pub fn release(self: *ValueHandle) core.Value {
-        const value = self.value;
-        self.runtime = null;
-        self.value = core.Value.undefinedValue();
-        return value;
-    }
-};
-
-pub const EvalResult = ValueHandle;
-pub const PersistentValue = core.runtime.PersistentValue;
+pub const EvalOptions = core.context.EvalOptions;
+pub const EvalTiming = core.context.EvalTiming;
 pub const ExternalHostCall = core.host_function.ExternalCall;
 pub const ExternalHostCallFn = core.host_function.ExternalCallFn;
 pub const ExternalHostFinalizer = core.host_function.ExternalFinalizer;
 
-pub const ExceptionInfo = struct {
-    value: ValueHandle,
+const ExceptionInfo = struct {
+    value: JSValueHandle,
 
     pub fn deinit(self: *ExceptionInfo) void {
         self.value.deinit();
     }
 };
 
-pub const EvalTiming = struct {
-    parse_ns: u64 = 0,
-    vm_run_ns: u64 = 0,
-    promise_jobs_ns: u64 = 0,
-};
-
-pub const Engine = struct {
-    runtime: *core.Runtime,
-    context: *core.Context,
-    job_queue: exec.jobs.Queue,
+const HarnessEngine = struct {
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
     output: ?*std.Io.Writer = null,
 
-    pub fn init(allocator: std.mem.Allocator) !Engine {
-        return initWithTrace(allocator, null);
+    pub fn init(allocator: std.mem.Allocator) !HarnessEngine {
+        return initWithOptions(.{ .allocator = allocator });
     }
 
-    pub fn initWithOptions(options: EngineOptions) !Engine {
-        var engine = try initWithTrace(options.allocator, options.trace_writer);
-        engine.setLimits(options.limits);
-        return engine;
-    }
-
-    pub fn initWithTrace(allocator: std.mem.Allocator, trace_writer: ?*std.Io.Writer) !Engine {
-        const rt = try core.Runtime.createWithTrace(allocator, trace_writer);
+    pub fn initWithOptions(options: EngineOptions) !HarnessEngine {
+        const rt = try core.JSRuntime.createWithOptions(options.allocator, .{
+            .trace_writer = options.trace_writer,
+            .memory_limit = options.limits.memory_bytes,
+            .gc_threshold = options.limits.gc_threshold_bytes orelse core.runtime.default_gc_threshold,
+            .stack_size = options.limits.stack_bytes orelse core.runtime.default_stack_size,
+        });
         errdefer rt.destroy();
-        const ctx = try core.Context.create(rt);
+        const ctx = try core.JSContext.create(rt);
         errdefer ctx.destroy();
         return .{
             .runtime = rt,
             .context = ctx,
-            .job_queue = exec.jobs.Queue.init(&rt.memory),
             .output = null,
         };
     }
 
-    pub fn deinit(self: *Engine) void {
-        self.job_queue.deinit();
+    pub fn initWithTrace(allocator: std.mem.Allocator, trace_writer: ?*std.Io.Writer) !HarnessEngine {
+        return initWithOptions(.{
+            .allocator = allocator,
+            .trace_writer = trace_writer,
+        });
+    }
+
+    pub fn deinit(self: *HarnessEngine) void {
         exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
         _ = exec.zjs_vm.cleanupTest262Agents();
         exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
@@ -120,33 +91,40 @@ pub const Engine = struct {
         self.runtime.destroy();
     }
 
-    pub fn setLimits(self: *Engine, limits: Limits) void {
+    pub fn setLimits(self: *HarnessEngine, limits: Limits) void {
         self.runtime.setMemoryLimit(limits.memory_bytes);
-        if (limits.stack_bytes) |stack_bytes| self.runtime.setStackSize(stack_bytes);
+        if (limits.stack_bytes) |stack_bytes| {
+            self.runtime.setStackSize(stack_bytes);
+            self.context.stack_limit = stack_bytes;
+        }
         if (limits.gc_threshold_bytes) |gc_threshold_bytes| self.runtime.setGCThreshold(gc_threshold_bytes);
     }
 
-    pub fn eval(self: *Engine, source_text: []const u8) RuntimeError!core.Value {
+    pub fn global(self: *HarnessEngine) !*core.Object {
+        return exec.zjs_vm.contextGlobal(self.context);
+    }
+
+    pub fn eval(self: *HarnessEngine, source_text: []const u8) RuntimeError!core.JSValue {
         return self.evalMode(source_text, .script) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
-    pub fn evalHandle(self: *Engine, source_text: []const u8) RuntimeError!ValueHandle {
+    pub fn evalHandle(self: *HarnessEngine, source_text: []const u8) RuntimeError!JSValueHandle {
         return self.evalHandleWithOptions(source_text, .{});
     }
 
-    pub fn evalModule(self: *Engine, source_text: []const u8) RuntimeError!core.Value {
+    pub fn evalModule(self: *HarnessEngine, source_text: []const u8) RuntimeError!core.JSValue {
         return self.evalMode(source_text, .module) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
-    pub fn evalModuleHandle(self: *Engine, source_text: []const u8) RuntimeError!ValueHandle {
+    pub fn evalModuleHandle(self: *HarnessEngine, source_text: []const u8) RuntimeError!JSValueHandle {
         return self.evalHandleWithOptions(source_text, .{ .mode = .module });
     }
 
-    pub fn evalMode(self: *Engine, source_text: []const u8, mode: frontend.parser.Mode) RuntimeError!core.Value {
+    pub fn evalMode(self: *HarnessEngine, source_text: []const u8, mode: frontend.parser.Mode) RuntimeError!core.JSValue {
         return self.evalModeWithOutput(source_text, null, mode) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
-    pub fn evalWithOptions(self: *Engine, source_text: []const u8, options: EvalOptions) RuntimeError!core.Value {
+    pub fn evalWithOptions(self: *HarnessEngine, source_text: []const u8, options: EvalOptions) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamedTimedOptions(
             source_text,
             options.output,
@@ -159,94 +137,94 @@ pub const Engine = struct {
         ) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
-    pub fn evalHandleWithOptions(self: *Engine, source_text: []const u8, options: EvalOptions) RuntimeError!ValueHandle {
+    pub fn evalHandleWithOptions(self: *HarnessEngine, source_text: []const u8, options: EvalOptions) RuntimeError!JSValueHandle {
         const value = try self.evalWithOptions(source_text, options);
-        return ValueHandle.init(self.runtime, value);
+        return try JSValueHandle.init(self.runtime, value);
     }
 
     /// Create an owned persistent handle for a host-held value. The caller must
     /// destroy the returned handle before deinitializing the engine.
-    pub fn createPersistentValue(self: *Engine, value: core.Value) !PersistentValue {
+    pub fn createPersistentValue(self: *HarnessEngine, value: core.JSValue) !JSValueHandle {
         return self.runtime.createPersistentValue(value);
     }
 
-    pub fn evalWithOutput(self: *Engine, source_text: []const u8, output: *std.Io.Writer) RuntimeError!core.Value {
+    pub fn evalWithOutput(self: *HarnessEngine, source_text: []const u8, output: *std.Io.Writer) RuntimeError!core.JSValue {
         return self.evalWithOutputMode(source_text, output, .script) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalWithOutputMode(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamed(source_text, output, mode, "<eval>") catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputMode(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamed(source_text, output, mode, filename) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeStrict(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
         strict: bool,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, null, strict, strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeRuntimeStrict(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
         runtime_strict: bool,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, null, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeTimed(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
         timing: *EvalTiming,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamedTimed(source_text, output, mode, filename, timing) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeTimedStrict(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
         timing: *EvalTiming,
         strict: bool,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, timing, strict, strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
     pub fn evalFileWithOutputModeTimedRuntimeStrict(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
         timing: *EvalTiming,
         runtime_strict: bool,
-    ) RuntimeError!core.Value {
+    ) RuntimeError!core.JSValue {
         return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, timing, false, runtime_strict) catch |err| return @errorCast(moduleResolutionError(err));
     }
 
@@ -316,13 +294,13 @@ pub const Engine = struct {
     }
 
     pub fn evalFileModuleGraphWithHostHooks(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         filename: []const u8,
         host_hooks: HostHooks,
         allocator: std.mem.Allocator,
-    ) !core.Value {
+    ) !core.JSValue {
         self.output = output;
         var module_postorder = std.ArrayList([]const u8).empty;
         defer {
@@ -335,7 +313,7 @@ pub const Engine = struct {
         defer self.runtime.atoms.free(root_module_name);
         if (self.runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
         self.runtime.modules.linkModule(self.runtime, root_module_name) catch |err| return moduleResolutionError(err);
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         for (module_postorder.items) |path| {
             var raw_module_source: []const u8 = undefined;
             const is_root = std.mem.eql(u8, path, filename);
@@ -369,7 +347,7 @@ pub const Engine = struct {
             }
             const module_name = try self.runtime.internAtom(path);
             defer self.runtime.atoms.free(module_name);
-            try exec.module.initializeModuleFunctionDeclarations(self.context, global, module_name, &compiled.function);
+            try exec.module.initializeModuleFunctionDeclarations(self.context, global_object, module_name, &compiled.function);
         }
 
         var continuations = std.ArrayList(ModuleContinuation).empty;
@@ -405,7 +383,7 @@ pub const Engine = struct {
 
     fn preloadFileModuleGraphWithHostHooks(
         allocator: std.mem.Allocator,
-        runtime: *core.Runtime,
+        runtime: *core.JSRuntime,
         host_hooks: HostHooks,
         root_source: []const u8,
         root_path: []const u8,
@@ -421,7 +399,7 @@ pub const Engine = struct {
 
     fn preloadFileModuleGraphWithHostHooksInner(
         allocator: std.mem.Allocator,
-        runtime: *core.Runtime,
+        runtime: *core.JSRuntime,
         host_hooks: HostHooks,
         source_text: []const u8,
         path: []const u8,
@@ -518,14 +496,14 @@ pub const Engine = struct {
     }
 
     pub fn evalFileModuleGraphWithOutput(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: *std.Io.Writer,
         filename: []const u8,
         io: std.Io,
         allocator: std.mem.Allocator,
         max_source_size: usize,
-    ) !core.Value {
+    ) !core.JSValue {
         const normalized_filename = try std.fs.path.resolve(allocator, &.{filename});
         defer allocator.free(normalized_filename);
 
@@ -574,14 +552,14 @@ pub const Engine = struct {
     }
 
     fn evalDynamicImportModule(
-        self: *Engine,
+        self: *HarnessEngine,
         output: ?*std.Io.Writer,
         referrer_path: []const u8,
         specifier: []const u8,
         io: std.Io,
         allocator: std.mem.Allocator,
         max_source_size: usize,
-    ) !core.Value {
+    ) !core.JSValue {
         if (referrer_path.len == 0) return error.ModuleNotFound;
         const target_path = try exec.module.resolveModuleSpecifier(allocator, referrer_path, specifier);
         defer allocator.free(target_path);
@@ -627,7 +605,7 @@ pub const Engine = struct {
     }
 
     fn initializePreloadedModuleFunctionDeclarations(
-        self: *Engine,
+        self: *HarnessEngine,
         root_source: []const u8,
         root_path: []const u8,
         io: std.Io,
@@ -635,7 +613,7 @@ pub const Engine = struct {
         max_source_size: usize,
         postorder: []const []const u8,
     ) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         for (postorder) |path| {
             const module_source = if (std.mem.eql(u8, path, root_path))
                 root_source
@@ -648,71 +626,71 @@ pub const Engine = struct {
             if (compiled.syntax_error != null) return error.SyntaxError;
             const module_name = try self.runtime.internAtom(path);
             defer self.runtime.atoms.free(module_name);
-            try exec.module.initializeModuleFunctionDeclarations(self.context, global, module_name, &compiled.function);
+            try exec.module.initializeModuleFunctionDeclarations(self.context, global_object, module_name, &compiled.function);
         }
     }
 
     fn initializeSyntheticFileModules(
-        self: *Engine,
+        self: *HarnessEngine,
         io: std.Io,
         allocator: std.mem.Allocator,
         max_source_size: usize,
     ) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         for (self.runtime.modules.modules) |record| {
             if (record.synthetic_kind == .none) continue;
             if (record.synthetic_kind == .native_std or record.synthetic_kind == .native_os) {
-                _ = try exec.module.initializeSyntheticFileModule(self.context, global, record.module_name, "");
+                _ = try exec.module.initializeSyntheticFileModule(self.context, global_object, record.module_name, "");
                 continue;
             }
             const path = self.runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
             const source_path = exec.module.syntheticModuleFilePath(path);
             const module_source = try std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size));
             defer allocator.free(module_source);
-            _ = try exec.module.initializeSyntheticFileModule(self.context, global, record.module_name, module_source);
+            _ = try exec.module.initializeSyntheticFileModule(self.context, global_object, record.module_name, module_source);
         }
     }
 
-    fn initializeNativeSyntheticModules(self: *Engine) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+    fn initializeNativeSyntheticModules(self: *HarnessEngine) !void {
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         for (self.runtime.modules.modules) |record| {
             if (record.synthetic_kind != .native_std and record.synthetic_kind != .native_os) continue;
-            _ = try exec.module.initializeSyntheticFileModule(self.context, global, record.module_name, "");
+            _ = try exec.module.initializeSyntheticFileModule(self.context, global_object, record.module_name, "");
         }
     }
 
     fn evalModeWithOutput(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: ?*std.Io.Writer,
         mode: frontend.parser.Mode,
-    ) !core.Value {
+    ) !core.JSValue {
         return self.evalModeWithOutputNamed(source_text, output, mode, "<eval>");
     }
 
     fn evalModeWithOutputNamed(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: ?*std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
-    ) !core.Value {
+    ) !core.JSValue {
         return self.evalModeWithOutputNamedTimed(source_text, output, mode, filename, null);
     }
 
     fn evalModeWithOutputNamedTimed(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: ?*std.Io.Writer,
         mode: frontend.parser.Mode,
         filename: []const u8,
         timing: ?*EvalTiming,
-    ) !core.Value {
+    ) !core.JSValue {
         return self.evalModeWithOutputNamedTimedOptions(source_text, output, mode, filename, .auto, timing, false, false);
     }
 
     fn evalModeWithOutputNamedTimedOptions(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: ?*std.Io.Writer,
         mode: frontend.parser.Mode,
@@ -721,102 +699,32 @@ pub const Engine = struct {
         timing: ?*EvalTiming,
         parse_strict: bool,
         runtime_strict: bool,
-    ) !core.Value {
+    ) !core.JSValue {
         self.output = output;
-        const parse_start = monotonicNanos();
-        var compiled = try frontend.parser.parse(self.runtime, source_text, .{
+        return self.context.eval(source_text, .{
             .mode = mode,
             .filename = filename,
             .source_kind = source_kind,
-            .strict = parse_strict,
+            .output = output,
+            .parse_strict = parse_strict,
+            .runtime_strict = runtime_strict,
+            .return_completion = mode == .script and std.mem.eql(u8, filename, "<repl>"),
+            .discard_script_result = mode == .script and !std.mem.eql(u8, filename, "<repl>"),
+            .timing = timing,
         });
-        if (timing) |t| t.parse_ns += elapsedNanosSince(parse_start);
-        defer compiled.deinit();
-        if (compiled.syntax_error) |err| {
-            if (mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return core.Value.undefinedValue();
-            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ filename, err.position.line, err.position.column, err.message });
-            return error.SyntaxError;
-        }
-        if (runtime_strict and mode == .script) forceRuntimeStrict(&compiled.function);
-        var module_name: core.Atom = core.atom.null_atom;
-        var has_module_record = false;
-        defer if (has_module_record) self.runtime.atoms.free(module_name);
-        if (mode == .module and compiled.function.module_record != null) {
-            var module_name_buf: [64]u8 = undefined;
-            const module_name_bytes = if (std.mem.eql(u8, filename, "<eval>"))
-                try std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{self.runtime.modules.modules.len})
-            else
-                filename;
-            module_name = try self.runtime.internAtom(module_name_bytes);
-            has_module_record = true;
-            const referrer_path: ?[]const u8 = if (std.mem.eql(u8, filename, "<eval>")) null else filename;
-            _ = try exec.module.instantiateParsedRecordWithReferrer(self.runtime, module_name, &compiled.function, referrer_path);
-            if (self.runtime.modules.find(module_name)) |record| record.import_meta_main = true;
-            self.runtime.modules.linkModule(self.runtime, module_name) catch |err| {
-                if (!@import("builtin").is_test) std.debug.print("LINK ERROR for module {s}: {s}\n", .{ filename, @errorName(err) });
-                return moduleResolutionError(err);
-            };
-            try self.initializeNativeSyntheticModules();
-        }
-        var module_var_refs: []core.Value = &.{};
-        if (has_module_record) {
-            module_var_refs = try exec.module.buildModuleVarRefs(self.context, module_name, &compiled.function);
-        }
-        defer exec.module.freeModuleVarRefs(self.runtime, module_var_refs);
-        if (output) |writer| {
-            const result = if (has_module_record)
-                try self.runEvalModuleWithVarRefs(&compiled.function, output, module_var_refs, timing)
-            else blk: {
-                var vm_instance = exec.Vm.initWithOutput(self.context, writer);
-                defer vm_instance.deinit();
-                const vm_start = monotonicNanos();
-                const value = try vm_instance.run(&compiled.function);
-                if (timing) |t| t.vm_run_ns += elapsedNanosSince(vm_start);
-                break :blk value;
-            };
-            const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-            const jobs_start = monotonicNanos();
-            try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
-            if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
-            if (mode == .script and !std.mem.eql(u8, filename, "<repl>")) {
-                result.free(self.runtime);
-                return core.Value.undefinedValue();
-            }
-            return result;
-        } else {
-            const result = if (has_module_record)
-                try self.runEvalModuleWithVarRefs(&compiled.function, output, module_var_refs, timing)
-            else blk: {
-                var vm_instance = exec.Vm.init(self.context);
-                defer vm_instance.deinit();
-                const vm_start = monotonicNanos();
-                const value = try vm_instance.run(&compiled.function);
-                if (timing) |t| t.vm_run_ns += elapsedNanosSince(vm_start);
-                break :blk value;
-            };
-            const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-            const jobs_start = monotonicNanos();
-            try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
-            if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
-            if (mode == .script and !std.mem.eql(u8, filename, "<repl>")) {
-                result.free(self.runtime);
-                return core.Value.undefinedValue();
-            }
-            return result;
-        }
     }
 
     fn runEvalModuleWithVarRefs(
-        self: *Engine,
+        self: *HarnessEngine,
         function: *const bytecode.Bytecode,
         output: ?*std.Io.Writer,
-        module_var_refs: []const core.Value,
+        module_var_refs: []const core.JSValue,
         timing: ?*EvalTiming,
-    ) !core.Value {
+    ) !core.JSValue {
         var continuation_value = (try core.Object.create(self.runtime, core.class.ids.generator, null)).value();
         defer continuation_value.free(self.runtime);
         const continuation = try exec.property_ops.expectObject(continuation_value);
-        var resume_value: ?core.Value = null;
+        var resume_value: ?core.JSValue = null;
         var resume_value_symbol_rooted = false;
         defer if (resume_value) |value| {
             if (resume_value_symbol_rooted) self.runtime.unregisterExternalValueSymbolRoot(value);
@@ -849,9 +757,9 @@ pub const Engine = struct {
             if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
                 resume_value = result;
                 resume_value_symbol_rooted = try self.runtime.registerExternalValueSymbolRoot(result);
-                const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+                const global_object = try exec.zjs_vm.contextGlobal(self.context);
                 const jobs_start = monotonicNanos();
-                try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
+                try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global_object);
                 if (timing) |t| t.promise_jobs_ns += elapsedNanosSince(jobs_start);
                 continue;
             }
@@ -861,11 +769,11 @@ pub const Engine = struct {
     }
 
     fn evalPreloadedFileModuleWithOutput(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: ?*std.Io.Writer,
         filename: []const u8,
-    ) !core.Value {
+    ) !core.JSValue {
         var continuations = std.ArrayList(ModuleContinuation).empty;
         defer freeModuleContinuations(self.runtime, self.runtime.memory.allocator, &continuations);
         const step = try self.evalPreloadedFileModuleStep(source_text, output, filename, null, null);
@@ -874,12 +782,12 @@ pub const Engine = struct {
     }
 
     fn evalPreloadedFileModuleStep(
-        self: *Engine,
+        self: *HarnessEngine,
         source_text: []const u8,
         output: ?*std.Io.Writer,
         filename: []const u8,
-        continuation_value: ?core.Value,
-        resume_value: ?core.Value,
+        continuation_value: ?core.JSValue,
+        resume_value: ?core.JSValue,
     ) !ModuleEvalStep {
         var input_continuation = continuation_value;
         errdefer if (input_continuation) |value| value.free(self.runtime);
@@ -924,7 +832,7 @@ pub const Engine = struct {
     }
 
     fn handleModuleEvalStep(
-        self: *Engine,
+        self: *HarnessEngine,
         allocator: std.mem.Allocator,
         continuations: *std.ArrayList(ModuleContinuation),
         step: ModuleEvalStep,
@@ -943,7 +851,7 @@ pub const Engine = struct {
                     var continuation = ModuleContinuation{
                         .source = source_copy,
                         .path = path_copy,
-                        .continuation = core.Value.undefinedValue(),
+                        .continuation = core.JSValue.undefinedValue(),
                         .awaited = value,
                         .keep_result = true,
                         .completed = true,
@@ -977,12 +885,12 @@ pub const Engine = struct {
     }
 
     fn drainModuleContinuations(
-        self: *Engine,
+        self: *HarnessEngine,
         output: ?*std.Io.Writer,
         allocator: std.mem.Allocator,
         continuations: *std.ArrayList(ModuleContinuation),
-    ) !core.Value {
-        var kept_result: core.Value = core.Value.undefinedValue();
+    ) !core.JSValue {
+        var kept_result: core.JSValue = core.JSValue.undefinedValue();
         var has_kept_result = false;
         while (continuations.items.len != 0) {
             if (try self.drainOneModuleContinuation(output, allocator, continuations)) |value| {
@@ -992,11 +900,11 @@ pub const Engine = struct {
             }
         }
         if (has_kept_result) return kept_result;
-        return core.Value.undefinedValue();
+        return core.JSValue.undefinedValue();
     }
 
     fn drainModuleContinuationsForDependencies(
-        self: *Engine,
+        self: *HarnessEngine,
         output: ?*std.Io.Writer,
         allocator: std.mem.Allocator,
         continuations: *std.ArrayList(ModuleContinuation),
@@ -1008,11 +916,11 @@ pub const Engine = struct {
     }
 
     fn drainOneModuleContinuation(
-        self: *Engine,
+        self: *HarnessEngine,
         output: ?*std.Io.Writer,
         allocator: std.mem.Allocator,
         continuations: *std.ArrayList(ModuleContinuation),
-    ) !?core.Value {
+    ) !?core.JSValue {
         var current = continuations.orderedRemove(0);
         var current_roots_registered = true;
         errdefer if (current_roots_registered) current.unregisterSymbolRoots(self.runtime);
@@ -1034,8 +942,8 @@ pub const Engine = struct {
         const module_source = current.source;
         const path = current.path;
         const keep_result = current.keep_result;
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-        try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
+        try exec.zjs_vm.drainPendingPromiseJobs(self.context, output, global_object);
         continuation_owned = false;
         const step = try self.evalPreloadedFileModuleStep(module_source, output, path, continuation, awaited_value);
         awaited_value.free(self.runtime);
@@ -1052,7 +960,7 @@ pub const Engine = struct {
     }
 
     fn hasActiveAsyncDependency(
-        self: *Engine,
+        self: *HarnessEngine,
         continuations: *const std.ArrayList(ModuleContinuation),
         filename: []const u8,
     ) !bool {
@@ -1065,7 +973,7 @@ pub const Engine = struct {
     }
 
     fn recordHasActiveAsyncDependency(
-        self: *Engine,
+        self: *HarnessEngine,
         continuations: *const std.ArrayList(ModuleContinuation),
         record: *const core.module.ModuleRecord,
         visited: *std.ArrayList(core.Atom),
@@ -1085,33 +993,33 @@ pub const Engine = struct {
         return false;
     }
 
-    pub fn runJobs(self: *Engine) !void {
-        self.job_queue.runAll();
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-        exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
+    pub fn runJobs(self: *HarnessEngine) !void {
+        self.runtime.job_queue.runAll();
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
+        exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global_object) catch |err| {
             if (self.context.hasException() or self.context.hasUnhandledRejection()) return;
             return err;
         };
     }
 
-    pub fn exposeStdOsGlobals(self: *Engine) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-        try self.exposeNativeModuleGlobal(global, "std", .native_std);
-        try self.exposeNativeModuleGlobal(global, "os", .native_os);
+    pub fn exposeStdOsGlobals(self: *HarnessEngine) !void {
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
+        try self.exposeNativeModuleGlobal(global_object, "std", .native_std);
+        try self.exposeNativeModuleGlobal(global_object, "os", .native_os);
     }
 
-    pub fn defineScriptArgs(self: *Engine, args: []const []const u8) !void {
+    pub fn defineScriptArgs(self: *HarnessEngine, args: []const []const u8) !void {
         try self.defineStringArrayGlobal("scriptArgs", args);
     }
 
     pub fn createExternalHostFunctionValue(
-        self: *Engine,
+        self: *HarnessEngine,
         name: []const u8,
         length: i32,
         ptr: *anyopaque,
         call: ExternalHostCallFn,
         finalizer: ?ExternalHostFinalizer,
-    ) !core.Value {
+    ) !core.JSValue {
         const id = try self.runtime.registerExternalHostFunction(.{
             .ptr = ptr,
             .call = call,
@@ -1123,42 +1031,42 @@ pub const Engine = struct {
         const function_object = try exec.property_ops.expectObject(function_value);
         function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
         function_object.externalHostFunctionIdSlot().* = id;
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-        try function_object.setFunctionRealmGlobalPtr(self.runtime, global);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
+        try function_object.setFunctionRealmGlobalPtr(self.runtime, global_object);
         return function_value;
     }
 
     pub fn defineGlobalExternalHostFunction(
-        self: *Engine,
+        self: *HarnessEngine,
         name: []const u8,
         length: i32,
         ptr: *anyopaque,
         call: ExternalHostCallFn,
         finalizer: ?ExternalHostFinalizer,
     ) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         const function_value = try self.createExternalHostFunctionValue(name, length, ptr, call, finalizer);
         defer function_value.free(self.runtime);
 
         const property_name = try self.runtime.internAtom(name);
         defer self.runtime.atoms.free(property_name);
-        try global.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, true, false, true));
+        try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, true, false, true));
     }
 
-    pub fn defineArgvGlobals(self: *Engine, argv0: []const u8, exec_argv: []const []const u8) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+    pub fn defineArgvGlobals(self: *HarnessEngine, argv0: []const u8, exec_argv: []const []const u8) !void {
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         const argv0_value = try exec.value_ops.createStringValue(self.runtime, argv0);
         defer argv0_value.free(self.runtime);
         const argv0_key = try self.runtime.internAtom("argv0");
         defer self.runtime.atoms.free(argv0_key);
-        try global.defineOwnProperty(self.runtime, argv0_key, core.Descriptor.data(argv0_value, true, true, true));
+        try global_object.defineOwnProperty(self.runtime, argv0_key, core.Descriptor.data(argv0_value, true, true, true));
         try self.defineStringArrayGlobal("execArgv", exec_argv);
     }
 
-    fn defineStringArrayGlobal(self: *Engine, name: []const u8, items: []const []const u8) !void {
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-        const values = try self.runtime.memory.alloc(core.Value, items.len);
-        defer self.runtime.memory.free(core.Value, values);
+    fn defineStringArrayGlobal(self: *HarnessEngine, name: []const u8, items: []const []const u8) !void {
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
+        const values = try self.runtime.memory.alloc(core.JSValue, items.len);
+        defer self.runtime.memory.free(core.JSValue, values);
         var initialized: usize = 0;
         defer {
             for (values[0..initialized]) |value| value.free(self.runtime);
@@ -1168,7 +1076,7 @@ pub const Engine = struct {
             initialized += 1;
         }
 
-        const array_prototype = try self.arrayPrototypeFromGlobal(global);
+        const array_prototype = try self.arrayPrototypeFromGlobal(global_object);
         const array = try core.Object.createArray(self.runtime, array_prototype);
         var array_raw_owned = true;
         errdefer if (array_raw_owned) core.Object.destroyFromHeader(self.runtime, &array.header);
@@ -1181,32 +1089,32 @@ pub const Engine = struct {
         const array_value = array.value();
         array_raw_owned = false;
         defer array_value.free(self.runtime);
-        try global.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(array_value, true, true, true));
+        try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(array_value, true, true, true));
     }
 
-    pub fn defineCliArgvGlobalsLazy(self: *Engine, argv0: []const u8, exec_argv: []const []const u8) !void {
+    pub fn defineCliArgvGlobalsLazy(self: *HarnessEngine, argv0: []const u8, exec_argv: []const []const u8) !void {
         self.runtime.cli_argv0 = argv0;
         self.runtime.cli_exec_argv = exec_argv;
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
         const flags = core.property.Flags.data(true, true, true);
-        try global.defineCliGlobalAutoInitProperty(self.runtime, core.atom.predefinedId("argv0", .string).?, "argv0", flags, global);
-        try global.defineCliGlobalAutoInitProperty(self.runtime, core.atom.predefinedId("execArgv", .string).?, "execArgv", flags, global);
+        try global_object.defineCliGlobalAutoInitProperty(self.runtime, core.atom.predefinedId("argv0", .string).?, "argv0", flags, global_object);
+        try global_object.defineCliGlobalAutoInitProperty(self.runtime, core.atom.predefinedId("execArgv", .string).?, "execArgv", flags, global_object);
     }
 
-    pub fn defineCliScriptArgsLazy(self: *Engine, args: []const []const u8) !void {
+    pub fn defineCliScriptArgsLazy(self: *HarnessEngine, args: []const []const u8) !void {
         self.runtime.cli_script_args = args;
-        const global = try exec.zjs_vm.ensureContextGlobal(self.context);
-        try global.defineCliGlobalAutoInitProperty(
+        const global_object = try exec.zjs_vm.contextGlobal(self.context);
+        try global_object.defineCliGlobalAutoInitProperty(
             self.runtime,
             core.atom.predefinedId("scriptArgs", .string).?,
             "scriptArgs",
             core.property.Flags.data(true, true, true),
-            global,
+            global_object,
         );
     }
 
-    fn arrayPrototypeFromGlobal(self: *Engine, global: *core.Object) !*core.Object {
-        const array_ctor_value = global.getProperty(core.atom.ids.Array);
+    fn arrayPrototypeFromGlobal(self: *HarnessEngine, global_object: *core.Object) !*core.Object {
+        const array_ctor_value = global_object.getProperty(core.atom.ids.Array);
         defer array_ctor_value.free(self.runtime);
         const array_ctor = try exec.property_ops.expectObject(array_ctor_value);
         const prototype_value = array_ctor.getProperty(core.atom.ids.prototype);
@@ -1215,8 +1123,8 @@ pub const Engine = struct {
     }
 
     fn exposeNativeModuleGlobal(
-        self: *Engine,
-        global: *core.Object,
+        self: *HarnessEngine,
+        global_object: *core.Object,
         name: []const u8,
         kind: core.module.SyntheticKind,
     ) !void {
@@ -1224,15 +1132,15 @@ pub const Engine = struct {
         const module_name = try self.runtime.internAtom(name);
         defer self.runtime.atoms.free(module_name);
         self.runtime.modules.linkModule(self.runtime, module_name) catch |err| return moduleResolutionError(err);
-        _ = try exec.module.initializeSyntheticFileModule(self.context, global, module_name, "");
+        _ = try exec.module.initializeSyntheticFileModule(self.context, global_object, module_name, "");
         const namespace = try exec.module.moduleNamespaceValue(self.context, module_name);
         defer namespace.free(self.runtime);
         const property_name = try self.runtime.internAtom(name);
         defer self.runtime.atoms.free(property_name);
-        try global.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(namespace, true, false, true));
+        try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(namespace, true, false, true));
     }
 
-    pub fn takeException(self: *Engine) core.Value {
+    pub fn takeException(self: *HarnessEngine) core.JSValue {
         if (self.context.hasUnhandledRejection()) {
             const rejection = self.context.takeUnhandledRejection();
             if (self.context.hasException()) self.context.clearException();
@@ -1241,38 +1149,38 @@ pub const Engine = struct {
         return self.context.takeException();
     }
 
-    pub fn takeExceptionInfo(self: *Engine) ExceptionInfo {
+    pub fn takeExceptionInfo(self: *HarnessEngine) !ExceptionInfo {
         return .{
-            .value = ValueHandle.init(self.runtime, self.takeException()),
+            .value = try JSValueHandle.init(self.runtime, self.takeException()),
         };
     }
 };
 
 const ModuleEvalStep = union(enum) {
-    completed: core.Value,
+    completed: core.JSValue,
     suspended: struct {
-        continuation: core.Value,
-        awaited: core.Value,
+        continuation: core.JSValue,
+        awaited: core.JSValue,
     },
 };
 
 const ModuleContinuation = struct {
     source: []const u8,
     path: []const u8,
-    continuation: core.Value,
-    awaited: core.Value,
+    continuation: core.JSValue,
+    awaited: core.JSValue,
     keep_result: bool,
     completed: bool = false,
     symbol_root_mask: u2 = 0,
 
-    fn registerSymbolRoots(self: *ModuleContinuation, runtime: *core.Runtime) !void {
+    fn registerSymbolRoots(self: *ModuleContinuation, runtime: *core.JSRuntime) !void {
         std.debug.assert(self.symbol_root_mask == 0);
         errdefer self.unregisterSymbolRoots(runtime);
         if (try runtime.registerExternalValueSymbolRoot(self.continuation)) self.symbol_root_mask |= 0b01;
         if (try runtime.registerExternalValueSymbolRoot(self.awaited)) self.symbol_root_mask |= 0b10;
     }
 
-    fn unregisterSymbolRoots(self: *ModuleContinuation, runtime: *core.Runtime) void {
+    fn unregisterSymbolRoots(self: *ModuleContinuation, runtime: *core.JSRuntime) void {
         if ((self.symbol_root_mask & 0b01) != 0) runtime.unregisterExternalValueSymbolRoot(self.continuation);
         if ((self.symbol_root_mask & 0b10) != 0) runtime.unregisterExternalValueSymbolRoot(self.awaited);
         self.symbol_root_mask = 0;
@@ -1280,7 +1188,7 @@ const ModuleContinuation = struct {
 };
 
 fn freeModuleContinuations(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     allocator: std.mem.Allocator,
     continuations: *std.ArrayList(ModuleContinuation),
 ) void {
@@ -1294,7 +1202,7 @@ fn freeModuleContinuations(
     continuations.deinit(allocator);
 }
 
-fn freeModuleEvalStep(runtime: *core.Runtime, step: ModuleEvalStep) void {
+fn freeModuleEvalStep(runtime: *core.JSRuntime, step: ModuleEvalStep) void {
     switch (step) {
         .completed => |value| value.free(runtime),
         .suspended => |suspended| {
@@ -1305,19 +1213,19 @@ fn freeModuleEvalStep(runtime: *core.Runtime, step: ModuleEvalStep) void {
 }
 
 const DynamicImportState = struct {
-    engine: *Engine,
+    engine: *HarnessEngine,
     io: std.Io,
     allocator: std.mem.Allocator,
     max_source_size: usize,
 
     fn load(
         userdata: ?*anyopaque,
-        ctx: *core.Context,
+        ctx: *core.JSContext,
         output: ?*std.Io.Writer,
         global: *core.Object,
         referrer_path: []const u8,
         specifier: []const u8,
-    ) core.context.DynamicImportError!core.Value {
+    ) core.context.DynamicImportError!core.JSValue {
         _ = ctx;
         _ = global;
         const state: *DynamicImportState = @ptrCast(@alignCast(userdata orelse return error.ModuleNotFound));
@@ -1337,7 +1245,7 @@ fn forceRuntimeStrict(function: *bytecode.Bytecode) void {
     for (function.constants.values) |value| forceFunctionBytecodeRuntimeStrict(value);
 }
 
-fn forceFunctionBytecodeRuntimeStrict(value: core.Value) void {
+fn forceFunctionBytecodeRuntimeStrict(value: core.JSValue) void {
     if (!value.isFunctionBytecode()) return;
     const header = value.objectHeader() orelse return;
     const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", header);
@@ -1404,7 +1312,7 @@ fn expectRealmCachedGeneratorPrototypeOOMCleanup(kind: RealmCachedGeneratorProto
     var fail_offset: usize = 0;
     while (fail_offset < 280) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
         const global = try core.Object.create(rt, core.class.ids.object, null);
 
         failing.fail_index = failing.alloc_index + fail_offset;
@@ -1429,7 +1337,7 @@ fn expectRealmCachedGeneratorPrototypeOOMCleanup(kind: RealmCachedGeneratorProto
 }
 
 fn realmCachedPrototypeFromGlobal(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     global: *core.Object,
     kind: RealmCachedGeneratorPrototypeKind,
 ) !?*core.Object {
@@ -1442,7 +1350,7 @@ fn realmCachedPrototypeFromGlobal(
     };
 }
 
-fn cleanupRealmCachedGeneratorPrototypeOOMIteration(rt: *core.Runtime, global: *core.Object) void {
+fn cleanupRealmCachedGeneratorPrototypeOOMIteration(rt: *core.JSRuntime, global: *core.Object) void {
     global.value().free(rt);
     rt.destroy();
 }

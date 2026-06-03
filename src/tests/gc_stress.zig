@@ -7,7 +7,7 @@ const core = engine.core;
 
 const Rng = std.Random.DefaultPrng;
 
-fn appendWeakCollectionEntry(rt: *core.Runtime, collection: *core.Object, key: *core.Object, value: core.Value) !void {
+fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void {
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
@@ -26,7 +26,7 @@ test "gc stress deterministic object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0001);
     const random = prng.random();
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const count = 128;
@@ -65,7 +65,7 @@ test "gc stress weak map preserved key keeps value alive" {
     var prng = Rng.init(0x7a6a_6763_0002);
     const random = prng.random();
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -102,7 +102,7 @@ test "gc stress weak map dead cyclic keys clear values" {
     var prng = Rng.init(0x7a6a_6763_0003);
     const random = prng.random();
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -144,7 +144,7 @@ test "gc stress finalization registry dead target queues pending job" {
     var prng = Rng.init(0x7a6a_6763_0004);
     const random = prng.random();
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
@@ -160,17 +160,17 @@ test "gc stress finalization registry dead target queues pending job" {
     const held = try core.Object.create(rt, core.class.ids.object, null);
     const held_key = try rt.internAtom("stress-finalization-held");
     defer rt.atoms.free(held_key);
-    try held.defineOwnProperty(rt, held_key, core.Descriptor.data(core.Value.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))), true, true, true));
+    try held.defineOwnProperty(rt, held_key, core.Descriptor.data(core.JSValue.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))), true, true, true));
 
     try registry.appendFinalizationRegistryCell(
         rt,
         target_value,
         held.value(),
-        core.Value.undefinedValue(),
+        core.JSValue.undefinedValue(),
     );
     held.value().free(rt);
     target_value.free(rt);
-    target_value = core.Value.undefinedValue();
+    target_value = core.JSValue.undefinedValue();
 
     _ = try rt.tryRunObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), rt.pendingFinalizationJobCountForTest());
@@ -188,7 +188,7 @@ test "gc stress finalization enqueue OOM leaves pending cell for retry" {
     var prng = Rng.init(0x7a6a_6763_0005);
     const random = prng.random();
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
@@ -203,13 +203,13 @@ test "gc stress finalization enqueue OOM leaves pending cell for retry" {
     try registry.appendFinalizationRegistryCell(
         rt,
         target_value,
-        core.Value.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))),
-        core.Value.undefinedValue(),
+        core.JSValue.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))),
+        core.JSValue.undefinedValue(),
     );
 
     _ = try rt.tryRunObjectCycleRemoval();
     target_value.free(rt);
-    target_value = core.Value.undefinedValue();
+    target_value = core.JSValue.undefinedValue();
     try std.testing.expectEqual(@as(usize, 0), rt.pendingFinalizationJobCountForTest());
 
     const limit = rt.memory.allocated_bytes;
@@ -234,7 +234,7 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0006);
     const random = prng.random();
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const count = 17;
@@ -249,11 +249,11 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
         const fb = &fb_slice[0];
         fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
         try rt.gc.add(&fb.header);
-        fb.cpool = try rt.memory.alloc(core.Value, 1);
+        fb.cpool = try rt.memory.alloc(core.JSValue, 1);
         fb.cpool[0] = captured_obj.value().dup();
         fb.cpool_count = 1;
 
-        function.functionBytecodeSlot().* = core.Value.functionBytecode(&fb.header);
+        function.functionBytecodeSlot().* = core.JSValue.functionBytecode(&fb.header);
         function_slot.* = function;
         captured_slot.* = captured_obj;
     }

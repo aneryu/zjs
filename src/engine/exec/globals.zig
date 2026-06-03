@@ -2,19 +2,19 @@ const core = @import("../core/root.zig");
 
 pub const Slot = struct {
     name: core.Atom,
-    value: core.Value,
+    value: core.JSValue,
 };
 
-pub fn getByName(rt: *core.Runtime, slots: []const Slot, name: []const u8) !core.Value {
+pub fn getByName(rt: *core.JSRuntime, slots: []const Slot, name: []const u8) !core.JSValue {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
     for (slots) |slot| {
         if (slot.name == atom_id) return slot.value.dup();
     }
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-pub fn setExistingByName(rt: *core.Runtime, slots: []Slot, name: []const u8, value: core.Value) !void {
+pub fn setExistingByName(rt: *core.JSRuntime, slots: []Slot, name: []const u8, value: core.JSValue) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
     for (slots) |*slot| {

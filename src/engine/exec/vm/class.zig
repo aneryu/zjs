@@ -9,7 +9,7 @@ const stack_mod = @import("../stack.zig");
 const op = bytecode.opcode.op;
 
 pub fn getSuper(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
 ) !void {
@@ -17,7 +17,7 @@ pub fn getSuper(
     const source = if (source_from_stack) try stack.pop() else frame.current_function.dup();
     defer source.free(ctx.runtime);
     const function_object = property_ops.expectObject(source) catch {
-        try stack.pushOwned(core.Value.undefinedValue());
+        try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     };
     if (function_object.functionSuperConstructor()) |super_constructor| {
@@ -26,7 +26,7 @@ pub fn getSuper(
         } else if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
         } else {
-            try stack.pushOwned(core.Value.nullValue());
+            try stack.pushOwned(core.JSValue.nullValue());
         }
         return;
     }
@@ -34,7 +34,7 @@ pub fn getSuper(
         if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
         } else {
-            try stack.pushOwned(core.Value.nullValue());
+            try stack.pushOwned(core.JSValue.nullValue());
         }
         return;
     }
@@ -42,19 +42,19 @@ pub fn getSuper(
         if (function_object.getPrototype()) |prototype| {
             try stack.push(prototype.value());
         } else {
-            try stack.pushOwned(core.Value.nullValue());
+            try stack.pushOwned(core.JSValue.nullValue());
         }
         return;
     };
     if (home_object.getPrototype()) |prototype| {
         try stack.push(prototype.value());
     } else {
-        try stack.pushOwned(core.Value.nullValue());
+        try stack.pushOwned(core.JSValue.nullValue());
     }
 }
 
 pub fn getSuperValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -95,7 +95,7 @@ pub fn getSuperValue(
             if (sameObjectIdentity(super_constructor, obj)) {
                 if (function_object.functionHomeObjectSlot().*) |home_object| {
                     prototype = home_object.getPrototype() orelse {
-                        try stack.pushOwned(core.Value.undefinedValue());
+                        try stack.pushOwned(core.JSValue.undefinedValue());
                         return;
                     };
                 }
@@ -111,7 +111,7 @@ pub fn getSuperValue(
 }
 
 pub fn putSuperValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -167,7 +167,7 @@ pub fn putSuperValue(
 }
 
 pub fn setHomeObject(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     comptime functionBytecodeFromValue: anytype,
 ) !void {
@@ -186,19 +186,16 @@ pub fn setHomeObject(
             }
         }
         if (can_set_home_object) {
-            func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
+            try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
             if (is_arrow_function) {
-                const next_this = home_value.dup();
                 const slot = func_object.functionLexicalThisSlot();
-                const old_this = slot.*;
-                slot.* = next_this;
-                if (old_this) |stored| stored.free(ctx.runtime);
+                try func_object.setOptionalValueSlot(ctx.runtime, slot, home_value.dup());
             }
         }
     }
 }
 
-pub fn checkBrand(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (stack.values.len < 2) return error.StackUnderflow;
     const obj = stack.values[stack.values.len - 2].dup();
     defer obj.free(ctx.runtime);
@@ -207,7 +204,7 @@ pub fn checkBrand(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
 
-pub fn addBrand(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const home_value = try stack.pop();
     var rooted_home = home_value;
     defer home_value.free(ctx.runtime);
@@ -230,7 +227,7 @@ pub fn addBrand(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     if (rooted_obj.isObject()) {
         const object = try property_ops.expectObject(rooted_obj);
         if (object.hasOwnProperty(brand_atom)) return error.TypeError;
-        object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.Value.undefinedValue(), true, true, true)) catch |err| switch (err) {
+        object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true)) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             else => return err,
         };
@@ -238,7 +235,7 @@ pub fn addBrand(ctx: *core.Context, stack: *stack_mod.Stack) !void {
 }
 
 pub fn privateIn(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -263,11 +260,11 @@ pub fn privateIn(
         const object = try property_ops.expectObject(obj);
         break :blk object.hasOwnProperty(atom_id);
     };
-    try stack.pushOwned(core.Value.boolean(found));
+    try stack.pushOwned(core.JSValue.boolean(found));
 }
 
 pub fn defineClass(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -275,9 +272,9 @@ pub fn defineClass(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     comptime handleCatchableRuntimeError: anytype,
     comptime createBytecodeFunctionObject: anytype,
     comptime objectPrototypeFromGlobal: anytype,
@@ -301,21 +298,21 @@ pub fn defineClass(
     defer ctor_source.free(ctx.runtime);
     var parent_value = try stack.pop();
     defer parent_value.free(ctx.runtime);
-    var saved_class_binding = core.Value.undefinedValue();
+    var saved_class_binding = core.JSValue.undefinedValue();
     var saved_class_binding_active = false;
     defer if (saved_class_binding_active) saved_class_binding.free(ctx.runtime);
-    var superclass_value = core.Value.undefinedValue();
+    var superclass_value = core.JSValue.undefinedValue();
     var superclass_value_active = false;
     defer if (superclass_value_active) superclass_value.free(ctx.runtime);
-    var ctor = core.Value.undefinedValue();
+    var ctor = core.JSValue.undefinedValue();
     defer ctor.free(ctx.runtime);
-    var computed_key = core.Value.undefinedValue();
+    var computed_key = core.JSValue.undefinedValue();
     defer computed_key.free(ctx.runtime);
-    var name_value = core.Value.undefinedValue();
+    var name_value = core.JSValue.undefinedValue();
     defer name_value.free(ctx.runtime);
-    var superclass_proto = core.Value.undefinedValue();
+    var superclass_proto = core.JSValue.undefinedValue();
     defer superclass_proto.free(ctx.runtime);
-    var proto_value = core.Value.undefinedValue();
+    var proto_value = core.JSValue.undefinedValue();
     defer proto_value.free(ctx.runtime);
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &ctor_source },
@@ -338,7 +335,7 @@ pub fn defineClass(
     if ((flags & 1) != 0) {
         superclass_value = parent_value;
         superclass_value_active = true;
-        parent_value = core.Value.undefinedValue();
+        parent_value = core.JSValue.undefinedValue();
         if (superclass_value.isUndefined() and stack.len() > 0) {
             saved_class_binding = superclass_value;
             saved_class_binding_active = true;
@@ -361,9 +358,9 @@ pub fn defineClass(
         name_value = try functionNameValueFromAtom(ctx.runtime, name_atom, null);
         try defineFunctionNameProperty(ctx.runtime, ctor_object, name_value);
         name_value.free(ctx.runtime);
-        name_value = core.Value.undefinedValue();
+        name_value = core.JSValue.undefinedValue();
         computed_key.free(ctx.runtime);
-        computed_key = core.Value.undefinedValue();
+        computed_key = core.JSValue.undefinedValue();
     }
     var proto_parent: ?*core.Object = objectPrototypeFromGlobal(ctx.runtime, global);
     if (superclass_value_active) {
@@ -374,7 +371,7 @@ pub fn defineClass(
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
-            ctor_object.functionSuperConstructorSlot().* = superclass_value.dup();
+            try ctor_object.setOptionalValueSlot(ctx.runtime, ctor_object.functionSuperConstructorSlot(), superclass_value.dup());
             superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
                 return err;
@@ -401,10 +398,10 @@ pub fn defineClass(
             try copyPrivateNameRemap(ctx.runtime, ctor_object, proto);
         }
     }
-    ctor_object.setFunctionHomeObject(ctx.runtime, proto);
+    try ctor_object.setFunctionHomeObject(ctx.runtime, proto);
     if (ctor_object.functionClassFieldsInitSlot().*) |init_value| {
         if (objectFromValue(init_value)) |init_object| {
-            init_object.setFunctionHomeObject(ctx.runtime, proto);
+            try init_object.setFunctionHomeObject(ctx.runtime, proto);
         }
     }
     if (saved_class_binding_active) {
@@ -415,7 +412,7 @@ pub fn defineClass(
 }
 
 pub fn defineMethod(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -439,7 +436,7 @@ pub fn defineMethod(
 }
 
 pub fn defineMethodComputed(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -469,7 +466,7 @@ pub fn defineMethodComputed(
 }
 
 fn defineObjectMethod(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     stack: *stack_mod.Stack,
     atom_id: core.Atom,
     flags: u8,
@@ -492,10 +489,10 @@ fn defineObjectMethod(
 }
 
 fn defineObjectMethodValue(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     stack: *stack_mod.Stack,
     atom_id: core.Atom,
-    value: core.Value,
+    value: core.JSValue,
     flags: u8,
     caller_frame: ?*frame_mod.Frame,
     comptime remapPrivateAtomFromObject: anytype,
@@ -508,11 +505,11 @@ fn defineObjectMethodValue(
     var rooted_obj = obj;
     defer obj.free(rt);
     var rooted_value = value;
-    var name_value = core.Value.undefinedValue();
+    var name_value = core.JSValue.undefinedValue();
     defer name_value.free(rt);
-    var getter = core.Value.undefinedValue();
+    var getter = core.JSValue.undefinedValue();
     defer getter.free(rt);
-    var setter = core.Value.undefinedValue();
+    var setter = core.JSValue.undefinedValue();
     defer setter.free(rt);
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_obj },
@@ -532,7 +529,7 @@ fn defineObjectMethodValue(
     const effective_atom = remapPrivateAtomFromObject(rt, object, atom_id);
     if (rooted_value.isObject()) {
         const function_object = try property_ops.expectObject(rooted_value);
-        function_object.setFunctionHomeObject(rt, object);
+        try function_object.setFunctionHomeObject(rt, object);
         if (function_object.functionBytecodeSlot().*) |function_bytecode_value| {
             if (functionBytecodeFromValue(function_bytecode_value)) |fb| {
                 try installLexicalPrivateNameRemap(rt, object, caller_frame, fb.private_bound_names);
@@ -546,7 +543,7 @@ fn defineObjectMethodValue(
         name_value = try functionNameValueFromAtom(rt, effective_atom, prefix);
         try defineFunctionNameProperty(rt, function_object, name_value);
         name_value.free(rt);
-        name_value = core.Value.undefinedValue();
+        name_value = core.JSValue.undefinedValue();
     }
     const enumerable = (flags & 4) != 0;
     if ((flags & 3) == 1 or (flags & 3) == 2) {
@@ -566,9 +563,9 @@ fn defineObjectMethodValue(
             else => return err,
         };
         getter.free(rt);
-        getter = core.Value.undefinedValue();
+        getter = core.JSValue.undefinedValue();
         setter.free(rt);
-        setter = core.Value.undefinedValue();
+        setter = core.JSValue.undefinedValue();
         return;
     }
     const writable = rt.atoms.kind(atom_id) != .private;
@@ -578,13 +575,13 @@ fn defineObjectMethodValue(
     };
 }
 
-fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.Value {
+fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.values.len) return error.StackUnderflow;
     return stack.values[stack.values.len - 1 - index_from_top].dup();
 }
 
-fn ensureHomeObjectBrand(rt: *core.Runtime, home: *core.Object) !core.Atom {
+fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
     if (home.getOwnProperty(core.atom.ids.Private_brand)) |desc| {
         defer desc.destroy(rt);
         if (desc.value.asSymbolAtom()) |brand_atom| return brand_atom;
@@ -594,11 +591,11 @@ fn ensureHomeObjectBrand(rt: *core.Runtime, home: *core.Object) !core.Atom {
     if (!home.isExtensible()) return error.NotExtensible;
     const brand_atom = try rt.atoms.newSymbol(name, .private);
     defer rt.atoms.free(brand_atom);
-    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(core.Value.symbol(brand_atom), true, true, true));
+    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(core.JSValue.symbol(brand_atom), true, true, true));
     return brand_atom;
 }
 
-fn hasPrivateBrand(rt: *core.Runtime, obj: core.Value, func: core.Value) !bool {
+fn hasPrivateBrand(rt: *core.JSRuntime, obj: core.JSValue, func: core.JSValue) !bool {
     const object = try property_ops.expectObject(obj);
     const func_object = try property_ops.expectObject(func);
     const home = func_object.functionHomeObjectSlot().* orelse return error.TypeError;
@@ -613,7 +610,7 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 }
 
 test "private brand atom is released with home object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -625,7 +622,7 @@ test "private brand atom is released with home object" {
 }
 
 test "private brand creation does not allocate atom for non-extensible home object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);

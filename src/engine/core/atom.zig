@@ -1,6 +1,6 @@
 const memory = @import("memory.zig");
 const string = @import("string.zig");
-const Value = @import("value.zig").Value;
+const JSValue = @import("value.zig").JSValue;
 
 pub const Atom = u32;
 
@@ -942,7 +942,7 @@ pub const AtomTable = struct {
         return null;
     }
 
-    pub fn toStringValue(self: *const AtomTable, rt: anytype, atom_id: Atom) !Value {
+    pub fn toStringValue(self: *const AtomTable, rt: anytype, atom_id: Atom) !JSValue {
         if (isTaggedInt(atom_id)) {
             var buf: [10]u8 = undefined;
             const text = try std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)});
@@ -953,7 +953,7 @@ pub const AtomTable = struct {
             const cached = try rt.recentAtomString(atom_id, text);
             return cached.value().dup();
         }
-        const text = self.name(atom_id) orelse return Value.undefinedValue();
+        const text = self.name(atom_id) orelse return JSValue.undefinedValue();
         if (text.len == 1 and text[0] <= 0x7f) {
             const cached = (try rt.singleByteString(text[0])).?;
             return cached.value().dup();

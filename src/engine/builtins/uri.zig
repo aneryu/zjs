@@ -24,7 +24,7 @@ pub fn methodId(name: []const u8) ?u32 {
 
 /// QuickJS source map: global URI encode/decode functions in quickjs.c. This
 /// is the current narrow URI subset used by transitional `uri_call` bytecode.
-pub fn call(rt: *core.Runtime, mode: u32, input: core.Value) !core.Value {
+pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
     if (mode == 3 or mode == 4) {
         // Fast path: string inputs (the common case in real-world callers
         // and in test262's tight 4-byte-UTF-8 sweep) avoid the
@@ -81,7 +81,7 @@ pub fn call(rt: *core.Runtime, mode: u32, input: core.Value) !core.Value {
 /// The stack buffer is sized so that the test262 4-byte-UTF-8 sweep
 /// (`decodeURI("%F0%9F%98%80")` and similar) never spills to the heap.
 /// Larger strings spill to an `ArrayList`.
-fn decodeStringDataFast(rt: *core.Runtime, string_value: *core.string.String, component: bool) !?core.Value {
+fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, component: bool) !?core.JSValue {
     switch (string_value.resolveData()) {
         .latin1 => |bytes| return try decodeAsciiBytes(rt, bytes, component),
         .utf16 => |units| {
@@ -103,7 +103,7 @@ fn decodeStringDataFast(rt: *core.Runtime, string_value: *core.string.String, co
 /// Decode `%XX` escapes from an ASCII byte slice. The decoded form lives on
 /// a 128-byte stack buffer for the common short-input case; longer outputs
 /// (or unusually large inputs) spill to a heap `ArrayList`.
-fn decodeAsciiBytes(rt: *core.Runtime, bytes: []const u8, component: bool) !core.Value {
+fn decodeAsciiBytes(rt: *core.JSRuntime, bytes: []const u8, component: bool) !core.JSValue {
     if (try decodeSingleFourByteEscape(rt, bytes)) |result| return result;
 
     // Worst case after decoding is `bytes.len` bytes (each `%XX` triplet
@@ -123,13 +123,13 @@ fn decodeAsciiBytes(rt: *core.Runtime, bytes: []const u8, component: bool) !core
     return str.value();
 }
 
-fn decodeSingleFourByteEscape(rt: *core.Runtime, bytes: []const u8) !?core.Value {
+fn decodeSingleFourByteEscape(rt: *core.JSRuntime, bytes: []const u8) !?core.JSValue {
     const units = try decodeSingleFourByteEscapeUnitsFromAscii(bytes) orelse return null;
     const cached = try rt.recentTwoUnitString(units.high, units.low);
     return cached.value().dup();
 }
 
-pub fn decodeSingleFourByteEscapeUnits(value: core.Value) !?FourByteEscapeUnits {
+pub fn decodeSingleFourByteEscapeUnits(value: core.JSValue) !?FourByteEscapeUnits {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
@@ -196,7 +196,7 @@ fn fastHexValue(byte: u8) ?u8 {
     return @intCast(value);
 }
 
-pub fn escape(rt: *core.Runtime, input: core.Value) !core.Value {
+pub fn escape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     try appendValueCodeUnits(rt, &units, input);
@@ -221,7 +221,7 @@ pub fn escape(rt: *core.Runtime, input: core.Value) !core.Value {
     return str.value();
 }
 
-pub fn unescape(rt: *core.Runtime, input: core.Value) !core.Value {
+pub fn unescape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     try appendValueCodeUnits(rt, &units, input);
@@ -260,7 +260,7 @@ pub fn unescape(rt: *core.Runtime, input: core.Value) !core.Value {
     return str.value();
 }
 
-fn stringInputValue(input: core.Value) !?core.Value {
+fn stringInputValue(input: core.JSValue) !?core.JSValue {
     if (input.isString()) {
         return input;
     }
@@ -275,12 +275,12 @@ fn stringInputValue(input: core.Value) !?core.Value {
     return null;
 }
 
-fn stringDataFromValue(value: core.Value) ?*core.string.String {
+fn stringDataFromValue(value: core.JSValue) ?*core.string.String {
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-fn stringHasUnpairedSurrogate(value: core.Value) bool {
+fn stringHasUnpairedSurrogate(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     return switch (string_value.resolveData()) {
@@ -289,7 +289,7 @@ fn stringHasUnpairedSurrogate(value: core.Value) bool {
     };
 }
 
-fn encodeStringValue(rt: *core.Runtime, out: *std.ArrayList(u8), value: core.Value, component: bool) !void {
+fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue, component: bool) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -314,7 +314,7 @@ fn encodeStringValue(rt: *core.Runtime, out: *std.ArrayList(u8), value: core.Val
     }
 }
 
-fn encodeCodepoint(rt: *core.Runtime, out: *std.ArrayList(u8), codepoint: u21, component: bool) !void {
+fn encodeCodepoint(rt: *core.JSRuntime, out: *std.ArrayList(u8), codepoint: u21, component: bool) !void {
     if (codepoint <= 0x7f) {
         const ch: u8 = @intCast(codepoint);
         if (isUnescaped(ch) or (!component and isReserved(ch))) {
@@ -327,7 +327,7 @@ fn encodeCodepoint(rt: *core.Runtime, out: *std.ArrayList(u8), codepoint: u21, c
     for (encoded[0..len]) |byte| try appendPercentByte(rt, out, byte);
 }
 
-fn appendPercentByte(rt: *core.Runtime, out: *std.ArrayList(u8), byte: u8) !void {
+fn appendPercentByte(rt: *core.JSRuntime, out: *std.ArrayList(u8), byte: u8) !void {
     const encoded = percentEncodedByte(byte);
     try out.appendSlice(rt.memory.allocator, &encoded);
 }
@@ -355,7 +355,7 @@ fn stringDataContainsPercent(string_value: *core.string.String) bool {
     };
 }
 
-fn encodeBytes(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
+fn encodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
     for (bytes) |ch| {
         if (isUnescaped(ch) or (!component and isReserved(ch))) {
             try out.append(rt.memory.allocator, ch);
@@ -383,7 +383,7 @@ fn percentEncodedUnit(unit: u16) [6]u8 {
     };
 }
 
-fn decodeBytes(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
+fn decodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
     var index: usize = 0;
     while (index < bytes.len) {
         if (bytes[index] != '%') {
@@ -503,7 +503,7 @@ fn isSurrogate(codepoint: u21) bool {
     return codepoint >= 0xd800 and codepoint <= 0xdfff;
 }
 
-fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) AppendStringError!void {
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asInt32()) |int_value| {
         var int_buf: [32]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
@@ -556,7 +556,7 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
     }
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -575,7 +575,7 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
+fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
@@ -585,7 +585,7 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
     }
 }
 
-fn appendValueCodeUnits(rt: *core.Runtime, out: *std.ArrayList(u16), value: core.Value) AppendStringError!void {
+fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) AppendStringError!void {
     if (value.isSymbol()) return error.TypeError;
     if (value.isString()) return appendStringCodeUnits(rt, out, value);
     if (value.isObject()) {
@@ -603,7 +603,7 @@ fn appendValueCodeUnits(rt: *core.Runtime, out: *std.ArrayList(u16), value: core
     for (bytes.items) |byte| try out.append(rt.memory.allocator, byte);
 }
 
-fn appendStringCodeUnits(rt: *core.Runtime, out: *std.ArrayList(u16), value: core.Value) !void {
+fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -626,7 +626,7 @@ fn hexCodeUnitValue(unit: u16) u8 {
     return @intCast(unit - 'A' + 10);
 }
 
-fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;

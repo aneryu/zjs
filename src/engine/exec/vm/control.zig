@@ -16,18 +16,18 @@ pub const ThrowError = error{
     TypeError,
 };
 
-pub fn returnTop(ctx: *core.Context, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.Value {
+pub fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
-    const value = stack.peek() orelse core.Value.undefinedValue();
+    const value = stack.peek() orelse core.JSValue.undefinedValue();
     return finishFunctionReturn(ctx, frame, value);
 }
 
-pub fn returnUndefined(ctx: *core.Context, frame: *frame_mod.Frame, generator: ?*core.Object) !core.Value {
+pub fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
     if (generator) |generator_object| generator_object.generatorDoneSlot().* = true;
-    return finishFunctionReturn(ctx, frame, core.Value.undefinedValue());
+    return finishFunctionReturn(ctx, frame, core.JSValue.undefinedValue());
 }
 
-pub fn finishFunctionReturn(ctx: *core.Context, frame: *frame_mod.Frame, value: core.Value) !core.Value {
+pub fn finishFunctionReturn(ctx: *core.JSContext, frame: *frame_mod.Frame, value: core.JSValue) !core.JSValue {
     if (!frame.function.flags.is_derived_class_constructor) return value;
     if (value.isObject()) return value;
     defer value.free(ctx.runtime);
@@ -54,7 +54,7 @@ pub fn jump8(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn branch32(ctx: *core.Context, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
+pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
     const diff = readInt(i32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -66,7 +66,7 @@ pub fn branch32(ctx: *core.Context, stack: *stack_mod.Stack, function: *const by
     }
 }
 
-pub fn branch8(ctx: *core.Context, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
+pub fn branch8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
     const diff: i8 = @bitCast(function.code[frame.pc]);
     frame.pc += 1;
@@ -79,7 +79,7 @@ pub fn branch8(ctx: *core.Context, stack: *stack_mod.Stack, function: *const byt
 }
 
 pub fn throwTop(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -126,7 +126,7 @@ pub fn catchTarget(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, 
     frame.pc += 4;
     const previous_target: i32 = if (catch_target.*) |target| @intCast(target) else -1;
     catch_target.* = relativePc(operand_pc, diff);
-    try stack.pushOwned(core.Value.catchOffset(previous_target));
+    try stack.pushOwned(core.JSValue.catchOffset(previous_target));
 }
 
 pub fn gosub(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
@@ -134,11 +134,11 @@ pub fn gosub(function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack:
     const diff = readInt(i32, function.code[frame.pc..][0..4]);
     const return_pc = frame.pc + 4;
     if (return_pc > @as(usize, @intCast(std.math.maxInt(i32)))) return error.InvalidBytecode;
-    try stack.pushOwned(core.Value.int32(@intCast(return_pc)));
+    try stack.pushOwned(core.JSValue.int32(@intCast(return_pc)));
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn ret(ctx: *core.Context, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
+pub fn ret(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
     const target = try stack.pop();
     defer target.free(ctx.runtime);
     const pc_i32 = target.asInt32() orelse return error.InvalidBytecode;
@@ -154,7 +154,7 @@ fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
 }
 
-fn popCatchMarker(rt: *core.Runtime, stack: *stack_mod.Stack) !??usize {
+fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
     while (stack.peekBorrowed()) |marker| {
         const popped = try stack.pop();
         if (marker.isCatchOffset()) return catchTargetFromMarker(popped);
@@ -163,31 +163,31 @@ fn popCatchMarker(rt: *core.Runtime, stack: *stack_mod.Stack) !??usize {
     return null;
 }
 
-fn catchTargetFromMarker(marker: core.Value) ?usize {
+fn catchTargetFromMarker(marker: core.JSValue) ?usize {
     const previous = marker.asCatchOffset() orelse -1;
     if (previous < 0) return null;
     return @intCast(previous);
 }
 
-fn slotValueDup(slot: core.Value) core.Value {
+fn slotValueDup(slot: core.JSValue) core.JSValue {
     return slotValueBorrow(slot).dup();
 }
 
-fn slotValueBorrow(slot: core.Value) core.Value {
+fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var current = slot;
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.Value.undefinedValue();
+        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
     }
     return current;
 }
 
-fn varRefSlotIsUninitialized(slot: core.Value) bool {
+fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
     return slotValueBorrow(slot).tag == core.Tag.uninitialized;
 }
 
-fn varRefCellFromValue(value: core.Value) ?*core.Object {
+fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);

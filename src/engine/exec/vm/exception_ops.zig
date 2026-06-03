@@ -7,7 +7,7 @@ const value_ops = @import("../value_ops.zig");
 
 pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 
-pub fn createNamedError(rt: *core.Runtime, global: *core.Object, name: []const u8, message: []const u8) !core.Value {
+pub fn createNamedError(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     const ctor_key = try rt.internAtom(name);
     defer rt.atoms.free(ctor_key);
     const ctor_value = global.getProperty(ctor_key);
@@ -15,7 +15,7 @@ pub fn createNamedError(rt: *core.Runtime, global: *core.Object, name: []const u
     return createNamedErrorWithConstructor(rt, ctor_value, name, message);
 }
 
-pub fn createNamedErrorWithConstructor(rt: *core.Runtime, ctor_value: core.Value, name: []const u8, message: []const u8) !core.Value {
+pub fn createNamedErrorWithConstructor(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []const u8, message: []const u8) !core.JSValue {
     var rooted_ctor_value = ctor_value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_ctor_value },
@@ -53,11 +53,11 @@ pub fn createNamedErrorWithConstructor(rt: *core.Runtime, ctor_value: core.Value
 }
 
 test "createNamedErrorWithConstructor roots direct symbol constructor while creating error object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-error-constructor-symbol");
-    const ctor_value = core.Value.symbol(symbol_atom);
+    const ctor_value = core.JSValue.symbol(symbol_atom);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -84,7 +84,7 @@ test "createNamedErrorWithConstructor roots direct symbol constructor while crea
 /// Throw the canonical `ReferenceError` for a TDZ violation.
 /// Returns `error.ReferenceError` to align with the legacy VM
 /// convention (`exec/test262_helpers.raise(.reference)`).
-pub fn throwTdzReference(ctx: *core.Context) error{ReferenceError} {
+pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
     const rt = ctx.runtime;
 
     const error_obj = core.Object.create(rt, core.class.ids.error_, null) catch {
@@ -97,7 +97,7 @@ pub fn throwTdzReference(ctx: *core.Context) error{ReferenceError} {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer core.Value.string(&name_str.header).free(rt);
+    defer core.JSValue.string(&name_str.header).free(rt);
 
     const name_atom = rt.internAtom("ReferenceError") catch {
         throwReferenceErrorSentinel(ctx);
@@ -105,7 +105,7 @@ pub fn throwTdzReference(ctx: *core.Context) error{ReferenceError} {
     };
     defer rt.atoms.free(name_atom);
 
-    const name_value = core.Value.string(&name_str.header);
+    const name_value = core.JSValue.string(&name_str.header);
     error_obj.defineOwnProperty(rt, name_atom, core.Descriptor.data(name_value, true, false, true)) catch {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
@@ -115,7 +115,7 @@ pub fn throwTdzReference(ctx: *core.Context) error{ReferenceError} {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
     };
-    defer core.Value.string(&message_str.header).free(rt);
+    defer core.JSValue.string(&message_str.header).free(rt);
 
     const message_atom = rt.internAtom("message") catch {
         throwReferenceErrorSentinel(ctx);
@@ -123,7 +123,7 @@ pub fn throwTdzReference(ctx: *core.Context) error{ReferenceError} {
     };
     defer rt.atoms.free(message_atom);
 
-    const message_value = core.Value.string(&message_str.header);
+    const message_value = core.JSValue.string(&message_str.header);
     error_obj.defineOwnProperty(rt, message_atom, core.Descriptor.data(message_value, true, false, true)) catch {
         throwReferenceErrorSentinel(ctx);
         return error.ReferenceError;
@@ -140,7 +140,7 @@ pub fn normalizeEvalRuntimeError(err: anytype) (@TypeOf(err) || error{TypeError}
     };
 }
 
-pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.Context, global: *core.Object, err: anytype) !core.Value {
+pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const name = @errorName(err);
     const value = if (std.mem.eql(u8, name, "TypeError"))
@@ -161,8 +161,8 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.Context, global: *core.Obje
 
 test "runtimeErrorValueForGeneratorCatch keeps unrelated exception if error allocation fails" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(failing.allocator());
-    const ctx = try core.Context.create(rt);
+    const rt = try core.JSRuntime.create(failing.allocator());
+    const ctx = try core.JSContext.create(rt);
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer {
         failing.fail_index = std.math.maxInt(usize);
@@ -171,7 +171,7 @@ test "runtimeErrorValueForGeneratorCatch keeps unrelated exception if error allo
         rt.destroy();
     }
 
-    _ = ctx.throwValue(core.Value.int32(77));
+    _ = ctx.throwValue(core.JSValue.int32(77));
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.OutOfMemory,
@@ -185,7 +185,7 @@ test "runtimeErrorValueForGeneratorCatch keeps unrelated exception if error allo
     try std.testing.expectEqual(@as(?i32, 77), pending.asInt32());
 }
 
-pub fn qjsPromiseAggregateError(rt: *core.Runtime, global: *core.Object, errors: *core.Object) !core.Value {
+pub fn qjsPromiseAggregateError(rt: *core.JSRuntime, global: *core.Object, errors: *core.Object) !core.JSValue {
     const aggregate_error = try createNamedError(rt, global, "AggregateError", "");
     errdefer aggregate_error.free(rt);
     const object = objectFromValue(aggregate_error) orelse return error.TypeError;
@@ -193,18 +193,18 @@ pub fn qjsPromiseAggregateError(rt: *core.Runtime, global: *core.Object, errors:
     return aggregate_error;
 }
 
-pub fn qjsPromiseErrorValue(ctx: *core.Context, global: *core.Object, err: anytype) !core.Value {
+pub fn qjsPromiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const error_info = promiseErrorInfo(err);
     return createNamedError(ctx.runtime, global, error_info.name, error_info.message);
 }
 
 pub fn rejectedPromiseForRuntimeError(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     err: anytype,
     prototype: ?*core.Object,
-) !core.Value {
+) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
         const thrown_value = ctx.exception_slot.value;
         const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, thrown_value, prototype);
@@ -221,8 +221,8 @@ pub fn rejectedPromiseForRuntimeError(
 
 test "rejectedPromiseForRuntimeError keeps pending exception if promise allocation fails" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(failing.allocator());
-    const ctx = try core.Context.create(rt);
+    const rt = try core.JSRuntime.create(failing.allocator());
+    const ctx = try core.JSContext.create(rt);
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer {
         failing.fail_index = std.math.maxInt(usize);
@@ -231,7 +231,7 @@ test "rejectedPromiseForRuntimeError keeps pending exception if promise allocati
         rt.destroy();
     }
 
-    _ = ctx.throwValue(core.Value.int32(42));
+    _ = ctx.throwValue(core.JSValue.int32(42));
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.OutOfMemory,
@@ -245,19 +245,19 @@ test "rejectedPromiseForRuntimeError keeps pending exception if promise allocati
     try std.testing.expectEqual(@as(?i32, 42), pending.asInt32());
 }
 
-pub fn isCallSiteObject(rt: *core.Runtime, object: *core.Object) bool {
+pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
     _ = rt;
     return object.isCallSite();
 }
 
-pub fn qjsCallSiteMethod(rt: *core.Runtime, object: *core.Object, name: []const u8) !?core.Value {
+pub fn qjsCallSiteMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !?core.JSValue {
     if (!isCallSiteObject(rt, object)) return null;
-    if (std.mem.eql(u8, name, "getFunction")) return core.Value.nullValue();
-    if (std.mem.eql(u8, name, "getFunctionName")) return if (object.callSiteFunctionName()) |value| value.dup() else core.Value.nullValue();
-    if (std.mem.eql(u8, name, "getFileName")) return if (object.callSiteFile()) |value| value.dup() else core.Value.nullValue();
-    if (std.mem.eql(u8, name, "getLineNumber")) return core.Value.int32(object.callSiteLine());
-    if (std.mem.eql(u8, name, "getColumnNumber")) return core.Value.int32(object.callSiteColumn());
-    if (std.mem.eql(u8, name, "isNative")) return core.Value.boolean(false);
+    if (std.mem.eql(u8, name, "getFunction")) return core.JSValue.nullValue();
+    if (std.mem.eql(u8, name, "getFunctionName")) return if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue();
+    if (std.mem.eql(u8, name, "getFileName")) return if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue();
+    if (std.mem.eql(u8, name, "getLineNumber")) return core.JSValue.int32(object.callSiteLine());
+    if (std.mem.eql(u8, name, "getColumnNumber")) return core.JSValue.int32(object.callSiteColumn());
+    if (std.mem.eql(u8, name, "isNative")) return core.JSValue.boolean(false);
     return null;
 }
 
@@ -274,7 +274,7 @@ pub fn isErrorConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "Test262Error");
 }
 
-pub fn functionNameBytes(rt: *core.Runtime, value: core.Value) ![]u8 {
+pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
     const object = property_ops.expectObject(value) catch return rt.memory.allocator.dupe(u8, "");
     const name_value = object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
@@ -285,7 +285,7 @@ pub fn functionNameBytes(rt: *core.Runtime, value: core.Value) ![]u8 {
     return rt.memory.allocator.dupe(u8, bytes.items);
 }
 
-pub fn pendingExceptionMatchesError(ctx: *core.Context, err: anytype) bool {
+pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     if (!ctx.hasException()) return false;
     if (std.mem.eql(u8, @errorName(err), "Test262Error")) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
@@ -341,19 +341,19 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
     return null;
 }
 
-fn objectFromValue(value: core.Value) ?*core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
-fn throwReferenceErrorSentinel(ctx: *core.Context) void {
+fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
     const reference_error_atom: u32 = 209;
-    _ = ctx.throwValue(core.Value.int32(@intCast(reference_error_atom)));
+    _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom)));
 }

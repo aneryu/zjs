@@ -10,12 +10,12 @@ pub const EntriesMode = enum {
 };
 
 const RootedValueCopies = struct {
-    values: []core.Value,
+    values: []core.JSValue,
     roots: []core.runtime.ValueRootValue,
 
-    fn init(rt: *core.Runtime, source: []const core.Value) !RootedValueCopies {
-        const values = try rt.memory.alloc(core.Value, source.len);
-        errdefer rt.memory.free(core.Value, values);
+    fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
+        const values = try rt.memory.alloc(core.JSValue, source.len);
+        errdefer rt.memory.free(core.JSValue, values);
         @memcpy(values, source);
 
         const roots = try rt.memory.alloc(core.runtime.ValueRootValue, source.len);
@@ -27,9 +27,9 @@ const RootedValueCopies = struct {
         return .{ .values = values, .roots = roots };
     }
 
-    fn deinit(self: RootedValueCopies, rt: *core.Runtime) void {
+    fn deinit(self: RootedValueCopies, rt: *core.JSRuntime) void {
         rt.memory.free(core.runtime.ValueRootValue, self.roots);
-        rt.memory.free(core.Value, self.values);
+        rt.memory.free(core.JSValue, self.values);
     }
 };
 
@@ -158,17 +158,17 @@ pub fn prototypeMethodOrdinal(id: u32) ?i32 {
     };
 }
 
-pub fn create(rt: *core.Runtime, prototype: ?*core.Object) !*core.Object {
+pub fn create(rt: *core.JSRuntime, prototype: ?*core.Object) !*core.Object {
     return core.Object.create(rt, core.class.ids.object, prototype);
 }
 
-pub fn keys(rt: *core.Runtime, object: *core.Object) ![]core.Atom {
+pub fn keys(rt: *core.JSRuntime, object: *core.Object) ![]core.Atom {
     return object.ownKeys(rt);
 }
 
 /// QuickJS source map: narrow object-literal helper used by transitional
 /// `new_object` bytecode.
-pub fn literal(rt: *core.Runtime, names: []const core.Atom, values: []const core.Value) !core.Value {
+pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const core.JSValue) !core.JSValue {
     if (names.len != values.len) return error.TypeError;
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
@@ -189,7 +189,7 @@ pub fn literal(rt: *core.Runtime, names: []const core.Atom, values: []const core
 }
 
 test "object literal roots direct function bytecode values while creating object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const key = try rt.internAtom("value");
@@ -202,14 +202,14 @@ test "object literal roots direct function bytecode values while creating object
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var literal_value = core.Value.functionBytecode(&fb.header);
+    var literal_value = core.JSValue.functionBytecode(&fb.header);
     var literal_alive = true;
     defer if (literal_alive) literal_value.free(rt);
-    const values = [_]core.Value{literal_value};
+    const values = [_]core.JSValue{literal_value};
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -234,10 +234,10 @@ test "object literal roots direct function bytecode values while creating object
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub fn ownEntriesArray(rt: *core.Runtime, value: core.Value, mode: EntriesMode) !core.Value {
+pub fn ownEntriesArray(rt: *core.JSRuntime, value: core.JSValue, mode: EntriesMode) !core.JSValue {
     var rooted_value = value;
-    var out_value = core.Value.undefinedValue();
-    var element_val = core.Value.undefinedValue();
+    var out_value = core.JSValue.undefinedValue();
+    var element_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
         .{ .value = &out_value },
@@ -258,7 +258,7 @@ pub fn ownEntriesArray(rt: *core.Runtime, value: core.Value, mode: EntriesMode) 
     out_value = out.value();
     errdefer {
         core.Object.destroyFromHeader(rt, &out.header);
-        out_value = core.Value.undefinedValue();
+        out_value = core.JSValue.undefinedValue();
     }
     var out_index: u32 = 0;
     for (owned_keys) |key| {
@@ -273,7 +273,7 @@ pub fn ownEntriesArray(rt: *core.Runtime, value: core.Value, mode: EntriesMode) 
         };
         defer {
             element_val.free(rt);
-            element_val = core.Value.undefinedValue();
+            element_val = core.JSValue.undefinedValue();
         }
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(element_val, true, true, true));
         out_index += 1;
@@ -281,7 +281,7 @@ pub fn ownEntriesArray(rt: *core.Runtime, value: core.Value, mode: EntriesMode) 
     return out_value;
 }
 
-pub fn sameValue(a: core.Value, b: core.Value) bool {
+pub fn sameValue(a: core.JSValue, b: core.JSValue) bool {
     if (numberValue(a)) |lhs| {
         if (numberValue(b)) |rhs| {
             if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
@@ -292,13 +292,13 @@ pub fn sameValue(a: core.Value, b: core.Value) bool {
     return valuesEqual(a, b);
 }
 
-fn expectObject(value: core.Value) !*core.Object {
+fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn entryArrayValue(rt: *core.Runtime, key: core.Atom, value: core.Value) !core.Value {
+fn entryArrayValue(rt: *core.JSRuntime, key: core.Atom, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
     var root_values = [_]core.runtime.ValueRootValue{
@@ -321,7 +321,7 @@ fn entryArrayValue(rt: *core.Runtime, key: core.Atom, value: core.Value) !core.V
 }
 
 test "object entryArrayValue roots direct function bytecode value while creating entry array" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const key = try rt.internAtom("entryKey");
@@ -333,11 +333,11 @@ test "object entryArrayValue roots direct function bytecode value while creating
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-entry-array-value-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var entry_value = core.Value.functionBytecode(&fb.header);
+    var entry_value = core.JSValue.functionBytecode(&fb.header);
     var entry_value_alive = true;
     defer if (entry_value_alive) entry_value.free(rt);
 
@@ -363,11 +363,11 @@ test "object entryArrayValue roots direct function bytecode value while creating
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn atomToStringValue(rt: *core.Runtime, atom_id: core.Atom) !core.Value {
+fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
     return rt.atoms.toStringValue(rt, atom_id);
 }
 
-fn valuesEqual(a: core.Value, b: core.Value) bool {
+fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     if (a.isBigInt() and b.isBigInt()) {
         return (compareBigIntValues(a, b) orelse return false) == .eq;
     }
@@ -385,7 +385,7 @@ fn valuesEqual(a: core.Value, b: core.Value) bool {
     return a.same(b);
 }
 
-fn compareBigIntValues(a: core.Value, b: core.Value) ?std.math.Order {
+fn compareBigIntValues(a: core.JSValue, b: core.JSValue) ?std.math.Order {
     var lhs_scratch: [2]bignum.Limb = undefined;
     var rhs_scratch: [2]bignum.Limb = undefined;
     const lhs = bigIntParts(a, &lhs_scratch) orelse return null;
@@ -398,7 +398,7 @@ const BigIntParts = struct {
     limbs: []const bignum.Limb,
 };
 
-fn bigIntParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntParts {
+fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
     if (value.asShortBigInt()) |short| {
         const signed: i128 = short;
         var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
@@ -421,7 +421,7 @@ fn bigIntParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntParts {
     return null;
 }
 
-fn compareStringValues(a: core.Value, b: core.Value) ?i32 {
+fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
     if (!a.isString() or !b.isString()) return null;
     const a_header = a.refHeader() orelse return null;
     const b_header = b.refHeader() orelse return null;
@@ -430,7 +430,7 @@ fn compareStringValues(a: core.Value, b: core.Value) ?i32 {
     return a_string.compare(b_string.*);
 }
 
-fn numberValue(value: core.Value) ?f64 {
+fn numberValue(value: core.JSValue) ?f64 {
     if (value.asInt32()) |v| return @floatFromInt(v);
     if (value.asFloat64()) |v| return v;
     return null;

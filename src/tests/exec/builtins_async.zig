@@ -109,7 +109,7 @@ test "latin1 string literal append range fast path preserves fallbacks" {
 }
 
 test "latin1 string literal append range fast path collapses loop opcodes" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -131,7 +131,7 @@ test "latin1 string literal append range fast path collapses loop opcodes" {
 }
 
 test "latin1 string literal append range fast path accepts i8 loop limits" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -611,7 +611,7 @@ fn expectRegExpNamedGroupsOOMCleanup(source: []const u8) !void {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
         defer js.deinit();
 
         const warmup = try js.eval("(/(?<word>\\w+)/d).exec(\"abc\")");
@@ -1038,7 +1038,7 @@ test "Engine direct eval var shadows readonly global property" {
 }
 
 test "Engine top-level var probes preserve QuickJS global object semantics" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [1024]u8 = undefined;

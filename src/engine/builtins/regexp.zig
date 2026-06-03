@@ -168,15 +168,15 @@ pub fn matches(program: regexp_lib.Program, input: []const u8) bool {
 
 /// QuickJS source map: narrow RegExp constructor payload used by transitional
 /// `new_regexp` bytecode.
-pub fn construct(rt: *core.Runtime, pattern: core.Value, flags: core.Value) !core.Value {
+pub fn construct(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue) !core.JSValue {
     return constructWithPrototype(rt, pattern, flags, null);
 }
 
-pub fn constructLiteral(rt: *core.Runtime, pattern: []const u8, flags: []const u8, prototype: ?*core.Object) !core.Value {
+pub fn constructLiteral(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8, prototype: ?*core.Object) !core.JSValue {
     if (!validatePatternAndFlags(pattern, flags)) return error.SyntaxError;
 
-    var source_val = core.Value.undefinedValue();
-    var flags_val = core.Value.undefinedValue();
+    var source_val = core.JSValue.undefinedValue();
+    var flags_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &source_val },
         .{ .value = &flags_val },
@@ -198,13 +198,13 @@ pub fn constructLiteral(rt: *core.Runtime, pattern: []const u8, flags: []const u
 }
 
 pub fn constructLiteralWithValues(
-    rt: *core.Runtime,
-    source: core.Value,
-    stored_flags: core.Value,
+    rt: *core.JSRuntime,
+    source: core.JSValue,
+    stored_flags: core.JSValue,
     pattern: []const u8,
     flags: []const u8,
     prototype: ?*core.Object,
-) !core.Value {
+) !core.JSValue {
     if (!validatePatternAndFlags(pattern, flags)) return error.SyntaxError;
     return constructValidated(rt, source, stored_flags, prototype);
 }
@@ -213,17 +213,17 @@ pub fn constructLiteralWithValues(
 /// The parser has already validated `pattern`/`flags`, so the execution path
 /// must not recompile the pattern on every literal evaluation.
 pub fn constructPrevalidatedLiteralWithValues(
-    rt: *core.Runtime,
-    source: core.Value,
-    stored_flags: core.Value,
+    rt: *core.JSRuntime,
+    source: core.JSValue,
+    stored_flags: core.JSValue,
     prototype: ?*core.Object,
-) !core.Value {
+) !core.JSValue {
     return constructValidated(rt, source, stored_flags, prototype);
 }
 
-pub fn constructWithPrototype(rt: *core.Runtime, pattern: core.Value, flags: core.Value, prototype: ?*core.Object) !core.Value {
-    var source_val = core.Value.undefinedValue();
-    var flags_val = core.Value.undefinedValue();
+pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    var source_val = core.JSValue.undefinedValue();
+    var flags_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &source_val },
         .{ .value = &flags_val },
@@ -264,7 +264,7 @@ pub fn constructWithPrototype(rt: *core.Runtime, pattern: core.Value, flags: cor
     return constructValidated(rt, source_val, flags_val, prototype);
 }
 
-fn regExpStringValue(rt: *core.Runtime, value: core.Value) !core.Value {
+fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) return value.dup();
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -272,7 +272,7 @@ fn regExpStringValue(rt: *core.Runtime, value: core.Value) !core.Value {
     return try value_ops.createStringValue(rt, bytes.items);
 }
 
-fn constructValidated(rt: *core.Runtime, source: core.Value, stored_flags: core.Value, prototype: ?*core.Object) !core.Value {
+fn constructValidated(rt: *core.JSRuntime, source: core.JSValue, stored_flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     var source_val = source;
     var flags_val = stored_flags;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -289,15 +289,15 @@ fn constructValidated(rt: *core.Runtime, source: core.Value, stored_flags: core.
     const object = try core.Object.create(rt, core.class.ids.regexp, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
-    object.regexpSourceSlot().* = source_val.dup();
-    object.regexpFlagsSlot().* = flags_val.dup();
-    object.regexpLastIndexSlot().* = core.Value.int32(0);
+    try object.setOptionalValueSlot(rt, object.regexpSourceSlot(), source_val.dup());
+    try object.setOptionalValueSlot(rt, object.regexpFlagsSlot(), flags_val.dup());
+    try object.setOptionalValueSlot(rt, object.regexpLastIndexSlot(), core.JSValue.int32(0));
     object.regexpLastIndexWritableSlot().* = true;
     return object.value();
 }
 
 test "constructValidated roots source and flags while creating regexp object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const source_atom = try rt.atoms.newValueSymbol("gc-regexp-source-symbol");
@@ -306,15 +306,15 @@ test "constructValidated roots source and flags while creating regexp object" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const regexp_value = try constructValidated(rt, core.Value.symbol(source_atom), core.Value.symbol(flags_atom), null);
+    const regexp_value = try constructValidated(rt, core.JSValue.symbol(source_atom), core.JSValue.symbol(flags_atom), null);
     var regexp_alive = true;
     defer if (regexp_alive) regexp_value.free(rt);
     const regexp = regexpObjectFromValue(regexp_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(source_atom) != null);
     try std.testing.expect(rt.atoms.name(flags_atom) != null);
-    try std.testing.expect(regexp.regexpSource().?.same(core.Value.symbol(source_atom)));
-    try std.testing.expect(regexp.regexpFlags().?.same(core.Value.symbol(flags_atom)));
+    try std.testing.expect(regexp.regexpSource().?.same(core.JSValue.symbol(source_atom)));
+    try std.testing.expect(regexp.regexpFlags().?.same(core.JSValue.symbol(flags_atom)));
 
     regexp_value.free(rt);
     regexp_alive = false;
@@ -3164,7 +3164,7 @@ fn isUnicodeSetsReservedDoublePunctuator(first: u8, second: u8) bool {
     };
 }
 
-fn regexpObjectFromValue(value: core.Value) ?*core.Object {
+fn regexpObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -3173,18 +3173,18 @@ fn regexpObjectFromValue(value: core.Value) ?*core.Object {
 
 /// QuickJS source map: selected RegExp.prototype methods currently covered by
 /// smoke and parser lowering. Matching is still owned by libs/regexp.zig.
-pub fn methodCall(rt: *core.Runtime, object_value: core.Value, method: u32, arg: ?core.Value) !core.Value {
+pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, arg: ?core.JSValue) !core.JSValue {
     _ = arg;
     const object = try expectRegExpObject(object_value);
     return switch (method) {
         1 => try toString(rt, object),
-        2 => core.Value.boolean(true),
-        3 => core.Value.nullValue(),
+        2 => core.JSValue.boolean(true),
+        3 => core.JSValue.nullValue(),
         else => error.TypeError,
     };
 }
 
-pub fn accessor(rt: *core.Runtime, object_value: core.Value, name: []const u8) !core.Value {
+pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u8) !core.JSValue {
     const object = try expectRegExpObject(object_value);
     if (std.mem.eql(u8, name, "source")) {
         const source = try getInternalSource(object);
@@ -3202,10 +3202,10 @@ pub fn accessor(rt: *core.Runtime, object_value: core.Value, name: []const u8) !
         std.mem.indexOfScalar(u8, buffer.items, char) != null
     else
         false;
-    return core.Value.boolean(present);
+    return core.JSValue.boolean(present);
 }
 
-fn escapedSource(rt: *core.Runtime, source: core.Value) !core.Value {
+fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
     if (regexpSourceCanReturnRaw(source)) return source.dup();
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -3247,7 +3247,7 @@ fn escapedSource(rt: *core.Runtime, source: core.Value) !core.Value {
     return value_ops.createStringValue(rt, escaped.items);
 }
 
-fn regexpSourceCanReturnRaw(source: core.Value) bool {
+fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
     const header = source.refHeader() orelse return false;
     if (!source.isString()) return false;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
@@ -3267,7 +3267,7 @@ fn regexpSourceCanReturnRaw(source: core.Value) bool {
     return true;
 }
 
-pub fn escape(rt: *core.Runtime, args: []const core.Value) !core.Value {
+pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or !args[0].isString()) return error.TypeError;
 
     const input = try expectString(args[0]);
@@ -3304,7 +3304,7 @@ pub fn escape(rt: *core.Runtime, args: []const core.Value) !core.Value {
     return output.value();
 }
 
-fn toString(rt: *core.Runtime, object: *core.Object) !core.Value {
+fn toString(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     const source = try getInternalSource(object);
     defer source.free(rt);
     const flags = try getInternalFlags(object);
@@ -3321,14 +3321,14 @@ fn toString(rt: *core.Runtime, object: *core.Object) !core.Value {
     return str.value();
 }
 
-fn canonicalFlagsValue(rt: *core.Runtime, flags: core.Value) !core.Value {
+fn canonicalFlagsValue(rt: *core.JSRuntime, flags: core.JSValue) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try appendCanonicalRegExpFlags(rt, &buffer, flags);
     return value_ops.createStringValue(rt, buffer.items);
 }
 
-fn appendCanonicalRegExpFlags(rt: *core.Runtime, buffer: *std.ArrayList(u8), flags: core.Value) !void {
+fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), flags: core.JSValue) !void {
     var raw = std.ArrayList(u8).empty;
     defer raw.deinit(rt.memory.allocator);
     try appendValueString(rt, &raw, flags);
@@ -3338,7 +3338,7 @@ fn appendCanonicalRegExpFlags(rt: *core.Runtime, buffer: *std.ArrayList(u8), fla
     }
 }
 
-fn expectRegExpObject(value: core.Value) !*core.Object {
+fn expectRegExpObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -3346,27 +3346,27 @@ fn expectRegExpObject(value: core.Value) !*core.Object {
     return object;
 }
 
-fn expectString(value: core.Value) !*core.string.String {
+fn expectString(value: core.JSValue) !*core.string.String {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isString()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
-fn getInternalSource(object: *core.Object) !core.Value {
+fn getInternalSource(object: *core.Object) !core.JSValue {
     return (object.regexpSource() orelse return error.TypeError).dup();
 }
 
-fn getInternalFlags(object: *core.Object) !core.Value {
+fn getInternalFlags(object: *core.Object) !core.JSValue {
     return (object.regexpFlags() orelse return error.TypeError).dup();
 }
 
-fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) AppendStringError!void {
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asInt32()) |int_value| {
         var int_buf: [32]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
@@ -3419,7 +3419,7 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
     }
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -3434,12 +3434,12 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendRegExpPatternString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value, flags: []const u8) !void {
+fn appendRegExpPatternString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue, flags: []const u8) !void {
     _ = flags;
     try value_ops.appendValueString(rt, buffer, value);
 }
 
-fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
+fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
@@ -3461,7 +3461,7 @@ fn regexpFlagChar(name: []const u8) ?u8 {
     return null;
 }
 
-fn appendEscapedCodeUnit(rt: *core.Runtime, buffer: *std.ArrayList(u8), unit: u16, is_first: bool) !void {
+fn appendEscapedCodeUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: u16, is_first: bool) !void {
     if (unit <= 0x7f) {
         const byte: u8 = @intCast(unit);
         if (is_first and isAsciiAlphaNumeric(byte)) return appendHexEscape(rt, buffer, byte);
@@ -3487,24 +3487,24 @@ fn appendEscapedCodeUnit(rt: *core.Runtime, buffer: *std.ArrayList(u8), unit: u1
     try appendUtf8CodePoint(rt, buffer, unit);
 }
 
-fn appendHexEscape(rt: *core.Runtime, buffer: *std.ArrayList(u8), byte: u8) !void {
+fn appendHexEscape(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
     try buffer.appendSlice(rt.memory.allocator, "\\x");
     try appendHexByte(rt, buffer, byte);
 }
 
-fn appendUnicodeEscape(rt: *core.Runtime, buffer: *std.ArrayList(u8), unit: u16) !void {
+fn appendUnicodeEscape(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: u16) !void {
     try buffer.appendSlice(rt.memory.allocator, "\\u");
     try appendHexByte(rt, buffer, @intCast(unit >> 8));
     try appendHexByte(rt, buffer, @intCast(unit & 0xff));
 }
 
-fn appendHexByte(rt: *core.Runtime, buffer: *std.ArrayList(u8), byte: u8) !void {
+fn appendHexByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
     const hex = "0123456789abcdef";
     try buffer.append(rt.memory.allocator, hex[byte >> 4]);
     try buffer.append(rt.memory.allocator, hex[byte & 0x0f]);
 }
 
-fn appendUtf8CodePoint(rt: *core.Runtime, buffer: *std.ArrayList(u8), cp: u32) !void {
+fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
     if (cp <= 0x7f) {
         try buffer.append(rt.memory.allocator, @intCast(cp));
     } else if (cp <= 0x7ff) {
@@ -3575,7 +3575,7 @@ fn surrogateCodePoint(high: u16, low: u16) u32 {
     return 0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00);
 }
 
-fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;

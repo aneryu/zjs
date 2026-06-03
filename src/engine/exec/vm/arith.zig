@@ -9,7 +9,7 @@ const value_ops = @import("../value_ops.zig");
 const op = bytecode.opcode.op;
 
 pub fn binary(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     binop: u8,
     output: ?*std.Io.Writer,
@@ -63,7 +63,7 @@ pub fn binary(
 }
 
 pub fn compare(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     cmp: u8,
     output: ?*std.Io.Writer,
@@ -87,7 +87,7 @@ pub fn compare(
                 else => null,
             };
             if (result) |out| {
-                try stack.pushOwned(core.Value.boolean(out));
+                try stack.pushOwned(core.JSValue.boolean(out));
                 return;
             }
         }
@@ -95,15 +95,15 @@ pub fn compare(
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (fastCompareShortBigInt(cmp, lhs_bigint, rhs_bigint)) |out| {
-                try stack.pushOwned(core.Value.boolean(out));
+                try stack.pushOwned(core.JSValue.boolean(out));
                 return;
             }
         }
     }
 
-    const result: core.Value = switch (cmp) {
-        op.eq => core.Value.boolean(try looseEqualOp(ctx, output, global, lhs, rhs, 0, toPrimitiveForAddition)),
-        op.neq => core.Value.boolean(!try looseEqualOp(ctx, output, global, lhs, rhs, 0, toPrimitiveForAddition)),
+    const result: core.JSValue = switch (cmp) {
+        op.eq => core.JSValue.boolean(try looseEqualOp(ctx, output, global, lhs, rhs, 0, toPrimitiveForAddition)),
+        op.neq => core.JSValue.boolean(!try looseEqualOp(ctx, output, global, lhs, rhs, 0, toPrimitiveForAddition)),
         op.strict_eq => value_ops.strictEqual(lhs, rhs),
         op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
         else => blk: {
@@ -121,7 +121,7 @@ pub fn compare(
 }
 
 pub fn unary(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     opcode_id: u8,
     output: ?*std.Io.Writer,
@@ -131,7 +131,7 @@ pub fn unary(
     const value = try stack.pop();
     defer value.free(ctx.runtime);
 
-    const result: core.Value = blk: {
+    const result: core.JSValue = blk: {
         if (value.asInt32()) |int_value| {
             switch (opcode_id) {
                 op.plus => break :blk value,
@@ -157,7 +157,7 @@ pub fn unary(
 }
 
 pub fn bitNot(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -173,7 +173,7 @@ pub fn bitNot(
 }
 
 pub fn postUpdate(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     opcode_id: u8,
     output: ?*std.Io.Writer,
@@ -211,7 +211,7 @@ pub fn postUpdate(
 }
 
 pub fn tryFuseDroppedLocalPostUpdate(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -245,14 +245,14 @@ pub fn tryFuseDroppedLocalPostUpdate(
     };
     const dropped = try stack.pop();
     dropped.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc += 4;
     return true;
 }
 
 pub fn tryFuseDroppedCheckedLocalPostUpdateRead(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -286,14 +286,14 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateRead(
         }
         return false;
     };
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = pc + 5;
     return true;
 }
 
 pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -329,7 +329,7 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
             !ctx.runtime.hasInterruptHandler() and
             old_int < condition.limit)
         {
-            setSlotValue(ctx, &frame.locals[idx], core.Value.int32(condition.limit));
+            try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(condition.limit));
             try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             frame.pc = condition.exit_pc;
             return true;
@@ -349,7 +349,7 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
             else => return false,
         };
 
-        setSlotValue(ctx, &frame.locals[idx], core.Value.int32(updated_int));
+        try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         frame.pc = if (updated_int < condition.limit) condition.body_pc else condition.exit_pc;
         return true;
@@ -372,7 +372,7 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
             else => return false,
         };
 
-        setSlotValue(ctx, &frame.locals[idx], core.Value.int32(updated_int));
+        try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         frame.pc = if (updated_int < limit) condition.body_pc else condition.exit_pc;
         return true;
@@ -382,14 +382,14 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
     const old_bigint = frame.locals[idx].asShortBigInt() orelse return false;
     const updated = value_ops.shortBigIntUnary(opcode_id, old_bigint) orelse return false;
     const updated_bigint = updated.asShortBigInt() orelse return false;
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = if (updated_bigint < condition.limit) condition.body_pc else condition.exit_pc;
     return true;
 }
 
 pub fn updateLocal(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -414,7 +414,7 @@ pub fn updateLocal(
             op.dec_loc => fastInt32Sub(int_value, 1),
             else => unreachable,
         };
-        setSlotValue(ctx, &frame.locals[idx], updated);
+        try setSlotValue(ctx, &frame.locals[idx], updated);
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         return;
     }
@@ -425,7 +425,7 @@ pub fn updateLocal(
             else => unreachable,
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
-            setSlotValue(ctx, &frame.locals[idx], updated);
+            try setSlotValue(ctx, &frame.locals[idx], updated);
             try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             return;
         }
@@ -439,12 +439,12 @@ pub fn updateLocal(
         else => unreachable,
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub fn addLocal(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -468,7 +468,7 @@ pub fn addLocal(
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
-            setSlotValue(ctx, &frame.locals[idx], updated);
+            try setSlotValue(ctx, &frame.locals[idx], updated);
             try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             return;
         }
@@ -476,7 +476,7 @@ pub fn addLocal(
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
-                setSlotValue(ctx, &frame.locals[idx], updated);
+                try setSlotValue(ctx, &frame.locals[idx], updated);
                 try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
                 return;
             }
@@ -488,12 +488,12 @@ pub fn addLocal(
     const rhs_primitive = try toPrimitiveForAddition(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub fn tryFuseLocalNumericAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -531,14 +531,14 @@ pub fn tryFuseLocalNumericAdd(
     rhs_owned.free(ctx.runtime);
     const lhs_owned = try stack.pop();
     lhs_owned.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc += 3;
     return true;
 }
 
 pub fn tryFuseLocalNumericBinary(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -586,14 +586,14 @@ pub fn tryFuseLocalNumericBinary(
     rhs_owned.free(ctx.runtime);
     const lhs_owned = try stack.pop();
     lhs_owned.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc += 3;
     return true;
 }
 
 pub fn tryFuseLocalAddWithTopValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -632,14 +632,14 @@ pub fn tryFuseLocalAddWithTopValue(
     rhs_owned.free(ctx.runtime);
     const lhs_owned = try stack.pop();
     lhs_owned.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[idx], updated);
+    try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc += 4;
     return true;
 }
 
 pub fn tryFuseLocalStringAppend(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -685,21 +685,21 @@ pub fn tryFuseLocalStringAppend(
 }
 
 pub fn tryFuseGlobalDataAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) !bool {
     if (frame.pc + 5 > function.code.len) return false;
     if (function.code[frame.pc] != op.put_var) return false;
     const atom_id = std.mem.readInt(u32, function.code[frame.pc + 1 ..][0..4], .little);
     if (!canFuseGlobalDataWrite(function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (global.global_lexical_env) |env| {
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
     }
     if (stack.values.len < 2) return false;
@@ -737,7 +737,7 @@ pub fn tryFuseGlobalDataAdd(
 }
 
 pub fn tryFuseDroppedGlobalDataPostUpdate(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -745,7 +745,7 @@ pub fn tryFuseDroppedGlobalDataPostUpdate(
     opcode_id: u8,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) !bool {
     if (frame.pc + 6 > function.code.len) return false;
     if (function.code[frame.pc] != op.put_var) return false;
@@ -753,7 +753,7 @@ pub fn tryFuseDroppedGlobalDataPostUpdate(
     const atom_id = std.mem.readInt(u32, function.code[frame.pc + 1 ..][0..4], .little);
     if (!canFuseGlobalDataWrite(function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
-    if (global.global_lexical_env) |env| {
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
     }
 
@@ -790,7 +790,7 @@ fn canFuseGlobalDataWrite(
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     if (!eval_with_object.isUndefined()) return false;
     if (!frame.current_function.isUndefined()) return false;
@@ -922,7 +922,7 @@ fn parseCheckedLocalShortBigIntLessThanImmediateCondition(code: []const u8, targ
     };
 }
 
-fn objectFromValue(value: core.Value) ?*core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
@@ -957,48 +957,48 @@ fn immediateInt32Operand(code: []const u8, pc: usize) ?ImmediateInt32 {
     };
 }
 
-fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.Value {
+fn fastBinaryInt32(binop: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (binop) {
         op.add => fastInt32Add(lhs, rhs),
         op.sub => fastInt32Sub(lhs, rhs),
         op.mul => fastInt32Mul(lhs, rhs),
         op.div => value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) / @as(f64, @floatFromInt(rhs))),
         op.mod => fastInt32Mod(lhs, rhs),
-        op.shl => core.Value.int32(lhs << @intCast(rhs & 31)),
-        op.sar => core.Value.int32(lhs >> @intCast(rhs & 31)),
+        op.shl => core.JSValue.int32(lhs << @intCast(rhs & 31)),
+        op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
         op.shr => value_ops.numberToValue(@floatFromInt(@as(u32, @bitCast(lhs)) >> @intCast(rhs & 31))),
-        op.@"and" => core.Value.int32(lhs & rhs),
-        op.@"or" => core.Value.int32(lhs | rhs),
-        op.xor => core.Value.int32(lhs ^ rhs),
+        op.@"and" => core.JSValue.int32(lhs & rhs),
+        op.@"or" => core.JSValue.int32(lhs | rhs),
+        op.xor => core.JSValue.int32(lhs ^ rhs),
         else => null,
     };
 }
 
-fn fastInt32Add(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Sub(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Mul(lhs: i32, rhs: i32) core.Value {
-    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.Value.float64(-0.0);
+fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
+    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
     const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Mod(lhs: i32, rhs: i32) core.Value {
-    if (rhs == 0) return core.Value.float64(std.math.nan(f64));
-    if (rhs == -1) return if (lhs < 0) core.Value.float64(-0.0) else core.Value.int32(0);
+fn fastInt32Mod(lhs: i32, rhs: i32) core.JSValue {
+    if (rhs == 0) return core.JSValue.float64(std.math.nan(f64));
+    if (rhs == -1) return if (lhs < 0) core.JSValue.float64(-0.0) else core.JSValue.int32(0);
     const result = @rem(lhs, rhs);
-    if (result == 0 and lhs < 0) return core.Value.float64(-0.0);
-    return core.Value.int32(result);
+    if (result == 0 and lhs < 0) return core.JSValue.float64(-0.0);
+    return core.JSValue.int32(result);
 }
 
 fn fastCompareShortBigInt(cmp: u8, lhs: i64, rhs: i64) ?bool {
@@ -1024,11 +1024,11 @@ fn isNumericBinaryOp(binop: u8) bool {
 }
 
 fn looseEqualOp(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    lhs: core.Value,
-    rhs: core.Value,
+    lhs: core.JSValue,
+    rhs: core.JSValue,
     depth: u8,
     comptime toPrimitiveForAddition: anytype,
 ) !bool {
@@ -1064,11 +1064,11 @@ fn looseEqualOp(
         return value_ops.strictEqual(lhs_value, rhs).asBool().?;
     }
     if (lhs.isBool()) {
-        const number_lhs = core.Value.int32(if (lhs.asBool().?) 1 else 0);
+        const number_lhs = core.JSValue.int32(if (lhs.asBool().?) 1 else 0);
         return looseEqualOp(ctx, output, global, number_lhs, rhs, depth + 1, toPrimitiveForAddition);
     }
     if (rhs.isBool()) {
-        const number_rhs = core.Value.int32(if (rhs.asBool().?) 1 else 0);
+        const number_rhs = core.JSValue.int32(if (rhs.asBool().?) 1 else 0);
         return looseEqualOp(ctx, output, global, lhs, number_rhs, depth + 1, toPrimitiveForAddition);
     }
     if (lhs.isBigInt() and rhs.isNumber()) {
@@ -1092,7 +1092,7 @@ fn looseEqualOp(
     return false;
 }
 
-fn sameLooseEqualityType(lhs: core.Value, rhs: core.Value) bool {
+fn sameLooseEqualityType(lhs: core.JSValue, rhs: core.JSValue) bool {
     if (lhs.isNumber() and rhs.isNumber()) return true;
     if (lhs.isString() and rhs.isString()) return true;
     if (lhs.isBool() and rhs.isBool()) return true;
@@ -1103,11 +1103,11 @@ fn sameLooseEqualityType(lhs: core.Value, rhs: core.Value) bool {
     return lhs.tag == rhs.tag;
 }
 
-fn isLoosePrimitiveForObject(value: core.Value) bool {
+fn isLoosePrimitiveForObject(value: core.JSValue) bool {
     return value.isNumber() or value.isString() or value.isBigInt() or value.isSymbol();
 }
 
-fn looseEqualSameNumberTypes(lhs: core.Value, rhs: core.Value) bool {
+fn looseEqualSameNumberTypes(lhs: core.JSValue, rhs: core.JSValue) bool {
     const lhs_number = value_ops.numberValue(lhs) orelse return false;
     const rhs_number = value_ops.numberValue(rhs) orelse return false;
     if (std.math.isNan(lhs_number) or std.math.isNan(rhs_number)) return false;

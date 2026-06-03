@@ -24,7 +24,7 @@ pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytec
 pub fn pushBigIntI32Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     const value = readInt(i32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    try stack.pushOwned(core.Value.shortBigInt(value));
+    try stack.pushOwned(core.JSValue.shortBigInt(value));
 }
 
 pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
@@ -40,7 +40,7 @@ pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Bytecode
 }
 
 pub fn pushSmallInt(stack: *stack_mod.Stack, value: i32) !void {
-    try stack.pushOwned(core.Value.int32(value));
+    try stack.pushOwned(core.JSValue.int32(value));
 }
 
 pub fn pushSmallIntMaybeFuse(stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, value: i32) !void {
@@ -73,10 +73,10 @@ fn pushImmediateInt32MaybeFuse(
         };
     }
     if (consumed) frame.pc = pc;
-    try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, core.Value.int32(current));
+    try pushImmediateBinaryResultMaybeFuseStackBinary(stack, function, frame, core.JSValue.int32(current));
 }
 
-fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.Value {
+fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
     const immediate = immediateInt32Operand(code, pc.*) orelse return null;
     if (immediate.next_pc >= code.len) return null;
     const result = fastInt32ImmediateBinary(code[immediate.next_pc], current.*, immediate.value) orelse return null;
@@ -84,7 +84,7 @@ fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?c
     return result;
 }
 
-fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *const i32) ?core.Value {
+fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
     const rhs = immediateInt32Operand(code, pc.*) orelse return null;
     var rhs_value = rhs.value;
     var rhs_pc = rhs.next_pc;
@@ -135,7 +135,7 @@ fn pushImmediateBinaryResultMaybeFuseStackBinary(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    rhs_value: core.Value,
+    rhs_value: core.JSValue,
 ) !void {
     const rhs = rhs_value.asInt32() orelse {
         try stack.pushOwned(rhs_value);
@@ -156,51 +156,51 @@ fn pushImmediateBinaryResultMaybeFuseStackBinary(
     try stack.pushOwned(rhs_value);
 }
 
-fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.Value {
+fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (opcode_id) {
         op.add => fastInt32Add(lhs, rhs),
         op.sub => fastInt32Sub(lhs, rhs),
         op.mul => fastInt32Mul(lhs, rhs),
-        op.sar => core.Value.int32(lhs >> @intCast(rhs & 31)),
-        op.@"and" => core.Value.int32(lhs & rhs),
-        op.@"or" => core.Value.int32(lhs | rhs),
-        op.xor => core.Value.int32(lhs ^ rhs),
+        op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
+        op.@"and" => core.JSValue.int32(lhs & rhs),
+        op.@"or" => core.JSValue.int32(lhs | rhs),
+        op.xor => core.JSValue.int32(lhs ^ rhs),
         else => null,
     };
 }
 
-fn fastInt32Add(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Sub(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Mul(lhs: i32, rhs: i32) core.Value {
-    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.Value.float64(-0.0);
+fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
+    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
     const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
 pub fn pushUndefined(stack: *stack_mod.Stack) !void {
-    try stack.pushOwned(core.Value.undefinedValue());
+    try stack.pushOwned(core.JSValue.undefinedValue());
 }
 
 pub fn pushNull(stack: *stack_mod.Stack) !void {
-    try stack.pushOwned(core.Value.nullValue());
+    try stack.pushOwned(core.JSValue.nullValue());
 }
 
 pub fn pushBoolean(stack: *stack_mod.Stack, value: bool) !void {
-    try stack.pushOwned(core.Value.boolean(value));
+    try stack.pushOwned(core.JSValue.boolean(value));
 }
 
-pub fn pushConst(ctx: *core.Context, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub fn pushConst(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
     const index = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -209,7 +209,7 @@ pub fn pushConst(ctx: *core.Context, stack: *stack_mod.Stack, function: *const b
     try stack.push(value);
 }
 
-pub fn pushConst8(ctx: *core.Context, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
+pub fn pushConst8(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, opc: u8) !void {
     _ = opc;
     const index = function.code[frame.pc];
     frame.pc += 1;
@@ -218,7 +218,7 @@ pub fn pushConst8(ctx: *core.Context, stack: *stack_mod.Stack, function: *const 
     try stack.push(value);
 }
 
-pub fn pushAtomValue(ctx: *core.Context, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     if (ctx.runtime.opcode_profile == null) {
         if (try pushFusedAsciiAtomStringConcat(ctx, stack, function, frame, atom_id)) return;
@@ -230,7 +230,7 @@ pub fn pushAtomValue(ctx: *core.Context, stack: *stack_mod.Stack, function: *con
 }
 
 fn pushFusedAsciiAtomStringConcat(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -256,7 +256,7 @@ fn pushFusedAsciiAtomStringConcat(
     return true;
 }
 
-fn atomAsciiText(rt: *core.Runtime, atom_id: core.Atom, buffer: *[10]u8) ?[]const u8 {
+fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: *[10]u8) ?[]const u8 {
     if (rt.atoms.kind(atom_id) != .string) return null;
     if (core.atom.isTaggedInt(atom_id)) {
         return std.fmt.bufPrint(buffer, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch return null;
@@ -273,25 +273,25 @@ fn asciiBytes(bytes: []const u8) bool {
     return true;
 }
 
-pub fn pushPrivateSymbol(ctx: *core.Context, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+pub fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const effective_atom = remapPrivateAtomFromFrame(ctx.runtime, frame, atom_id);
-    try stack.pushOwned(core.Value.symbol(effective_atom));
+    try stack.pushOwned(core.JSValue.symbol(effective_atom));
 }
 
-pub fn pushEmptyString(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = (try ctx.runtime.emptyString()).value().dup();
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
 
-pub fn pushThis(stack: *stack_mod.Stack, this_value: core.Value) !void {
+pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
     if (varRefSlotIsUninitialized(this_value)) return error.ReferenceError;
     try pushSlotValue(stack, this_value);
 }
 
-pub fn toObject(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn toObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     var object_value = try toObjectForWith(ctx.runtime, value);
@@ -301,7 +301,7 @@ pub fn toObject(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     try stack.pushOwned(object_value);
 }
 
-pub fn typeOf(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const text: []const u8 = if (value.isUndefined() or value_ops.isHTMLDDA(value))
@@ -327,26 +327,26 @@ pub fn typeOf(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     try stack.pushOwned(out);
 }
 
-pub fn typeOfIsUndefined(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn typeOfIsUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    try stack.pushOwned(core.Value.boolean(value.isUndefined() or value_ops.isHTMLDDA(value)));
+    try stack.pushOwned(core.JSValue.boolean(value.isUndefined() or value_ops.isHTMLDDA(value)));
 }
 
-pub fn typeOfIsFunction(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn typeOfIsFunction(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
     const is_func = value.isFunctionBytecode() or functionObjectFromValue(value) != null;
-    try stack.pushOwned(core.Value.boolean(is_func));
+    try stack.pushOwned(core.JSValue.boolean(is_func));
 }
 
-pub fn logicalNot(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn logicalNot(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    try stack.pushOwned(core.Value.boolean(!value_ops.isTruthy(value)));
+    try stack.pushOwned(core.JSValue.boolean(!value_ops.isTruthy(value)));
 }
 
-pub fn drop(rt: *core.Runtime, stack: *stack_mod.Stack) !DropResult {
+pub fn drop(rt: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     const value = try stack.pop();
     if (value.isCatchOffset()) {
         if ((value.asCatchOffset() orelse -1) == 0) {
@@ -360,7 +360,7 @@ pub fn drop(rt: *core.Runtime, stack: *stack_mod.Stack) !DropResult {
     return .value;
 }
 
-pub fn nipCatch(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn nipCatch(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const ret_value = try stack.pop();
 
     while (stack.values.len != 0) {
@@ -380,14 +380,14 @@ pub fn nipCatch(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
     return error.InvalidBytecode;
 }
 
-pub fn dup(ctx: *core.Context, stack: *stack_mod.Stack, opc: u8) !void {
+pub fn dup(ctx: *core.JSContext, stack: *stack_mod.Stack, opc: u8) !void {
     _ = ctx;
     _ = opc;
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
     try stack.push(value);
 }
 
-pub fn swap(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn swap(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 2);
     const a = try stack.pop();
@@ -396,7 +396,7 @@ pub fn swap(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn nip(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn nip(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 2);
     const top = try stack.pop();
     const second = try stack.pop();
@@ -404,7 +404,7 @@ pub fn nip(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(top);
 }
 
-pub fn nip1(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn nip1(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     try requireStackLen(stack, 3);
     const c = try stack.pop();
     const b = try stack.pop();
@@ -414,7 +414,7 @@ pub fn nip1(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn dup2(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn dup2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 2);
     try stack.reserveAdditional(2);
@@ -426,7 +426,7 @@ pub fn dup2(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn dup1(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn dup1(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 2);
     try stack.reserveAdditional(1);
@@ -437,7 +437,7 @@ pub fn dup1(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn dup3(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn dup3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 3);
     try stack.reserveAdditional(3);
@@ -452,7 +452,7 @@ pub fn dup3(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn insert2(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn insert2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 2);
     try stack.reserveAdditional(1);
@@ -463,7 +463,7 @@ pub fn insert2(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn insert3(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn insert3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 3);
     try stack.reserveAdditional(1);
@@ -476,7 +476,7 @@ pub fn insert3(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn insert4(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn insert4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 4);
     try stack.reserveAdditional(1);
@@ -491,7 +491,7 @@ pub fn insert4(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(d);
 }
 
-pub fn rot3l(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn rot3l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 3);
     const c = try stack.pop();
@@ -502,7 +502,7 @@ pub fn rot3l(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(a);
 }
 
-pub fn rot3r(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn rot3r(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 3);
     const c = try stack.pop();
@@ -513,7 +513,7 @@ pub fn rot3r(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn rot4l(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn rot4l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 4);
     const d = try stack.pop();
@@ -526,7 +526,7 @@ pub fn rot4l(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(a);
 }
 
-pub fn rot5l(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn rot5l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 5);
     const e = try stack.pop();
@@ -541,7 +541,7 @@ pub fn rot5l(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(a);
 }
 
-pub fn perm3(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn perm3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 3);
     const c = try stack.pop();
@@ -552,7 +552,7 @@ pub fn perm3(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn perm4(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn perm4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 4);
     const d = try stack.pop();
@@ -565,7 +565,7 @@ pub fn perm4(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(d);
 }
 
-pub fn perm5(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn perm5(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 5);
     const e = try stack.pop();
@@ -580,7 +580,7 @@ pub fn perm5(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(e);
 }
 
-pub fn swap2(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     try requireStackLen(stack, 4);
     const d = try stack.pop();
@@ -593,25 +593,25 @@ pub fn swap2(ctx: *core.Context, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn isUndefinedOrNull(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn isUndefinedOrNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    try stack.pushOwned(core.Value.boolean(value.isUndefined() or value.isNull()));
+    try stack.pushOwned(core.JSValue.boolean(value.isUndefined() or value.isNull()));
 }
 
-pub fn isUndefined(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn isUndefined(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    try stack.pushOwned(core.Value.boolean(value.isUndefined()));
+    try stack.pushOwned(core.JSValue.boolean(value.isUndefined()));
 }
 
-pub fn isNull(rt: *core.Runtime, stack: *stack_mod.Stack) !void {
+pub fn isNull(rt: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     const value = try stack.pop();
     defer value.free(rt);
-    try stack.pushOwned(core.Value.boolean(value.isNull()));
+    try stack.pushOwned(core.JSValue.boolean(value.isNull()));
 }
 
-pub fn toObjectForWith(rt: *core.Runtime, value: core.Value) !core.Value {
+pub fn toObjectForWith(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isObject()) return value.dup();
     if (value.isNull() or value.isUndefined()) return error.TypeError;
     if (value.isString()) return builtins.string.constructWithPrototype(rt, &.{value}, null);
@@ -622,7 +622,7 @@ pub fn toObjectForWith(rt: *core.Runtime, value: core.Value) !core.Value {
     return error.TypeError;
 }
 
-fn primitiveObject(rt: *core.Runtime, class_id: core.class.ClassId, primitive: core.Value) !core.Value {
+fn primitiveObject(rt: *core.JSRuntime, class_id: core.class.ClassId, primitive: core.JSValue) !core.JSValue {
     var rooted_primitive = primitive;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_primitive },
@@ -636,12 +636,12 @@ fn primitiveObject(rt: *core.Runtime, class_id: core.class.ClassId, primitive: c
 
     const object = try core.Object.create(rt, class_id, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    object.objectDataSlot().* = rooted_primitive.dup();
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
     return object.value();
 }
 
 test "primitiveObject roots direct symbol while creating ToObject wrapper" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-vm-value-wrapper-symbol");
@@ -649,14 +649,14 @@ test "primitiveObject roots direct symbol while creating ToObject wrapper" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const wrapper_value = try primitiveObject(rt, core.class.ids.symbol, core.Value.symbol(symbol_atom));
+    const wrapper_value = try primitiveObject(rt, core.class.ids.symbol, core.JSValue.symbol(symbol_atom));
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
     const wrapper = property_ops.expectObject(wrapper_value) catch return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.Value.symbol(symbol_atom)));
+    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
 
     wrapper_value.free(rt);
     wrapper_alive = false;
@@ -664,16 +664,16 @@ test "primitiveObject roots direct symbol while creating ToObject wrapper" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn pushSlotValue(stack: *stack_mod.Stack, slot: core.Value) !void {
+fn pushSlotValue(stack: *stack_mod.Stack, slot: core.JSValue) !void {
     try stack.push(slotValueBorrow(slot));
 }
 
-fn slotValueBorrow(slot: core.Value) core.Value {
+fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var current = slot;
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.Value.undefinedValue();
+        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
     }
     return current;
 }
@@ -689,11 +689,11 @@ fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void
     }
 }
 
-fn varRefSlotIsUninitialized(slot: core.Value) bool {
+fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
     return slotValueBorrow(slot).tag == core.Tag.uninitialized;
 }
 
-fn varRefCellFromValue(value: core.Value) ?*core.Object {
+fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -701,7 +701,7 @@ fn varRefCellFromValue(value: core.Value) ?*core.Object {
     return object;
 }
 
-fn functionObjectFromValue(value: core.Value) ?*core.Object {
+fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -709,13 +709,13 @@ fn functionObjectFromValue(value: core.Value) ?*core.Object {
     return object;
 }
 
-fn objectFromValue(value: core.Value) ?*core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-fn remapPrivateAtomFromObject(rt: *core.Runtime, object: *const core.Object, atom_id: core.Atom) core.Atom {
+fn remapPrivateAtomFromObject(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) core.Atom {
     if (rt.atoms.kind(atom_id) != .private) return atom_id;
     for (object.privateRemapFrom(), 0..) |old_atom, idx| {
         if (old_atom == atom_id) return object.privateRemapTo()[idx];
@@ -723,7 +723,7 @@ fn remapPrivateAtomFromObject(rt: *core.Runtime, object: *const core.Object, ato
     return atom_id;
 }
 
-fn remapPrivateAtomFromFrame(rt: *core.Runtime, frame: ?*frame_mod.Frame, atom_id: core.Atom) core.Atom {
+fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, frame: ?*frame_mod.Frame, atom_id: core.Atom) core.Atom {
     if (rt.atoms.kind(atom_id) != .private) return atom_id;
     const current_frame = frame orelse return atom_id;
     const function_object = objectFromValue(current_frame.current_function) orelse return atom_id;
@@ -733,7 +733,7 @@ fn remapPrivateAtomFromFrame(rt: *core.Runtime, frame: ?*frame_mod.Frame, atom_i
     return remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 
-fn callableObjectFromValue(value: core.Value) ?*core.Object {
+fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -743,13 +743,13 @@ fn callableObjectFromValue(value: core.Value) ?*core.Object {
     return object;
 }
 
-fn proxyTargetIsCallable(value: core.Value) bool {
+fn proxyTargetIsCallable(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
 }
 
-fn catchTargetFromMarker(marker: core.Value) ?usize {
+fn catchTargetFromMarker(marker: core.JSValue) ?usize {
     const previous = marker.asCatchOffset() orelse -1;
     if (previous < 0) return null;
     return @intCast(previous);
@@ -760,9 +760,9 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 }
 
 test "push private symbol does not retain transient private atom" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolNoRetain");
@@ -792,19 +792,19 @@ test "push private symbol does not retain transient private atom" {
 }
 
 test "stack rearrange opcodes validate depth before mutating stack" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     var stack = stack_mod.Stack.init(&rt.memory, 8);
     defer stack.deinit(rt);
 
-    try stack.pushOwned(core.Value.int32(1));
-    try stack.pushOwned(core.Value.int32(2));
+    try stack.pushOwned(core.JSValue.int32(1));
+    try stack.pushOwned(core.JSValue.int32(2));
     try std.testing.expectError(error.StackUnderflow, dup3(ctx, &stack));
     try expectStackInt32s(&stack, &.{ 1, 2 });
 
-    try stack.pushOwned(core.Value.int32(3));
+    try stack.pushOwned(core.JSValue.int32(3));
     try std.testing.expectError(error.StackUnderflow, insert4(ctx, &stack));
     try expectStackInt32s(&stack, &.{ 1, 2, 3 });
 
@@ -814,8 +814,8 @@ test "stack rearrange opcodes validate depth before mutating stack" {
 
 test "stack rearrange growth reserves before mutating stack" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(failing.allocator());
-    const ctx = try core.Context.create(rt);
+    const rt = try core.JSRuntime.create(failing.allocator());
+    const ctx = try core.JSContext.create(rt);
     var stack = stack_mod.Stack.init(&rt.memory, 16);
     defer {
         failing.fail_index = std.math.maxInt(usize);
@@ -824,7 +824,7 @@ test "stack rearrange growth reserves before mutating stack" {
         rt.destroy();
     }
 
-    for (0..8) |index| try stack.pushOwned(core.Value.int32(@intCast(index)));
+    for (0..8) |index| try stack.pushOwned(core.JSValue.int32(@intCast(index)));
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, dup3(ctx, &stack));
     failing.fail_index = std.math.maxInt(usize);
@@ -833,9 +833,9 @@ test "stack rearrange growth reserves before mutating stack" {
 }
 
 test "push private symbol stack failure does not retain transient private atom" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolStackFailure");

@@ -14,9 +14,9 @@ const parseStmtAndRunWithTopLevelChildren = helpers.parseStmtAndRunWithTopLevelC
 const expectStringBytes = helpers.expectStringBytes;
 const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 test "F2+F3 qjs dispatcher: object literal with property via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "({ x: 1 })");
@@ -30,9 +30,9 @@ test "F2+F3 qjs dispatcher: object literal with property via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: array literal via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "[]");
@@ -43,9 +43,9 @@ test "F2+F3 qjs dispatcher: array literal via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: array literal with elements via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "[1, 2, 3]");
@@ -56,9 +56,9 @@ test "F2+F3 qjs dispatcher: array literal with elements via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: member expression via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "({}).x");
@@ -68,9 +68,9 @@ test "F2+F3 qjs dispatcher: member expression via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: array index via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "[1][0]");
@@ -79,9 +79,9 @@ test "F2+F3 qjs dispatcher: array index via qjs_vm" {
 }
 
 test "M2.3: qjs_vm reads primitive string index properties" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "\"abc\"[1]");
@@ -90,9 +90,9 @@ test "M2.3: qjs_vm reads primitive string index properties" {
 }
 
 test "M2.3: qjs_vm preserves UTF-16 code units for string index properties" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "String.fromCharCode(256)[0]");
@@ -101,9 +101,9 @@ test "M2.3: qjs_vm preserves UTF-16 code units for string index properties" {
 }
 
 test "M2.3: zjs_parser records function-local while back edge against child bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function f(){ var s = \"\"; var i = 0; while (i < 4) { s = \"0\" + s; i++; } return s; })()");
@@ -112,9 +112,9 @@ test "M2.3: zjs_parser records function-local while back edge against child byte
 }
 
 test "M2.3: zjs_parser records function-local do while back edge against child bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function f(){ var s = \"\"; var i = 0; do { s = \"0\" + s; i++; } while (i < 4); return s; })()");
@@ -123,7 +123,7 @@ test "M2.3: zjs_parser records function-local do while back edge against child b
 }
 
 test "M2.3: sloppy yield identifier before division is not parsed as regexp" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [32]u8 = undefined;
@@ -143,18 +143,18 @@ test "M2.3: sloppy yield identifier before division is not parsed as regexp" {
 }
 
 test "F2+F3 qjs dispatcher: unresolved call expression fails through qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.ReferenceError, parseAndRun(rt, ctx, "f()"));
 }
 
 test "M1.3: nested FunctionDef child runs through fclosure and call" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function inner(){ return 42; } return inner(); })()");
@@ -163,9 +163,9 @@ test "M1.3: nested FunctionDef child runs through fclosure and call" {
 }
 
 test "M1.3: nested FunctionDef function expression captures parent var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 41; return (function inner(){ return a + 1; })(); })()");
@@ -174,9 +174,9 @@ test "M1.3: nested FunctionDef function expression captures parent var" {
 }
 
 test "M1.3: nested FunctionDef capture observes parent write after closure creation" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a; var f = function inner(){ return a + 1; }; a = 41; return f(); })()");
@@ -185,9 +185,9 @@ test "M1.3: nested FunctionDef capture observes parent write after closure creat
 }
 
 test "M1.3: nested FunctionDef captured parent var survives returned closure" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 41; return function inner(){ return a + 1; }; })()()");
@@ -196,9 +196,9 @@ test "M1.3: nested FunctionDef captured parent var survives returned closure" {
 }
 
 test "M1.3: nested FunctionDef declaration captures var declared later" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function inner(){ return a + 1; } var a = 41; return inner(); })()");
@@ -207,9 +207,9 @@ test "M1.3: nested FunctionDef declaration captures var declared later" {
 }
 
 test "M1.3: function-body var predeclare skips nested function bodies" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function ignored(){ var a = 1; } function inner(){ return a + 1; } var a = 41; return inner(); })()");
@@ -218,9 +218,9 @@ test "M1.3: function-body var predeclare skips nested function bodies" {
 }
 
 test "M1.3: nested FunctionDef captures parent argument" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(a){ return function inner(){ return a + 1; }; })(41)()");
@@ -229,9 +229,9 @@ test "M1.3: nested FunctionDef captures parent argument" {
 }
 
 test "M1.3: nested FunctionDef captured argument observes parent write" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(a){ var f = function inner(){ return a + 1; }; a = 41; return f(); })(1)");
@@ -240,9 +240,9 @@ test "M1.3: nested FunctionDef captured argument observes parent write" {
 }
 
 test "M1.3: nested FunctionDef captures grandparent var through ref chain" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 41; return (function middle(){ return function inner(){ return a + 1; }; })()(); })()");
@@ -251,9 +251,9 @@ test "M1.3: nested FunctionDef captures grandparent var through ref chain" {
 }
 
 test "M1.3: nested FunctionDef grandparent ref observes outer write" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 1; var f = (function middle(){ return function inner(){ return a + 1; }; })(); a = 41; return f(); })()");
@@ -262,9 +262,9 @@ test "M1.3: nested FunctionDef grandparent ref observes outer write" {
 }
 
 test "M1.3: nested FunctionDef writes captured parent var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 1; function inner(){ a = 41; } inner(); return a + 1; })()");
@@ -273,9 +273,9 @@ test "M1.3: nested FunctionDef writes captured parent var" {
 }
 
 test "M1.3: nested FunctionDef writes captured parent argument" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(a){ function inner(){ a = 41; } inner(); return a + 1; })(1)");
@@ -284,9 +284,9 @@ test "M1.3: nested FunctionDef writes captured parent argument" {
 }
 
 test "M1.3: nested FunctionDef writes captured grandparent var through ref chain" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ var a = 1; var f = (function middle(){ return function inner(){ a = 41; }; })(); f(); return a + 1; })()");
@@ -295,9 +295,9 @@ test "M1.3: nested FunctionDef writes captured grandparent var through ref chain
 }
 
 test "M1.3: nested FunctionDef declaration is callable before declaration" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ return inner(); function inner(){ return 42; } })()");
@@ -306,9 +306,9 @@ test "M1.3: nested FunctionDef declaration is callable before declaration" {
 }
 
 test "M2: function-body var predeclare skips template substitutions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function f(actual){ var x = `${actual}`; return 42; })(1)");
@@ -317,9 +317,9 @@ test "M2: function-body var predeclare skips template substitutions" {
 }
 
 test "M2: FunctionDef child reparent keeps nested sibling closure valid" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function outer(){ function first(){ return function inner(){ return a + 1; }; } function second(){ return 0; } var a = 41; return first()(); })()");
@@ -332,9 +332,9 @@ test "M2: FunctionDef child reparent keeps nested sibling closure valid" {
 // =====================================================================
 
 test "F10.1b: var x; x returns undefined (locals init to undefined)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "var x; x");
@@ -343,7 +343,7 @@ test "F10.1b: var x; x returns undefined (locals init to undefined)" {
 }
 
 test "F10.1b: top-level var_count populated from global vars" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -364,7 +364,7 @@ test "F10.1b: top-level var_count populated from global vars" {
 }
 
 test "F10.1b: top-level scope_get_var lowers to get_var for global var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -398,7 +398,7 @@ test "F10.1b: top-level scope_get_var lowers to get_var for global var" {
 }
 
 test "F10.1b: scope_get_var stays get_var for unknown identifiers" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -424,9 +424,9 @@ test "F10.1b: scope_get_var stays get_var for unknown identifiers" {
 // =====================================================================
 
 test "F10.1c: var x = 1; x returns 1" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "var x = 1; x");
@@ -435,9 +435,9 @@ test "F10.1c: var x = 1; x returns 1" {
 }
 
 test "F10.1c: let x = 42; x returns 42" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "let x = 42; x");
@@ -446,9 +446,9 @@ test "F10.1c: let x = 42; x returns 42" {
 }
 
 test "F10.1c: const k = 7; k returns 7" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "const k = 7; k");
@@ -457,9 +457,9 @@ test "F10.1c: const k = 7; k returns 7" {
 }
 
 test "F10.1c: arithmetic with locals: var a=2; var b=3; a+b returns 5" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "var a = 2; var b = 3; a + b");
@@ -468,9 +468,9 @@ test "F10.1c: arithmetic with locals: var a=2; var b=3; a+b returns 5" {
 }
 
 test "F10.1c: reassignment: var x = 1; x = 2; x returns 2" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "var x = 1; x = 2; x");
@@ -483,9 +483,9 @@ test "F10.1c: reassignment: var x = 1; x = 2; x returns 2" {
 // =====================================================================
 
 test "TDZ: let x; x returns undefined (initialised by declaration)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // `let x;` runs `set_loc_uninitialized` then `put_loc_check_init`
@@ -497,9 +497,9 @@ test "TDZ: let x; x returns undefined (initialised by declaration)" {
 }
 
 test "TDZ: let x = 99; x returns 99 (init clears TDZ)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "let x = 99; x");
@@ -508,18 +508,18 @@ test "TDZ: let x = 99; x returns 99 (init clears TDZ)" {
 }
 
 test "TDZ: const k = 11; k = 22 throws on TDZ-checked write to const after init" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.TypeError, parseStmtAndRun(rt, ctx, "const k = 11; k = 22;"));
 }
 
 test "TDZ: compound and update writes to const throw TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.TypeError, parseStmtAndRun(rt, ctx, "const k = 11; k += 1;"));
@@ -529,9 +529,9 @@ test "TDZ: compound and update writes to const throw TypeError" {
 }
 
 test "TDZ: closure write to captured const throws TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.TypeError, parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -542,27 +542,27 @@ test "TDZ: closure write to captured const throws TypeError" {
 }
 
 test "TDZ: destructured const write after init throws TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.TypeError, parseStmtAndRun(rt, ctx, "const [k] = [11]; k = 22;"));
 }
 
 test "TDZ: for-of const head write in body throws TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.TypeError, parseStmtAndRun(rt, ctx, "for (const k of [11]) { k = 22; }"));
 }
 
 test "TDZ: var x = 1; x reads via plain get_loc (no TDZ check)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // `var` slots are NOT lexical, so the pipeline emits short-form
@@ -593,7 +593,7 @@ test "TDZ: var x = 1; x reads via plain get_loc (no TDZ check)" {
 }
 
 test "TDZ: lexical prologue emits set_loc_uninitialized for let only" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -629,9 +629,9 @@ test "TDZ: lexical prologue emits set_loc_uninitialized for let only" {
 // the prior test-only "strip trailing drop" hack.
 
 test "eval_ret: 1 + 2 * 3 returns 7 (single expression)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRun(rt, ctx, "1 + 2 * 3");
@@ -640,9 +640,9 @@ test "eval_ret: 1 + 2 * 3 returns 7 (single expression)" {
 }
 
 test "eval_ret: 1; 2; 3 returns 3 (last expression wins)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // QuickJS eval semantics: each expression statement updates
@@ -653,9 +653,9 @@ test "eval_ret: 1; 2; 3 returns 3 (last expression wins)" {
 }
 
 test "eval_ret: empty script returns undefined" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // <ret> is initialised to undefined by enableEvalReturn so an

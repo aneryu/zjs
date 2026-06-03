@@ -120,7 +120,7 @@ const BacktrackState = struct {
     stack_start: usize,
 };
 
-const Context = struct {
+const JSContext = struct {
     allocator: std.mem.Allocator,
     input: Input,
     cbuf_type: CbufType,
@@ -135,14 +135,14 @@ const Context = struct {
     capture_snapshots: std.ArrayList(?usize),
     stack_snapshots: std.ArrayList(usize),
 
-    fn deinit(self: *Context) void {
+    fn deinit(self: *JSContext) void {
         self.state_stack.deinit(self.allocator);
         self.capture_snapshots.deinit(self.allocator);
         self.stack_snapshots.deinit(self.allocator);
     }
 
     fn pushState(
-        self: *Context,
+        self: *JSContext,
         captures: *const [max_captures * 2]?usize,
         stack: *const [max_stack]usize,
         stack_len: usize,
@@ -172,19 +172,19 @@ const Context = struct {
         try self.state_stack.append(self.allocator, state);
     }
 
-    fn dropState(self: *Context, state: BacktrackState) void {
+    fn dropState(self: *JSContext, state: BacktrackState) void {
         self.capture_snapshots.shrinkRetainingCapacity(state.capture_start);
         self.stack_snapshots.shrinkRetainingCapacity(state.stack_start);
     }
 
-    fn popState(self: *Context) ?BacktrackState {
+    fn popState(self: *JSContext) ?BacktrackState {
         const state = self.state_stack.pop() orelse return null;
         self.dropState(state);
         return state;
     }
 
     fn restoreState(
-        self: *Context,
+        self: *JSContext,
         state: *const BacktrackState,
         captures: *[max_captures * 2]?usize,
         stack: *[max_stack]usize,
@@ -201,7 +201,7 @@ const Context = struct {
     }
 
     fn resolveResult(
-        self: *Context,
+        self: *JSContext,
         captures: *[max_captures * 2]?usize,
         stack: *[max_stack]usize,
         stack_len: *usize,
@@ -252,27 +252,27 @@ const Context = struct {
         }
     }
 
-    fn readU8(self: *const Context, index: usize) !u8 {
+    fn readU8(self: *const JSContext, index: usize) !u8 {
         if (index >= self.bytecode_end) return error.BytecodeCorrupt;
         return self.bytecode[index];
     }
 
-    fn readU16(self: *const Context, index: usize) !u16 {
+    fn readU16(self: *const JSContext, index: usize) !u16 {
         if (index + 2 > self.bytecode_end) return error.BytecodeCorrupt;
         return std.mem.readInt(u16, self.bytecode[index..][0..2], .little);
     }
 
-    fn readU32(self: *const Context, index: usize) !u32 {
+    fn readU32(self: *const JSContext, index: usize) !u32 {
         if (index + 4 > self.bytecode_end) return error.BytecodeCorrupt;
         return std.mem.readInt(u32, self.bytecode[index..][0..4], .little);
     }
 
-    fn readI32(self: *const Context, index: usize) !i32 {
+    fn readI32(self: *const JSContext, index: usize) !i32 {
         const raw = try self.readU32(index);
         return @bitCast(raw);
     }
 
-    fn charAt(self: *const Context, pos: usize) ?CharRead {
+    fn charAt(self: *const JSContext, pos: usize) ?CharRead {
         return switch (self.input) {
             .latin1 => |bytes| {
                 if (pos >= bytes.len) return null;
@@ -291,7 +291,7 @@ const Context = struct {
         };
     }
 
-    fn prevCharAt(self: *const Context, pos: usize) ?CharRead {
+    fn prevCharAt(self: *const JSContext, pos: usize) ?CharRead {
         if (pos == 0) return null;
         return switch (self.input) {
             .latin1 => |bytes| {
@@ -311,7 +311,7 @@ const Context = struct {
         };
     }
 
-    fn prevCharPos(self: *const Context, pos: usize) !usize {
+    fn prevCharPos(self: *const JSContext, pos: usize) !usize {
         return (self.prevCharAt(pos) orelse return error.BytecodeCorrupt).next;
     }
 };
@@ -367,7 +367,7 @@ pub fn exec(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, st
     if (header.stack_size > max_stack) return error.BytecodeCorrupt;
     if (start_index > input.len()) return .{ .result = .out_of_range };
 
-    var ctx = Context{
+    var ctx = JSContext{
         .allocator = allocator,
         .input = input,
         .cbuf_type = switch (input) {
@@ -410,7 +410,7 @@ pub fn testMatch(allocator: std.mem.Allocator, bytecode: []const u8, input: Inpu
     if (header.stack_size > max_stack) return error.BytecodeCorrupt;
     if (start_index > input.len()) return false;
 
-    var ctx = Context{
+    var ctx = JSContext{
         .allocator = allocator,
         .input = input,
         .cbuf_type = switch (input) {
@@ -444,7 +444,7 @@ pub fn testMatch(allocator: std.mem.Allocator, bytecode: []const u8, input: Inpu
     };
 }
 
-fn execSearchLoop(ctx: *Context, bytecode: []const u8, header: Header, start_index: usize) !ExecStatus {
+fn execSearchLoop(ctx: *JSContext, bytecode: []const u8, header: Header, start_index: usize) !ExecStatus {
     const body_pc = header_len + search_prefix_len;
     var cpos = start_index;
 
@@ -466,7 +466,7 @@ fn execSearchLoop(ctx: *Context, bytecode: []const u8, header: Header, start_ind
     }
 }
 
-fn testSearchLoop(ctx: *Context, header: Header, start_index: usize) !bool {
+fn testSearchLoop(ctx: *JSContext, header: Header, start_index: usize) !bool {
     const body_pc = header_len + search_prefix_len;
     var cpos = start_index;
 
@@ -489,7 +489,7 @@ fn testSearchLoop(ctx: *Context, header: Header, start_index: usize) !bool {
 }
 
 fn execBacktrack(
-    ctx: *Context,
+    ctx: *JSContext,
     captures: *[max_captures * 2]?usize,
     stack: *[max_stack]usize,
     initial_stack_len: usize,
@@ -786,7 +786,7 @@ fn execBacktrack(
 }
 
 fn handleNoMatch(
-    ctx: *Context,
+    ctx: *JSContext,
     captures: *[max_captures * 2]?usize,
     stack: *[max_stack]usize,
     stack_len: *usize,
@@ -805,7 +805,7 @@ const SimpleQuantAtomMatch = union(enum) {
     position: usize,
 };
 
-fn matchSimpleQuantAtom(ctx: *const Context, atom_pc: usize, cpos: usize) !SimpleQuantAtomMatch {
+fn matchSimpleQuantAtom(ctx: *const JSContext, atom_pc: usize, cpos: usize) !SimpleQuantAtomMatch {
     const opcode = decodeOp(try ctx.readU8(atom_pc)) orelse return error.BytecodeCorrupt;
     var pc = atom_pc + 1;
     switch (opcode) {
@@ -857,7 +857,7 @@ fn matchSimpleQuantAtom(ctx: *const Context, atom_pc: usize, cpos: usize) !Simpl
     }
 }
 
-fn expectSimpleQuantAtomEnd(ctx: *const Context, pc: usize) !void {
+fn expectSimpleQuantAtomEnd(ctx: *const JSContext, pc: usize) !void {
     const opcode = decodeOp(try ctx.readU8(pc)) orelse return error.BytecodeCorrupt;
     if (opcode != .match) return error.BytecodeCorrupt;
 }
@@ -908,7 +908,7 @@ fn hasSearchPrefix(bytecode: []const u8, header: Header) bool {
         std.mem.readInt(u32, bytecode[pos + 7 ..][0..4], .little) == search_prefix_goto_offset;
 }
 
-fn matchRange16(ctx: *const Context, pc: usize, n: u16, code_point: u21) !bool {
+fn matchRange16(ctx: *const JSContext, pc: usize, n: u16, code_point: u21) !bool {
     var idx_min: usize = 0;
     const first_low = try ctx.readU16(pc);
     if (code_point < first_low) return false;
@@ -932,7 +932,7 @@ fn matchRange16(ctx: *const Context, pc: usize, n: u16, code_point: u21) !bool {
     return false;
 }
 
-fn matchRange32(ctx: *const Context, pc: usize, n: u16, code_point: u21) !bool {
+fn matchRange32(ctx: *const JSContext, pc: usize, n: u16, code_point: u21) !bool {
     var idx_min: usize = 0;
     const first_low = try ctx.readU32(pc);
     if (code_point < first_low) return false;

@@ -67,7 +67,7 @@ pub const ResolvedImportEntry = struct {
 pub const LocalBinding = struct {
     name: atom.Atom,
     initialized: bool = false,
-    cell: value_mod.Value = value_mod.Value.undefinedValue(),
+    cell: value_mod.JSValue = value_mod.JSValue.undefinedValue(),
 };
 
 pub const ResolvedExport = union(enum) {
@@ -89,7 +89,7 @@ pub const ModuleRecord = struct {
     import_attributes: []ImportAttributeEntry = &.{},
     resolved_imports: []ResolvedImportEntry = &.{},
     local_bindings: []LocalBinding = &.{},
-    import_meta: ?value_mod.Value = null,
+    import_meta: ?value_mod.JSValue = null,
     import_meta_main: bool = false,
     synthetic_kind: SyntheticKind = .none,
     has_top_level_await: bool = false,
@@ -152,7 +152,7 @@ pub const ModuleRecord = struct {
         }
         for (local_bindings) |*entry| {
             const cell = entry.cell;
-            entry.cell = value_mod.Value.undefinedValue();
+            entry.cell = value_mod.JSValue.undefinedValue();
             atoms.free(entry.name);
             cell.free(rt);
         }
@@ -256,7 +256,7 @@ pub const ModuleRecord = struct {
         self.local_bindings = &.{};
         for (local_bindings) |*entry| {
             const cell = entry.cell;
-            entry.cell = value_mod.Value.undefinedValue();
+            entry.cell = value_mod.JSValue.undefinedValue();
             self.atoms.free(entry.name);
             cell.free(rt);
         }

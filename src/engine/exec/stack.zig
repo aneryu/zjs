@@ -1,11 +1,11 @@
 const std = @import("std");
 
 const memory = @import("../core/memory.zig");
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 
 pub const Stack = struct {
     memory: *memory.MemoryAccount,
-    values: []Value = &.{},
+    values: []JSValue = &.{},
     capacity: usize = 0,
     limit: usize,
 
@@ -20,53 +20,53 @@ pub const Stack = struct {
         self.capacity = 0;
         for (values) |*slot| {
             const value = slot.*;
-            slot.* = Value.undefinedValue();
+            slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
-        if (capacity != 0) self.memory.free(Value, values.ptr[0..capacity]);
+        if (capacity != 0) self.memory.free(JSValue, values.ptr[0..capacity]);
     }
 
-    pub fn push(self: *Stack, value: Value) !void {
+    pub fn push(self: *Stack, value: JSValue) !void {
         try self.reserveAdditional(1);
         const old_len = self.values.len;
         self.values = self.values.ptr[0 .. old_len + 1];
         self.values[old_len] = if (value.requiresRefCount()) value.dup() else value;
     }
 
-    pub fn pushOwned(self: *Stack, value: Value) !void {
+    pub fn pushOwned(self: *Stack, value: JSValue) !void {
         try self.reserveAdditional(1);
         const old_len = self.values.len;
         self.values = self.values.ptr[0 .. old_len + 1];
         self.values[old_len] = value;
     }
 
-    pub fn pushAssumeCapacity(self: *Stack, value: Value) void {
+    pub fn pushAssumeCapacity(self: *Stack, value: JSValue) void {
         std.debug.assert(self.values.len < self.capacity);
         const old_len = self.values.len;
         self.values = self.values.ptr[0 .. old_len + 1];
         self.values[old_len] = if (value.requiresRefCount()) value.dup() else value;
     }
 
-    pub fn pushOwnedAssumeCapacity(self: *Stack, value: Value) void {
+    pub fn pushOwnedAssumeCapacity(self: *Stack, value: JSValue) void {
         std.debug.assert(self.values.len < self.capacity);
         const old_len = self.values.len;
         self.values = self.values.ptr[0 .. old_len + 1];
         self.values[old_len] = value;
     }
 
-    pub fn pop(self: *Stack) !Value {
+    pub fn pop(self: *Stack) !JSValue {
         if (self.values.len == 0) return error.StackUnderflow;
         const value = self.values[self.values.len - 1];
         self.values = self.values.ptr[0 .. self.values.len - 1];
         return value;
     }
 
-    pub fn peek(self: Stack) ?Value {
+    pub fn peek(self: Stack) ?JSValue {
         if (self.values.len == 0) return null;
         return self.values[self.values.len - 1].dup();
     }
 
-    pub fn peekBorrowed(self: Stack) ?Value {
+    pub fn peekBorrowed(self: Stack) ?JSValue {
         if (self.values.len == 0) return null;
         return self.values[self.values.len - 1];
     }
@@ -89,13 +89,13 @@ pub const Stack = struct {
             }
         }
 
-        const next = try self.memory.alloc(Value, next_capacity);
-        errdefer self.memory.free(Value, next);
+        const next = try self.memory.alloc(JSValue, next_capacity);
+        errdefer self.memory.free(JSValue, next);
         const old_values = self.values;
         const old_capacity = self.capacity;
         @memcpy(next[0..old_values.len], old_values);
         self.values = next[0..old_values.len];
         self.capacity = next_capacity;
-        if (old_capacity != 0) self.memory.free(Value, old_values.ptr[0..old_capacity]);
+        if (old_capacity != 0) self.memory.free(JSValue, old_values.ptr[0..old_capacity]);
     }
 };

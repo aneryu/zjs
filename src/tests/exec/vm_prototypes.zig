@@ -14,9 +14,9 @@ const parseStmtAndRunWithTopLevelChildren = helpers.parseStmtAndRunWithTopLevelC
 const expectStringBytes = helpers.expectStringBytes;
 const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 test "M3.1 F4: qjs_vm executes Object.setPrototypeOf" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var proto = {x: 42}; var object = {}; return Object.setPrototypeOf(object, proto) === object && object.x === 42; })()");
@@ -25,9 +25,9 @@ test "M3.1 F4: qjs_vm executes Object.setPrototypeOf" {
 }
 
 test "M3.1 F4: object generator method super uses receiver prototype" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var proto = { method(){ return 42; } }; var object = { *g(){ yield super.method(); } }; Object.setPrototypeOf(object, proto); return object.g().next().value; })()");
@@ -36,9 +36,9 @@ test "M3.1 F4: object generator method super uses receiver prototype" {
 }
 
 test "M3.1 F4: generator call stores non-strict this binding before resume" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -58,9 +58,9 @@ test "M3.1 F4: generator call stores non-strict this binding before resume" {
 }
 
 test "M3.1 F4: logical return chain keeps short-circuit value before trailing call" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -79,9 +79,9 @@ test "M3.1 F4: logical return chain keeps short-circuit value before trailing ca
 }
 
 test "M3.1 F4: if condition keeps member postfix update value" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -99,9 +99,9 @@ test "M3.1 F4: if condition keeps member postfix update value" {
 }
 
 test "M3.1 F4: destructuring default anonymous class receives binding name" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([cls = class {}]) { seen = cls.name === \"cls\" ? 1 : 0; } }; obj.method([]).next().then(function(){}); return seen; })()");
@@ -110,9 +110,9 @@ test "M3.1 F4: destructuring default anonymous class receives binding name" {
 }
 
 test "M3.1 F4: generator argument can feed empty rest array binding pattern" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var iterations = 0; var iter = (function*(){ iterations += 1; })(); var callCount = 0; var obj = { async *method([...[]]) { callCount = iterations; } }; obj.method(iter).next().then(function(){}); return callCount; })()");
@@ -121,9 +121,9 @@ test "M3.1 F4: generator argument can feed empty rest array binding pattern" {
 }
 
 test "M3.1 F4: generator next value resumes computed object accessor key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var obj; var setValue = 0; var iter = (function*(){ obj = { get [yield](){ return 11; }, set [yield](v){ setValue = v; } }; })(); iter.next(); iter.next(\"first\"); iter.next(\"second\"); obj.second = 13; return obj.first === 11 && setValue === 13; })()");
@@ -132,9 +132,9 @@ test "M3.1 F4: generator next value resumes computed object accessor key" {
 }
 
 test "M3.1 F4: generator resume preserves locals for computed object data key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var value = 0; var iter = (function*(){ let object = { [yield 1]: 9 }; value = object[yield 2] + object[String(yield 3)]; })(); iter.next(); iter.next(); iter.next(); iter.next(); return value; })()");
@@ -143,9 +143,9 @@ test "M3.1 F4: generator resume preserves locals for computed object data key" {
 }
 
 test "M3.1 F4: comma cover default does not infer anonymous function name" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var observed = 0; var obj = { async *method([cover = (function(){}), xCover = (0, function(){})]) { observed = cover.name === \"cover\" && xCover.name !== \"xCover\" ? 1 : 0; } }; obj.method([]).next().then(function(){}); return observed; })()");
@@ -154,9 +154,9 @@ test "M3.1 F4: comma cover default does not infer anonymous function name" {
 }
 
 test "M3.1 F4: comma expression drops member assignment values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var obj = {}; obj.x = 1, obj[\"y\"] = 2; return obj.x * 10 + obj.y; })()");
@@ -165,9 +165,9 @@ test "M3.1 F4: comma expression drops member assignment values" {
 }
 
 test "M3.1 F4: large numeric computed assignment stays indexed" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var array = []; array[123456] = \"ok\"; return array[123456]; })()");
@@ -176,9 +176,9 @@ test "M3.1 F4: large numeric computed assignment stays indexed" {
 }
 
 test "M3.1 F4: async generator destructuring defaults throw at call time" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var callCount = 0; var obj = { async *method([x = (function(){ throw new Test262Error(); })()]) { callCount = 1; } }; try { obj.method([undefined]); } catch (e) { return callCount === 0 ? 1 : 0; } return 0; })()");
@@ -187,9 +187,9 @@ test "M3.1 F4: async generator destructuring defaults throw at call time" {
 }
 
 test "M3.1 F4: async generator destructuring body stays deferred after call-time init" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var callCount = 0; var obj = { async *method([x]) { callCount = x; } }; var iter = obj.method([7]); var before = callCount; iter.next().then(function(){}); return before === 0 && callCount === 7; })()");
@@ -198,9 +198,9 @@ test "M3.1 F4: async generator destructuring body stays deferred after call-time
 }
 
 test "P0 variable destructuring RHS keeps outer global binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var g = [7]; function read(){ var [x] = g; return x; } return read(); })()");
@@ -209,9 +209,9 @@ test "P0 variable destructuring RHS keeps outer global binding" {
 }
 
 test "P0 duplicate var destructuring declarations reuse one binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -230,9 +230,9 @@ test "P0 duplicate var destructuring declarations reuse one binding" {
 }
 
 test "G1/P0: closures after catch cannot capture popped block lexical" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -260,9 +260,9 @@ test "G1/P0: closures after catch cannot capture popped block lexical" {
 }
 
 test "G1/P0: Error toString matches name and message" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -277,9 +277,9 @@ test "G1/P0: Error toString matches name and message" {
 }
 
 test "G1/P0: catch markers do not cover for-in iterator on continue" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -310,9 +310,9 @@ test "G1/P0: catch markers do not cover for-in iterator on continue" {
 }
 
 test "M3.1 F4: for-in boxes primitive receivers" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -343,9 +343,9 @@ test "M3.1 F4: for-in boxes primitive receivers" {
 }
 
 test "M3.1 F4: for-of supports parenthesized member targets and closes on lhs throw" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -378,9 +378,9 @@ test "M3.1 F4: for-of supports parenthesized member targets and closes on lhs th
 }
 
 test "M3.1 F4: for-of closes after return through finally" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -416,9 +416,9 @@ test "M3.1 F4: for-of closes after return through finally" {
 }
 
 test "M3.1 F4: nested for-in and for-of close in inner-first order on return" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -449,9 +449,9 @@ test "M3.1 F4: nested for-in and for-of close in inner-first order on return" {
 }
 
 test "G1/P0: inner loop break keeps enclosing try catch marker" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -475,9 +475,9 @@ test "G1/P0: inner loop break keeps enclosing try catch marker" {
 }
 
 test "G1/P0: for lexical head rejects body var redeclaration" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.UnexpectedToken, parseAndRunWithTopLevelChildren(rt, ctx,
@@ -497,9 +497,9 @@ test "G1/P0: for lexical head rejects body var redeclaration" {
 }
 
 test "G1/P0: for lexical destructuring head initializes current scope" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -525,9 +525,9 @@ test "G1/P0: for lexical destructuring head initializes current scope" {
 }
 
 test "G1/P0: for head treats sloppy let and async of arrow as expressions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -554,9 +554,9 @@ test "G1/P0: for head treats sloppy let and async of arrow as expressions" {
 }
 
 test "M3.1 F4: for head rejects arrow expression bodies containing in" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -576,9 +576,9 @@ test "M3.1 F4: for head rejects arrow expression bodies containing in" {
 }
 
 test "M3.1 F4: for declaration initializers reject in after comma" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -608,9 +608,9 @@ test "M3.1 F4: for declaration initializers reject in after comma" {
 }
 
 test "G1/P0: generator return closes destructuring iterators" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -636,9 +636,9 @@ test "G1/P0: generator return closes destructuring iterators" {
 }
 
 test "P5: Array concat rejects spread result above max safe length before scanning" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -670,9 +670,9 @@ test "P5: Array concat rejects spread result above max safe length before scanni
 }
 
 test "P5: typed array resize exposes Array method and iterator bounds distinctly" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -726,9 +726,9 @@ test "P5: typed array resize exposes Array method and iterator bounds distinctly
 }
 
 test "P5: Object prototype methods keep dispatch after name deletion and observe ToPropertyKey order" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,

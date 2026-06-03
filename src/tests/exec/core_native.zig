@@ -16,9 +16,9 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "vm executes push constants arithmetic comparisons and return" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     var function = try makeFunction(rt, &.{
@@ -35,9 +35,9 @@ test "vm executes push constants arithmetic comparisons and return" {
 }
 
 test "vm executes stack constants source locations and return_undef" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     var function = try makeFunction(rt, &.{
@@ -54,7 +54,7 @@ test "vm executes stack constants source locations and return_undef" {
 }
 
 test "frame setLocal handles self-assignment without dropping object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
@@ -75,12 +75,12 @@ test "frame setLocal handles self-assignment without dropping object" {
 }
 
 test "VM roots frame this symbol before derived constructor var-ref allocation" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
 
     const this_name = try rt.internAtom("this");
     defer rt.atoms.free(this_name);
@@ -104,7 +104,7 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
         ctx,
         &stack,
         &function,
-        core.Value.symbol(this_symbol),
+        core.JSValue.symbol(this_symbol),
         &.{},
         &.{},
         null,
@@ -123,12 +123,12 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
         null,
         null,
         null,
-        core.Value.undefinedValue(),
-        core.Value.undefinedValue(),
-        core.Value.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
         false,
         false,
-        core.Value.undefinedValue(),
+        core.JSValue.undefinedValue(),
         true,
         false,
     );
@@ -139,9 +139,9 @@ test "VM roots frame this symbol before derived constructor var-ref allocation" 
 }
 
 test "bound function call skips zero-length combined args allocation" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try engine.exec.closure.create(rt, 13, 0, 0, 0);
@@ -149,7 +149,7 @@ test "bound function call skips zero-length combined args allocation" {
     const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
     defer bound.value().free(rt);
     bound.boundTargetSlot().* = target.dup();
-    bound.boundThisSlot().* = core.Value.undefinedValue();
+    bound.boundThisSlot().* = core.JSValue.undefinedValue();
 
     const base_bytes = rt.memory.allocated_bytes;
     const base_allocations = rt.memory.allocation_count;
@@ -170,9 +170,9 @@ test "os.exec env option OOM leaves runtime clean" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
         defer rt.destroy();
-        const ctx = try core.Context.create(rt);
+        const ctx = try core.JSContext.create(rt);
         defer ctx.destroy();
 
         const exec_fn = try engine.exec.call.createOsModuleFunction(rt, "exec");
@@ -202,7 +202,7 @@ test "os.exec env option OOM leaves runtime clean" {
         defer item_value.free(rt);
         try env_object.defineOwnProperty(rt, item_key, core.Descriptor.data(item_value, true, true, true));
 
-        const args = [_]core.Value{ argv_value, options_value };
+        const args = [_]core.JSValue{ argv_value, options_value };
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = engine.exec.call.callValue(ctx, null, exec_fn, &args);
         failing.fail_index = std.math.maxInt(usize);
@@ -224,7 +224,7 @@ test "os.exec env option OOM leaves runtime clean" {
 }
 
 test "os.exec PATH search keeps empty entries and continues after EACCES" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const root_dir = ".zig-cache/os-exec-path-search";
@@ -347,7 +347,7 @@ test "std.urlGet full OOM releases response once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
 
         const warmup_fixture = try createUrlGetFullOOMFixture(&js);
         const warmup = try callUrlGetFullOOMFixture(&js, warmup_fixture);
@@ -389,7 +389,7 @@ test "createRealm OOM after global transfer releases realm global once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
         defer js.deinit();
 
         const warmup = try js.eval("var createRealmWarmup = $262.createRealm;");
@@ -399,7 +399,7 @@ test "createRealm OOM after global transfer releases realm global once" {
         defer parsed.deinit();
         var stack = engine.exec.stack.Stack.init(&js.runtime.memory, js.context.stack_limit);
         defer stack.deinit(js.runtime);
-        const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
+        const global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = engine.exec.zjs_vm.runWithArgs(
@@ -436,7 +436,7 @@ test "createRealm OOM after global transfer releases realm global once" {
     }
 
     if (!saw_success) {
-        var js = try engine.Engine.init(std.testing.allocator);
+        var js = try engine.harness.Engine.init(std.testing.allocator);
         defer js.deinit();
         const result = try js.eval("$262.createRealm();");
         result.free(js.runtime);
@@ -448,18 +448,18 @@ test "createRealm OOM after global transfer releases realm global once" {
 }
 
 const UrlGetFullOOMFixture = struct {
-    function: core.Value,
-    url: core.Value,
-    options: core.Value,
+    function: core.JSValue,
+    url: core.JSValue,
+    options: core.JSValue,
 
-    fn deinit(self: UrlGetFullOOMFixture, rt: *core.Runtime) void {
+    fn deinit(self: UrlGetFullOOMFixture, rt: *core.JSRuntime) void {
         self.function.free(rt);
         self.url.free(rt);
         self.options.free(rt);
     }
 };
 
-fn createUrlGetFullOOMFixture(js: *engine.Engine) !UrlGetFullOOMFixture {
+fn createUrlGetFullOOMFixture(js: *engine.harness.Engine) !UrlGetFullOOMFixture {
     const rt = js.runtime;
     const function = try engine.exec.call.createStdModuleFunction(rt, "urlGet");
     errdefer function.free(rt);
@@ -470,18 +470,18 @@ fn createUrlGetFullOOMFixture(js: *engine.Engine) !UrlGetFullOOMFixture {
     errdefer options.free(rt);
     const full_key = try rt.internAtom("full");
     defer rt.atoms.free(full_key);
-    try options_object.defineOwnProperty(rt, full_key, core.Descriptor.data(core.Value.boolean(true), true, true, true));
+    try options_object.defineOwnProperty(rt, full_key, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
     return .{ .function = function, .url = url, .options = options };
 }
 
-fn callUrlGetFullOOMFixture(js: *engine.Engine, fixture: UrlGetFullOOMFixture) !core.Value {
-    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
+fn callUrlGetFullOOMFixture(js: *engine.harness.Engine, fixture: UrlGetFullOOMFixture) !core.JSValue {
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     return engine.exec.call.callValueWithThisGlobalsAndGlobal(
         js.context,
         null,
         global,
         &.{},
-        core.Value.undefinedValue(),
+        core.JSValue.undefinedValue(),
         fixture.function,
         &.{ fixture.url, fixture.options },
     );
@@ -496,7 +496,7 @@ test "function object creation OOM releases linked prototype once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
         const name = try rt.internAtom("oomFunctionObject");
 
         failing.fail_index = failing.alloc_index + fail_offset;
@@ -529,7 +529,7 @@ test "createBigIntOwned OOM releases owned limbs" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
         const wide_value: i128 = @as(i128, std.math.maxInt(i64)) + 1;
         const big = try engine.libs.bignum.BigInt.fromIntAlloc(rt.memory.allocator, wide_value);
 
@@ -562,7 +562,7 @@ test "eval OOM during lazy function creation leaves runtime clean" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
 
         const warmup = try js.eval("Proxy.revocable({}, {})");
         warmup.free(js.runtime);
@@ -597,7 +597,7 @@ test "host closure array append OOM releases temporary records once" {
 }
 
 test "globals setExistingByName handles self-assignment without dropping object" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("self");
@@ -625,7 +625,7 @@ fn expectHostClosureAppendOOMCleanup(kind: i32) !void {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         const results_name = try rt.internAtom("results");
         const counter_name = try rt.internAtom("counter");
@@ -637,12 +637,12 @@ fn expectHostClosureAppendOOMCleanup(kind: i32) !void {
 
         var globals = [_]engine.exec.globals.Slot{
             .{ .name = results_name, .value = results.value() },
-            .{ .name = counter_name, .value = core.Value.int32(0) },
+            .{ .name = counter_name, .value = core.JSValue.int32(0) },
             .{ .name = this_name, .value = this_values.value() },
         };
 
         failing.fail_index = failing.alloc_index + fail_offset;
-        const result = engine.exec.closure.call(rt, closure_value, &.{ core.Value.int32(1), core.Value.int32(2) }, globals[0..]);
+        const result = engine.exec.closure.call(rt, closure_value, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, globals[0..]);
         failing.fail_index = std.math.maxInt(usize);
 
         if (result) |value| {
@@ -665,9 +665,9 @@ fn expectHostClosureAppendOOMCleanup(kind: i32) !void {
 }
 
 fn cleanupHostClosureAppendOOMIteration(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     globals: []engine.exec.globals.Slot,
-    closure_value: core.Value,
+    closure_value: core.JSValue,
     atom_names: []const core.Atom,
 ) void {
     closure_value.free(rt);
@@ -677,9 +677,9 @@ fn cleanupHostClosureAppendOOMIteration(
 }
 
 test "constant pool execution retains returned constants" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("const-return");
@@ -698,15 +698,15 @@ test "constant pool execution retains returned constants" {
 }
 
 test "property ops use shared object semantics" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     defer obj.value().free(rt);
     const key = try rt.internAtom("x");
     defer rt.atoms.free(key);
 
-    try engine.exec.property_ops.defineDataProperty(rt, obj, key, core.Value.int32(9));
-    try engine.exec.property_ops.setProperty(rt, obj, key, core.Value.int32(10));
+    try engine.exec.property_ops.defineDataProperty(rt, obj, key, core.JSValue.int32(9));
+    try engine.exec.property_ops.setProperty(rt, obj, key, core.JSValue.int32(10));
     const value = engine.exec.property_ops.getProperty(obj, key);
     try std.testing.expectEqual(@as(?i32, 10), value.asInt32());
 
@@ -720,26 +720,26 @@ test "property ops use shared object semantics" {
     const in_result = try engine.exec.property_ops.propertyIn(rt, obj.value(), key_string);
     try std.testing.expectEqual(true, in_result.asBool().?);
 
-    const optional_result = try engine.exec.property_ops.optionalGetPropertyValue(rt, core.Value.nullValue(), key);
+    const optional_result = try engine.exec.property_ops.optionalGetPropertyValue(rt, core.JSValue.nullValue(), key);
     try std.testing.expect(optional_result.isUndefined());
 
     try std.testing.expect(engine.exec.property_ops.deleteProperty(rt, obj, key));
 }
 
 test "value ops own primitive VM semantics" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const sum = try engine.exec.value_ops.binary(rt, op.add, core.Value.int32(2), core.Value.int32(3));
+    const sum = try engine.exec.value_ops.binary(rt, op.add, core.JSValue.int32(2), core.JSValue.int32(3));
     defer sum.free(rt);
     try std.testing.expectEqual(@as(?i32, 5), sum.asInt32());
 
     const suffix_obj = try core.string.String.createUtf8(rt, "px");
     const suffix = suffix_obj.value();
     defer suffix.free(rt);
-    const joined = try engine.exec.value_ops.binary(rt, op.add, core.Value.int32(2), suffix);
+    const joined = try engine.exec.value_ops.binary(rt, op.add, core.JSValue.int32(2), suffix);
     defer joined.free(rt);
 
     var joined_text = std.ArrayList(u8).empty;
@@ -747,7 +747,7 @@ test "value ops own primitive VM semantics" {
     try engine.exec.value_ops.appendRawString(rt, &joined_text, joined);
     try std.testing.expectEqualStrings("2px", joined_text.items);
 
-    const int_string = try engine.exec.value_ops.toStringValue(rt, core.Value.int32(7));
+    const int_string = try engine.exec.value_ops.toStringValue(rt, core.JSValue.int32(7));
     defer int_string.free(rt);
     var int_string_text = std.ArrayList(u8).empty;
     defer int_string_text.deinit(rt.memory.allocator);
@@ -758,14 +758,14 @@ test "value ops own primitive VM semantics" {
     const empty = empty_obj.value();
     defer empty.free(rt);
 
-    const empty_suffix = try engine.exec.value_ops.binary(rt, op.add, empty, core.Value.int32(7));
+    const empty_suffix = try engine.exec.value_ops.binary(rt, op.add, empty, core.JSValue.int32(7));
     defer empty_suffix.free(rt);
     var empty_suffix_text = std.ArrayList(u8).empty;
     defer empty_suffix_text.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &empty_suffix_text, empty_suffix);
     try std.testing.expectEqualStrings("7", empty_suffix_text.items);
 
-    const empty_prefix = try engine.exec.value_ops.binary(rt, op.add, core.Value.int32(7), empty);
+    const empty_prefix = try engine.exec.value_ops.binary(rt, op.add, core.JSValue.int32(7), empty);
     defer empty_prefix.free(rt);
     var empty_prefix_text = std.ArrayList(u8).empty;
     defer empty_prefix_text.deinit(rt.memory.allocator);
@@ -788,7 +788,7 @@ test "value ops own primitive VM semantics" {
 
     const symbol_atom = try rt.atoms.newSymbol("boxed", .symbol);
     defer rt.atoms.free(symbol_atom);
-    try std.testing.expectError(error.TypeError, engine.builtins.string.constructWithPrototype(rt, &.{core.Value.symbol(symbol_atom)}, null));
+    try std.testing.expectError(error.TypeError, engine.builtins.string.constructWithPrototype(rt, &.{core.JSValue.symbol(symbol_atom)}, null));
 
     const name = try rt.internAtom("loose-eq");
     defer rt.atoms.free(name);
@@ -804,11 +804,11 @@ test "value ops own primitive VM semantics" {
     defer eq_result.free(rt);
     try std.testing.expectEqual(true, eq_result.asBool().?);
 
-    try std.testing.expectEqual(false, engine.exec.value_ops.toBooleanValue(core.Value.int32(0)).asBool().?);
+    try std.testing.expectEqual(false, engine.exec.value_ops.toBooleanValue(core.JSValue.int32(0)).asBool().?);
 }
 
 test "closure helper stores closure state outside the VM" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const closure_value = try engine.exec.closure.create(rt, 2, 0, 0, 0);
@@ -823,15 +823,15 @@ test "closure helper stores closure state outside the VM" {
 }
 
 test "test262 helpers own SameValue assertions" {
-    const same_nan = try engine.exec.test262_helpers.assertSameValue(core.Value.float64(std.math.nan(f64)), core.Value.float64(std.math.nan(f64)));
+    const same_nan = try engine.exec.test262_helpers.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
     try std.testing.expect(same_nan.isUndefined());
-    try std.testing.expectError(error.Test262Error, engine.exec.test262_helpers.assertSameValue(core.Value.int32(1), core.Value.int32(2)));
+    try std.testing.expectError(error.Test262Error, engine.exec.test262_helpers.assertSameValue(core.JSValue.int32(1), core.JSValue.int32(2)));
 }
 
 test "call subsystem installs and invokes host globals" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -850,7 +850,7 @@ test "call subsystem installs and invokes host globals" {
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
-    const args = [_]core.Value{ core.Value.int32(1), core.Value.boolean(true) };
+    const args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.boolean(true) };
     const result = try engine.exec.call.callValue(ctx, &stream, print, &args);
     defer result.free(rt);
 
@@ -868,11 +868,11 @@ test "call subsystem installs and invokes host globals" {
     const same_value = assert_object.getProperty(same_value_key);
     defer same_value.free(rt);
 
-    const same_args = [_]core.Value{ core.Value.float64(std.math.nan(f64)), core.Value.float64(std.math.nan(f64)) };
+    const same_args = [_]core.JSValue{ core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)) };
     const same_result = try engine.exec.call.callValue(ctx, null, same_value, &same_args);
     defer same_result.free(rt);
     try std.testing.expect(same_result.isUndefined());
-    const mismatch_args = [_]core.Value{ core.Value.int32(1), core.Value.int32(2) };
+    const mismatch_args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.int32(2) };
     try std.testing.expectError(error.Test262Error, engine.exec.call.callValue(ctx, null, same_value, &mismatch_args));
 
     const test262_key = try rt.internAtom("Test262Error");
@@ -898,7 +898,7 @@ test "call subsystem installs and invokes host globals" {
     const stored_value_obj = try core.string.String.createUtf8(rt, "value");
     const stored_value = stored_value_obj.value();
     defer stored_value.free(rt);
-    const set_args = [_]core.Value{ stored_key, stored_value };
+    const set_args = [_]core.JSValue{ stored_key, stored_value };
     const set_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_set, &set_args);
     defer set_result.free(rt);
     try std.testing.expect(set_result.same(map_value));
@@ -912,9 +912,9 @@ test "call subsystem installs and invokes host globals" {
 }
 
 test "native builtin record dispatch is independent from dispatch-name strings" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -942,7 +942,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notMathAbs", dispatch_name);
 
-    const args = [_]core.Value{core.Value.int32(-8)};
+    const args = [_]core.JSValue{core.JSValue.int32(-8)};
     const result = try engine.exec.call.callValue(ctx, null, fake, &args);
     defer result.free(rt);
     try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(result).?);
@@ -964,7 +964,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
 }
 
 test "native dispatch metadata is internal and ignores user properties" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -991,7 +991,7 @@ test "native dispatch metadata is internal and ignores user properties" {
 }
 
 test "__zjs-prefixed user properties are ordinary own properties" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1014,7 +1014,7 @@ test "__zjs-prefixed user properties are ordinary own properties" {
 }
 
 test "array species fast path markers are internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1041,7 +1041,7 @@ test "array species fast path markers are internal" {
 }
 
 test "auto-init builtin markers are internal and ignore user properties" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1156,7 +1156,7 @@ test "auto-init builtin markers are internal and ignore user properties" {
 }
 
 test "immutable prototype marker is internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -1177,7 +1177,7 @@ test "immutable prototype marker is internal" {
 }
 
 test "builtin dispatch function markers are internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [512]u8 = undefined;
@@ -1219,7 +1219,7 @@ test "builtin dispatch function markers are internal" {
 }
 
 test "proxy revocation target is internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1261,7 +1261,7 @@ test "proxy revocation target is internal" {
 }
 
 test "regexp accessor realm TypeError constructor is internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1296,7 +1296,7 @@ test "regexp accessor realm TypeError constructor is internal" {
 }
 
 test "throw type error intrinsic marker is internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1337,8 +1337,8 @@ test "throw type error intrinsic marker is internal" {
 
     const probe_result = try js.eval("globalThis.__thrower_probe = Object.getOwnPropertyDescriptor(Function.prototype, \"arguments\").get;");
     defer probe_result.free(js.runtime);
-    try std.testing.expect(js.context.cached_global != null);
-    const global = js.context.cached_global.?;
+    try std.testing.expect(js.context.global != null);
+    const global = js.context.global.?;
     const probe_key = try js.runtime.internAtom("__thrower_probe");
     defer js.runtime.atoms.free(probe_key);
     const thrower_value = global.getProperty(probe_key);
@@ -1352,7 +1352,7 @@ test "throw type error intrinsic marker is internal" {
 }
 
 test "async generator prototype method marker is internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1375,7 +1375,7 @@ test "async generator prototype method marker is internal" {
 }
 
 test "iterator helper method marker is internal" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [1024]u8 = undefined;
@@ -1424,7 +1424,7 @@ test "iterator helper method marker is internal" {
 }
 
 test "Iterator.from follows QuickJS wrapper selection" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -1484,9 +1484,9 @@ test "Iterator.from follows QuickJS wrapper selection" {
 }
 
 test "number native builtin records cover static and prototype dispatch" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1516,7 +1516,7 @@ test "number native builtin records cover static and prototype dispatch" {
     const static_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_static_object);
     defer rt.memory.allocator.free(static_dispatch_name);
     try std.testing.expectEqualStrings("notNumberIsInteger", static_dispatch_name);
-    const static_args = [_]core.Value{core.Value.float64(3.5)};
+    const static_args = [_]core.JSValue{core.JSValue.float64(3.5)};
     const static_result = try engine.exec.call.callValue(ctx, null, fake_static, &static_args);
     defer static_result.free(rt);
     try std.testing.expectEqual(false, static_result.asBool().?);
@@ -1536,8 +1536,8 @@ test "number native builtin records cover static and prototype dispatch" {
     const proto_dispatch_name = try engine.exec.call.nativeFunctionNameForVm(rt, fake_proto_object);
     defer rt.memory.allocator.free(proto_dispatch_name);
     try std.testing.expectEqualStrings("notNumberToFixed", proto_dispatch_name);
-    const fixed_args = [_]core.Value{core.Value.int32(2)};
-    const proto_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.Value.float64(1.25), fake_proto, &fixed_args);
+    const fixed_args = [_]core.JSValue{core.JSValue.int32(2)};
+    const proto_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.float64(1.25), fake_proto, &fixed_args);
     defer proto_result.free(rt);
     const proto_string: *core.string.String = @fieldParentPtr("header", proto_result.refHeader().?);
     try std.testing.expect(proto_string.eqlBytes("1.25"));
@@ -1562,9 +1562,9 @@ test "number native builtin records cover static and prototype dispatch" {
 }
 
 test "string static native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1590,8 +1590,8 @@ test "string static native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notStringFromCodePoint", dispatch_name);
 
-    const args = [_]core.Value{core.Value.int32(0x41)};
-    const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.Value.undefinedValue(), fake, &args);
+    const args = [_]core.JSValue{core.JSValue.int32(0x41)};
+    const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &args);
     defer result.free(rt);
     const result_string: *core.string.String = @fieldParentPtr("header", result.refHeader().?);
     try std.testing.expect(result_string.eqlBytes("A"));
@@ -1613,9 +1613,9 @@ test "string static native builtin records ignore dispatch names" {
 }
 
 test "string prototype native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1648,7 +1648,7 @@ test "string prototype native builtin records ignore dispatch names" {
     defer needle_string.value().free(rt);
     const receiver_string = try core.string.String.createUtf8(rt, "banana");
     defer receiver_string.value().free(rt);
-    const direct_args = [_]core.Value{ needle_string.value(), core.Value.int32(3) };
+    const direct_args = [_]core.JSValue{ needle_string.value(), core.JSValue.int32(3) };
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver_string.value(), fake, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expectEqual(@as(i32, 4), direct_result.asInt32().?);
@@ -1670,9 +1670,9 @@ test "string prototype native builtin records ignore dispatch names" {
 }
 
 test "date static native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1698,8 +1698,8 @@ test "date static native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notDateUTC", dispatch_name);
 
-    const args = [_]core.Value{ core.Value.int32(2024), core.Value.int32(0), core.Value.int32(1) };
-    const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.Value.undefinedValue(), fake, &args);
+    const args = [_]core.JSValue{ core.JSValue.int32(2024), core.JSValue.int32(0), core.JSValue.int32(1) };
+    const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &args);
     defer result.free(rt);
     try std.testing.expectEqual(@as(f64, 1704067200000), engine.exec.value_ops.numberValue(result).?);
 
@@ -1720,9 +1720,9 @@ test "date static native builtin records ignore dispatch names" {
 }
 
 test "date constructor native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1747,14 +1747,14 @@ test "date constructor native builtin records ignore dispatch names" {
     defer prototype_value.free(rt);
     try fake_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, true));
 
-    const call_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.Value.undefinedValue(), fake, &.{});
+    const call_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &.{});
     defer call_result.free(rt);
     var call_buffer = std.ArrayList(u8).empty;
     defer call_buffer.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &call_buffer, call_result);
     try std.testing.expect(std.mem.indexOf(u8, call_buffer.items, "GMT+0000") != null);
 
-    const construct_result = try engine.exec.construct.constructValue(rt, fake, &.{core.Value.int32(1)}, &.{});
+    const construct_result = try engine.exec.construct.constructValue(rt, fake, &.{core.JSValue.int32(1)}, &.{});
     defer construct_result.free(rt);
     const construct_ms = try engine.builtins.date.methodCall(rt, construct_result, 1);
     defer construct_ms.free(rt);
@@ -1783,7 +1783,7 @@ test "date constructor native builtin records ignore dispatch names" {
 }
 
 test "constructValue AggregateError releases copied errors array owner" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("AggregateError");
@@ -1793,10 +1793,10 @@ test "constructValue AggregateError releases copied errors array owner" {
 
     const source = try core.Object.createArray(rt, null);
     defer source.value().free(rt);
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.Value.int32(1), true, true, true));
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(core.Value.int32(2), true, true, true));
+    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(1), core.Descriptor.data(core.JSValue.int32(2), true, true, true));
     source.length = 2;
-    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.Value.int32(2), true, false, false));
+    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
 
     const baseline_objects = rt.gc.liveCount();
     const result = try engine.exec.construct.constructValue(rt, constructor, &.{source.value()}, &.{});
@@ -1807,9 +1807,9 @@ test "constructValue AggregateError releases copied errors array owner" {
 }
 
 test "date prototype native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1838,9 +1838,9 @@ test "date prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notDateSetTime", dispatch_name);
 
-    const direct_receiver = try engine.builtins.date.construct(rt, &.{core.Value.int32(0)});
+    const direct_receiver = try engine.builtins.date.construct(rt, &.{core.JSValue.int32(0)});
     defer direct_receiver.free(rt);
-    const direct_args = [_]core.Value{core.Value.int32(1)};
+    const direct_args = [_]core.JSValue{core.JSValue.int32(1)};
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_receiver, fake, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(direct_result).?);
@@ -1862,9 +1862,9 @@ test "date prototype native builtin records ignore dispatch names" {
 }
 
 test "array static native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1896,10 +1896,10 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(is_array_dispatch_name);
     try std.testing.expectEqualStrings("notArrayIsArray", is_array_dispatch_name);
 
-    const direct_array = try engine.builtins.array.construct(rt, &.{core.Value.int32(1)});
+    const direct_array = try engine.builtins.array.construct(rt, &.{core.JSValue.int32(1)});
     defer direct_array.free(rt);
-    const direct_is_array_args = [_]core.Value{direct_array};
-    const is_array_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.Value.undefinedValue(), fake_is_array, &direct_is_array_args);
+    const direct_is_array_args = [_]core.JSValue{direct_array};
+    const is_array_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake_is_array, &direct_is_array_args);
     defer is_array_result.free(rt);
     try std.testing.expectEqual(true, is_array_result.asBool().?);
 
@@ -1937,9 +1937,9 @@ test "array static native builtin records ignore dispatch names" {
 }
 
 test "array prototype native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -1989,7 +1989,7 @@ test "array prototype native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(join_dispatch_name);
     try std.testing.expectEqualStrings("notArrayJoin", join_dispatch_name);
 
-    const direct_array = try engine.builtins.array.constructWithPrototype(rt, &.{ core.Value.int32(1), core.Value.int32(2) }, prototype_object);
+    const direct_array = try engine.builtins.array.constructWithPrototype(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, prototype_object);
     defer direct_array.free(rt);
     const separator = (try core.string.String.createUtf8(rt, ":")).value();
     defer separator.free(rt);
@@ -2040,9 +2040,9 @@ test "array prototype native builtin records ignore dispatch names" {
 }
 
 test "collection native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2111,7 +2111,7 @@ test "collection native builtin records ignore dispatch names" {
     defer direct_map.free(rt);
     const direct_key = (try core.string.String.createUtf8(rt, "direct")).value();
     defer direct_key.free(rt);
-    const direct_args = [_]core.Value{ direct_key, core.Value.int32(7) };
+    const direct_args = [_]core.JSValue{ direct_key, core.JSValue.int32(7) };
     const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_map, fake_map_set, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expect(direct_result.same(direct_map));
@@ -2165,9 +2165,9 @@ test "collection native builtin records ignore dispatch names" {
 }
 
 test "buffer native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2274,9 +2274,9 @@ test "buffer native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notArrayBufferSlice", dispatch_name);
 
-    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.Value.int32(6)}, array_buffer_prototype_object);
+    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(6)}, array_buffer_prototype_object);
     defer direct_buffer.free(rt);
-    const direct_slice_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_slice, &.{ core.Value.int32(1), core.Value.int32(4) });
+    const direct_slice_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_slice, &.{ core.JSValue.int32(1), core.JSValue.int32(4) });
     defer direct_slice_result.free(rt);
     const direct_slice_object: *core.Object = @fieldParentPtr("header", direct_slice_result.refHeader().?);
     try std.testing.expectEqual(@as(usize, 3), direct_slice_object.byteStorage().len);
@@ -2330,9 +2330,9 @@ test "buffer native builtin records ignore dispatch names" {
 }
 
 test "typed array accessor native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2384,7 +2384,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(dispatch_name);
     try std.testing.expectEqualStrings("notTypedArrayByteLength", dispatch_name);
 
-    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.Value.int32(8)}, null);
+    const direct_buffer = try engine.builtins.buffer.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
     defer direct_buffer.free(rt);
     const direct_typed_array = try engine.builtins.buffer.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
     defer direct_typed_array.free(rt);
@@ -2424,9 +2424,9 @@ test "typed array accessor native builtin records ignore dispatch names" {
 }
 
 test "regexp static native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2454,8 +2454,8 @@ test "regexp static native builtin records ignore dispatch names" {
 
     const dot = try core.string.String.createUtf8(rt, ".");
     defer dot.value().free(rt);
-    const direct_args = [_]core.Value{dot.value()};
-    const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.Value.undefinedValue(), fake, &direct_args);
+    const direct_args = [_]core.JSValue{dot.value()};
+    const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &direct_args);
     defer direct_result.free(rt);
     try std.testing.expect(direct_result.isString());
     const direct_result_string: *core.string.String = @fieldParentPtr("header", direct_result.refHeader().?);
@@ -2478,9 +2478,9 @@ test "regexp static native builtin records ignore dispatch names" {
 }
 
 test "regexp prototype native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2545,7 +2545,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     defer receiver.free(rt);
     const input_string = try core.string.String.createUtf8(rt, "cat");
     defer input_string.value().free(rt);
-    const direct_args = [_]core.Value{input_string.value()};
+    const direct_args = [_]core.JSValue{input_string.value()};
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     defer exec_result.free(rt);
     const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
@@ -2594,9 +2594,9 @@ test "regexp prototype native builtin records ignore dispatch names" {
 }
 
 test "regexp symbol native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2668,7 +2668,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const replacement_string = try core.string.String.createUtf8(rt, "o");
     defer replacement_string.value().free(rt);
 
-    const one_arg = [_]core.Value{input_string.value()};
+    const one_arg = [_]core.JSValue{input_string.value()};
     const search_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_search, &one_arg);
     defer search_result.free(rt);
     try std.testing.expectEqual(@as(i32, 1), search_result.asInt32().?);
@@ -2687,7 +2687,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const match_all_iterator: *core.Object = @fieldParentPtr("header", match_all_result.refHeader().?);
     try std.testing.expectEqual(core.class.ids.regexp_string_iterator, match_all_iterator.class_id);
 
-    const replace_args = [_]core.Value{ input_string.value(), replacement_string.value() };
+    const replace_args = [_]core.JSValue{ input_string.value(), replacement_string.value() };
     const replace_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_replace, &replace_args);
     defer replace_result.free(rt);
     try std.testing.expect(replace_result.isString());
@@ -2736,9 +2736,9 @@ test "regexp symbol native builtin records ignore dispatch names" {
 }
 
 test "regexp accessor native builtin records ignore dispatch names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
@@ -2820,9 +2820,9 @@ test "regexp accessor native builtin records ignore dispatch names" {
 }
 
 test "vm collection constructors use registered prototype methods" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("collection-prototype");
@@ -2871,8 +2871,8 @@ test "throwTypeErrorMessage OOM before throw releases error value" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
-        const ctx = try core.Context.create(rt);
+        const rt = try core.JSRuntime.create(failing.allocator());
+        const ctx = try core.JSContext.create(rt);
         const global = try core.Object.create(rt, core.class.ids.object, null);
         var parsed = try engine.frontend.parser.parse(rt, "(0)();", .{
             .mode = .script,

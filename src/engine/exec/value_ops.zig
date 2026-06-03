@@ -12,7 +12,7 @@ pub const AppendStringError = error{
     NoSpaceLeft,
 };
 
-pub fn binary(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Value {
+pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.add and (a.isString() or b.isString())) return stringAdd(rt, a, b);
     if (a.isSymbol() or b.isSymbol()) return error.TypeError;
     if (a.isBigInt() or b.isBigInt()) {
@@ -36,7 +36,7 @@ pub fn binary(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Val
             bytecode.opcode.op.@"or" => lhs | rhs,
             else => unreachable,
         };
-        return core.Value.int32(out);
+        return core.JSValue.int32(out);
     }
     if (a.isNumber() and b.isNumber()) return binaryNumber(rt, op, a, b);
     if (op == bytecode.opcode.op.add or op == bytecode.opcode.op.sub or op == bytecode.opcode.op.mul or
@@ -61,10 +61,10 @@ pub fn binary(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Val
         bytecode.opcode.op.pow => powI32(lhs, rhs),
         else => unreachable,
     };
-    return core.Value.int32(out);
+    return core.JSValue.int32(out);
 }
 
-pub fn compare(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Value {
+pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.isString() and b.isString()) {
         const cmp: i32 = if (a.same(b)) 0 else compareStringValues(a, b) orelse return error.TypeError;
         const out = switch (op) {
@@ -74,10 +74,10 @@ pub fn compare(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Va
             bytecode.opcode.op.gte => cmp >= 0,
             else => false,
         };
-        return core.Value.boolean(out);
+        return core.JSValue.boolean(out);
     }
     if (a.isBigInt() or b.isBigInt()) {
-        const cmp = try compareBigIntRelational(rt, a, b) orelse return core.Value.boolean(false);
+        const cmp = try compareBigIntRelational(rt, a, b) orelse return core.JSValue.boolean(false);
         const out = switch (op) {
             bytecode.opcode.op.lt => cmp == .lt,
             bytecode.opcode.op.lte => cmp == .lt or cmp == .eq,
@@ -85,7 +85,7 @@ pub fn compare(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Va
             bytecode.opcode.op.gte => cmp == .gt or cmp == .eq,
             else => unreachable,
         };
-        return core.Value.boolean(out);
+        return core.JSValue.boolean(out);
     }
     const lhs = if (numberValue(a)) |number| number else try toIntegerOrInfinity(rt, a);
     const rhs = if (numberValue(b)) |number| number else try toIntegerOrInfinity(rt, b);
@@ -96,10 +96,10 @@ pub fn compare(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Va
         bytecode.opcode.op.gte => lhs >= rhs,
         else => false,
     };
-    return core.Value.boolean(out);
+    return core.JSValue.boolean(out);
 }
 
-fn compareBigIntRelational(rt: *core.Runtime, a: core.Value, b: core.Value) !?std.math.Order {
+fn compareBigIntRelational(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !?std.math.Order {
     if (a.isBigInt() and b.isBigInt()) {
         return compareBigIntValues(a, b) orelse error.TypeError;
     }
@@ -108,7 +108,7 @@ fn compareBigIntRelational(rt: *core.Runtime, a: core.Value, b: core.Value) !?st
     return reverseOrder(order);
 }
 
-fn compareBigIntToNonBigInt(rt: *core.Runtime, bigint_value: core.Value, other: core.Value) !?std.math.Order {
+fn compareBigIntToNonBigInt(rt: *core.JSRuntime, bigint_value: core.JSValue, other: core.JSValue) !?std.math.Order {
     if (other.isString()) {
         var parsed = parseStringToBigInt(rt, other) catch return null;
         defer parsed.deinit();
@@ -134,7 +134,7 @@ fn compareBigIntToNonBigInt(rt: *core.Runtime, bigint_value: core.Value, other: 
     return error.TypeError;
 }
 
-pub fn parseStringToBigInt(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+pub fn parseStringToBigInt(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try appendRawString(rt, &buffer, value);
@@ -143,7 +143,7 @@ pub fn parseStringToBigInt(rt: *core.Runtime, value: core.Value) !bignum.BigInt 
     return bignum.parseAutoAlloc(rt.memory.allocator, trimmed);
 }
 
-fn compareBigIntToNumber(rt: *core.Runtime, bigint_value: core.Value, number: f64) !?std.math.Order {
+fn compareBigIntToNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number: f64) !?std.math.Order {
     if (std.math.isNan(number)) return null;
     if (std.math.isPositiveInf(number)) return .lt;
     if (std.math.isNegativeInf(number)) return .gt;
@@ -158,7 +158,7 @@ fn compareBigIntToNumber(rt: *core.Runtime, bigint_value: core.Value, number: f6
     return if (number > 0) .lt else .gt;
 }
 
-pub fn bigIntEqualsNumber(rt: *core.Runtime, bigint_value: core.Value, number: f64) !bool {
+pub fn bigIntEqualsNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number: f64) !bool {
     const order = try compareBigIntToNumber(rt, bigint_value, number) orelse return false;
     return order == .eq;
 }
@@ -187,7 +187,7 @@ fn truncatedFiniteNumberToBigInt(allocator: std.mem.Allocator, number: f64) !big
     return out;
 }
 
-pub fn integerNumberToBigIntValue(rt: *core.Runtime, number: f64) !core.Value {
+pub fn integerNumberToBigIntValue(rt: *core.JSRuntime, number: f64) !core.JSValue {
     if (!std.math.isFinite(number) or @trunc(number) != number) return error.RangeError;
     var bigint = try truncatedFiniteNumberToBigInt(rt.memory.allocator, number);
     defer bigint.deinit();
@@ -202,41 +202,41 @@ fn reverseOrder(order: std.math.Order) std.math.Order {
     };
 }
 
-pub fn strictEqual(a: core.Value, b: core.Value) core.Value {
-    return core.Value.boolean(valuesEqual(a, b));
+pub fn strictEqual(a: core.JSValue, b: core.JSValue) core.JSValue {
+    return core.JSValue.boolean(valuesEqual(a, b));
 }
 
-pub fn strictNotEqual(a: core.Value, b: core.Value) core.Value {
-    return core.Value.boolean(!valuesEqual(a, b));
+pub fn strictNotEqual(a: core.JSValue, b: core.JSValue) core.JSValue {
+    return core.JSValue.boolean(!valuesEqual(a, b));
 }
 
-pub fn length(rt: *core.Runtime, value: core.Value) !core.Value {
+pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) {
         const header = value.refHeader() orelse return error.TypeError;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
-        return core.Value.int32(@intCast(string_value.len()));
+        return core.JSValue.int32(@intCast(string_value.len()));
     }
     if (value.isObject()) {
         const header = value.refHeader() orelse return error.TypeError;
         const object_value: *core.Object = @fieldParentPtr("header", header);
         if (object_value.is_array) {
             if (object_value.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
-                return core.Value.int32(@intCast(object_value.length));
+                return core.JSValue.int32(@intCast(object_value.length));
             }
-            return core.Value.float64(@floatFromInt(object_value.length));
+            return core.JSValue.float64(@floatFromInt(object_value.length));
         }
         const length_value = object_value.getProperty(core.atom.ids.length);
         if (!length_value.isUndefined()) return length_value;
         length_value.free(rt);
-        return core.Value.undefinedValue();
+        return core.JSValue.undefinedValue();
     }
     if (value.isNull() or value.isUndefined()) return error.TypeError;
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-pub fn unary(rt: *core.Runtime, op: u8, value: core.Value) !core.Value {
+pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.not and !value.isBigInt()) {
-        return core.Value.int32(~try toInt32(rt, value));
+        return core.JSValue.int32(~try toInt32(rt, value));
     }
     if (value.asFloat64()) |float_value| {
         const out = switch (op) {
@@ -305,19 +305,19 @@ pub fn unary(rt: *core.Runtime, op: u8, value: core.Value) !core.Value {
         bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => n + 1,
         else => unreachable,
     };
-    return core.Value.int32(out);
+    return core.JSValue.int32(out);
 }
 
-pub fn factorial(value: core.Value) !core.Value {
+pub fn factorial(value: core.JSValue) !core.JSValue {
     const n = value.asInt32() orelse return error.TypeError;
     if (n < 0) return error.RangeError;
     var out: i32 = 1;
     var i: i32 = 2;
     while (i <= n) : (i += 1) out *= i;
-    return core.Value.int32(out);
+    return core.JSValue.int32(out);
 }
 
-pub fn typeOf(rt: *core.Runtime, value: core.Value) !core.Value {
+pub fn typeOf(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     const name: []const u8 = if (value.isBigInt())
         "bigint"
     else if (value.isNumber())
@@ -343,7 +343,7 @@ pub fn typeOf(rt: *core.Runtime, value: core.Value) !core.Value {
     return createStringValue(rt, name);
 }
 
-pub fn logical(op: u8, a: core.Value, b: core.Value) core.Value {
+pub fn logical(op: u8, a: core.JSValue, b: core.JSValue) core.JSValue {
     const out = switch (op) {
         bytecode.opcode.op.@"and" => if (isTruthy(a)) b else a,
         bytecode.opcode.op.@"or" => if (isTruthy(a)) a else b,
@@ -353,7 +353,7 @@ pub fn logical(op: u8, a: core.Value, b: core.Value) core.Value {
     return out.dup();
 }
 
-pub fn toStringValue(rt: *core.Runtime, value: core.Value) !core.Value {
+pub fn toStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (try primitiveToStringValueFast(rt, value)) |fast| return fast;
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
@@ -361,7 +361,7 @@ pub fn toStringValue(rt: *core.Runtime, value: core.Value) !core.Value {
     return createStringValue(rt, buffer.items);
 }
 
-fn primitiveToStringValueFast(rt: *core.Runtime, value: core.Value) !?core.Value {
+fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.JSValue {
     if (value.isString()) return value.dup();
     if (value.asInt32()) |int_value| {
         if (int_value >= 0 and int_value < 256) {
@@ -402,16 +402,16 @@ fn fastStringToInt32(bytes: []const u8) ?i32 {
     return @intCast(res);
 }
 
-pub fn toNumberValue(rt: *core.Runtime, value: core.Value) !core.Value {
+pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isSymbol()) return error.TypeError;
     if (numberValue(value)) |number| return numberToValue(number);
-    if (value.asBool()) |bool_value| return core.Value.int32(if (bool_value) 1 else 0);
-    if (value.isNull()) return core.Value.int32(0);
+    if (value.asBool()) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
+    if (value.isNull()) return core.JSValue.int32(0);
     if (value.isString()) {
         const str = stringObject(value).?;
         switch (str.resolveData()) {
             .latin1 => |bytes| {
-                if (fastStringToInt32(bytes)) |val| return core.Value.int32(val);
+                if (fastStringToInt32(bytes)) |val| return core.JSValue.int32(val);
                 return numberToValue(parseJsNumber(bytes));
             },
             .utf16 => {},
@@ -421,14 +421,14 @@ pub fn toNumberValue(rt: *core.Runtime, value: core.Value) !core.Value {
         try appendRawString(rt, &bytes, value);
         return numberToValue(parseJsNumber(bytes.items));
     }
-    return core.Value.float64(std.math.nan(f64));
+    return core.JSValue.float64(std.math.nan(f64));
 }
 
-pub fn toBooleanValue(value: core.Value) core.Value {
-    return core.Value.boolean(isTruthy(value));
+pub fn toBooleanValue(value: core.JSValue) core.JSValue {
+    return core.JSValue.boolean(isTruthy(value));
 }
 
-pub fn asN(rt: *core.Runtime, bits_value: core.Value, bigint_value: core.Value, unsigned: bool) !core.Value {
+pub fn asN(rt: *core.JSRuntime, bits_value: core.JSValue, bigint_value: core.JSValue, unsigned: bool) !core.JSValue {
     if (bits_value.isBigInt() or bits_value.isSymbol()) return error.TypeError;
     const bits_number = try toIntegerOrInfinity(rt, bits_value);
     if (!std.math.isFinite(bits_number)) return error.RangeError;
@@ -459,17 +459,17 @@ pub fn asN(rt: *core.Runtime, bits_value: core.Value, bigint_value: core.Value, 
     return createBigIntValue(rt, reduced);
 }
 
-pub fn numberToValue(value: f64) core.Value {
+pub fn numberToValue(value: f64) core.JSValue {
     if (value >= -2147483648 and value <= 2147483647) {
         const int_val: i32 = @intFromFloat(value);
         if (@as(f64, @floatFromInt(int_val)) == value and !isNegativeZero(value)) {
-            return core.Value.int32(int_val);
+            return core.JSValue.int32(int_val);
         }
     }
-    return core.Value.float64(value);
+    return core.JSValue.float64(value);
 }
 
-pub fn createStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+pub fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     if (bytes.len == 0) {
         const cached = try rt.emptyString();
         return cached.value().dup();
@@ -481,7 +481,7 @@ pub fn createStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
     return str.value();
 }
 
-fn createAsciiStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     if (bytes.len == 0) {
         const cached = try rt.emptyString();
         return cached.value().dup();
@@ -496,40 +496,40 @@ fn isAsciiBytes(bytes: []const u8) bool {
     return true;
 }
 
-pub fn createBigIntI128(rt: *core.Runtime, value: i128) !core.Value {
+pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {
     if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64)) {
-        return core.Value.shortBigInt(@intCast(value));
+        return core.JSValue.shortBigInt(@intCast(value));
     }
     const big = try core.bigint.BigInt.create(rt, value);
     return big.valueRef();
 }
 
-pub fn createBigIntOwned(rt: *core.Runtime, value: bignum.BigInt) !core.Value {
+pub fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue {
     var owned = value;
     errdefer owned.deinit();
     if (owned.toI64()) |val| {
         owned.deinit();
-        return core.Value.shortBigInt(val);
+        return core.JSValue.shortBigInt(val);
     }
     const big = try core.bigint.BigInt.createFromOwned(rt, owned);
     return big.valueRef();
 }
 
-pub fn createBigIntValue(rt: *core.Runtime, value: bignum.BigInt) !core.Value {
+pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue {
     if (value.toI64()) |val| {
-        return core.Value.shortBigInt(val);
+        return core.JSValue.shortBigInt(val);
     }
     const big = try core.bigint.BigInt.createFromBigInt(rt, value);
     return big.valueRef();
 }
 
-pub fn numberValue(value: core.Value) ?f64 {
+pub fn numberValue(value: core.JSValue) ?f64 {
     if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
     if (value.tag == core.Tag.float64) return value.asFloat64().?;
     return null;
 }
 
-pub fn bigIntToNumber(rt: *core.Runtime, value: core.Value) !f64 {
+pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     var bigint = try cloneBigIntValue(rt, value);
     defer bigint.deinit();
     const text = try bigint.formatBase10Alloc(rt.memory.allocator);
@@ -537,7 +537,7 @@ pub fn bigIntToNumber(rt: *core.Runtime, value: core.Value) !f64 {
     return std.fmt.parseFloat(f64, text);
 }
 
-pub fn toIntegerOrInfinity(rt: *core.Runtime, value: core.Value) !f64 {
+pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
@@ -549,7 +549,7 @@ pub fn toIntegerOrInfinity(rt: *core.Runtime, value: core.Value) !f64 {
     return parseJsNumber(buffer.items);
 }
 
-pub fn toIndexUsize(rt: *core.Runtime, value: core.Value) !usize {
+pub fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize {
     const number = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return 0;
     if (!std.math.isFinite(number)) return error.RangeError;
@@ -559,7 +559,7 @@ pub fn toIndexUsize(rt: *core.Runtime, value: core.Value) !usize {
     return @intFromFloat(truncated);
 }
 
-pub fn toBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.isBigInt()) return cloneBigIntValue(rt, value);
     if (value.isNumber()) return error.TypeError;
     if (value.asBool()) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
@@ -575,7 +575,7 @@ pub fn toBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
     return error.TypeError;
 }
 
-pub fn bigIntFromValueBorrowed(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
@@ -587,7 +587,7 @@ pub fn bigIntFromValueBorrowed(rt: *core.Runtime, value: core.Value) !bignum.Big
     return error.TypeError;
 }
 
-pub fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
@@ -597,7 +597,7 @@ pub fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
     return error.TypeError;
 }
 
-pub fn isTruthy(value: core.Value) bool {
+pub fn isTruthy(value: core.JSValue) bool {
     if (isHTMLDDA(value)) return false;
     if (value.isUndefined() or value.isNull()) return false;
     if (value.asBool()) |bool_value| return bool_value;
@@ -617,7 +617,7 @@ pub fn isTruthy(value: core.Value) bool {
     return true;
 }
 
-pub fn isFunctionObject(value: core.Value) bool {
+pub fn isFunctionObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -629,7 +629,7 @@ pub fn isFunctionObject(value: core.Value) bool {
         object.class_id == core.class.ids.c_closure;
 }
 
-fn proxyTargetIsFunction(value: core.Value) bool {
+fn proxyTargetIsFunction(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -637,11 +637,11 @@ fn proxyTargetIsFunction(value: core.Value) bool {
     return target.isFunctionBytecode() or isFunctionObject(target);
 }
 
-pub fn atomNameEql(rt: *core.Runtime, atom_id: core.Atom, name: []const u8) bool {
+pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool {
     return if (rt.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
-pub fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -650,7 +650,7 @@ pub fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: cor
     }
 }
 
-pub fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) AppendStringError!void {
+pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asSymbolAtom()) |atom_id| {
         const description = symbol_builtin.description(&rt.atoms, atom_id) orelse "";
         try buffer.appendSlice(rt.memory.allocator, "Symbol(");
@@ -784,7 +784,7 @@ fn normalizeExponentSign(buffer: []u8, len: usize) []const u8 {
     return buffer[0 .. len + 1];
 }
 
-fn appendUtf8CodePoint(rt: *core.Runtime, buffer: *std.ArrayList(u8), cp: u32) !void {
+fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
     if (cp <= 0x7f) {
         try buffer.append(rt.memory.allocator, @intCast(cp));
     } else if (cp <= 0x7ff) {
@@ -802,7 +802,7 @@ fn appendUtf8CodePoint(rt: *core.Runtime, buffer: *std.ArrayList(u8), cp: u32) !
     }
 }
 
-fn appendUtf16AsUtf8(rt: *core.Runtime, buffer: *std.ArrayList(u8), units: []const u16) !void {
+fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
@@ -820,7 +820,7 @@ fn appendUtf16AsUtf8(rt: *core.Runtime, buffer: *std.ArrayList(u8), units: []con
     }
 }
 
-fn binaryBigInt(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Value {
+fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.asShortBigInt()) |lhs| {
         if (b.asShortBigInt()) |rhs| {
             if (shortBigIntBinary(op, lhs, rhs)) |out| return out;
@@ -895,7 +895,7 @@ fn binaryBigInt(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.V
     return createBigIntOwned(rt, out);
 }
 
-fn addPositiveShortToBigInt(rt: *core.Runtime, value: core.Value, addend: bignum.Limb) !?core.Value {
+fn addPositiveShortToBigInt(rt: *core.JSRuntime, value: core.JSValue, addend: bignum.Limb) !?core.JSValue {
     if (!value.isBigInt()) return null;
     const header = value.refHeader() orelse return null;
     const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
@@ -907,47 +907,47 @@ fn addPositiveShortToBigInt(rt: *core.Runtime, value: core.Value, addend: bignum
     return try createBigIntOwned(rt, out);
 }
 
-pub fn shortBigIntBinary(op: u8, lhs: i64, rhs: i64) ?core.Value {
+pub fn shortBigIntBinary(op: u8, lhs: i64, rhs: i64) ?core.JSValue {
     return switch (op) {
         bytecode.opcode.op.add => shortBigIntAdd(lhs, rhs),
         bytecode.opcode.op.sub => shortBigIntSub(lhs, rhs),
         bytecode.opcode.op.mul => shortBigIntMul(lhs, rhs),
-        bytecode.opcode.op.@"and" => core.Value.shortBigInt(lhs & rhs),
-        bytecode.opcode.op.xor => core.Value.shortBigInt(lhs ^ rhs),
-        bytecode.opcode.op.@"or" => core.Value.shortBigInt(lhs | rhs),
+        bytecode.opcode.op.@"and" => core.JSValue.shortBigInt(lhs & rhs),
+        bytecode.opcode.op.xor => core.JSValue.shortBigInt(lhs ^ rhs),
+        bytecode.opcode.op.@"or" => core.JSValue.shortBigInt(lhs | rhs),
         else => null,
     };
 }
 
-pub fn shortBigIntUnary(op: u8, value: i64) ?core.Value {
+pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue {
     return switch (op) {
-        bytecode.opcode.op.neg => if (value == std.math.minInt(i64)) null else core.Value.shortBigInt(-value),
+        bytecode.opcode.op.neg => if (value == std.math.minInt(i64)) null else core.JSValue.shortBigInt(-value),
         bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => shortBigIntSub(value, 1),
         bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => shortBigIntAdd(value, 1),
-        bytecode.opcode.op.not => core.Value.shortBigInt(~value),
+        bytecode.opcode.op.not => core.JSValue.shortBigInt(~value),
         else => null,
     };
 }
 
-fn shortBigIntAdd(lhs: i64, rhs: i64) ?core.Value {
+fn shortBigIntAdd(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
-    return core.Value.shortBigInt(result[0]);
+    return core.JSValue.shortBigInt(result[0]);
 }
 
-fn shortBigIntSub(lhs: i64, rhs: i64) ?core.Value {
+fn shortBigIntSub(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
-    return core.Value.shortBigInt(result[0]);
+    return core.JSValue.shortBigInt(result[0]);
 }
 
-fn shortBigIntMul(lhs: i64, rhs: i64) ?core.Value {
+fn shortBigIntMul(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @mulWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
-    return core.Value.shortBigInt(result[0]);
+    return core.JSValue.shortBigInt(result[0]);
 }
 
-fn binaryNumber(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.Value {
+fn binaryNumber(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     const lhs = if (numberValue(a)) |number| number else try toIntegerOrInfinity(rt, a);
     const rhs = if (numberValue(b)) |number| number else try toIntegerOrInfinity(rt, b);
     const out = switch (op) {
@@ -962,7 +962,7 @@ fn binaryNumber(rt: *core.Runtime, op: u8, a: core.Value, b: core.Value) !core.V
     return numberToValue(out);
 }
 
-fn toInt32(rt: *core.Runtime, value: core.Value) !i32 {
+fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
     const number = try toIntegerOrInfinity(rt, value);
     if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
     const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
@@ -970,7 +970,7 @@ fn toInt32(rt: *core.Runtime, value: core.Value) !i32 {
     return @bitCast(wrapped);
 }
 
-fn stringAdd(rt: *core.Runtime, a: core.Value, b: core.Value) !core.Value {
+fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.isSymbol() or b.isSymbol()) return error.TypeError;
     if (a.isString() and b.tag == core.Tag.int) {
         if (try stringAddStringInt(rt, a, b.asInt32().?, .suffix)) |out| return out;
@@ -991,10 +991,10 @@ const StringIntPosition = enum {
     suffix,
 };
 
-fn stringAddStringInt(rt: *core.Runtime, string_value: core.Value, int_value: i32, position: StringIntPosition) !?core.Value {
+fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value: i32, position: StringIntPosition) !?core.JSValue {
     const string = stringObject(string_value) orelse return null;
     if (string.len() == 0) {
-        return try toStringValue(rt, core.Value.int32(int_value));
+        return try toStringValue(rt, core.JSValue.int32(int_value));
     }
 
     const string_bytes = string.borrowLatin1() orelse return null;
@@ -1052,7 +1052,7 @@ fn formatI32Decimal(buffer: *[16]u8, value: i32) []const u8 {
     return buffer[index..];
 }
 
-fn stringAddStrings(rt: *core.Runtime, a: core.Value, b: core.Value) !core.Value {
+fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
     const a_string = stringObject(a) orelse return error.TypeError;
     const b_string = stringObject(b) orelse return error.TypeError;
     const a_len = a_string.len();
@@ -1095,7 +1095,7 @@ fn stringAddStrings(rt: *core.Runtime, a: core.Value, b: core.Value) !core.Value
     return (try core.string.String.createUtf16(rt, units.items)).value();
 }
 
-fn appendStringInPlace(rt: *core.Runtime, lhs_string: *core.string.String, rhs_string: *core.string.String) !bool {
+fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs_string: *core.string.String) !bool {
     return switch (rhs_string.resolveData()) {
         .latin1 => |rhs_bytes| switch (lhs_string.resolveData()) {
             .latin1 => try lhs_string.appendLatin1InPlace(rt, rhs_bytes),
@@ -1108,7 +1108,7 @@ fn appendStringInPlace(rt: *core.Runtime, lhs_string: *core.string.String, rhs_s
     };
 }
 
-pub fn tryAppendStringInPlace(rt: *core.Runtime, lhs: core.Value, rhs: core.Value, max_ref_count: usize) !bool {
+pub fn tryAppendStringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
     const lhs_header = lhs.refHeader() orelse return false;
     if (lhs_header.rc > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
@@ -1116,11 +1116,11 @@ pub fn tryAppendStringInPlace(rt: *core.Runtime, lhs: core.Value, rhs: core.Valu
     return try appendStringInPlace(rt, lhs_string, rhs_string);
 }
 
-pub fn tryAppendLatin1StringInPlace(rt: *core.Runtime, lhs: core.Value, rhs: core.Value, max_ref_count: usize) !bool {
+pub fn tryAppendLatin1StringInPlace(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue, max_ref_count: usize) !bool {
     return tryAppendStringInPlace(rt, lhs, rhs, max_ref_count);
 }
 
-pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.Runtime, lhs: core.Value, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
+pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize, max_ref_count: usize) !bool {
     const lhs_header = lhs.refHeader() orelse return false;
     if (@as(usize, @intCast(lhs_header.rc)) > max_ref_count) return false;
     const lhs_string = stringObject(lhs) orelse return false;
@@ -1132,7 +1132,7 @@ pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.Runtime, lhs: core.Value, at
     return try lhs_string.appendLatin1RepeatedInPlace(rt, suffix, repeat_count);
 }
 
-pub fn latin1AtomRepeatedConcatValue(rt: *core.Runtime, lhs: core.Value, atom_id: core.Atom, repeat_count: usize) !?core.Value {
+pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize) !?core.JSValue {
     const lhs_string = stringObject(lhs) orelse return null;
     const lhs_bytes = switch (lhs_string.resolveData()) {
         .latin1 => |bytes| bytes,
@@ -1148,7 +1148,7 @@ pub fn latin1AtomRepeatedConcatValue(rt: *core.Runtime, lhs: core.Value, atom_id
     return out.value();
 }
 
-fn percentHexConcat(rt: *core.Runtime, a: []const u8, b: []const u8) !?core.Value {
+fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JSValue {
     if (a.len == 1 and b.len == 1 and a[0] == '%' and upperHexValue(b[0]) != null) {
         const cached = try rt.recentTwoUnitString('%', b[0]);
         return cached.value().dup();
@@ -1168,13 +1168,13 @@ fn upperHexValue(byte: u8) ?u8 {
     return null;
 }
 
-fn stringObject(value: core.Value) ?*core.string.String {
+fn stringObject(value: core.JSValue) ?*core.string.String {
     const header = value.refHeader() orelse return null;
     if (!value.isString()) return null;
     return @fieldParentPtr("header", header);
 }
 
-fn appendStringLatin1Units(rt: *core.Runtime, out: *std.ArrayList(u8), string: core.string.String) !void {
+fn appendStringLatin1Units(rt: *core.JSRuntime, out: *std.ArrayList(u8), string: core.string.String) !void {
     switch (string.resolveData()) {
         .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| try appendUtf16AsUtf8(rt, out, units),
@@ -1193,7 +1193,7 @@ fn stringLatin1IsAscii(string: core.string.String) bool {
     }
 }
 
-fn appendStringUtf16Units(rt: *core.Runtime, out: *std.ArrayList(u16), string: core.string.String) !void {
+fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: core.string.String) !void {
     switch (string.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try out.append(rt.memory.allocator, byte);
@@ -1309,7 +1309,7 @@ fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
     return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
 }
 
-fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
+fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
@@ -1319,7 +1319,7 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
     }
 }
 
-fn valuesEqual(a: core.Value, b: core.Value) bool {
+fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
     if (a.isBigInt() and b.isBigInt()) {
         return (compareBigIntValues(a, b) orelse return false) == .eq;
     }
@@ -1343,7 +1343,7 @@ fn valuesEqual(a: core.Value, b: core.Value) bool {
     return a.same(b);
 }
 
-fn compareBigIntValues(a: core.Value, b: core.Value) ?std.math.Order {
+fn compareBigIntValues(a: core.JSValue, b: core.JSValue) ?std.math.Order {
     var lhs_scratch: [2]bignum.Limb = undefined;
     var rhs_scratch: [2]bignum.Limb = undefined;
     const lhs = bigIntParts(a, &lhs_scratch) orelse return null;
@@ -1356,7 +1356,7 @@ const BigIntParts = struct {
     limbs: []const bignum.Limb,
 };
 
-fn bigIntParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntParts {
+fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
     if (value.asShortBigInt()) |short| {
         const signed: i128 = short;
         var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
@@ -1379,14 +1379,14 @@ fn bigIntParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntParts {
     return null;
 }
 
-pub fn isHTMLDDA(value: core.Value) bool {
+pub fn isHTMLDDA(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
     const object: *core.Object = @fieldParentPtr("header", header);
     return object.is_html_dda;
 }
 
-fn sameAbstractEqualityType(a: core.Value, b: core.Value) bool {
+fn sameAbstractEqualityType(a: core.JSValue, b: core.JSValue) bool {
     if (a.isNumber() and b.isNumber()) return true;
     if (a.isBigInt() and b.isBigInt()) return true;
     if (a.isString() and b.isString()) return true;
@@ -1397,7 +1397,7 @@ fn sameAbstractEqualityType(a: core.Value, b: core.Value) bool {
     return a.tag == b.tag;
 }
 
-fn numberLikeInt(value: core.Value) ?i32 {
+fn numberLikeInt(value: core.JSValue) ?i32 {
     if (value.asInt32()) |int_value| return int_value;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
@@ -1418,7 +1418,7 @@ fn parseIntString(bytes: []const u8) ?i32 {
     return std.fmt.parseInt(i32, trimmed, 10) catch null;
 }
 
-fn compareStringValues(a: core.Value, b: core.Value) ?i32 {
+fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
     const a_header = a.refHeader() orelse return null;
     const b_header = b.refHeader() orelse return null;
     const a_string: *core.string.String = @fieldParentPtr("header", a_header);

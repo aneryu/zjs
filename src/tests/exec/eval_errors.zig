@@ -413,7 +413,7 @@ test "Engine eval rejects break and continue outside loops" {
     try expectEvalError(error.TypeError, "for (const i = 0; i < 1; i++) {}");
     try expectEvalError(error.TypeError, "'use strict'; var ref = function BindingIdentifier() { BindingIdentifier = 1; }; ref();");
 
-    var indirect_js = try engine.Engine.init(std.testing.allocator);
+    var indirect_js = try engine.harness.Engine.init(std.testing.allocator);
     defer indirect_js.deinit();
     var indirect_buffer: [64]u8 = undefined;
     var indirect_stream = std.Io.Writer.fixed(&indirect_buffer);
@@ -430,7 +430,7 @@ test "Engine eval rejects break and continue outside loops" {
     try std.testing.expect(indirect_result.isUndefined());
     try std.testing.expectEqualStrings("TypeError\n0\n2\n2\n", indirect_stream.buffered());
 
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
     var output_buffer: [32]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -447,13 +447,13 @@ test "Engine eval rejects break and continue outside loops" {
 }
 
 fn expectEvalError(expected: anyerror, source: []const u8) !void {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
     try std.testing.expectError(expected, js.eval(source));
 }
 
 test "Engine eval copies object rest binding properties" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -560,7 +560,7 @@ test "Engine eval does not leak function expression name into body inference" {
 }
 
 test "Engine eval keeps return expression parser state inside nested functions" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;

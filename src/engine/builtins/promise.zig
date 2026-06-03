@@ -7,11 +7,11 @@ const std = @import("std");
 
 /// QuickJS source map: narrow Promise constructor payload used by transitional
 /// `new_promise` bytecode.
-pub fn construct(rt: *core.Runtime) !core.Value {
+pub fn construct(rt: *core.JSRuntime) !core.JSValue {
     return constructWithPrototype(rt, null);
 }
 
-pub fn constructWithPrototype(rt: *core.Runtime, prototype: ?*core.Object) !core.Value {
+pub fn constructWithPrototype(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.promise, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     if (prototype == null) {
@@ -21,7 +21,7 @@ pub fn constructWithPrototype(rt: *core.Runtime, prototype: ?*core.Object) !core
     return object.value();
 }
 
-pub fn fulfilledWithPrototype(rt: *core.Runtime, value: core.Value, prototype: ?*core.Object) !core.Value {
+pub fn fulfilledWithPrototype(rt: *core.JSRuntime, value: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -35,11 +35,11 @@ pub fn fulfilledWithPrototype(rt: *core.Runtime, value: core.Value, prototype: ?
 
     const promise = try constructWithPrototype(rt, prototype);
     const object = promiseObject(promise) orelse return error.TypeError;
-    object.promiseResultSlot().* = rooted_value.dup();
+    try object.setPromiseResult(rt, rooted_value.dup());
     return promise;
 }
 
-pub fn rejectedWithPrototype(rt: *core.Runtime, reason: core.Value, prototype: ?*core.Object) !core.Value {
+pub fn rejectedWithPrototype(rt: *core.JSRuntime, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     var rooted_reason = reason;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_reason },
@@ -53,13 +53,13 @@ pub fn rejectedWithPrototype(rt: *core.Runtime, reason: core.Value, prototype: ?
 
     const promise = try constructWithPrototype(rt, prototype);
     const object = promiseObject(promise) orelse return error.TypeError;
-    object.promiseResultSlot().* = rooted_reason.dup();
+    try object.setPromiseResult(rt, rooted_reason.dup());
     object.promiseIsRejectedSlot().* = true;
     return promise;
 }
 
 test "fulfilledWithPrototype roots direct function bytecode result while constructing promise" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
@@ -68,11 +68,11 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var result_value = core.Value.functionBytecode(&fb.header);
+    var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
     defer if (result_alive) result_value.free(rt);
 
@@ -97,7 +97,7 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn promiseObject(value: core.Value) ?*core.Object {
+fn promiseObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
     if (object.class_id != core.class.ids.promise) return null;
@@ -108,20 +108,20 @@ fn promiseObject(value: core.Value) ?*core.Object {
 /// coverage. This intentionally preserves the existing narrow behavior:
 /// resolve/all/race ignore arguments, reject records an unhandled reason, and
 /// every supported mode returns a Promise object.
-pub fn staticCall(ctx: *core.Context, mode: u32, payload: ?core.Value) !core.Value {
+pub fn staticCall(ctx: *core.JSContext, mode: u32, payload: ?core.JSValue) !core.JSValue {
     return staticCallWithPrototype(ctx, mode, payload, null, null);
 }
 
 pub fn staticCallWithPrototype(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     mode: u32,
-    payload: ?core.Value,
+    payload: ?core.JSValue,
     prototype: ?*core.Object,
     global: ?*core.Object,
-) !core.Value {
+) !core.JSValue {
     switch (mode) {
         1 => {
-            const value = payload orelse core.Value.undefinedValue();
+            const value = payload orelse core.JSValue.undefinedValue();
             if (promiseObject(value)) |promise| {
                 if (prototype == null or promise.getPrototype() == prototype) {
                     return value.dup();
@@ -143,13 +143,13 @@ pub fn staticCallWithPrototype(
     return constructWithPrototype(ctx.runtime, prototype);
 }
 
-pub fn rejectedWithUnhandledPrototype(ctx: *core.Context, reason: core.Value, prototype: ?*core.Object) !core.Value {
+pub fn rejectedWithUnhandledPrototype(ctx: *core.JSContext, reason: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const promise = try rejectedWithPrototype(ctx.runtime, reason, prototype);
     ctx.recordUnhandledPromiseRejection(promise, reason);
     return promise;
 }
 
-pub fn markHandled(ctx: *core.Context, promise: *core.Object) void {
+pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     if (!promise.promiseIsRejected()) return;
     const reason = promise.promiseResult() orelse return;
     const pending_exception_is_unhandled =
@@ -176,11 +176,11 @@ pub fn markHandled(ctx: *core.Context, promise: *core.Object) void {
     }
 }
 
-pub fn withResolvers(rt: *core.Runtime, prototype: ?*core.Object) !core.Value {
-    var promise_val = core.Value.undefinedValue();
-    var resolve_val = core.Value.undefinedValue();
-    var reject_val = core.Value.undefinedValue();
-    var result_val = core.Value.undefinedValue();
+pub fn withResolvers(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {
+    var promise_val = core.JSValue.undefinedValue();
+    var resolve_val = core.JSValue.undefinedValue();
+    var reject_val = core.JSValue.undefinedValue();
+    var result_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &promise_val },
         .{ .value = &resolve_val },
@@ -211,10 +211,10 @@ pub fn withResolvers(rt: *core.Runtime, prototype: ?*core.Object) !core.Value {
     return result_val;
 }
 
-fn createResolvingFunction(rt: *core.Runtime, promise: core.Value, reject: bool) !core.Value {
+fn createResolvingFunction(rt: *core.JSRuntime, promise: core.JSValue, reject: bool) !core.JSValue {
     var rooted_promise = promise;
-    var function_val = core.Value.undefinedValue();
-    var state_val = core.Value.undefinedValue();
+    var function_val = core.JSValue.undefinedValue();
+    var state_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_promise },
         .{ .value = &function_val },
@@ -235,14 +235,14 @@ fn createResolvingFunction(rt: *core.Runtime, promise: core.Value, reject: bool)
     state_val = state.value();
     defer state_val.free(rt);
     (try state.promiseAlreadyResolvedSlot(rt)).* = false;
-    object.functionPromiseResolvingTargetSlot().* = rooted_promise.dup();
-    object.functionPromiseResolvingStateSlot().* = state_val.dup();
+    try object.setFunctionPromiseResolvingTarget(rt, rooted_promise.dup());
+    try object.setFunctionPromiseResolvingState(rt, state_val.dup());
     object.functionPromiseResolvingRejectSlot().* = reject;
     return function_val;
 }
 
 test "createResolvingFunction roots promise and state while allocating slots" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const promise_symbol = try rt.atoms.newValueSymbol("gc-promise-resolving-target-symbol");
@@ -250,14 +250,14 @@ test "createResolvingFunction roots promise and state while allocating slots" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const function_value = try createResolvingFunction(rt, core.Value.symbol(promise_symbol), false);
+    const function_value = try createResolvingFunction(rt, core.JSValue.symbol(promise_symbol), false);
     var function_alive = true;
     defer if (function_alive) function_value.free(rt);
     const function_object: *core.Object = @fieldParentPtr("header", function_value.refHeader() orelse return error.TypeError);
 
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     const stored_target = function_object.functionPromiseResolvingTarget() orelse return error.TypeError;
-    try std.testing.expect(stored_target.same(core.Value.symbol(promise_symbol)));
+    try std.testing.expect(stored_target.same(core.JSValue.symbol(promise_symbol)));
     const stored_state = function_object.functionPromiseResolvingState() orelse return error.TypeError;
     const state_object: *core.Object = @fieldParentPtr("header", stored_state.refHeader() orelse return error.TypeError);
     try std.testing.expect(!state_object.promiseAlreadyResolved());
@@ -269,7 +269,7 @@ test "createResolvingFunction roots promise and state while allocating slots" {
 }
 
 test "withResolvers roots promise and resolving functions while creating result" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const old_threshold = rt.gcThreshold();
@@ -308,12 +308,12 @@ test "withResolvers roots promise and resolving functions while creating result"
     _ = rt.runObjectCycleRemoval();
 }
 
-fn promiseAll(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object) !core.Value {
+fn promiseAll(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.Value.undefinedValue(), prototype);
+    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.JSValue.undefinedValue(), prototype);
 
-    var out_val = core.Value.undefinedValue();
-    var item_val = core.Value.undefinedValue();
+    var out_val = core.JSValue.undefinedValue();
+    var item_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &out_val },
         .{ .value = &item_val },
@@ -336,17 +336,17 @@ fn promiseAll(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object
         item_val = source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
-            item_val = core.Value.undefinedValue();
+            item_val = core.JSValue.undefinedValue();
         }
         const settled = promiseObject(item_val);
         if (settled) |promise| {
             if (promise.promiseIsRejected()) {
                 markHandled(ctx, promise);
-                const reason = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+                const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
                 defer reason.free(rt);
                 return rejectedWithUnhandledPrototype(ctx, reason, prototype);
             }
-            const value = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+            const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             defer value.free(rt);
             try out.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, true, true, true));
         } else {
@@ -357,14 +357,14 @@ fn promiseAll(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object
     return fulfilledWithPrototype(rt, out_val, prototype);
 }
 
-fn promiseRace(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object) !core.Value {
+fn promiseRace(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.Value.undefinedValue(), prototype);
+    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.JSValue.undefinedValue(), prototype);
     if (source.length == 0) return constructWithPrototype(rt, prototype);
     const item = source.getProperty(core.atom.atomFromUInt32(0));
     defer item.free(rt);
     if (promiseObject(item)) |promise| {
-        const value = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+        const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
         defer value.free(rt);
         if (promise.promiseIsRejected()) {
             markHandled(ctx, promise);
@@ -375,13 +375,13 @@ fn promiseRace(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Objec
     return fulfilledWithPrototype(rt, item, prototype);
 }
 
-fn promiseAllSettled(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object) !core.Value {
+fn promiseAllSettled(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.Value.undefinedValue(), prototype);
+    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.JSValue.undefinedValue(), prototype);
 
-    var out_val = core.Value.undefinedValue();
-    var item_val = core.Value.undefinedValue();
-    var record_val = core.Value.undefinedValue();
+    var out_val = core.JSValue.undefinedValue();
+    var item_val = core.JSValue.undefinedValue();
+    var record_val = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &out_val },
         .{ .value = &item_val },
@@ -406,7 +406,7 @@ fn promiseAllSettled(ctx: *core.Context, iterable: core.Value, prototype: ?*core
         item_val = source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
-            item_val = core.Value.undefinedValue();
+            item_val = core.JSValue.undefinedValue();
         }
         if (promiseObject(item_val)) |promise| {
             if (promise.promiseIsRejected()) markHandled(ctx, promise);
@@ -414,7 +414,7 @@ fn promiseAllSettled(ctx: *core.Context, iterable: core.Value, prototype: ?*core
         record_val = try settlementRecord(rt, item_val);
         defer {
             record_val.free(rt);
-            record_val = core.Value.undefinedValue();
+            record_val = core.JSValue.undefinedValue();
         }
         try out.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(record_val, true, true, true));
     }
@@ -422,13 +422,13 @@ fn promiseAllSettled(ctx: *core.Context, iterable: core.Value, prototype: ?*core
     return fulfilledWithPrototype(rt, out_val, prototype);
 }
 
-fn promiseAny(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object, global: ?*core.Object) !core.Value {
+fn promiseAny(ctx: *core.JSContext, iterable: core.JSValue, prototype: ?*core.Object, global: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
-    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.Value.undefinedValue(), prototype);
+    const source = arrayObject(iterable) orelse return rejectedWithUnhandledPrototype(ctx, core.JSValue.undefinedValue(), prototype);
 
-    var errors_val = core.Value.undefinedValue();
-    var fulfillment_val = core.Value.undefinedValue();
-    var item_val = core.Value.undefinedValue();
+    var errors_val = core.JSValue.undefinedValue();
+    var fulfillment_val = core.JSValue.undefinedValue();
+    var item_val = core.JSValue.undefinedValue();
 
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &errors_val },
@@ -456,19 +456,19 @@ fn promiseAny(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object
         item_val = source.getProperty(core.atom.atomFromUInt32(index));
         defer {
             item_val.free(rt);
-            item_val = core.Value.undefinedValue();
+            item_val = core.JSValue.undefinedValue();
         }
         if (promiseObject(item_val)) |promise| {
             if (promise.promiseIsRejected()) {
                 markHandled(ctx, promise);
-                const reason = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+                const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
                 defer reason.free(rt);
                 try errors.defineOwnProperty(rt, core.atom.atomFromUInt32(error_count), core.Descriptor.data(reason, true, true, true));
                 error_count += 1;
                 continue;
             }
             if (!has_fulfillment) {
-                fulfillment_val = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+                fulfillment_val = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
                 has_fulfillment = true;
             }
             continue;
@@ -488,27 +488,27 @@ fn promiseAny(ctx: *core.Context, iterable: core.Value, prototype: ?*core.Object
 }
 
 test "promise all family preserves direct symbol payload ownership" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const all_symbol = try rt.atoms.newValueSymbol("gc-promise-all-symbol");
     const all_source = try core.Object.createArray(rt, null);
     var all_source_alive = true;
     defer if (all_source_alive) all_source.value().free(rt);
-    try all_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.Value.symbol(all_symbol), true, true, true));
+    try all_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(all_symbol), true, true, true));
     all_source.length = 1;
 
     const settled_symbol = try rt.atoms.newValueSymbol("gc-promise-all-settled-symbol");
     const settled_source = try core.Object.createArray(rt, null);
     var settled_source_alive = true;
     defer if (settled_source_alive) settled_source.value().free(rt);
-    try settled_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.Value.symbol(settled_symbol), true, true, true));
+    try settled_source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(settled_symbol), true, true, true));
     settled_source.length = 1;
 
     const any_symbol = try rt.atoms.newValueSymbol("gc-promise-any-rejection-symbol");
-    const rejected_value = try rejectedWithPrototype(rt, core.Value.symbol(any_symbol), null);
+    const rejected_value = try rejectedWithPrototype(rt, core.JSValue.symbol(any_symbol), null);
     var rejected_alive = true;
     defer if (rejected_alive) rejected_value.free(rt);
     const any_source = try core.Object.createArray(rt, null);
@@ -526,7 +526,7 @@ test "promise all family preserves direct symbol payload ownership" {
     {
         const stored = all_result.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.Value.symbol(all_symbol)));
+        try std.testing.expect(stored.same(core.JSValue.symbol(all_symbol)));
     }
 
     const settled_promise_value = try promiseAllSettled(ctx, settled_source.value(), null);
@@ -543,7 +543,7 @@ test "promise all family preserves direct symbol payload ownership" {
         defer rt.atoms.free(value_atom);
         const stored = record.getProperty(value_atom);
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.Value.symbol(settled_symbol)));
+        try std.testing.expect(stored.same(core.JSValue.symbol(settled_symbol)));
     }
 
     const any_promise_value = try promiseAny(ctx, any_source.value(), null, null);
@@ -561,7 +561,7 @@ test "promise all family preserves direct symbol payload ownership" {
     {
         const stored = errors.getProperty(core.atom.atomFromUInt32(0));
         defer stored.free(rt);
-        try std.testing.expect(stored.same(core.Value.symbol(any_symbol)));
+        try std.testing.expect(stored.same(core.JSValue.symbol(any_symbol)));
     }
     all_source.value().free(rt);
     all_source_alive = false;
@@ -580,7 +580,7 @@ test "promise all family preserves direct symbol payload ownership" {
     any_promise_alive = false;
 }
 
-fn settlementRecord(rt: *core.Runtime, item: core.Value) !core.Value {
+fn settlementRecord(rt: *core.JSRuntime, item: core.JSValue) !core.JSValue {
     var rooted_item = item;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_item },
@@ -598,7 +598,7 @@ fn settlementRecord(rt: *core.Runtime, item: core.Value) !core.Value {
         const status = try stringValue(rt, if (promise.promiseIsRejected()) "rejected" else "fulfilled");
         defer status.free(rt);
         try defineData(rt, record, "status", status);
-        const payload = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+        const payload = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
         defer payload.free(rt);
         try defineData(rt, record, if (promise.promiseIsRejected()) "reason" else "value", payload);
     } else {
@@ -611,7 +611,7 @@ fn settlementRecord(rt: *core.Runtime, item: core.Value) !core.Value {
 }
 
 test "settlementRecord roots direct function bytecode item while creating record" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
@@ -620,11 +620,11 @@ test "settlementRecord roots direct function bytecode item while creating record
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var item = core.Value.functionBytecode(&fb.header);
+    var item = core.JSValue.functionBytecode(&fb.header);
     var item_alive = true;
     defer if (item_alive) item.free(rt);
 
@@ -652,24 +652,24 @@ test "settlementRecord roots direct function bytecode item while creating record
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn defineData(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineData(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const atom = try rt.internAtom(name);
     defer rt.atoms.free(atom);
     try object.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
 }
 
-fn defineHiddenData(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineHiddenData(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const atom = try rt.internAtom(name);
     defer rt.atoms.free(atom);
     try object.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, false, false));
 }
 
-fn stringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn stringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     const string = try core.string.String.createUtf8(rt, bytes);
     return string.value();
 }
 
-fn aggregateErrorValue(ctx: *core.Context, global: ?*core.Object, errors: *core.Object) !core.Value {
+fn aggregateErrorValue(ctx: *core.JSContext, global: ?*core.Object, errors: *core.Object) !core.JSValue {
     var errors_value = errors.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &errors_value },
@@ -707,16 +707,16 @@ fn aggregateErrorValue(ctx: *core.Context, global: ?*core.Object, errors: *core.
 }
 
 test "aggregateErrorValue roots errors array while creating aggregate error" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const errors = try core.Object.createArray(rt, null);
     var errors_alive = true;
     defer if (errors_alive) errors.value().free(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-aggregate-errors-symbol");
-    try errors.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.Value.symbol(symbol_atom), true, true, true));
+    try errors.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
     errors.length = 1;
 
     const old_threshold = rt.gcThreshold();
@@ -745,19 +745,19 @@ test "aggregateErrorValue roots errors array while creating aggregate error" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn arrayObject(value: core.Value) ?*core.Object {
+fn arrayObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
     if (!object.is_array) return null;
     return object;
 }
 
-fn objectFromValue(value: core.Value) ?*core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (header.kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
-pub fn enqueueReaction(queue: *jobs.Queue, ctx: *core.Context, job: jobs.Func, args: []const core.Value) !void {
-    try queue.enqueueFunc(ctx, job, args);
+pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {
+    try ctx.runtime.job_queue.enqueueFunc(ctx, job, args);
 }

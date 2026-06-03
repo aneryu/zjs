@@ -8,7 +8,7 @@ const stack_mod = @import("../stack.zig");
 pub const Result = union(enum) {
     none,
     continue_loop,
-    return_value: core.Value,
+    return_value: core.JSValue,
 };
 
 pub const AwaitSuspendMode = enum {
@@ -24,7 +24,7 @@ pub const AwaitSuspendMode = enum {
 };
 
 pub fn initialYield(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
@@ -33,18 +33,18 @@ pub fn initialYield(
 ) !Result {
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
-        return .{ .return_value = core.Value.undefinedValue() };
+        return .{ .return_value = core.JSValue.undefinedValue() };
     }
-    try stack.pushOwned(core.Value.undefinedValue());
+    try stack.pushOwned(core.JSValue.undefinedValue());
     return .none;
 }
 
 pub fn yieldValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
@@ -56,7 +56,7 @@ pub fn yieldValue(
     errdefer if (value_owned) value.free(ctx.runtime);
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
@@ -66,12 +66,12 @@ pub fn yieldValue(
     try stack.reserveAdditional(1);
     value.free(ctx.runtime);
     value_owned = false;
-    stack.pushOwnedAssumeCapacity(core.Value.undefinedValue());
+    stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
     return .none;
 }
 
 pub fn yieldStar(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -92,7 +92,7 @@ pub fn yieldStar(
         errdefer if (result_object_owned) result_object.free(ctx.runtime);
         if (stop_on_yield) {
             if (generator) |generator_object| {
-                saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+                try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
                 try setGeneratorYieldStarSuspended(ctx.runtime, generator_object, true);
                 generator_object.generatorStartedSlot().* = true;
                 generator_object.generatorJustYieldedSlot().* = true;
@@ -100,8 +100,8 @@ pub fn yieldStar(
                 try stack.reserveAdditional(2);
                 result_object.free(ctx.runtime);
                 result_object_owned = false;
-                stack.pushOwnedAssumeCapacity(core.Value.undefinedValue());
-                stack.pushOwnedAssumeCapacity(core.Value.int32(0));
+                stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+                stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
                 return .none;
             }
             result_object_owned = false;
@@ -110,14 +110,14 @@ pub fn yieldStar(
         try stack.reserveAdditional(2);
         result_object.free(ctx.runtime);
         result_object_owned = false;
-        stack.pushOwnedAssumeCapacity(core.Value.undefinedValue());
-        stack.pushOwnedAssumeCapacity(core.Value.int32(0));
+        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+        stack.pushOwnedAssumeCapacity(core.JSValue.int32(0));
         return .none;
     }
 
-    var iterator_value: core.Value = undefined;
+    var iterator_value: core.JSValue = undefined;
     var using_stored_iterator = false;
-    var next_arg = core.Value.undefinedValue();
+    var next_arg = core.JSValue.undefinedValue();
     var next_arg_needs_free = false;
     defer if (next_arg_needs_free) next_arg.free(ctx.runtime);
     if (generator) |generator_object| {
@@ -145,30 +145,27 @@ pub fn yieldStar(
     if (step.done) {
         try stack.reserveAdditional(1);
         if (generator) |generator_object| {
-            if (generator_object.generatorYieldStarIterator()) |stored| {
-                generator_object.generatorYieldStarIteratorSlot().* = null;
-                stored.free(ctx.runtime);
-            }
+            generator_object.clearOptionalValueSlot(ctx.runtime, generator_object.generatorYieldStarIteratorSlot());
         }
         stack.pushAssumeCapacity(step.value);
         return .continue_loop;
     }
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            if (!using_stored_iterator) generator_object.generatorYieldStarIteratorSlot().* = iterator_value.dup();
-            saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc);
+            if (!using_stored_iterator) try generator_object.setOptionalValueSlot(ctx.runtime, generator_object.generatorYieldStarIteratorSlot(), iterator_value.dup());
+            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc);
             generator_object.generatorStartedSlot().* = true;
             generator_object.generatorJustYieldedSlot().* = true;
         }
         return .{ .return_value = step.result.dup() };
     }
     try stack.reserveAdditional(1);
-    stack.pushOwnedAssumeCapacity(core.Value.undefinedValue());
+    stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
     return .none;
 }
 
 pub fn awaitValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -214,7 +211,7 @@ pub fn awaitValue(
     try settlePendingPromiseReaction(ctx, output, global, promise);
     if ((suspend_mode == .settled or suspend_mode == .drain) and promise.promiseResult() == null) try drainPendingPromiseJobs(ctx, output, global);
     if (promise.promiseResult() == null) try awaitPendingPromise(ctx, output, global, promise);
-    const result = if (promise.promiseResult()) |stored| stored.dup() else core.Value.undefinedValue();
+    const result = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer result.free(ctx.runtime);
     if (promise.promiseIsRejected()) {
         _ = ctx.throwValue(result.dup());
@@ -226,35 +223,35 @@ pub fn awaitValue(
 }
 
 fn suspendAwaitValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     suspend_on_await: bool,
-    value: core.Value,
+    value: core.JSValue,
     comptime saveGeneratorExecutionState: anytype,
 ) !?Result {
     if (!suspend_on_await) return null;
     const generator_object = generator orelse return null;
-    saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
+    try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
     generator_object.generatorStartedSlot().* = true;
     generator_object.generatorJustYieldedSlot().* = true;
     return .{ .return_value = value.dup() };
 }
 
-fn objectFromValue(value: core.Value) ?*core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
 fn testSaveGeneratorExecutionState(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: *core.Object,
     pc: usize,
-) void {
+) !void {
     _ = ctx;
     _ = stack;
     _ = frame;
@@ -263,13 +260,13 @@ fn testSaveGeneratorExecutionState(
 }
 
 fn testIteratorForValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    iterable: core.Value,
+    iterable: core.JSValue,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     _ = ctx;
     _ = output;
     _ = global;
@@ -280,17 +277,17 @@ fn testIteratorForValue(
 }
 
 const TestIteratorStepResult = struct {
-    result: core.Value,
-    value: core.Value,
+    result: core.JSValue,
+    value: core.JSValue,
     done: bool,
 };
 
 fn testDoneIteratorStepResult(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    iterator: core.Value,
-    next_arg: core.Value,
+    iterator: core.JSValue,
+    next_arg: core.JSValue,
 ) !TestIteratorStepResult {
     _ = ctx;
     _ = output;
@@ -298,21 +295,21 @@ fn testDoneIteratorStepResult(
     _ = iterator;
     _ = next_arg;
     return .{
-        .result = core.Value.undefinedValue(),
-        .value = core.Value.int32(7),
+        .result = core.JSValue.undefinedValue(),
+        .value = core.JSValue.int32(7),
         .done = true,
     };
 }
 
-fn testSetGeneratorYieldStarSuspended(rt: *core.Runtime, generator: *core.Object, value: bool) !void {
+fn testSetGeneratorYieldStarSuspended(rt: *core.JSRuntime, generator: *core.Object, value: bool) !void {
     _ = rt;
     generator.generatorYieldStarSuspendedSlot().* = value;
 }
 
 test "yield star keeps stored iterator when done-value stack reservation fails" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(failing.allocator());
-    const ctx = try core.Context.create(rt);
+    const rt = try core.JSRuntime.create(failing.allocator());
+    const ctx = try core.JSContext.create(rt);
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const generator = try core.Object.create(rt, core.class.ids.generator, null);
     var stack = stack_mod.Stack.init(&rt.memory, 8);
@@ -333,7 +330,7 @@ test "yield star keeps stored iterator when done-value stack reservation fails" 
     }
 
     const iterator = try core.Object.create(rt, core.class.ids.iterator, null);
-    generator.generatorYieldStarIteratorSlot().* = iterator.value().dup();
+    try generator.setOptionalValueSlot(rt, generator.generatorYieldStarIteratorSlot(), iterator.value().dup());
     iterator.value().free(rt);
 
     failing.fail_index = failing.alloc_index;

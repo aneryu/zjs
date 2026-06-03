@@ -1,5 +1,5 @@
 const property = @import("property.zig");
-const Value = @import("value.zig").Value;
+const JSValue = @import("value.zig").JSValue;
 
 pub const Kind = enum {
     generic,
@@ -9,17 +9,17 @@ pub const Kind = enum {
 
 pub const Descriptor = struct {
     kind: Kind = .generic,
-    value: Value = Value.undefinedValue(),
+    value: JSValue = JSValue.undefinedValue(),
     value_present: bool = false,
-    getter: Value = Value.undefinedValue(),
+    getter: JSValue = JSValue.undefinedValue(),
     getter_present: bool = false,
-    setter: Value = Value.undefinedValue(),
+    setter: JSValue = JSValue.undefinedValue(),
     setter_present: bool = false,
     writable: ?bool = null,
     enumerable: ?bool = null,
     configurable: ?bool = null,
 
-    pub fn data(value: Value, writable: bool, enumerable: bool, configurable: bool) Descriptor {
+    pub fn data(value: JSValue, writable: bool, enumerable: bool, configurable: bool) Descriptor {
         return .{
             .kind = .data,
             .value = value,
@@ -30,7 +30,7 @@ pub const Descriptor = struct {
         };
     }
 
-    pub fn accessor(getter: Value, setter: Value, enumerable: bool, configurable: bool) Descriptor {
+    pub fn accessor(getter: JSValue, setter: JSValue, enumerable: bool, configurable: bool) Descriptor {
         return .{
             .kind = .accessor,
             .getter = getter,

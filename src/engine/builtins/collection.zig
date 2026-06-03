@@ -66,7 +66,7 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn sameValueZero(a: core.Value, b: core.Value) bool {
+pub fn sameValueZero(a: core.JSValue, b: core.JSValue) bool {
     if (numberValue(a)) |lhs| {
         if (numberValue(b)) |rhs| {
             if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
@@ -88,17 +88,17 @@ pub fn sameValueZero(a: core.Value, b: core.Value) bool {
 }
 
 pub const Entry = struct {
-    key: core.Value,
-    value: core.Value,
+    key: core.JSValue,
+    value: core.JSValue,
 };
 
 /// QuickJS source map: narrow collection constructors used by the transitional
 /// `new_collection` bytecode.
-pub fn construct(rt: *core.Runtime, kind: u32) !core.Value {
+pub fn construct(rt: *core.JSRuntime, kind: u32) !core.JSValue {
     return constructWithPrototype(rt, kind, null);
 }
 
-pub fn constructWithPrototype(rt: *core.Runtime, kind: u32, prototype: ?*core.Object) !core.Value {
+pub fn constructWithPrototype(rt: *core.JSRuntime, kind: u32, prototype: ?*core.Object) !core.JSValue {
     const class_id = collectionClassId(kind) orelse return error.TypeError;
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
@@ -111,76 +111,76 @@ pub fn constructWithPrototype(rt: *core.Runtime, kind: u32, prototype: ?*core.Ob
 /// covered by smoke fixtures and targeted collection validation. Strong
 /// collections use object-owned entry arrays; weak collections store object
 /// identities plus values so keys are not retained through ordinary properties.
-pub fn methodCall(rt: *core.Runtime, object_value: core.Value, method: u32, args: []const core.Value) !core.Value {
+pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
     return methodCallWithGlobals(rt, object_value, method, args, &.{});
 }
 
 pub fn methodCallWithGlobals(
-    rt: *core.Runtime,
-    object_value: core.Value,
+    rt: *core.JSRuntime,
+    object_value: core.JSValue,
     method: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     globals: []globals_mod.Slot,
-) !core.Value {
+) !core.JSValue {
     const object = try expectObject(object_value);
     return methodCallResolved(rt, null, globalObjectFromGlobals(rt, globals), object, method, args, globals);
 }
 
 pub fn methodCallWithContext(
-    ctx: *core.Context,
-    object_value: core.Value,
+    ctx: *core.JSContext,
+    object_value: core.JSValue,
     method: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     globals: []globals_mod.Slot,
-) !core.Value {
+) !core.JSValue {
     const object = try expectObject(object_value);
     return methodCallResolved(ctx.runtime, ctx, globalObjectFromGlobals(ctx.runtime, globals), object, method, args, globals);
 }
 
 pub fn methodCallWithGlobal(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
-    object_value: core.Value,
+    object_value: core.JSValue,
     method: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     globals: []globals_mod.Slot,
-) !core.Value {
+) !core.JSValue {
     const object = try expectObject(object_value);
     return methodCallResolved(ctx.runtime, ctx, global, object, method, args, globals);
 }
 
 fn methodCallResolved(
-    rt: *core.Runtime,
-    ctx: ?*core.Context,
+    rt: *core.JSRuntime,
+    ctx: ?*core.JSContext,
     global: ?*core.Object,
     object: *core.Object,
     method: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     globals: []globals_mod.Slot,
-) !core.Value {
+) !core.JSValue {
     return switch (method) {
         1 => {
-            const key = if (args.len >= 1) args[0] else core.Value.undefinedValue();
-            const value = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             return mapSet(rt, object, key, value);
         },
         2 => {
-            const key = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return mapGet(rt, object, key);
         },
         3 => {
-            const key = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return collectionHas(rt, object, key);
         },
         4 => {
-            const key = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return collectionDelete(rt, object, key);
         },
         5 => {
             return collectionClear(rt, object);
         },
         6 => {
-            const value = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return setAdd(rt, object, value);
         },
         7 => {
@@ -194,8 +194,8 @@ fn methodCallResolved(
         },
         10 => return collectionForEach(rt, object, args, globals),
         11 => {
-            const key = if (args.len >= 1) args[0] else core.Value.undefinedValue();
-            return mapGetOrInsert(rt, object, key, if (args.len >= 2) args[1] else core.Value.undefinedValue());
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return mapGetOrInsert(rt, object, key, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
         },
         12 => {
             if (args.len < 2) return error.TypeError;
@@ -218,16 +218,16 @@ fn methodCallResolved(
     };
 }
 
-pub fn methodCallDroppedResult(rt: *core.Runtime, object: *core.Object, method: u32, args: []const core.Value) !bool {
+pub fn methodCallDroppedResult(rt: *core.JSRuntime, object: *core.Object, method: u32, args: []const core.JSValue) !bool {
     switch (method) {
         @intFromEnum(PrototypeMethod.set) => {
-            const key = if (args.len >= 1) args[0] else core.Value.undefinedValue();
-            const value = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
             try mapSetNoResult(rt, object, key, value);
             return true;
         },
         @intFromEnum(PrototypeMethod.add) => {
-            const value = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             try setAddNoResult(rt, object, value);
             return true;
         },
@@ -236,11 +236,11 @@ pub fn methodCallDroppedResult(rt: *core.Runtime, object: *core.Object, method: 
 }
 
 pub fn groupBy(
-    rt: *core.Runtime,
-    args: []const core.Value,
+    rt: *core.JSRuntime,
+    args: []const core.JSValue,
     globals: []globals_mod.Slot,
     prototype: ?*core.Object,
-) !core.Value {
+) !core.JSValue {
     if (args.len < 2) return error.TypeError;
     if (!isCallableClosure(args[1])) return error.TypeError;
 
@@ -264,12 +264,12 @@ pub fn groupBy(
     return map_value;
 }
 
-fn mapSet(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.Value) !core.Value {
+fn mapSet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
     try mapSetNoResult(rt, object, key, value);
     return object.value().dup();
 }
 
-fn mapSetNoResult(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.Value) !void {
+fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     if (object.class_id == core.class.ids.weakmap) {
         try setWeakMapEntry(rt, object, key, value);
         return;
@@ -279,8 +279,9 @@ fn mapSetNoResult(rt: *core.Runtime, object: *core.Object, key: core.Value, valu
     const canonical_key = canonicalizeKey(key);
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| {
-        const next_value = value.dup();
         const entry = &object.collectionEntriesSlot().*[index];
+        try rt.writeBarrierValueAt(&object.header, value, &entry.value);
+        const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
         old_value.free(rt);
@@ -290,17 +291,18 @@ fn mapSetNoResult(rt: *core.Runtime, object: *core.Object, key: core.Value, valu
     }
 }
 
-pub fn setWeakMapEntry(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.Value) !void {
+pub fn setWeakMapEntry(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     if (object.class_id != core.class.ids.weakmap) return error.TypeError;
     const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
     try setWeakMapEntryByIdentity(rt, object, key_identity, value);
 }
 
-pub fn setWeakMapEntryByIdentity(rt: *core.Runtime, object: *core.Object, key_identity: usize, value: core.Value) !void {
+pub fn setWeakMapEntryByIdentity(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (object.class_id != core.class.ids.weakmap) return error.TypeError;
     if (findWeakEntry(object, key_identity)) |index| {
-        const next_value = value.dup();
         const entry = &object.weakCollectionEntriesSlot().*[index];
+        try rt.writeBarrierValueAt(&object.header, value, &entry.value);
+        const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
         old_value.free(rt);
@@ -312,19 +314,19 @@ pub fn setWeakMapEntryByIdentity(rt: *core.Runtime, object: *core.Object, key_id
     try appendWeakEntry(rt, object, entry);
 }
 
-fn mapGet(rt: *core.Runtime, object: *core.Object, key: core.Value) !core.Value {
+fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return core.Value.undefinedValue();
-        const index = findWeakEntry(object, key_identity) orelse return core.Value.undefinedValue();
+        const key_identity = weakKeyIdentity(rt, key) orelse return core.JSValue.undefinedValue();
+        const index = findWeakEntry(object, key_identity) orelse return core.JSValue.undefinedValue();
         return object.weakCollectionEntriesSlot().*[index].value.dup();
     }
 
     if (object.class_id != core.class.ids.map) return error.TypeError;
-    const index = findStrongEntry(object, key) orelse return core.Value.undefinedValue();
+    const index = findStrongEntry(object, key) orelse return core.JSValue.undefinedValue();
     return object.collectionEntriesSlot().*[index].value.dup();
 }
 
-pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_value: i32) ?core.Value {
+pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_value: i32) ?core.JSValue {
     if (object.class_id != core.class.ids.map) return null;
     var int_buf: [16]u8 = undefined;
     const digits = formatI32Decimal(&int_buf, int_value);
@@ -334,7 +336,7 @@ pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_
 }
 
 pub fn mapSetLatin1PrefixInt32Range(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
     prefix: []const u8,
     start: i32,
@@ -360,7 +362,7 @@ pub fn mapSetLatin1PrefixInt32Range(
         if (findStrongEntryLatin1Concat(object, prefix, digits, hash)) |index| {
             const entry = &object.collectionEntriesSlot().*[index];
             const old_value = entry.value;
-            entry.value = core.Value.int32(int_value);
+            entry.value = core.JSValue.int32(int_value);
             old_value.free(rt);
             continue;
         }
@@ -368,7 +370,7 @@ pub fn mapSetLatin1PrefixInt32Range(
         const key = (try core.string.String.createLatin1ConcatWithSeed(rt, prefix, digits, prefix_seed)).value();
         const entry = core.object.CollectionEntry{
             .key = key,
-            .value = core.Value.int32(int_value),
+            .value = core.JSValue.int32(int_value),
             .hash = hash,
             .hash_next = strong_no_entry,
         };
@@ -395,12 +397,12 @@ const IteratorPrototypeRef = struct {
 };
 
 fn collectionIterator(
-    rt: *core.Runtime,
-    ctx: ?*core.Context,
+    rt: *core.JSRuntime,
+    ctx: ?*core.JSContext,
     global: ?*core.Object,
     object: *core.Object,
     kind: CollectionIteratorKind,
-) !core.Value {
+) !core.JSValue {
     const iterator_class = if (object.class_id == core.class.ids.map)
         core.class.ids.map_iterator
     else if (object.class_id == core.class.ids.set)
@@ -429,15 +431,15 @@ fn collectionIterator(
     defer if (prototype.owned) prototype.object.value().free(rt);
     const iterator = try core.Object.create(rt, iterator_class, prototype.object);
     errdefer core.Object.destroyFromHeader(rt, &iterator.header);
-    iterator.iteratorTargetSlot().* = target_value.dup();
+    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), target_value.dup());
     iterator.iteratorIndexSlot().* = 0;
     iterator.iteratorKindSlot().* = @intFromEnum(kind);
     return iterator.value();
 }
 
 fn iteratorPrototype(
-    rt: *core.Runtime,
-    ctx: ?*core.Context,
+    rt: *core.JSRuntime,
+    ctx: ?*core.JSContext,
     global: ?*core.Object,
     receiver: *core.Object,
     iterator_class: core.ClassId,
@@ -465,7 +467,7 @@ fn iteratorPrototype(
 }
 
 fn createIteratorPrototype(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     global: ?*core.Object,
     receiver: *core.Object,
     tag_name: []const u8,
@@ -498,7 +500,7 @@ fn createIteratorPrototype(
     return specific;
 }
 
-fn iteratorPrototypeFromGlobal(rt: *core.Runtime, global: ?*core.Object) ?*core.Object {
+fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
     const global_object = global orelse return null;
     const iterator_atom = core.atom.predefinedId("Iterator", .string) orelse return null;
     const iterator_value = global_object.getProperty(iterator_atom);
@@ -509,7 +511,7 @@ fn iteratorPrototypeFromGlobal(rt: *core.Runtime, global: ?*core.Object) ?*core.
     return expectObject(prototype_value) catch null;
 }
 
-fn objectPrototypeFromGlobalOrReceiver(rt: *core.Runtime, global: ?*core.Object, receiver: *core.Object) ?*core.Object {
+fn objectPrototypeFromGlobalOrReceiver(rt: *core.JSRuntime, global: ?*core.Object, receiver: *core.Object) ?*core.Object {
     if (global) |global_object| {
         const object_atom = core.atom.predefinedId("Object", .string) orelse return null;
         const object_value = global_object.getProperty(object_atom);
@@ -526,22 +528,22 @@ fn objectPrototypeFromGlobalOrReceiver(rt: *core.Runtime, global: ?*core.Object,
     return candidate;
 }
 
-fn globalObjectFromGlobals(rt: *core.Runtime, globals: []const globals_mod.Slot) ?*core.Object {
+fn globalObjectFromGlobals(rt: *core.JSRuntime, globals: []const globals_mod.Slot) ?*core.Object {
     const global_value = globals_mod.getByName(rt, globals, "globalThis") catch return null;
     defer global_value.free(rt);
     return expectObject(global_value) catch null;
 }
 
-fn defineToStringTag(rt: *core.Runtime, object: *core.Object, tag_name: []const u8) !void {
+fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag_value = try core.string.String.createUtf8(rt, tag_name);
     defer tag_value.value().free(rt);
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
 }
 
-fn collectionIteratorNext(rt: *core.Runtime, iterator: *core.Object) !core.Value {
+fn collectionIteratorNext(rt: *core.JSRuntime, iterator: *core.Object) !core.JSValue {
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return error.TypeError;
-    const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.Value.undefinedValue(), true);
+    const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const target = try expectObject(target_value);
     while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
         const index = (iterator.iteratorIndexSlot().*);
@@ -550,15 +552,12 @@ fn collectionIteratorNext(rt: *core.Runtime, iterator: *core.Object) !core.Value
         if (!entry.active) continue;
         return iteratorResult(rt, try iteratorValue(rt, target.class_id, entry, @enumFromInt((iterator.iteratorKindSlot().*))), false);
     }
-    const done_result = try iteratorResult(rt, core.Value.undefinedValue(), true);
-    if ((iterator.iteratorTargetSlot().*)) |stored| {
-        iterator.iteratorTargetSlot().* = null;
-        stored.free(rt);
-    }
+    const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
+    iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
     return done_result;
 }
 
-fn iteratorValue(rt: *core.Runtime, class_id: core.ClassId, entry: core.object.CollectionEntry, kind: CollectionIteratorKind) !core.Value {
+fn iteratorValue(rt: *core.JSRuntime, class_id: core.ClassId, entry: core.object.CollectionEntry, kind: CollectionIteratorKind) !core.JSValue {
     switch (kind) {
         .key => return entry.key.dup(),
         .value => return if (class_id == core.class.ids.set) entry.key.dup() else entry.value.dup(),
@@ -585,7 +584,7 @@ fn iteratorValue(rt: *core.Runtime, class_id: core.ClassId, entry: core.object.C
     }
 }
 
-fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value {
+fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
     var root_values = [_]core.runtime.ValueRootValue{
@@ -601,12 +600,12 @@ fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
     try defineValueProperty(rt, result, "value", rooted_value);
-    try defineValueProperty(rt, result, "done", core.Value.boolean(done));
+    try defineValueProperty(rt, result, "done", core.JSValue.boolean(done));
     return result.value();
 }
 
 test "collection iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
@@ -615,11 +614,11 @@ test "collection iteratorResult roots direct function bytecode value while creat
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var result_value = core.Value.functionBytecode(&fb.header);
+    var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
     defer if (result_alive) result_value.free(rt);
 
@@ -648,7 +647,7 @@ test "collection iteratorResult roots direct function bytecode value while creat
 }
 
 test "Map groupBy roots direct symbol key while creating group array" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const map_value = try construct(rt, 1);
@@ -661,7 +660,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     defer if (callback_alive) callback.free(rt);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-map-groupby-symbol-key");
-    const item = core.Value.symbol(symbol_atom);
+    const item = core.JSValue.symbol(symbol_atom);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
@@ -680,20 +679,20 @@ test "Map groupBy roots direct symbol key while creating group array" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn collectionSize(object: *core.Object) !core.Value {
+fn collectionSize(object: *core.Object) !core.JSValue {
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
-    return core.Value.int32(@intCast(strongSize(object)));
+    return core.JSValue.int32(@intCast(strongSize(object)));
 }
 
 fn collectionForEach(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
-    args: []const core.Value,
+    args: []const core.JSValue,
     globals: []globals_mod.Slot,
-) !core.Value {
+) !core.JSValue {
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1 or !isCallableClosure(args[0])) return error.TypeError;
-    const this_arg = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: usize = 0;
     while (index < object.collectionEntriesSlot().*.len) {
         const entry = object.collectionEntriesSlot().*[index];
@@ -705,16 +704,16 @@ fn collectionForEach(
             continue;
         }
         var callback_args = if (object.class_id == core.class.ids.set)
-            [_]core.Value{ entry.key, entry.key, object.value() }
+            [_]core.JSValue{ entry.key, entry.key, object.value() }
         else
-            [_]core.Value{ entry.value, entry.key, object.value() };
+            [_]core.JSValue{ entry.value, entry.key, object.value() };
         const result = try closure_mod.callWithThis(rt, args[0], this_arg, &callback_args, globals);
         result.free(rt);
     }
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-fn applyForEachFixtureMutation(rt: *core.Runtime, object: *core.Object, callback: core.Value, globals: []globals_mod.Slot) !void {
+fn applyForEachFixtureMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, globals: []globals_mod.Slot) !void {
     const kind = closure_mod.closureKind(rt, callback) catch return;
     if (kind < 23 or kind > 25) return;
     const count_value = try globals_mod.getByName(rt, globals, "count");
@@ -730,7 +729,7 @@ fn applyForEachFixtureMutation(rt: *core.Runtime, object: *core.Object, callback
         24 => {
             const key = try valueString(rt, "baz");
             defer key.free(rt);
-            const out = try mapSet(rt, object, key, core.Value.int32(2));
+            const out = try mapSet(rt, object, key, core.JSValue.int32(2));
             out.free(rt);
         },
         25 => {
@@ -747,12 +746,12 @@ fn applyForEachFixtureMutation(rt: *core.Runtime, object: *core.Object, callback
     }
 }
 
-fn valueString(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn valueString(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     const string = try core.string.String.createUtf8(rt, bytes);
     return string.value();
 }
 
-fn assertAndShiftExpected(rt: *core.Runtime, globals: []globals_mod.Slot, actual: core.Value) !void {
+fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
     var expects_value = try globals_mod.getByName(rt, globals, "expects");
     if (expects_value.isUndefined()) {
         expects_value.free(rt);
@@ -773,7 +772,7 @@ fn assertAndShiftExpected(rt: *core.Runtime, globals: []globals_mod.Slot, actual
     expects.length -= 1;
 }
 
-fn getGlobalObjectProperty(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !core.Value {
+fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
     const global_value = try globals_mod.getByName(rt, globals, "globalThis");
     defer global_value.free(rt);
     const global = try expectObject(global_value);
@@ -782,7 +781,7 @@ fn getGlobalObjectProperty(rt: *core.Runtime, globals: []globals_mod.Slot, name:
     return global.getProperty(key);
 }
 
-fn mapGetOrInsert(rt: *core.Runtime, object: *core.Object, key: core.Value, value: core.Value) !core.Value {
+fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
@@ -802,22 +801,23 @@ fn mapGetOrInsert(rt: *core.Runtime, object: *core.Object, key: core.Value, valu
 }
 
 fn mapGetOrInsertComputed(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
-    key: core.Value,
-    callback: core.Value,
+    key: core.JSValue,
+    callback: core.JSValue,
     globals: []globals_mod.Slot,
-) !core.Value {
+) !core.JSValue {
     if (!isCallableObject(callback)) return error.TypeError;
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
-        var callback_args = [_]core.Value{key};
+        var callback_args = [_]core.JSValue{key};
         const value = if (isCallableClosure(callback)) try closure_mod.call(rt, callback, &callback_args, globals) else try callNativeCallback(rt, callback);
         errdefer value.free(rt);
         if (findWeakEntry(object, key_identity)) |index| {
-            const next_value = value.dup();
             const entry = &object.weakCollectionEntriesSlot().*[index];
+            try rt.writeBarrierValueAt(&object.header, value, &entry.value);
+            const next_value = value.dup();
             const old_value = entry.value;
             entry.value = next_value;
             old_value.free(rt);
@@ -833,7 +833,7 @@ fn mapGetOrInsertComputed(
     const canonical_key = canonicalizeKey(key);
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value.dup();
-    var callback_args = [_]core.Value{canonical_key};
+    var callback_args = [_]core.JSValue{canonical_key};
     const value = if (isCallableClosure(callback)) value: {
         const out = try closure_mod.call(rt, callback, &callback_args, globals);
         try applyGetOrInsertComputedCallbackMutation(rt, object, callback, canonical_key);
@@ -841,8 +841,9 @@ fn mapGetOrInsertComputed(
     } else try callNativeCallback(rt, callback);
     errdefer value.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| {
-        const next_value = value.dup();
         const entry = &object.collectionEntriesSlot().*[index];
+        try rt.writeBarrierValueAt(&object.header, value, &entry.value);
+        const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
         old_value.free(rt);
@@ -853,19 +854,19 @@ fn mapGetOrInsertComputed(
     return value;
 }
 
-fn canonicalizeKey(key: core.Value) core.Value {
+fn canonicalizeKey(key: core.JSValue) core.JSValue {
     if (key.asFloat64()) |number| {
-        if (number == 0) return core.Value.int32(0);
+        if (number == 0) return core.JSValue.int32(0);
     }
     return key.dup();
 }
 
-fn applyGetOrInsertComputedCallbackMutation(rt: *core.Runtime, object: *core.Object, callback: core.Value, key: core.Value) !void {
+fn applyGetOrInsertComputedCallbackMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, key: core.JSValue) !void {
     const kind = closure_mod.closureKind(rt, callback) catch return;
-    const mutation_value: ?core.Value = switch (kind) {
-        34 => core.Value.int32(0),
-        35 => core.Value.int32(1),
-        36 => core.Value.int32(2),
+    const mutation_value: ?core.JSValue = switch (kind) {
+        34 => core.JSValue.int32(0),
+        35 => core.JSValue.int32(1),
+        36 => core.JSValue.int32(2),
         else => null,
     };
     if (mutation_value) |value| {
@@ -874,63 +875,63 @@ fn applyGetOrInsertComputedCallbackMutation(rt: *core.Runtime, object: *core.Obj
     }
 }
 
-fn callNativeCallback(rt: *core.Runtime, callback: core.Value) !core.Value {
-    const object = expectObject(callback) catch return core.Value.undefinedValue();
+fn callNativeCallback(rt: *core.JSRuntime, callback: core.JSValue) !core.JSValue {
+    const object = expectObject(callback) catch return core.JSValue.undefinedValue();
     const name_value = object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
-    if (!name_value.isString()) return core.Value.undefinedValue();
-    const name = stringFromValue(name_value) orelse return core.Value.undefinedValue();
-    if (name.eqlBytes("three")) return core.Value.int32(3);
-    return core.Value.undefinedValue();
+    if (!name_value.isString()) return core.JSValue.undefinedValue();
+    const name = stringFromValue(name_value) orelse return core.JSValue.undefinedValue();
+    if (name.eqlBytes("three")) return core.JSValue.int32(3);
+    return core.JSValue.undefinedValue();
 }
 
-fn collectionHas(rt: *core.Runtime, object: *core.Object, key: core.Value) !core.Value {
+fn collectionHas(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return core.Value.boolean(false);
-        return core.Value.boolean(findWeakEntry(object, key_identity) != null);
+        const key_identity = weakKeyIdentity(rt, key) orelse return core.JSValue.boolean(false);
+        return core.JSValue.boolean(findWeakEntry(object, key_identity) != null);
     }
     if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.set) {
-        return core.Value.boolean(findStrongEntry(object, key) != null);
+        return core.JSValue.boolean(findStrongEntry(object, key) != null);
     }
     return error.TypeError;
 }
 
-fn collectionDelete(rt: *core.Runtime, object: *core.Object, key: core.Value) !core.Value {
+fn collectionDelete(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return core.Value.boolean(false);
-        const index = findWeakEntry(object, key_identity) orelse return core.Value.boolean(false);
+        const key_identity = weakKeyIdentity(rt, key) orelse return core.JSValue.boolean(false);
+        const index = findWeakEntry(object, key_identity) orelse return core.JSValue.boolean(false);
         try removeWeakEntry(rt, object, index);
-        return core.Value.boolean(true);
+        return core.JSValue.boolean(true);
     }
 
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
-    const index = findStrongEntry(object, key) orelse return core.Value.boolean(false);
+    const index = findStrongEntry(object, key) orelse return core.JSValue.boolean(false);
     try removeStrongEntryAndUpdateSize(rt, object, index);
-    return core.Value.boolean(true);
+    return core.JSValue.boolean(true);
 }
 
-fn collectionClear(rt: *core.Runtime, object: *core.Object) !core.Value {
+fn collectionClear(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.set) {
         try clearStrongEntriesAndUpdateSize(rt, object);
-        return core.Value.undefinedValue();
+        return core.JSValue.undefinedValue();
     }
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
         clearWeakEntries(rt, object);
-        return core.Value.undefinedValue();
+        return core.JSValue.undefinedValue();
     }
     return error.TypeError;
 }
 
-fn setAdd(rt: *core.Runtime, object: *core.Object, value: core.Value) !core.Value {
+fn setAdd(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !core.JSValue {
     try setAddNoResult(rt, object, value);
     return object.value().dup();
 }
 
-fn setAddNoResult(rt: *core.Runtime, object: *core.Object, value: core.Value) !void {
+fn setAddNoResult(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !void {
     if (object.class_id == core.class.ids.weakset) {
         const key_identity = weakKeyIdentity(rt, value) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity) == null) {
-            var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = core.Value.undefinedValue() };
+            var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = core.JSValue.undefinedValue() };
             errdefer entry.destroy(rt);
             try appendWeakEntry(rt, object, entry);
         }
@@ -941,7 +942,7 @@ fn setAddNoResult(rt: *core.Runtime, object: *core.Object, value: core.Value) !v
     const canonical_value = canonicalizeKey(value);
     defer canonical_value.free(rt);
     if (findStrongEntry(object, canonical_value) == null) {
-        const entry = core.object.CollectionEntry{ .key = canonical_value.dup(), .value = core.Value.undefinedValue() };
+        const entry = core.object.CollectionEntry{ .key = canonical_value.dup(), .value = core.JSValue.undefinedValue() };
         try appendStrongEntryAndUpdateSize(rt, object, entry);
     }
 }
@@ -965,7 +966,7 @@ const SetLikeRecord = struct {
     mode: i32,
 };
 
-fn setComposition(rt: *core.Runtime, object: *core.Object, args: []const core.Value, operation: SetComposition, globals: []globals_mod.Slot) !core.Value {
+fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComposition, globals: []globals_mod.Slot) !core.JSValue {
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
@@ -1066,7 +1067,7 @@ fn setComposition(rt: *core.Runtime, object: *core.Object, args: []const core.Va
     return result_value;
 }
 
-fn setComparison(rt: *core.Runtime, object: *core.Object, args: []const core.Value, operation: SetComparison, globals: []globals_mod.Slot) !core.Value {
+fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
@@ -1085,7 +1086,7 @@ fn setComparison(rt: *core.Runtime, object: *core.Object, args: []const core.Val
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, globals)) return core.Value.boolean(false);
+                    if (try setLikeHas(rt, other_record, entry.key, object, globals)) return core.JSValue.boolean(false);
                 }
             } else {
                 const other_keys = try setLikeKeys(rt, other_record, globals);
@@ -1093,39 +1094,39 @@ fn setComparison(rt: *core.Runtime, object: *core.Object, args: []const core.Val
                 for (other_keys) |key| {
                     const canonical_key = canonicalizeKey(key);
                     defer canonical_key.free(rt);
-                    if (findStrongEntry(object, canonical_key) != null) return core.Value.boolean(false);
+                    if (findStrongEntry(object, canonical_key) != null) return core.JSValue.boolean(false);
                 }
             }
-            return core.Value.boolean(true);
+            return core.JSValue.boolean(true);
         },
         .is_subset_of => {
-            if (strongSize(object) > other_record.size) return core.Value.boolean(false);
+            if (strongSize(object) > other_record.size) return core.JSValue.boolean(false);
             for (object.collectionEntriesSlot().*) |entry| {
                 if (!entry.active) continue;
-                if (!try setLikeHas(rt, other_record, entry.key, object, globals)) return core.Value.boolean(false);
+                if (!try setLikeHas(rt, other_record, entry.key, object, globals)) return core.JSValue.boolean(false);
             }
-            return core.Value.boolean(true);
+            return core.JSValue.boolean(true);
         },
         .is_superset_of => {
-            if (strongSize(object) < other_record.size) return core.Value.boolean(false);
+            if (strongSize(object) < other_record.size) return core.JSValue.boolean(false);
             const other_keys = try setLikeKeys(rt, other_record, globals);
             defer freeValueList(rt, other_keys);
             for (other_keys) |key| {
-                if (findStrongEntry(object, key) == null) return core.Value.boolean(false);
+                if (findStrongEntry(object, key) == null) return core.JSValue.boolean(false);
             }
-            return core.Value.boolean(true);
+            return core.JSValue.boolean(true);
         },
     }
 }
 
-fn setLikeRecord(rt: *core.Runtime, object: *core.Object, globals: []globals_mod.Slot) !SetLikeRecord {
+fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object, globals: []globals_mod.Slot) !SetLikeRecord {
     const mode = setLikeMode(rt, object) orelse 0;
     const size = try setLikeSize(rt, object, mode, globals);
     try validateSetLikeMethods(rt, object, mode, globals);
     return .{ .object = object, .size = size, .mode = mode };
 }
 
-fn setLikeMode(rt: *core.Runtime, object: *core.Object) ?i32 {
+fn setLikeMode(rt: *core.JSRuntime, object: *core.Object) ?i32 {
     const key = rt.internAtom("__setlike_mode") catch return null;
     defer rt.atoms.free(key);
     const value = object.getProperty(key);
@@ -1133,7 +1134,7 @@ fn setLikeMode(rt: *core.Runtime, object: *core.Object) ?i32 {
     return value.asInt32();
 }
 
-fn setLikeSize(rt: *core.Runtime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !usize {
+fn setLikeSize(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !usize {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return strongSize(object);
     if (mode == 1 or mode == 2) {
         try appendGlobalString(rt, globals, "observedOrder", "getting size");
@@ -1147,7 +1148,7 @@ fn setLikeSize(rt: *core.Runtime, object: *core.Object, mode: i32, globals: []gl
     return @intCast(size);
 }
 
-fn validateSetLikeMethods(rt: *core.Runtime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !void {
+fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object, mode: i32, globals: []globals_mod.Slot) !void {
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) return;
     if (mode == 1 or mode == 2) {
         try appendGlobalString(rt, globals, "observedOrder", "getting has");
@@ -1170,7 +1171,7 @@ fn validateSetLikeMethods(rt: *core.Runtime, object: *core.Object, mode: i32, gl
     if (!isCallableClosure(keys_value)) return error.TypeError;
 }
 
-fn setLikeHas(rt: *core.Runtime, record: SetLikeRecord, key: core.Value, receiver: *core.Object, globals: []globals_mod.Slot) !bool {
+fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, receiver: *core.Object, globals: []globals_mod.Slot) !bool {
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         const out = try collectionHas(rt, object, key);
@@ -1210,16 +1211,16 @@ fn setLikeHas(rt: *core.Runtime, record: SetLikeRecord, key: core.Value, receive
     const has_value = object.getProperty(has_key);
     defer has_value.free(rt);
     if (!isCallableClosure(has_value)) return error.TypeError;
-    var has_args = [_]core.Value{key};
+    var has_args = [_]core.JSValue{key};
     const out = try closure_mod.callWithThis(rt, has_value, object.value(), &has_args, &.{});
     defer out.free(rt);
     return out.asBool() orelse false;
 }
 
-fn setLikeKeys(rt: *core.Runtime, record: SetLikeRecord, globals: []globals_mod.Slot) ![]core.Value {
+fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, globals: []globals_mod.Slot) ![]core.JSValue {
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
-        var values: []core.Value = &.{};
+        var values: []core.JSValue = &.{};
         errdefer freeValueList(rt, values);
         for (object.collectionEntriesSlot().*) |entry| {
             if (!entry.active) continue;
@@ -1260,7 +1261,7 @@ fn setLikeKeys(rt: *core.Runtime, record: SetLikeRecord, globals: []globals_mod.
     defer iterable_value.free(rt);
     const iterable = try expectObject(iterable_value);
     if (iterable.is_array) {
-        var values: []core.Value = &.{};
+        var values: []core.JSValue = &.{};
         errdefer freeValueList(rt, values);
         var index: u32 = 0;
         while (index < iterable.length) : (index += 1) {
@@ -1273,28 +1274,28 @@ fn setLikeKeys(rt: *core.Runtime, record: SetLikeRecord, globals: []globals_mod.
     return error.TypeError;
 }
 
-fn setComparisonIterReturn(rt: *core.Runtime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.Value {
+fn setComparisonIterReturn(rt: *core.JSRuntime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
     const values = [_]i32{ 4, 5, 6 };
     var next_calls: i32 = 0;
     for (values) |value| {
         next_calls += 1;
-        const present = findStrongEntry(object, core.Value.int32(value)) != null;
+        const present = findStrongEntry(object, core.JSValue.int32(value)) != null;
         if (operation == .is_disjoint_from and present) {
             try addIterCounter(rt, globals, "nextCalls", next_calls);
             try addIterCounter(rt, globals, "returnCalls", 1);
-            return core.Value.boolean(false);
+            return core.JSValue.boolean(false);
         }
         if (operation == .is_superset_of and !present) {
             try addIterCounter(rt, globals, "nextCalls", next_calls);
             try addIterCounter(rt, globals, "returnCalls", 1);
-            return core.Value.boolean(false);
+            return core.JSValue.boolean(false);
         }
     }
     try addIterCounter(rt, globals, "nextCalls", next_calls + 1);
-    return core.Value.boolean(true);
+    return core.JSValue.boolean(true);
 }
 
-fn setComparisonObservableKeys(rt: *core.Runtime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.Value {
+fn setComparisonObservableKeys(rt: *core.JSRuntime, object: *core.Object, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
     try appendGlobalString(rt, globals, "observedOrder", "calling keys");
     try appendGlobalString(rt, globals, "observedOrder", "getting next");
     inline for (.{ "a", "b", "c" }) |name| {
@@ -1304,18 +1305,18 @@ fn setComparisonObservableKeys(rt: *core.Runtime, object: *core.Object, operatio
         const value = try makeString(rt, name);
         defer value.free(rt);
         const present = findStrongEntry(object, value) != null;
-        if (operation == .is_disjoint_from and present) return core.Value.boolean(false);
-        if (operation == .is_superset_of and !present) return core.Value.boolean(false);
+        if (operation == .is_disjoint_from and present) return core.JSValue.boolean(false);
+        if (operation == .is_superset_of and !present) return core.JSValue.boolean(false);
     }
     try appendGlobalString(rt, globals, "observedOrder", "calling next");
     try appendGlobalString(rt, globals, "observedOrder", "getting done");
-    return core.Value.boolean(true);
+    return core.JSValue.boolean(true);
 }
 
-fn observableOrderKeys(rt: *core.Runtime, globals: []globals_mod.Slot) ![]core.Value {
+fn observableOrderKeys(rt: *core.JSRuntime, globals: []globals_mod.Slot) ![]core.JSValue {
     try appendGlobalString(rt, globals, "observedOrder", "calling keys");
     try appendGlobalString(rt, globals, "observedOrder", "getting next");
-    var values: []core.Value = &.{};
+    var values: []core.JSValue = &.{};
     errdefer freeValueList(rt, values);
     inline for (.{ "a", "b", "c" }) |name| {
         try appendGlobalString(rt, globals, "observedOrder", "calling next");
@@ -1330,8 +1331,8 @@ fn observableOrderKeys(rt: *core.Runtime, globals: []globals_mod.Slot) ![]core.V
     return values;
 }
 
-fn stringList(rt: *core.Runtime, comptime names: []const []const u8) ![]core.Value {
-    var values: []core.Value = &.{};
+fn stringList(rt: *core.JSRuntime, comptime names: []const []const u8) ![]core.JSValue {
+    var values: []core.JSValue = &.{};
     errdefer freeValueList(rt, values);
     inline for (names) |name| {
         const value = try makeString(rt, name);
@@ -1341,23 +1342,23 @@ fn stringList(rt: *core.Runtime, comptime names: []const []const u8) ![]core.Val
     return values;
 }
 
-fn intList(rt: *core.Runtime, comptime ints: []const i32) ![]core.Value {
-    var values: []core.Value = &.{};
+fn intList(rt: *core.JSRuntime, comptime ints: []const i32) ![]core.JSValue {
+    var values: []core.JSValue = &.{};
     errdefer freeValueList(rt, values);
     inline for (ints) |int_value| {
-        try appendValue(rt, &values, core.Value.int32(int_value));
+        try appendValue(rt, &values, core.JSValue.int32(int_value));
     }
     return values;
 }
 
-fn applyBaseSetIteratorMutation(rt: *core.Runtime, globals: []globals_mod.Slot) !void {
+fn applyBaseSetIteratorMutation(rt: *core.JSRuntime, globals: []globals_mod.Slot) !void {
     try deleteStringFromGlobalSet(rt, globals, "baseSet", "b");
     try deleteStringFromGlobalSet(rt, globals, "baseSet", "c");
     try addStringToGlobalSet(rt, globals, "baseSet", "b");
     try addStringToGlobalSet(rt, globals, "baseSet", "d");
 }
 
-fn appendGlobalString(rt: *core.Runtime, globals: []globals_mod.Slot, array_name: []const u8, bytes: []const u8) !void {
+fn appendGlobalString(rt: *core.JSRuntime, globals: []globals_mod.Slot, array_name: []const u8, bytes: []const u8) !void {
     var array_value = try globals_mod.getByName(rt, globals, array_name);
     if (array_value.isUndefined()) {
         array_value.free(rt);
@@ -1371,7 +1372,7 @@ fn appendGlobalString(rt: *core.Runtime, globals: []globals_mod.Slot, array_name
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
 }
 
-fn addStringToGlobalSet(rt: *core.Runtime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
+fn addStringToGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
     const set = try globalSetObject(rt, globals, set_name);
     const value = try makeString(rt, bytes);
     defer value.free(rt);
@@ -1379,12 +1380,12 @@ fn addStringToGlobalSet(rt: *core.Runtime, globals: []globals_mod.Slot, set_name
     out.free(rt);
 }
 
-fn deleteStringFromGlobalSet(rt: *core.Runtime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
+fn deleteStringFromGlobalSet(rt: *core.JSRuntime, globals: []globals_mod.Slot, set_name: []const u8, bytes: []const u8) !void {
     const set = try globalSetObject(rt, globals, set_name);
     try deleteStringFromSet(rt, set, bytes);
 }
 
-fn deleteStringFromSet(rt: *core.Runtime, set: *core.Object, bytes: []const u8) !void {
+fn deleteStringFromSet(rt: *core.JSRuntime, set: *core.Object, bytes: []const u8) !void {
     if (set.class_id != core.class.ids.set) return error.TypeError;
     const value = try makeString(rt, bytes);
     defer value.free(rt);
@@ -1393,7 +1394,7 @@ fn deleteStringFromSet(rt: *core.Runtime, set: *core.Object, bytes: []const u8) 
     }
 }
 
-fn globalSetObject(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !*core.Object {
+fn globalSetObject(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !*core.Object {
     var set_value = try globals_mod.getByName(rt, globals, name);
     if (set_value.isUndefined()) {
         set_value.free(rt);
@@ -1405,7 +1406,7 @@ fn globalSetObject(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const
     return set;
 }
 
-fn addIterCounter(rt: *core.Runtime, globals: []globals_mod.Slot, property: []const u8, delta: i32) !void {
+fn addIterCounter(rt: *core.JSRuntime, globals: []globals_mod.Slot, property: []const u8, delta: i32) !void {
     var iter_value = try globals_mod.getByName(rt, globals, "iter");
     if (iter_value.isUndefined()) {
         iter_value.free(rt);
@@ -1418,37 +1419,115 @@ fn addIterCounter(rt: *core.Runtime, globals: []globals_mod.Slot, property: []co
     const current_value = iter.getProperty(key);
     defer current_value.free(rt);
     const current = current_value.asInt32() orelse 0;
-    try iter.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(current + delta), true, true, true));
+    try iter.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(current + delta), true, true, true));
 }
 
-fn makeString(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn makeString(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     return (try core.string.String.createUtf8(rt, bytes)).value();
 }
 
-fn valueStringEql(value: core.Value, bytes: []const u8) bool {
+fn valueStringEql(value: core.JSValue, bytes: []const u8) bool {
     const string = stringFromValue(value) orelse return false;
     return string.eqlBytes(bytes);
 }
 
-fn appendValue(rt: *core.Runtime, values: *[]core.Value, value: core.Value) !void {
-    const next = try rt.memory.alloc(core.Value, values.*.len + 1);
-    errdefer rt.memory.free(core.Value, next);
+fn appendValue(rt: *core.JSRuntime, values: *[]core.JSValue, value: core.JSValue) !void {
+    var rooted_value = value;
+    var root_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = values }};
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted_value }};
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .slices = &root_slices,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const next = try rt.memory.alloc(core.JSValue, values.*.len + 1);
+    errdefer rt.memory.free(core.JSValue, next);
     @memcpy(next[0..values.*.len], values.*);
-    next[values.*.len] = value.dup();
-    if (values.*.len != 0) rt.memory.free(core.Value, values.*);
+    next[values.*.len] = rooted_value.dup();
+    if (values.*.len != 0) rt.memory.free(core.JSValue, values.*);
     values.* = next;
 }
 
-fn freeValueList(rt: *core.Runtime, values: []core.Value) void {
+fn freeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
     for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.Value, values);
+    if (values.len != 0) rt.memory.free(core.JSValue, values);
+}
+
+test "appendValue roots existing values and incoming value during growth" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_atom = try rt.atoms.newValueSymbol("gc-collection-value-list-first");
+    const second_atom = try rt.atoms.newValueSymbol("gc-collection-value-list-second");
+
+    var values: []core.JSValue = &.{};
+    try appendValue(rt, &values, core.JSValue.symbol(first_atom));
+    defer freeValueList(rt, values);
+
+    const Trigger = struct {
+        rt: *core.JSRuntime,
+        first_atom: u32,
+        second_atom: u32,
+        saw_first: bool = false,
+        saw_second: bool = false,
+        trace_failed: bool = false,
+
+        fn trigger(context: ?*anyopaque, size: usize) void {
+            _ = size;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var visitor = core.runtime.RootVisitor{
+                .context = self,
+                .visit_value = @This().visitValue,
+                .visit_object = @This().visitObject,
+            };
+            self.rt.traceActiveRoots(&visitor) catch {
+                self.trace_failed = true;
+            };
+        }
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.asSymbolAtom()) |atom_id| {
+                if (atom_id == self.first_atom) self.saw_first = true;
+                if (atom_id == self.second_atom) self.saw_second = true;
+            }
+        }
+
+        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+            _ = context;
+            _ = slot;
+        }
+    };
+
+    const saved_trigger_fn = rt.memory.trigger_gc_fn;
+    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    var trigger = Trigger{
+        .rt = rt,
+        .first_atom = first_atom,
+        .second_atom = second_atom,
+    };
+    rt.memory.trigger_gc_fn = Trigger.trigger;
+    rt.memory.trigger_gc_ctx = &trigger;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger_fn;
+        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    }
+
+    try appendValue(rt, &values, core.JSValue.symbol(second_atom));
+
+    try std.testing.expect(!trigger.trace_failed);
+    try std.testing.expect(trigger.saw_first);
+    try std.testing.expect(trigger.saw_second);
 }
 
 fn groupString(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     map: *core.Object,
-    string_value: core.Value,
-    callback: core.Value,
+    string_value: core.JSValue,
+    callback: core.JSValue,
     globals: []globals_mod.Slot,
 ) !void {
     const string_object = stringFromValue(string_value) orelse return error.TypeError;
@@ -1462,17 +1541,17 @@ fn groupString(
 }
 
 fn addGroupedItem(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     map: *core.Object,
-    callback: core.Value,
+    callback: core.JSValue,
     globals: []globals_mod.Slot,
-    item: core.Value,
+    item: core.JSValue,
     index: u32,
 ) !void {
     var rooted_item = item;
-    var key = core.Value.undefinedValue();
-    var existing = core.Value.undefinedValue();
-    var group_value = core.Value.undefinedValue();
+    var key = core.JSValue.undefinedValue();
+    var existing = core.JSValue.undefinedValue();
+    var group_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_item },
         .{ .value = &key },
@@ -1486,8 +1565,8 @@ fn addGroupedItem(
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const index_value = core.Value.int32(@intCast(index));
-    var callback_args = [_]core.Value{ rooted_item, index_value };
+    const index_value = core.JSValue.int32(@intCast(index));
+    var callback_args = [_]core.JSValue{ rooted_item, index_value };
     key = try closure_mod.call(rt, callback, &callback_args, globals);
     defer key.free(rt);
 
@@ -1507,12 +1586,12 @@ fn addGroupedItem(
     set_result.free(rt);
 }
 
-fn appendArrayValue(rt: *core.Runtime, array: *core.Object, value: core.Value) !void {
+fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     if (!array.is_array) return error.TypeError;
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
 }
 
-fn stringElementAt(rt: *core.Runtime, string_object: *core.string.String, index: *usize) !core.Value {
+fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
     const first = string_object.codeUnitAt(index.*);
     index.* += 1;
     if (isHighSurrogate(first) and index.* < string_object.len()) {
@@ -1537,14 +1616,14 @@ fn isLowSurrogate(unit: u16) bool {
     return unit >= 0xdc00 and unit <= 0xdfff;
 }
 
-fn isCallableClosure(value: core.Value) bool {
+fn isCallableClosure(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
     const object: *core.Object = @fieldParentPtr("header", header);
     return object.class_id == core.class.ids.c_closure;
 }
 
-fn isCallableObject(value: core.Value) bool {
+fn isCallableObject(value: core.JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -1552,7 +1631,7 @@ fn isCallableObject(value: core.Value) bool {
 }
 
 pub fn sweepWeakEntries(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
     context: ?*anyopaque,
     isLive: *const fn (?*anyopaque, usize) bool,
@@ -1576,7 +1655,7 @@ const weak_no_entry = core.object.collection_no_entry;
 const strong_index_threshold: usize = 8;
 const weak_index_threshold: usize = 8;
 
-fn findStrongEntry(object: *core.Object, key: core.Value) ?usize {
+fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
     const hash = strongEntryHash(key);
     const heads = object.collectionBucketHeads();
     if (heads.len != 0) {
@@ -1623,7 +1702,7 @@ fn strongSize(object: *core.Object) usize {
     return object.collectionActiveCount();
 }
 
-fn strongEntryHash(value: core.Value) u64 {
+fn strongEntryHash(value: core.JSValue) u64 {
     return switch (value.tag) {
         core.Tag.int => hashNumber(@floatFromInt(value.asInt32().?)),
         core.Tag.float64 => hashNumber(value.asFloat64().?),
@@ -1646,7 +1725,7 @@ fn hashNumber(number: f64) u64 {
     return mix64(bits);
 }
 
-fn hashStringValue(value: core.Value) u64 {
+fn hashStringValue(value: core.JSValue) u64 {
     const string = stringFromValue(value) orelse return hashRefPointer(value);
     return mix64(@as(u64, string.hash) ^ (@as(u64, string.len()) << 32));
 }
@@ -1661,7 +1740,7 @@ fn strongEntryHashLatin1ConcatWithSeed(prefix: []const u8, digits: []const u8, s
     return mix64(@as(u64, hash) ^ (@as(u64, prefix.len + digits.len) << 32));
 }
 
-fn stringValueEqlLatin1Concat(value: core.Value, prefix: []const u8, digits: []const u8) bool {
+fn stringValueEqlLatin1Concat(value: core.JSValue, prefix: []const u8, digits: []const u8) bool {
     const string = stringFromValue(value) orelse return false;
     const len = prefix.len + digits.len;
     if (string.len() != len) return false;
@@ -1710,7 +1789,7 @@ const BigIntHashParts = struct {
     limbs: []const bignum.Limb,
 };
 
-fn bigIntHashParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntHashParts {
+fn bigIntHashParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntHashParts {
     if (value.asShortBigInt()) |short| {
         const signed: i128 = short;
         var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
@@ -1727,7 +1806,7 @@ fn bigIntHashParts(value: core.Value, scratch: *[2]bignum.Limb) ?BigIntHashParts
     return .{ .negative = bigint.value.negative, .limbs = bigint.value.limbs };
 }
 
-fn hashBigIntValue(value: core.Value) u64 {
+fn hashBigIntValue(value: core.JSValue) u64 {
     var scratch: [2]bignum.Limb = undefined;
     const parts = bigIntHashParts(value, &scratch) orelse return hashRefPointer(value);
     var hash: u64 = if (parts.negative) 0x9d77_4424_2d81_353f else 0x4f1b_bcdc_baa7_2b39;
@@ -1736,12 +1815,12 @@ fn hashBigIntValue(value: core.Value) u64 {
     return mix64(hash);
 }
 
-fn hashRefPointer(value: core.Value) u64 {
+fn hashRefPointer(value: core.JSValue) u64 {
     const header = value.refHeader() orelse return mix64(tagHashBits(value.tag));
     return mix64(@as(u64, @intCast(@intFromPtr(header))));
 }
 
-fn hashObjectPointer(value: core.Value) u64 {
+fn hashObjectPointer(value: core.JSValue) u64 {
     const header = value.objectHeader() orelse return mix64(tagHashBits(value.tag));
     return mix64(@as(u64, @intCast(@intFromPtr(header))));
 }
@@ -1786,11 +1865,11 @@ fn weakEntryHash(key_identity: usize) u64 {
     return mix64(@as(u64, @intCast(key_identity)));
 }
 
-fn appendStrongEntry(rt: *core.Runtime, object: *core.Object, entry: core.object.CollectionEntry) !usize {
+fn appendStrongEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !usize {
     return try appendStrongEntryWithHash(rt, object, entry, strongEntryHash(entry.key));
 }
 
-fn appendStrongEntryWithHash(rt: *core.Runtime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
+fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry, hash: u64) !usize {
     var stored = entry;
     stored.hash = hash;
     stored.hash_next = strong_no_entry;
@@ -1802,7 +1881,7 @@ fn appendStrongEntryWithHash(rt: *core.Runtime, object: *core.Object, entry: cor
     return index;
 }
 
-fn appendStrongEntryAndUpdateSize(rt: *core.Runtime, object: *core.Object, entry: core.object.CollectionEntry) !void {
+fn appendStrongEntryAndUpdateSize(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
     var entry_owned = true;
     errdefer if (entry_owned) entry.destroy(rt);
     const index = try appendStrongEntry(rt, object, entry);
@@ -1813,7 +1892,7 @@ fn appendStrongEntryAndUpdateSize(rt: *core.Runtime, object: *core.Object, entry
     inserted = false;
 }
 
-fn ensureStrongIndexForInsert(rt: *core.Runtime, object: *core.Object, next_active_count: usize) !void {
+fn ensureStrongIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_active_count: usize) !void {
     if (next_active_count < strong_index_threshold) return;
     const heads = object.collectionBucketHeads();
     if (heads.len == 0) {
@@ -1831,7 +1910,7 @@ fn bucketCountForActiveCount(active_count: usize) usize {
     return bucket_count;
 }
 
-fn rebuildStrongIndex(rt: *core.Runtime, object: *core.Object, bucket_count: usize) !void {
+fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
     const next = try rt.memory.alloc(usize, bucket_count);
     errdefer rt.memory.free(usize, next);
     @memset(next, strong_no_entry);
@@ -1879,7 +1958,7 @@ fn unlinkStrongEntry(object: *core.Object, index: usize) void {
     }
 }
 
-fn appendWeakEntry(rt: *core.Runtime, object: *core.Object, entry: core.object.WeakCollectionEntry) !void {
+fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object.WeakCollectionEntry) !void {
     var stored = entry;
     stored.hash = weakEntryHash(stored.key_identity);
     stored.hash_next = weak_no_entry;
@@ -1892,11 +1971,13 @@ fn appendWeakEntry(rt: *core.Runtime, object: *core.Object, entry: core.object.W
     try object.ensureWeakCollectionEntryCapacity(rt, index + 1);
     const refreshed_entries = object.weakCollectionEntriesSlot();
     refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
+    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
+    try rt.writeBarrierValueAt(&object.header, stored.value, &refreshed_entries.*[index].value);
     refreshed_entries.*[index] = stored;
     linkWeakEntry(object, index);
 }
 
-fn ensureWeakIndexForInsert(rt: *core.Runtime, object: *core.Object, next_count: usize) !void {
+fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_count: usize) !void {
     if (next_count < weak_index_threshold) return;
     const heads = object.collectionBucketHeads();
     if (heads.len == 0) {
@@ -1908,7 +1989,7 @@ fn ensureWeakIndexForInsert(rt: *core.Runtime, object: *core.Object, next_count:
     }
 }
 
-fn rebuildWeakIndex(rt: *core.Runtime, object: *core.Object, bucket_count: usize) !void {
+fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
     const next = try rt.memory.alloc(usize, bucket_count);
     errdefer rt.memory.free(usize, next);
     @memset(next, weak_no_entry);
@@ -1946,7 +2027,7 @@ fn relinkWeakIndex(object: *core.Object) void {
     }
 }
 
-fn removeStrongEntryAndUpdateSize(rt: *core.Runtime, object: *core.Object, index: usize) !void {
+fn removeStrongEntryAndUpdateSize(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const removed = takeStrongEntry(object, index) orelse return;
     var committed = false;
     errdefer if (!committed) restoreStrongEntry(object, index, removed);
@@ -1956,7 +2037,7 @@ fn removeStrongEntryAndUpdateSize(rt: *core.Runtime, object: *core.Object, index
     removed.destroy(rt);
 }
 
-fn rollbackLastStrongEntry(rt: *core.Runtime, object: *core.Object, index: usize) void {
+fn rollbackLastStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
     const entries_slot = object.collectionEntriesSlot();
     std.debug.assert(index + 1 == entries_slot.*.len);
     const entry = takeStrongEntry(object, index) orelse return;
@@ -1964,7 +2045,7 @@ fn rollbackLastStrongEntry(rt: *core.Runtime, object: *core.Object, index: usize
     entry.destroy(rt);
 }
 
-fn rollbackStrongEntriesTo(rt: *core.Runtime, object: *core.Object, len: usize, active_count: usize) void {
+fn rollbackStrongEntriesTo(rt: *core.JSRuntime, object: *core.Object, len: usize, active_count: usize) void {
     const entries_slot = object.collectionEntriesSlot();
     while (entries_slot.*.len > len) {
         rollbackLastStrongEntry(rt, object, entries_slot.*.len - 1);
@@ -1972,7 +2053,7 @@ fn rollbackStrongEntriesTo(rt: *core.Runtime, object: *core.Object, len: usize, 
     object.collectionActiveCountSlot().* = active_count;
 }
 
-fn removeWeakEntry(rt: *core.Runtime, object: *core.Object, index: usize) !void {
+fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const entries_slot = object.weakCollectionEntriesSlot();
     const entry = entries_slot.*[index];
     if (index + 1 < entries_slot.*.len) {
@@ -1990,7 +2071,7 @@ const RemovedStrongEntry = struct {
     entry: core.object.CollectionEntry,
 };
 
-fn clearStrongEntriesAndUpdateSize(rt: *core.Runtime, object: *core.Object) !void {
+fn clearStrongEntriesAndUpdateSize(rt: *core.JSRuntime, object: *core.Object) !void {
     const active_count = object.collectionActiveCount();
     if (active_count == 0) {
         try defineCollectionSizeProperty(rt, object, 0);
@@ -2024,7 +2105,7 @@ fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEn
     if (index >= entries_slot.*.len or !entries_slot.*[index].active) return null;
     unlinkStrongEntry(object, index);
     const entry = entries_slot.*[index];
-    entries_slot.*[index] = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false, .hash_next = strong_no_entry };
+    entries_slot.*[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = strong_no_entry };
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
     return entry;
@@ -2051,7 +2132,7 @@ fn restoreStrongEntries(object: *core.Object, entries: []const RemovedStrongEntr
     }
 }
 
-fn clearWeakEntries(rt: *core.Runtime, object: *core.Object) void {
+fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void {
     const entries_slot = object.weakCollectionEntriesSlot();
     while (entries_slot.*.len != 0) {
         const index = entries_slot.*.len - 1;
@@ -2064,7 +2145,7 @@ fn clearWeakEntries(rt: *core.Runtime, object: *core.Object) void {
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
 
-fn weakKeyIdentity(rt: ?*core.Runtime, value: core.Value) ?usize {
+fn weakKeyIdentity(rt: ?*core.JSRuntime, value: core.JSValue) ?usize {
     if (value.asSymbolAtom()) |id| {
         if (rt) |runtime| {
             if (runtime.atoms.kind(id) != .symbol) return null;
@@ -2087,7 +2168,7 @@ fn collectionClassId(kind: u32) ?core.ClassId {
     };
 }
 
-fn defineNativeMethods(rt: *core.Runtime, object: *core.Object, class_id: core.ClassId) !void {
+fn defineNativeMethods(rt: *core.JSRuntime, object: *core.Object, class_id: core.ClassId) !void {
     switch (class_id) {
         core.class.ids.map, core.class.ids.weakmap => {
             try function_builtin.defineNativeMethod(rt, object, "set", 2);
@@ -2123,38 +2204,38 @@ fn defineNativeMethods(rt: *core.Runtime, object: *core.Object, class_id: core.C
     }
 }
 
-fn expectObject(value: core.Value) !*core.Object {
+fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn defineCollectionSizeProperty(rt: *core.Runtime, object: *core.Object, value: i32) !void {
+fn defineCollectionSizeProperty(rt: *core.JSRuntime, object: *core.Object, value: i32) !void {
     const key = core.atom.predefinedId("size", .string).?;
-    const new_value = core.Value.int32(value);
+    const new_value = core.JSValue.int32(value);
     if (try object.setOwnWritableDataProperty(rt, key, new_value)) return;
     try object.defineOwnProperty(rt, key, core.Descriptor.data(new_value, true, true, true));
 }
 
-fn defineIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(value), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
 }
 
-fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
-fn numberValue(value: core.Value) ?f64 {
+fn numberValue(value: core.JSValue) ?f64 {
     if (value.asInt32()) |int_value| return @floatFromInt(int_value);
     if (value.asFloat64()) |float_value| return float_value;
     return null;
 }
 
-fn stringFromValue(value: core.Value) ?*core.string.String {
+fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);

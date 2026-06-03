@@ -10,7 +10,7 @@ const makeFunction = helpers.makeFunction;
 const runFunction = helpers.runFunction;
 
 test "Engine eval loop collects object cycles incrementally" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     for (0..8) |_| {
@@ -82,7 +82,7 @@ test "module top-level await condition resumes with awaited value" {
 }
 
 test "module top-level await keeps symbol resume value across promise job GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.evalModule(
@@ -108,7 +108,7 @@ test "explicit namespace export OOM releases namespace owner once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
         defer js.deinit();
 
         const rt = js.runtime;
@@ -157,7 +157,7 @@ const PreloadTrackedPathFailure = enum {
 
 fn expectPreloadTrackedPathOOMCleanup(kind: PreloadTrackedPathFailure) !void {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var postorder = std.ArrayList([]const u8).empty;
@@ -447,7 +447,7 @@ test "module function declarations stay local and keep self-capturing bindings l
 }
 
 test "module graph preinitializes root function declarations for cyclic dependencies" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-dfs-function-init-test";
@@ -486,7 +486,7 @@ test "module graph preinitializes root function declarations for cyclic dependen
 }
 
 test "module graph dynamic import resolves local modules" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-dynamic-import-test";
@@ -521,7 +521,7 @@ test "module graph dynamic import resolves local modules" {
 }
 
 test "module graph resolves native std and os modules" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/native-std-os-module-test";
@@ -568,7 +568,7 @@ test "module graph resolves native std and os modules" {
 }
 
 test "os stat and readdir result pairs release temporary result objects" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.evalModule(
@@ -584,7 +584,7 @@ test "os stat and readdir result pairs release temporary result objects" {
 }
 
 test "os Worker posts messages between parent and worker thread" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/os-worker-message-test";
@@ -635,7 +635,7 @@ test "os Worker posts messages between parent and worker thread" {
 }
 
 test "os Worker preserves queued message order" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/os-worker-message-order-test";
@@ -677,7 +677,7 @@ test "os Worker preserves queued message order" {
 }
 
 test "os Worker shares SharedArrayBuffer backing store" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/os-worker-sab-test";
@@ -720,7 +720,7 @@ test "os Worker shares SharedArrayBuffer backing store" {
 }
 
 test "module graph dynamically imports native modules" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/native-dynamic-module-test";
@@ -750,7 +750,7 @@ test "module graph dynamically imports native modules" {
 }
 
 test "module graph exported destructuring initializes module bindings" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-export-destructuring-test";
@@ -780,7 +780,7 @@ test "module graph exported destructuring initializes module bindings" {
 }
 
 test "module graph top-level await does not block independent siblings and drains promise ticks" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-tla-scheduler-test";
@@ -819,7 +819,7 @@ test "module graph top-level await does not block independent siblings and drain
 }
 
 test "module graph top-level await keeps symbol continuation across promise job GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-tla-symbol-root-test";
@@ -844,7 +844,7 @@ test "module graph top-level await keeps symbol continuation across promise job 
 }
 
 test "Promise.all custom constructor capability keeps symbol result under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -875,7 +875,7 @@ test "Promise.all custom constructor capability keeps symbol result under GC" {
 }
 
 test "Reflect.construct FinalizationRegistry accepts cleanup callback under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -898,7 +898,7 @@ test "Reflect.construct FinalizationRegistry accepts cleanup callback under GC" 
 }
 
 test "module graph top-level await propagates first queued promise rejection" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-tla-rejection-tick-test";
@@ -923,7 +923,7 @@ test "module graph top-level await propagates first queued promise rejection" {
 }
 
 test "module graph top-level await resumed throw releases continuation values" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-tla-resume-throw-lifecycle-test";
@@ -1050,7 +1050,7 @@ test "module missing and ambiguous exports surface as syntax errors" {
 }
 
 test "module file eval uses filename as runtime module name" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1064,7 +1064,7 @@ test "module file eval uses filename as runtime module name" {
 }
 
 test "module file eval links modules without import export declarations" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1080,7 +1080,7 @@ test "module file eval links modules without import export declarations" {
 }
 
 test "module file graph reads imported live binding cells" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-live-binding-test";
@@ -1103,7 +1103,7 @@ test "module file graph reads imported live binding cells" {
 }
 
 test "module var refs reject const and import assignment without freezing exported let" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-const-import-assignment-test";
@@ -1145,7 +1145,7 @@ test "module var refs reject const and import assignment without freezing export
 }
 
 test "module forward import capture remains immutable in earlier function expressions" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-forward-import-capture-test";
@@ -1179,7 +1179,7 @@ test "module forward import capture remains immutable in earlier function expres
 }
 
 test "import.meta exposes file url and main flag" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/import-meta-test";
@@ -1210,7 +1210,7 @@ test "import.meta exposes file url and main flag" {
 }
 
 test "module file graph creates namespace import objects" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-namespace-test";
@@ -1268,7 +1268,7 @@ test "module file graph creates namespace import objects" {
 }
 
 test "module namespace uninitialized exports throw on get and descriptor" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-namespace-uninit-test";
@@ -1304,7 +1304,7 @@ test "module namespace uninitialized exports throw on get and descriptor" {
 }
 
 test "module default exports initialize import and namespace bindings" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-default-export-test";
@@ -1348,7 +1348,7 @@ test "module default exports initialize import and namespace bindings" {
 }
 
 test "module file graph creates explicit star re-export namespaces" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-star-namespace-test";
@@ -1379,7 +1379,7 @@ test "module file graph creates explicit star re-export namespaces" {
 }
 
 test "module file graph normalizes cyclic relative paths" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-cycle-path-test";
@@ -1414,7 +1414,7 @@ test "module file graph normalizes cyclic relative paths" {
 }
 
 test "module file graph supports synthesized root source self import" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-synth-self-test";
@@ -1442,7 +1442,7 @@ test "module file graph supports synthesized root source self import" {
 }
 
 test "module file graph treats relative root self imports as the root module" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-self-once-test";
@@ -1496,7 +1496,7 @@ test "module duplicate lexical and exported names are syntax errors" {
 }
 
 test "parsed module metadata instantiates runtime record for resolution" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const main_name = try rt.internAtom("main.mjs");
@@ -1572,7 +1572,7 @@ test "RegExp character classes match validator-style sources" {
 }
 
 test "RegExp character class escapes use the fast class matcher" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1598,7 +1598,7 @@ test "RegExp character class escapes use the fast class matcher" {
 }
 
 test "RegExp compiles and executes Latin-1 source characters" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1617,7 +1617,7 @@ test "RegExp compiles and executes Latin-1 source characters" {
 }
 
 test "RegExp accepts empty modifier groups and rejects duplicate modifiers" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1637,7 +1637,7 @@ test "RegExp accepts empty modifier groups and rejects duplicate modifiers" {
 }
 
 test "RegExp dotAll modifier groups rewrite scoped dot semantics" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1661,7 +1661,7 @@ test "RegExp dotAll modifier groups rewrite scoped dot semantics" {
 }
 
 test "RegExp multiline modifier groups rewrite scoped anchor semantics" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1690,7 +1690,7 @@ test "RegExp multiline modifier groups rewrite scoped anchor semantics" {
 }
 
 test "RegExp ignoreCase modifier groups rewrite ASCII case semantics" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -1738,7 +1738,7 @@ test "RegExp ignoreCase modifier groups rewrite ASCII case semantics" {
 }
 
 test "RegExp unicode classes handle property escapes and surrogate pairs" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -2049,7 +2049,7 @@ test "Symbol registry keyFor description and toPrimitive surface" {
 }
 
 test "Symbol.for does not retain per returned value" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -2294,7 +2294,7 @@ test "AggregateError converts message before iterable errors and stores list" {
 }
 
 test "AggregateError iterable failure keeps caught error alive" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(
@@ -2630,7 +2630,7 @@ test "using declarations in for heads dispose at loop boundaries" {
 }
 
 test "AsyncDisposableStack awaits payload resources and settles chained promises" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [2048]u8 = undefined;
@@ -2760,7 +2760,7 @@ test "AsyncDisposableStack awaits payload resources and settles chained promises
 }
 
 test "AsyncDisposableStack ignores promises returned by sync dispose fallback" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;
@@ -2838,7 +2838,7 @@ test "yield star preserves delegate iterator results and catchable abrupts" {
 }
 
 test "module eval yield star preserves delegate return completion" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.evalModule(
@@ -2977,7 +2977,7 @@ fn expectRegExpMatchAllIteratorOOMCleanup(source: []const u8) !void {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
         defer js.deinit();
 
         const warmup = try js.eval(source);
@@ -3550,7 +3550,7 @@ test "proxy for-in descriptors and set forwarding" {
 }
 
 test "typed array Reflect.set proxy receiver preserves symbol descriptor value under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -5241,7 +5241,7 @@ test "RegExp function call observes Symbol.match constructor and pattern toStrin
 }
 
 test "Module Namespace resolution under GC pressure keeps namespace bindings alive" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const dir = ".zig-cache/module-ns-gc-test";
@@ -5288,7 +5288,7 @@ test "Module Namespace resolution under GC pressure keeps namespace bindings ali
 }
 
 test "Array.from and Array.prototype.map keep direct symbol results under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -5309,7 +5309,7 @@ test "Array.from and Array.prototype.map keep direct symbol results under GC" {
 }
 
 test "Rest parameter keeps direct symbol arguments under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -5330,7 +5330,7 @@ test "Rest parameter keeps direct symbol arguments under GC" {
 }
 
 test "Object literal keeps direct symbol field values under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -5347,7 +5347,7 @@ test "Object literal keeps direct symbol field values under GC" {
 }
 
 test "Class setup keeps superclass private and field values under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();
@@ -5378,7 +5378,7 @@ test "Class setup keeps superclass private and field values under GC" {
 }
 
 test "JSON parse stringify and rawJSON preserve nested values under GC" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const old_threshold = js.runtime.gcThreshold();

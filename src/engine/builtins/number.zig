@@ -54,7 +54,7 @@ pub fn toString(buf: []u8, value: f64) ![]const u8 {
     return dtoa.formatNumber(buf, value);
 }
 
-pub fn toFixed(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+pub fn toFixed(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = numberValue(receiver) orelse return error.TypeError;
     const fraction_digits = try integerDigitsArgument(rt, args, 0);
     if (fraction_digits < 0 or fraction_digits > 100) return error.RangeError;
@@ -63,7 +63,7 @@ pub fn toFixed(rt: *core.Runtime, receiver: core.Value, args: []const core.Value
     return dtoaStringValue(rt, number, fraction_digits, flags);
 }
 
-pub fn toExponential(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = numberValue(receiver) orelse return error.TypeError;
     const fraction_arg_undefined = args.len == 0 or args[0].isUndefined();
     var fraction_digits = try integerDigitsArgument(rt, args, 0);
@@ -79,7 +79,7 @@ pub fn toExponential(rt: *core.Runtime, receiver: core.Value, args: []const core
     return dtoaStringValue(rt, number, fraction_digits, flags | dtoa.JS_DTOA_EXP_ENABLED);
 }
 
-pub fn toPrecision(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = numberValue(receiver) orelse return error.TypeError;
     if (args.len == 0 or args[0].isUndefined()) return numberStringValue(rt, number);
     const precision = try integerDigitsArgument(rt, args, 0);
@@ -88,7 +88,7 @@ pub fn toPrecision(rt: *core.Runtime, receiver: core.Value, args: []const core.V
     return dtoaStringValue(rt, number, precision, dtoa.JS_DTOA_FORMAT_FIXED);
 }
 
-pub fn toStringMethod(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = numberValue(receiver) orelse return error.TypeError;
     const radix = if (args.len >= 1 and !args[0].isUndefined())
         @as(i32, @intFromFloat(try toNumber(rt, args[0])))
@@ -110,21 +110,21 @@ pub fn toStringMethod(rt: *core.Runtime, receiver: core.Value, args: []const cor
     return string.value();
 }
 
-fn numberStringValue(rt: *core.Runtime, number: f64) !core.Value {
+fn numberStringValue(rt: *core.JSRuntime, number: f64) !core.JSValue {
     var buffer: [64]u8 = undefined;
     const text = try toString(&buffer, number);
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }
 
-fn dtoaStringValue(rt: *core.Runtime, number: f64, n_digits: i32, flags: i32) !core.Value {
+fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, flags: i32) !core.JSValue {
     var buffer: [768]u8 = undefined;
     const text = try dtoa.formatDtoaChecked(&buffer, number, n_digits, flags);
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }
 
-fn integerDigitsArgument(rt: *core.Runtime, args: []const core.Value, default: i32) !i32 {
+fn integerDigitsArgument(rt: *core.JSRuntime, args: []const core.JSValue, default: i32) !i32 {
     if (args.len == 0 or args[0].isUndefined()) return default;
     if (args[0].isSymbol() or args[0].isBigInt()) return error.TypeError;
     const number = try toNumber(rt, args[0]);
@@ -136,7 +136,7 @@ fn integerDigitsArgument(rt: *core.Runtime, args: []const core.Value, default: i
     return @intFromFloat(truncated);
 }
 
-fn appendRadixInteger(rt: *core.Runtime, out: *std.ArrayList(u8), number: f64, radix: u8) !void {
+fn appendRadixInteger(rt: *core.JSRuntime, out: *std.ArrayList(u8), number: f64, radix: u8) !void {
     if (number == 0) {
         try out.append(rt.memory.allocator, '0');
         return;
@@ -160,13 +160,13 @@ fn appendRadixInteger(rt: *core.Runtime, out: *std.ArrayList(u8), number: f64, r
 
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
 /// narrow subset used by transitional `parse_int` bytecode.
-fn stringFromValue(value: core.Value) ?*core.string.String {
+fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-pub fn parseIntValue(rt: *core.Runtime, input: core.Value, radix_value: ?core.Value) !f64 {
+pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?core.JSValue) !f64 {
     if (input.isString()) {
         const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
         const str = stringFromValue(input).?;
@@ -186,7 +186,7 @@ pub fn parseIntValue(rt: *core.Runtime, input: core.Value, radix_value: ?core.Va
 
 /// QuickJS source map: global parseFloat / Number.parseFloat. This is still the
 /// narrow subset used by transitional `parse_float` bytecode.
-pub fn parseFloatValue(rt: *core.Runtime, input: core.Value) !f64 {
+pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     if (input.isString()) {
         const str = stringFromValue(input).?;
         switch (str.resolveData()) {
@@ -305,7 +305,7 @@ fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
     return signed;
 }
 
-fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) AppendStringError!void {
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asInt32()) |int_value| {
         var int_buf: [32]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
@@ -364,7 +364,7 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
     }
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -377,7 +377,7 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
+fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
@@ -387,7 +387,7 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
     }
 }
 
-fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
@@ -397,13 +397,13 @@ fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
     return error.TypeError;
 }
 
-fn numberValue(value: core.Value) ?f64 {
+fn numberValue(value: core.JSValue) ?f64 {
     if (value.asInt32()) |v| return @floatFromInt(v);
     if (value.asFloat64()) |v| return v;
     return null;
 }
 
-fn toNumber(rt: *core.Runtime, value: core.Value) !f64 {
+fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
@@ -520,7 +520,7 @@ fn isNegativeZero(value: f64) bool {
     return value == 0 and std.math.isNegativeInf(1.0 / value);
 }
 
-fn appendUtf8CodePoint(rt: *core.Runtime, buffer: *std.ArrayList(u8), cp: u32) !void {
+fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
     if (cp <= 0x7f) {
         try buffer.append(rt.memory.allocator, @intCast(cp));
     } else if (cp <= 0x7ff) {

@@ -81,7 +81,7 @@ test "QuickJS opcode table has no host print opcode names" {
 }
 
 test "constant pool retains and releases values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
@@ -100,7 +100,7 @@ test "constant pool retains and releases values" {
 }
 
 test "constant pool appendOwned transfers refcounted values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
@@ -114,7 +114,7 @@ test "constant pool appendOwned transfers refcounted values" {
 }
 
 test "constant pool retains owned unique symbol atoms until release" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
@@ -122,7 +122,7 @@ test "constant pool retains owned unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-symbol");
-    _ = try pool.append(core.Value.symbol(borrowed_symbol));
+    _ = try pool.append(core.JSValue.symbol(borrowed_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
@@ -135,7 +135,7 @@ test "constant pool retains owned unique symbol atoms until release" {
 }
 
 test "constant pool appendOwned retains unique symbol atoms until release" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
@@ -143,7 +143,7 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
     defer if (pool_alive) pool.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-owned-symbol");
-    _ = try pool.appendOwned(core.Value.symbol(owned_symbol));
+    _ = try pool.appendOwned(core.JSValue.symbol(owned_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
@@ -156,7 +156,7 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
 }
 
 test "function bytecode owns code constants scopes module and debug metadata" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("compiled");
@@ -173,7 +173,7 @@ test "function bytecode owns code constants scopes module and debug metadata" {
 
     try function_bc.setCode(&.{ 1, 2, 3 });
     try std.testing.expectEqual(@as(usize, 3), function_bc.code.len);
-    _ = try function_bc.addConstant(core.Value.int32(7));
+    _ = try function_bc.addConstant(core.JSValue.int32(7));
     try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
 
     const scope_record = try function_bc.addScope(null);
@@ -207,7 +207,7 @@ test "function bytecode owns code constants scopes module and debug metadata" {
 }
 
 test "bytecode setCode skips zero-length allocation" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
@@ -232,7 +232,7 @@ test "bytecode setCode skips zero-length allocation" {
 }
 
 test "bytecode module record add failure releases duplicated atom references" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var record = bytecode.module.Record.init(&rt.memory, &rt.atoms);

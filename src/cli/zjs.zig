@@ -201,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
     var eval_ns: u64 = 0;
     var jobs_ns: u64 = 0;
     const runtime_start = monotonicNanos();
-    var runtime = engine.Engine.initWithTrace(allocator, if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null) catch |err| {
+    var runtime = engine.harness.Engine.initWithTrace(allocator, if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null) catch |err| {
         try printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -232,7 +232,7 @@ pub fn main(init: std.process.Init) !void {
     runtime.context.preserve_uncaught_exception = true;
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
-    // `Runtime.destroy` asserts that the runtime has no outstanding
+    // `JSRuntime.destroy` asserts that the runtime has no outstanding
     // allocations, which catches refcounting bugs in `zig build test` where
     // the engine is used in-process. As a short-lived CLI process, zjs
     // returns from `main` and the OS reclaims memory a few microseconds
@@ -362,7 +362,7 @@ fn commandScriptArgs(command: Command) []const []const u8 {
     };
 }
 
-fn applyRuntimeOptions(runtime: *engine.Engine, options: RuntimeOptions) void {
+fn applyRuntimeOptions(runtime: *engine.harness.Engine, options: RuntimeOptions) void {
     runtime.runtime.setCanBlock(options.can_block);
     if (options.memory_limit) |limit| runtime.runtime.setMemoryLimit(limit);
     if (options.stack_size) |size| {
@@ -371,14 +371,14 @@ fn applyRuntimeOptions(runtime: *engine.Engine, options: RuntimeOptions) void {
     }
 }
 
-fn exitIfRequested(runtime: *engine.Engine, output: *std.Io.Writer, err: anyerror) !void {
+fn exitIfRequested(runtime: *engine.harness.Engine, output: *std.Io.Writer, err: anyerror) !void {
     if (err != error.ProcessExit) return;
     const code = runtime.context.exit_code orelse return;
     try output.flush();
     std.process.exit(code);
 }
 
-fn runIncludeFiles(runtime: *engine.Engine, options: RuntimeOptions, output: *std.Io.Writer, io: std.Io, allocator: std.mem.Allocator) !void {
+fn runIncludeFiles(runtime: *engine.harness.Engine, options: RuntimeOptions, output: *std.Io.Writer, io: std.Io, allocator: std.mem.Allocator) !void {
     for (options.includes()) |path| {
         const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
         defer allocator.free(source);
@@ -529,7 +529,7 @@ fn runRepl(allocator: std.mem.Allocator, io: std.Io, options: RuntimeOptions, ex
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const output = &stdout_writer.interface;
 
-    var runtime = try engine.Engine.initWithTrace(allocator, if (options.trace_memory) output else null);
+    var runtime = try engine.harness.Engine.initWithTrace(allocator, if (options.trace_memory) output else null);
     applyRuntimeOptions(&runtime, options);
     runtime.context.track_unhandled_rejections = true;
     if (options.expose_std) try runtime.exposeStdOsGlobals();
@@ -566,14 +566,14 @@ const ReplAction = enum { eval, continue_input, quit };
 const ReplSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    runtime: *engine.Engine,
+    runtime: *engine.harness.Engine,
     output: *std.Io.Writer,
     history: std.ArrayList([]u8) = .empty,
     pending_source: std.ArrayList(u8) = .empty,
     raw_mode: ?RawMode = null,
     color: bool = true,
 
-    fn init(allocator: std.mem.Allocator, io: std.Io, runtime: *engine.Engine, output: *std.Io.Writer) !ReplSession {
+    fn init(allocator: std.mem.Allocator, io: std.Io, runtime: *engine.harness.Engine, output: *std.Io.Writer) !ReplSession {
         var self = ReplSession{ .allocator = allocator, .io = io, .runtime = runtime, .output = output };
         try self.loadHistory();
         self.raw_mode = RawMode.enable() catch null;
@@ -879,7 +879,7 @@ fn isReplKeyword(word: []const u8) bool {
     return false;
 }
 
-pub fn evalReplLine(runtime: *engine.Engine, output: *std.Io.Writer, line: []const u8) !void {
+pub fn evalReplLine(runtime: *engine.harness.Engine, output: *std.Io.Writer, line: []const u8) !void {
     const trimmed_line = std.mem.trim(u8, line, " \t\r\n");
     if (trimmed_line.len == 0) return;
     if (replPrefersStatement(trimmed_line)) {
@@ -939,7 +939,7 @@ fn replPrefersStatement(source: []const u8) bool {
         std.mem.startsWith(u8, source, "export ");
 }
 
-fn printReplValue(rt: *engine.core.Runtime, output: *std.Io.Writer, value: engine.core.Value, depth: usize) !void {
+fn printReplValue(rt: *engine.core.JSRuntime, output: *std.Io.Writer, value: engine.core.JSValue, depth: usize) !void {
     if (value.isObject()) {
         const header = value.refHeader() orelse return engine.exec.call.printValue(rt, output, value);
         const object: *engine.core.Object = @fieldParentPtr("header", header);
@@ -971,7 +971,7 @@ fn printReplValue(rt: *engine.core.Runtime, output: *std.Io.Writer, value: engin
     try engine.exec.call.printValue(rt, output, value);
 }
 
-fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *engine.Engine) !void {
+fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *engine.harness.Engine) !void {
     const rt = runtime.runtime;
     var live_dynamic_atoms: usize = 0;
     var dynamic_atom_bytes: usize = 0;
@@ -1014,7 +1014,7 @@ const PerfJsonTimings = struct {
     engine: engine.EvalTiming,
 };
 
-fn dumpPerfJson(io: std.Io, command: Command, runtime: *engine.Engine, perf_profile: ?*const engine.core.OpcodeProfile, timings: PerfJsonTimings) !void {
+fn dumpPerfJson(io: std.Io, command: Command, runtime: *engine.harness.Engine, perf_profile: ?*const engine.core.OpcodeProfile, timings: PerfJsonTimings) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
@@ -1261,7 +1261,7 @@ fn runBatchSource(
     stderr_storage: *[batch_max_stderr]u8,
     stderr_out: *[]const u8,
 ) !u8 {
-    var runtime = try engine.Engine.init(allocator);
+    var runtime = try engine.harness.Engine.init(allocator);
     defer runtime.deinit();
     runtime.runtime.setCanBlock(can_block);
     defer runtime.runtime.setCanBlock(false);
@@ -1329,7 +1329,7 @@ fn runBatchSource(
     return test262_protocol.status_passed;
 }
 
-fn clearPendingException(runtime: *engine.Engine) void {
+fn clearPendingException(runtime: *engine.harness.Engine) void {
     if (runtime.context.hasException()) {
         const exception = runtime.takeException();
         exception.free(runtime.runtime);
@@ -1340,7 +1340,7 @@ fn clearPendingException(runtime: *engine.Engine) void {
     }
 }
 
-fn takePendingRejectionOrException(runtime: *engine.Engine) engine.core.Value {
+fn takePendingRejectionOrException(runtime: *engine.harness.Engine) engine.core.JSValue {
     if (runtime.context.hasUnhandledRejection()) {
         const rejection = runtime.context.takeUnhandledRejection();
         if (runtime.context.hasException()) runtime.context.clearException();
@@ -1349,13 +1349,13 @@ fn takePendingRejectionOrException(runtime: *engine.Engine) engine.core.Value {
     return runtime.takeException();
 }
 
-fn batchDeadlineInterrupt(_: *engine.core.Runtime, context: ?*anyopaque) bool {
+fn batchDeadlineInterrupt(_: *engine.core.JSRuntime, context: ?*anyopaque) bool {
     const deadline: *BatchDeadline = @ptrCast(@alignCast(context orelse return false));
     const now = std.Io.Clock.Timestamp.now(deadline.io, .awake);
     return std.Io.Clock.Timestamp.compare(now, .gte, deadline.deadline);
 }
 
-fn formatEvaluationErrorText(runtime: *engine.Engine, err: anyerror, storage: *[batch_max_stderr]u8, stderr_out: *[]const u8) !void {
+fn formatEvaluationErrorText(runtime: *engine.harness.Engine, err: anyerror, storage: *[batch_max_stderr]u8, stderr_out: *[]const u8) !void {
     if (err == error.Test262Error and runtime.context.hasException()) {
         const thrown = runtime.takeException();
         defer thrown.free(runtime.runtime);
@@ -1367,7 +1367,7 @@ fn formatEvaluationErrorText(runtime: *engine.Engine, err: anyerror, storage: *[
     stderr_out.* = try std.fmt.bufPrint(storage, "{s}", .{@errorName(err)});
 }
 
-fn formatErrorObjectName(rt: *engine.core.Runtime, value: engine.core.Value, storage: *[batch_max_stderr]u8) !?[]const u8 {
+fn formatErrorObjectName(rt: *engine.core.JSRuntime, value: engine.core.JSValue, storage: *[batch_max_stderr]u8) !?[]const u8 {
     const object = objectFromValue(value) orelse return null;
     const name_value = object.getProperty(engine.core.atom.ids.name);
     defer name_value.free(rt);
@@ -1408,7 +1408,7 @@ fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try stderr.flush();
 }
 
-fn printEvaluationError(io: std.Io, runtime: *engine.Engine, err: anyerror) !void {
+fn printEvaluationError(io: std.Io, runtime: *engine.harness.Engine, err: anyerror) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
@@ -1422,7 +1422,7 @@ fn printEvaluationError(io: std.Io, runtime: *engine.Engine, err: anyerror) !voi
     try stderr.flush();
 }
 
-fn printExceptionValue(stderr: *std.Io.Writer, runtime: *engine.Engine, value: engine.core.Value) !bool {
+fn printExceptionValue(stderr: *std.Io.Writer, runtime: *engine.harness.Engine, value: engine.core.JSValue) !bool {
     const rt = runtime.runtime;
     const object = objectFromValue(value) orelse return false;
     if (try printStringProperty(stderr, rt, object, "name")) {
@@ -1442,11 +1442,11 @@ fn printExceptionValue(stderr: *std.Io.Writer, runtime: *engine.Engine, value: e
 
     const stack_key = try rt.internAtom("stack");
     defer rt.atoms.free(stack_key);
-    const stack_value = if (runtime.context.cached_global) |global|
+    const stack_value = if (runtime.context.global) |global|
         engine.exec.zjs_vm.getValueProperty(runtime.context, null, global, value, stack_key, null, null) catch |err| blk: {
             if (runtime.context.hasException()) {
                 runtime.context.clearException();
-                break :blk engine.core.Value.undefinedValue();
+                break :blk engine.core.JSValue.undefinedValue();
             }
             return err;
         }
@@ -1463,7 +1463,7 @@ fn printExceptionValue(stderr: *std.Io.Writer, runtime: *engine.Engine, value: e
     return true;
 }
 
-fn printStringProperty(stderr: *std.Io.Writer, rt: *engine.core.Runtime, object: *engine.core.Object, name: []const u8) !bool {
+fn printStringProperty(stderr: *std.Io.Writer, rt: *engine.core.JSRuntime, object: *engine.core.Object, name: []const u8) !bool {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     const value = object.getProperty(key);
@@ -1473,7 +1473,7 @@ fn printStringProperty(stderr: *std.Io.Writer, rt: *engine.core.Runtime, object:
     return true;
 }
 
-fn printErrorObjectName(stderr: *std.Io.Writer, rt: *engine.core.Runtime, value: engine.core.Value) !bool {
+fn printErrorObjectName(stderr: *std.Io.Writer, rt: *engine.core.JSRuntime, value: engine.core.JSValue) !bool {
     const object = objectFromValue(value) orelse return false;
     const name_value = object.getProperty(engine.core.atom.ids.name);
     defer name_value.free(rt);
@@ -1506,19 +1506,19 @@ fn stringEndsWithLinefeed(string: *engine.core.string.String) bool {
     }
 }
 
-fn objectFromValue(value: engine.core.Value) ?*engine.core.Object {
+fn objectFromValue(value: engine.core.JSValue) ?*engine.core.Object {
     const header = value.refHeader() orelse return null;
     if (header.kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
-fn stringFromValue(value: engine.core.Value) ?*engine.core.string.String {
+fn stringFromValue(value: engine.core.JSValue) ?*engine.core.string.String {
     const header = value.refHeader() orelse return null;
     if (header.kind != .string) return null;
     return @fieldParentPtr("header", header);
 }
 
-fn printUnhandledRejection(io: std.Io, runtime: *engine.Engine, value: engine.core.Value) !void {
+fn printUnhandledRejection(io: std.Io, runtime: *engine.harness.Engine, value: engine.core.JSValue) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
@@ -1720,7 +1720,7 @@ test "zjs args reject missing source" {
 }
 
 test "zjs repl line evaluator preserves state and prints results" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [256]u8 = undefined;

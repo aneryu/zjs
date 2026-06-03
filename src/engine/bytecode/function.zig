@@ -3,7 +3,7 @@ const build_options = @import("build_options");
 const atom = @import("../core/atom.zig");
 const gc = @import("../core/gc.zig");
 const memory = @import("../core/memory.zig");
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 const constant = @import("constant.zig");
 const debug = @import("debug.zig");
 const ic = @import("ic.zig");
@@ -233,7 +233,7 @@ pub const Bytecode = struct {
         self.ic_slots = slots;
     }
 
-    fn deinitIcSlots(self: *Bytecode, rt: ?*runtime.Runtime) void {
+    fn deinitIcSlots(self: *Bytecode, rt: ?*runtime.JSRuntime) void {
         const ic_slots = self.ic_slots;
         self.ic_slots = &.{};
         if (ic_slots.len != 0 and @intFromPtr(ic_slots.ptr) != 0) {
@@ -377,7 +377,7 @@ pub const Bytecode = struct {
         self.atom_operands_capacity = owned.len;
     }
 
-    pub fn addConstant(self: *Bytecode, value: Value) !u32 {
+    pub fn addConstant(self: *Bytecode, value: JSValue) !u32 {
         return self.constants.append(value);
     }
 
@@ -473,7 +473,7 @@ pub const FunctionBytecode = struct {
     class_instance_fields: []atom.Atom = &.{},
     private_bound_names: []atom.Atom = &.{},
     class_private_names: []atom.Atom = &.{},
-    class_fields_init: ?Value = null,
+    class_fields_init: ?JSValue = null,
     arg_count: u16 = 0,
     var_count: u16 = 0,
     defined_arg_count: u16 = 0,
@@ -493,7 +493,7 @@ pub const FunctionBytecode = struct {
     // tracks this differently via the runtime context.
 
     // Constant pool (contains child Function objects) (quickjs.c:796)
-    cpool: []Value = &.{},
+    cpool: []JSValue = &.{},
 
     // Source location (quickjs.c:797-803)
     filename: atom.Atom,
@@ -521,7 +521,7 @@ pub const FunctionBytecode = struct {
     /// The returned value does not own any slices and must not be deinitialized.
     /// It intentionally omits compile-only fields such as scopes, modules, and
     /// debug tables; those remain on the compile-time `Bytecode` representation.
-    pub fn asBytecodeView(self: *const FunctionBytecode, rt: *runtime.Runtime) Bytecode {
+    pub fn asBytecodeView(self: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytecode {
         return .{
             .memory = &rt.memory,
             .atoms = &rt.atoms,
@@ -607,10 +607,10 @@ pub const FunctionBytecode = struct {
         self.cpool = &.{};
         for (cpool) |*slot| {
             const value = slot.*;
-            slot.* = Value.undefinedValue();
+            slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
-        if (cpool.len != 0) self.memory.free(Value, cpool);
+        if (cpool.len != 0) self.memory.free(JSValue, cpool);
 
         const pc2line_buf = self.pc2line_buf;
         self.pc2line_buf = &.{};
@@ -651,7 +651,7 @@ pub const FunctionBytecode = struct {
         self.ic_slots = slots;
     }
 
-    fn deinitIcSlots(self: *FunctionBytecode, rt: ?*runtime.Runtime) void {
+    fn deinitIcSlots(self: *FunctionBytecode, rt: ?*runtime.JSRuntime) void {
         const ic_slots = self.ic_slots;
         self.ic_slots = &.{};
         if (ic_slots.len != 0 and @intFromPtr(ic_slots.ptr) != 0) {
@@ -777,7 +777,7 @@ fn findIcSite(sites: []const IcSite, site_pc: usize) ?IcSite {
 }
 
 pub fn destroyFunctionBytecode(header: *gc.ObjectHeader, destroy_ctx: ?*anyopaque) void {
-    const rt: *runtime.Runtime = @ptrCast(@alignCast(destroy_ctx orelse return));
+    const rt: *runtime.JSRuntime = @ptrCast(@alignCast(destroy_ctx orelse return));
     destroyFromHeader(rt, header);
 }
 

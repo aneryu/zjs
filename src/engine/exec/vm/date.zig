@@ -13,20 +13,20 @@ const DateToPrimitiveHint = enum {
 };
 
 pub fn qjsDateSetYear(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
-    args: []const core.Value,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const object = shared_vm.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
     const captured_ms_value = try builtins.date.methodCall(ctx.runtime, this_value, 1);
     defer captured_ms_value.free(ctx.runtime);
     const captured_ms = value_ops.numberValue(captured_ms_value) orelse std.math.nan(f64);
-    const year_input = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const year_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const year_value = try shared_vm.toNumberForDateMethod(ctx, output, global, year_input, caller_function, caller_frame);
     defer year_value.free(ctx.runtime);
     const year_number = value_ops.numberValue(year_value) orelse std.math.nan(f64);
@@ -34,35 +34,35 @@ pub fn qjsDateSetYear(
 }
 
 pub fn qjsDateSetTime(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
-    args: []const core.Value,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const object = shared_vm.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
-    const time_input = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const time_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const time_value = try shared_vm.toNumberForDateMethod(ctx, output, global, time_input, caller_function, caller_frame);
     defer time_value.free(ctx.runtime);
     return try builtins.date.methodCallArgs(ctx.runtime, this_value, 24, &.{time_value});
 }
 
 pub fn qjsDateStaticCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     method_id: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     _ = this_value;
     if (method_id != 1) return null;
-    var coerced_args: [7]core.Value = undefined;
+    var coerced_args: [7]core.JSValue = undefined;
     var coerced_len: usize = 0;
     defer {
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
@@ -74,15 +74,15 @@ pub fn qjsDateStaticCall(
 }
 
 pub fn qjsDateCapturedSetterCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     method_id: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     if (method_id < 25 or method_id > 31) return null;
     const object = shared_vm.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
@@ -91,7 +91,7 @@ pub fn qjsDateCapturedSetterCall(
     defer captured_ms_value.free(ctx.runtime);
     const captured_ms = value_ops.numberValue(captured_ms_value) orelse std.math.nan(f64);
 
-    var coerced_args: [4]core.Value = undefined;
+    var coerced_args: [4]core.JSValue = undefined;
     var coerced_len: usize = 0;
     defer {
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
@@ -104,14 +104,14 @@ pub fn qjsDateCapturedSetterCall(
 }
 
 pub fn qjsDateToJsonCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
-    args: []const core.Value,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     _ = args;
     if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
 
@@ -119,7 +119,7 @@ pub fn qjsDateToJsonCall(
     defer primitive.free(ctx.runtime);
     if (primitive.isNumber()) {
         const number = value_ops.numberValue(primitive) orelse std.math.nan(f64);
-        if (!std.math.isFinite(number)) return core.Value.nullValue();
+        if (!std.math.isFinite(number)) return core.JSValue.nullValue();
     }
 
     const key = try ctx.runtime.internAtom("toISOString");
@@ -131,12 +131,12 @@ pub fn qjsDateToJsonCall(
 }
 
 pub fn qjsDateConstructWithPrototype(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     prototype: ?*core.Object,
-    args: []const core.Value,
-) !core.Value {
+    args: []const core.JSValue,
+) !core.JSValue {
     if (args.len == 0) return builtins.date.constructWithPrototype(ctx.runtime, args, prototype);
 
     if (args.len == 1) {
@@ -161,7 +161,7 @@ pub fn qjsDateConstructWithPrototype(
         return builtins.date.constructWithPrototype(ctx.runtime, &.{number}, prototype);
     }
 
-    var coerced_args: [7]core.Value = undefined;
+    var coerced_args: [7]core.JSValue = undefined;
     var coerced_len: usize = 0;
     defer {
         for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
@@ -180,17 +180,17 @@ pub fn qjsDateStaticId(name: []const u8) ?u32 {
 }
 
 pub fn qjsDateToPrimitiveCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
-    args: []const core.Value,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     if (!this_value.isObject()) return error.TypeError;
 
-    const hint_value = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const hint_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const hint = qjsDateToPrimitiveHint(hint_value) orelse return error.TypeError;
     return switch (hint) {
         .string => try qjsDateOrdinaryToPrimitive(ctx, output, global, this_value, true, caller_function, caller_frame),
@@ -236,7 +236,7 @@ pub fn qjsDateMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-fn qjsDateToPrimitiveHint(value: core.Value) ?DateToPrimitiveHint {
+fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
     if (shared_vm.stringValueUnitsEqualBytes(value, "string") or shared_vm.stringValueUnitsEqualBytes(value, "default")) return .string;
     if (shared_vm.stringValueUnitsEqualBytes(value, "number")) return .number;
@@ -244,14 +244,14 @@ fn qjsDateToPrimitiveHint(value: core.Value) ?DateToPrimitiveHint {
 }
 
 fn qjsDateOrdinaryToPrimitive(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.Value,
+    receiver: core.JSValue,
     string_first: bool,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     if (string_first) {
         if (try shared_vm.callObjectToPrimitiveMethod(ctx, output, global, receiver, "toString", caller_function, caller_frame)) |primitive| return primitive;
         if (try shared_vm.callObjectToPrimitiveMethod(ctx, output, global, receiver, "valueOf", caller_function, caller_frame)) |primitive| return primitive;

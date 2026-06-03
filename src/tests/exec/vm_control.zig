@@ -17,9 +17,9 @@ const expectStringBytes = helpers.expectStringBytes;
 const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 
 test "M3.1 F4: sloppy function assignment creates global property" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -35,9 +35,9 @@ test "M3.1 F4: sloppy function assignment creates global property" {
 }
 
 test "M3.1 F4: standard numeric constants reject strict assignment" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -58,9 +58,9 @@ test "M3.1 F4: standard numeric constants reject strict assignment" {
 }
 
 test "M3.1 F4: strict unresolved assignment snapshots lhs before rhs" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -108,9 +108,9 @@ test "M3.1 F4: strict unresolved assignment snapshots lhs before rhs" {
 }
 
 test "M3.1 F4: global identifier binding checks proxy prototype" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -156,9 +156,9 @@ test "M3.1 F4: global identifier binding checks proxy prototype" {
 }
 
 test "G1/P0: with proxy binding uses has and get traps" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -184,9 +184,9 @@ test "G1/P0: with proxy binding uses has and get traps" {
 }
 
 test "G1/P0: with unscopables fallback preserves label boundary before local pair" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -214,9 +214,9 @@ test "G1/P0: with unscopables fallback preserves label boundary before local pai
 }
 
 test "M3.1 F4: sloppy let labels and strict rejection" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -252,9 +252,9 @@ test "M3.1 F4: sloppy let labels and strict rejection" {
 }
 
 test "G1/P0: String and Reflect helpers support proxy traps" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -272,9 +272,9 @@ test "G1/P0: String and Reflect helpers support proxy traps" {
 }
 
 test "G1/P0: typed array constructor accepts element length" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -288,9 +288,9 @@ test "G1/P0: typed array constructor accepts element length" {
 }
 
 test "G1/P0: strict with assignment rechecks deleted typed-array inherited binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -314,9 +314,9 @@ test "G1/P0: strict with assignment rechecks deleted typed-array inherited bindi
 }
 
 test "M3.1 F4: delete follows identifier, property, and with semantics" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -347,9 +347,9 @@ test "M3.1 F4: delete follows identifier, property, and with semantics" {
 }
 
 test "P5 Array: delete indexed own property reveals prototype value" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -370,9 +370,9 @@ test "P5 Array: delete indexed own property reveals prototype value" {
 }
 
 test "P5 Array: method fast-path TypeError is catchable" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -396,9 +396,9 @@ test "P5 Array: method fast-path TypeError is catchable" {
 }
 
 test "P5 Array: copyWithin observes generic receiver operations" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -425,9 +425,9 @@ test "P5 Array: copyWithin observes generic receiver operations" {
 }
 
 test "P5 Array: change-by-copy methods return copied arrays" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -446,9 +446,9 @@ test "P5 Array: change-by-copy methods return copied arrays" {
 }
 
 test "P5 Array sort setter writeback updates successor element" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -498,9 +498,9 @@ fn expectSortEntryOOMCleanup(mode: SortEntryOOMMode) !void {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
-        const ctx = try core.Context.create(rt);
-        const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        const rt = try core.JSRuntime.create(failing.allocator());
+        const ctx = try core.JSContext.create(rt);
+        const global = try engine.exec.zjs_vm.contextGlobal(ctx);
 
         const receiver = try createSortEntryOOMReceiver(rt, mode);
         const method = try sortEntryOOMMethod(rt, global, mode);
@@ -535,7 +535,7 @@ fn expectSortEntryOOMCleanup(mode: SortEntryOOMMode) !void {
     try std.testing.expect(saw_success);
 }
 
-fn createSortEntryOOMReceiver(rt: *core.Runtime, mode: SortEntryOOMMode) !core.Value {
+fn createSortEntryOOMReceiver(rt: *core.JSRuntime, mode: SortEntryOOMMode) !core.JSValue {
     switch (mode) {
         .sort, .to_sorted => {
             const array = try core.Object.createArray(rt, null);
@@ -547,18 +547,18 @@ fn createSortEntryOOMReceiver(rt: *core.Runtime, mode: SortEntryOOMMode) !core.V
             return array.value();
         },
         .typed_to_sorted => {
-            const buffer = try builtins.buffer.arrayBufferConstruct(rt, core.Value.int32(16));
+            const buffer = try builtins.buffer.arrayBufferConstruct(rt, core.JSValue.int32(16));
             defer buffer.free(rt);
             const typed = try builtins.buffer.typedArrayConstructWithOptions(rt, 8, 11, buffer, &.{buffer}, null);
             const object = try engine.exec.property_ops.expectObject(typed);
-            _ = try builtins.buffer.typedArraySetIndex(rt, object, 0, core.Value.shortBigInt(2));
-            _ = try builtins.buffer.typedArraySetIndex(rt, object, 1, core.Value.shortBigInt(1));
+            _ = try builtins.buffer.typedArraySetIndex(rt, object, 0, core.JSValue.shortBigInt(2));
+            _ = try builtins.buffer.typedArraySetIndex(rt, object, 1, core.JSValue.shortBigInt(1));
             return typed;
         },
     }
 }
 
-fn sortEntryOOMMethod(rt: *core.Runtime, global: *core.Object, mode: SortEntryOOMMode) !core.Value {
+fn sortEntryOOMMethod(rt: *core.JSRuntime, global: *core.Object, mode: SortEntryOOMMode) !core.JSValue {
     const ctor_name = switch (mode) {
         .sort, .to_sorted => "Array",
         .typed_to_sorted => "BigInt64Array",
@@ -580,7 +580,7 @@ fn sortEntryOOMMethod(rt: *core.Runtime, global: *core.Object, mode: SortEntryOO
     return prototype.getProperty(method_atom);
 }
 
-fn cleanupSortEntryOOMIteration(rt: *core.Runtime, ctx: *core.Context, receiver: core.Value, method: core.Value) void {
+fn cleanupSortEntryOOMIteration(rt: *core.JSRuntime, ctx: *core.JSContext, receiver: core.JSValue, method: core.JSValue) void {
     if (ctx.hasException()) {
         const exception = ctx.takeException();
         exception.free(rt);
@@ -596,9 +596,9 @@ fn cleanupSortEntryOOMIteration(rt: *core.Runtime, ctx: *core.Context, receiver:
 }
 
 test "P5 Array: length coercion and descriptor errors" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -657,9 +657,9 @@ test "P5 Array: length coercion and descriptor errors" {
 }
 
 test "P5 Array: toString uses join and intrinsic object tag fallback" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -695,9 +695,9 @@ test "P5 Array: toString uses join and intrinsic object tag fallback" {
 }
 
 test "P5 Array: toLocaleString invokes element methods with original receiver" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -733,9 +733,9 @@ test "P5 Array: toLocaleString invokes element methods with original receiver" {
 }
 
 test "M3.1 F4: delete super reference throws before ToPropertyKey" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -752,9 +752,9 @@ test "M3.1 F4: delete super reference throws before ToPropertyKey" {
 }
 
 test "M3.1 F4: arrow method tail call propagates thrown error" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -769,9 +769,9 @@ test "M3.1 F4: arrow method tail call propagates thrown error" {
 }
 
 test "M3.1 F4: new non-constructors throw catchable TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -788,9 +788,9 @@ test "M3.1 F4: new non-constructors throw catchable TypeError" {
 }
 
 test "M3.1 F4: instanceof uses Symbol.hasInstance and RHS TypeError rules" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -809,9 +809,9 @@ test "M3.1 F4: instanceof uses Symbol.hasInstance and RHS TypeError rules" {
 }
 
 test "M3.1 F4: instanceof treats Function.prototype as callable" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -825,9 +825,9 @@ test "M3.1 F4: instanceof treats Function.prototype as callable" {
 }
 
 test "M3.1 F4: instanceof follows standard constructor prototype graph" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -849,9 +849,9 @@ test "M3.1 F4: instanceof follows standard constructor prototype graph" {
 }
 
 test "M3.1 F4: update expressions accept covered identifier references" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -868,9 +868,9 @@ test "M3.1 F4: update expressions accept covered identifier references" {
 }
 
 test "M3.1 F4: in operator uses Object.prototype and primitive RHS TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -892,9 +892,9 @@ test "M3.1 F4: in operator uses Object.prototype and primitive RHS TypeError" {
 }
 
 test "F2+F3 qjs dispatcher: bitwise not via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "~0");
@@ -903,7 +903,7 @@ test "F2+F3 qjs dispatcher: bitwise not via qjs_vm" {
 }
 
 test "F2+F3 QuickJS dispatch: new bytecode starts empty" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("qjs_test");
@@ -915,9 +915,9 @@ test "F2+F3 QuickJS dispatch: new bytecode starts empty" {
 }
 
 test "F2+F3 qjs dispatcher: object literal via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "({})");

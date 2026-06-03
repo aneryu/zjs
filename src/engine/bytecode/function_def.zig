@@ -8,20 +8,20 @@
 const std = @import("std");
 const atom = @import("../core/atom.zig");
 const memory = @import("../core/memory.zig");
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 const pc2line = @import("./pipeline/pc2line.zig");
 
-fn dupOwnedValue(atoms: *atom.AtomTable, value: Value) Value {
-    if (value.asSymbolAtom()) |atom_id| return Value.symbol(atoms.dup(atom_id));
+fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
+    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
     return value.dup();
 }
 
-fn takeOwnedValue(atoms: *atom.AtomTable, value: Value) Value {
-    if (value.asSymbolAtom()) |atom_id| return Value.symbol(atoms.dup(atom_id));
+fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
+    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
     return value;
 }
 
-fn freeOwnedValue(atoms: *atom.AtomTable, value: Value, rt: anytype) void {
+fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
     if (value.asSymbolAtom()) |atom_id| {
         atoms.free(atom_id);
         return;
@@ -311,7 +311,7 @@ pub const FunctionDef = struct {
     label_count: i32 = 0,
 
     // Constant pool
-    cpool: []Value = &.{},
+    cpool: []JSValue = &.{},
     cpool_capacity: usize = 0,
     cpool_count: i32 = 0,
 
@@ -547,15 +547,15 @@ pub const FunctionDef = struct {
         tail[0] = self.atoms.dup(atom_id);
     }
 
-    pub fn appendCpool(self: *FunctionDef, value: Value) !u32 {
-        const tail = try growSliceBy(Value, self.memory, &self.cpool, &self.cpool_capacity, 1);
+    pub fn appendCpool(self: *FunctionDef, value: JSValue) !u32 {
+        const tail = try growSliceBy(JSValue, self.memory, &self.cpool, &self.cpool_capacity, 1);
         tail[0] = dupOwnedValue(self.atoms, value);
         self.cpool_count = @intCast(self.cpool.len);
         return @intCast(self.cpool.len - 1);
     }
 
-    pub fn appendCpoolOwned(self: *FunctionDef, value: Value) !u32 {
-        const tail = try growSliceBy(Value, self.memory, &self.cpool, &self.cpool_capacity, 1);
+    pub fn appendCpoolOwned(self: *FunctionDef, value: JSValue) !u32 {
+        const tail = try growSliceBy(JSValue, self.memory, &self.cpool, &self.cpool_capacity, 1);
         tail[0] = takeOwnedValue(self.atoms, value);
         self.cpool_count = @intCast(self.cpool.len);
         return @intCast(self.cpool.len - 1);
@@ -620,10 +620,10 @@ pub const FunctionDef = struct {
         self.cpool_count = 0;
         for (old_cpool) |*slot| {
             const value = slot.*;
-            slot.* = Value.undefinedValue();
+            slot.* = JSValue.undefinedValue();
             freeOwnedValue(self.atoms, value, rt);
         }
-        if (old_cpool_capacity != 0) self.memory.free(Value, old_cpool.ptr[0..old_cpool_capacity]);
+        if (old_cpool_capacity != 0) self.memory.free(JSValue, old_cpool.ptr[0..old_cpool_capacity]);
 
         freeGrowableNamedSlice(ClosureVar, self.atoms, self.memory, &self.closure_var, &self.closure_var_capacity);
 

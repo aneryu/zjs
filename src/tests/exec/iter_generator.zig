@@ -1274,7 +1274,7 @@ test "Iterator flatMap OOM releases inner iterator once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
 
         const warmup = try js.eval(source);
         warmup.free(js.runtime);
@@ -1575,7 +1575,7 @@ test "Symbol exposes dispose and asyncDispose well-known symbols" {
 }
 
 test "destructuring assignment to const binding throws TypeError" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -1747,7 +1747,7 @@ test "eval for-await uses AsyncFromSync close ordering" {
 }
 
 test "for-await AsyncFromSync stack overflow releases sync iterators once" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     try expectForAwaitStartStackOverflowCleanup(&js,
@@ -1774,7 +1774,7 @@ test "for-await AsyncFromSync stack overflow releases sync iterators once" {
     );
 }
 
-fn expectForAwaitStartStackOverflowCleanup(js: *engine.Engine, source: []const u8) !void {
+fn expectForAwaitStartStackOverflowCleanup(js: *engine.harness.Engine, source: []const u8) !void {
     var parsed = try engine.frontend.parser.parse(js.runtime, source, .{ .mode = .module });
     defer parsed.deinit();
 
@@ -2092,9 +2092,9 @@ test "Float16Array constructor and buffer views round-trip" {
 }
 
 test "VM domain helper failures surface as TypeError or invalid bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("domain-errors");

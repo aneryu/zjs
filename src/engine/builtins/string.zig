@@ -147,16 +147,18 @@ pub fn toUpperAscii(buf: []u8, bytes: []const u8) []u8 {
 
 /// QuickJS source map: narrow String wrapper constructor used by transitional
 /// `new_string_object` bytecode.
-pub fn construct(rt: *core.Runtime, args: []const core.Value) !core.Value {
+pub fn construct(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     return constructWithPrototype(rt, args, null);
 }
 
-pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
-    const rooted_args = args;
-    var data_value = core.Value.undefinedValue();
-    var object_value = core.Value.undefinedValue();
+pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var data_value = core.JSValue.undefinedValue();
+    var object_value = core.JSValue.undefinedValue();
     var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .constant = &rooted_args },
+        rooted_args_buffer.slice(),
     };
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &data_value },
@@ -182,11 +184,11 @@ pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, proto
     object_value = object.value();
     errdefer {
         const failed_object = object_value;
-        object_value = core.Value.undefinedValue();
+        object_value = core.JSValue.undefinedValue();
         failed_object.free(rt);
     }
 
-    object.objectDataSlot().* = data_value.dup();
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), data_value.dup());
     var index: u32 = 0;
     while (index < data.len()) : (index += 1) {
         try defineStringIndexUnitProperty(rt, object, index, data.codeUnitAt(index));
@@ -195,11 +197,11 @@ pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, proto
     return object_value;
 }
 
-pub fn iterator(rt: *core.Runtime, receiver: core.Value) !core.Value {
+pub fn iterator(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     var rooted_receiver = receiver;
-    var target = core.Value.undefinedValue();
-    var prototype_value = core.Value.undefinedValue();
-    var object_value = core.Value.undefinedValue();
+    var target = core.JSValue.undefinedValue();
+    var prototype_value = core.JSValue.undefinedValue();
+    var object_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_receiver },
         .{ .value = &target },
@@ -222,15 +224,15 @@ pub fn iterator(rt: *core.Runtime, receiver: core.Value) !core.Value {
     object_value = object.value();
     errdefer {
         const failed_object = object_value;
-        object_value = core.Value.undefinedValue();
+        object_value = core.JSValue.undefinedValue();
         failed_object.free(rt);
     }
-    object.iteratorTargetSlot().* = target.dup();
+    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target.dup());
     object.iteratorIndexSlot().* = 0;
     return object_value;
 }
 
-fn iteratorPrototype(rt: *core.Runtime, tag_name: []const u8) !*core.Object {
+fn iteratorPrototype(rt: *core.JSRuntime, tag_name: []const u8) !*core.Object {
     const base = try core.Object.create(rt, core.class.ids.object, null);
     var base_raw_owned = true;
     errdefer if (base_raw_owned) core.Object.destroyFromHeader(rt, &base.header);
@@ -246,24 +248,22 @@ fn iteratorPrototype(rt: *core.Runtime, tag_name: []const u8) !*core.Object {
     return specific;
 }
 
-fn defineToStringTag(rt: *core.Runtime, object: *core.Object, tag_name: []const u8) !void {
+fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag_value = try core.string.String.createUtf8(rt, tag_name);
     defer tag_value.value().free(rt);
     try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
 }
 
-pub fn iteratorNext(rt: *core.Runtime, receiver: core.Value) !core.Value {
+pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const iterator_object = try expectObject(receiver);
     if (iterator_object.class_id != core.class.ids.string_iterator) return error.TypeError;
-    const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.Value.undefinedValue(), true);
+    const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const header = target.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     if ((iterator_object.iteratorIndexSlot().*) >= string_value.len()) {
-        const done_result = try iteratorResult(rt, core.Value.undefinedValue(), true);
-        const old_target = iterator_object.iteratorTargetSlot().*;
-        iterator_object.iteratorTargetSlot().* = null;
-        if (old_target) |stored| stored.free(rt);
+        const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
+        iterator_object.clearOptionalValueSlot(rt, iterator_object.iteratorTargetSlot());
         return done_result;
     }
 
@@ -288,7 +288,7 @@ pub fn iteratorNext(rt: *core.Runtime, receiver: core.Value) !core.Value {
 /// Legacy primitive-only String.fromCharCode helper used by transitional bytecode.
 /// JS-visible native calls use the VM shared helper so object coercion and
 /// abrupt completion propagation match QuickJS.
-pub fn fromCharCode(rt: *core.Runtime, args: []const core.Value) !core.Value {
+pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     if (args.len == 2) {
         const first_code = args[0].asInt32() orelse return error.TypeError;
         const second_code = args[1].asInt32() orelse return error.TypeError;
@@ -326,7 +326,7 @@ pub fn fromCharCode(rt: *core.Runtime, args: []const core.Value) !core.Value {
     return string.value();
 }
 
-pub fn fromCodePoint(rt: *core.Runtime, args: []const core.Value) !core.Value {
+pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     for (args) |value| {
@@ -350,7 +350,7 @@ pub fn fromCodePoint(rt: *core.Runtime, args: []const core.Value) !core.Value {
 
 /// QuickJS source map: narrow charAt helper used by transitional
 /// `string_char_at` bytecode.
-pub fn charAtValue(rt: *core.Runtime, receiver: core.Value, index_value: core.Value) !core.Value {
+pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: core.JSValue) !core.JSValue {
     const index = try stringInteger(rt, index_value);
     if (stringValueFromReceiver(receiver)) |string_value| {
         if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return createStringValue(rt, "");
@@ -368,7 +368,7 @@ pub fn charAtValue(rt: *core.Runtime, receiver: core.Value, index_value: core.Va
 
 /// QuickJS source map: selected String.prototype methods currently covered by
 /// smoke fixtures and targeted String validation.
-pub fn methodCall(rt: *core.Runtime, receiver: core.Value, id: u32, args: []const core.Value) !core.Value {
+pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []const core.JSValue) !core.JSValue {
     if (id == 29) return charCodeAtReceiver(rt, receiver, args);
     if (id == 31) return codePointAtReceiver(rt, receiver, args);
     if (id == 8) return trimReceiver(rt, receiver, .both);
@@ -442,7 +442,7 @@ pub fn methodCall(rt: *core.Runtime, receiver: core.Value, id: u32, args: []cons
     };
 }
 
-fn concat(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn concat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     try out.appendSlice(rt.memory.allocator, bytes);
@@ -450,12 +450,12 @@ fn concat(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.
     return createStringValue(rt, out.items);
 }
 
-fn substring(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn substring(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const range = try stringSubstringRange(rt, bytes.len, args);
     return createStringValue(rt, bytes[range.start..range.end]);
 }
 
-fn substringReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn substringReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         const range = try stringSubstringRange(rt, string_value.len(), args);
         const res = try core.string.String.createSlice(rt, string_value, range.start, range.end - range.start);
@@ -468,7 +468,7 @@ fn substringReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core
     return substring(rt, bytes.items, args);
 }
 
-fn trimReceiver(rt: *core.Runtime, receiver: core.Value, mode: TrimMode) !core.Value {
+fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         return trimStringValue(rt, string_value, mode);
     }
@@ -483,7 +483,7 @@ fn trimReceiver(rt: *core.Runtime, receiver: core.Value, mode: TrimMode) !core.V
     return createStringValue(rt, trimmed);
 }
 
-fn trimStringValue(rt: *core.Runtime, string_value: *core.string.String, mode: TrimMode) !core.Value {
+fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode: TrimMode) !core.JSValue {
     var start: usize = 0;
     var end = string_value.len();
     if (mode == .start or mode == .both) {
@@ -498,17 +498,17 @@ fn trimStringValue(rt: *core.Runtime, string_value: *core.string.String, mode: T
     }
 }
 
-fn isWellFormedReceiver(rt: *core.Runtime, receiver: core.Value) !core.Value {
+fn isWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
-        return core.Value.boolean(isWellFormedString(string_value));
+        return core.JSValue.boolean(isWellFormedString(string_value));
     }
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendStringReceiverBytes(rt, &bytes, receiver);
-    return core.Value.boolean(true);
+    return core.JSValue.boolean(true);
 }
 
-fn toWellFormedReceiver(rt: *core.Runtime, receiver: core.Value) !core.Value {
+fn toWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         return toWellFormedString(rt, string_value);
     }
@@ -533,7 +533,7 @@ fn isWellFormedString(string_value: *core.string.String) bool {
     return true;
 }
 
-fn toWellFormedString(rt: *core.Runtime, string_value: *core.string.String) !core.Value {
+fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue {
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
@@ -566,7 +566,7 @@ fn isLowSurrogateUnit(unit: u16) bool {
     return unit >= 0xdc00 and unit <= 0xdfff;
 }
 
-fn substr(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn substr(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var start = try stringInteger(rt, args[0]);
     const len_i64: i64 = if (args.len >= 2 and !args[1].isUndefined()) blk: {
@@ -583,11 +583,13 @@ fn substr(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.
 /// Mirrors the non-RegExp core of QuickJS `js_string_split`
 /// (`quickjs.c:45749-45836`): convert receiver/separator to strings and
 /// create an ordinary array of substrings.
-fn split(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
-    const rooted_args = args;
-    var out_value = core.Value.undefinedValue();
+fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var out_value = core.JSValue.undefinedValue();
     var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .constant = &rooted_args },
+        rooted_args_buffer.slice(),
     };
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &out_value },
@@ -604,7 +606,7 @@ fn split(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.V
     out_value = out.value();
     errdefer {
         const failed_out = out_value;
-        out_value = core.Value.undefinedValue();
+        out_value = core.JSValue.undefinedValue();
         failed_out.free(rt);
     }
 
@@ -646,13 +648,15 @@ fn split(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.V
     return out_value;
 }
 
-fn splitReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     var rooted_receiver = receiver;
-    const rooted_args = args;
-    var out_value = core.Value.undefinedValue();
-    var sep_value = core.Value.undefinedValue();
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var out_value = core.JSValue.undefinedValue();
+    var sep_value = core.JSValue.undefinedValue();
     var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .constant = &rooted_args },
+        rooted_args_buffer.slice(),
     };
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_receiver },
@@ -672,7 +676,7 @@ fn splitReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Val
         out_value = out.value();
         errdefer {
             const failed_out = out_value;
-            out_value = core.Value.undefinedValue();
+            out_value = core.JSValue.undefinedValue();
             failed_out.free(rt);
         }
 
@@ -721,21 +725,23 @@ fn splitReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Val
     return split(rt, bytes.items, rooted_args);
 }
 
-fn search(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn search(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
-    const search_value = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &needle, search_value);
     const index = std.mem.indexOf(u8, bytes, needle.items);
-    return core.Value.int32(if (index) |value| @intCast(value) else -1);
+    return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
 }
 
-fn match(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
-    const rooted_args = args;
-    var out_value = core.Value.undefinedValue();
-    var input = core.Value.undefinedValue();
+fn match(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var out_value = core.JSValue.undefinedValue();
+    var input = core.JSValue.undefinedValue();
     var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .constant = &rooted_args },
+        rooted_args_buffer.slice(),
     };
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &out_value },
@@ -751,15 +757,15 @@ fn match(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.V
 
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
-    const search_value = if (rooted_args.len >= 1) rooted_args[0] else core.Value.undefinedValue();
+    const search_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &needle, search_value);
-    const index = std.mem.indexOf(u8, bytes, needle.items) orelse return core.Value.nullValue();
+    const index = std.mem.indexOf(u8, bytes, needle.items) orelse return core.JSValue.nullValue();
 
     const out = try core.Object.createArray(rt, null);
     out_value = out.value();
     errdefer {
         const failed_out = out_value;
-        out_value = core.Value.undefinedValue();
+        out_value = core.JSValue.undefinedValue();
         failed_out.free(rt);
     }
     try defineStringElement(rt, out, 0, bytes[index .. index + needle.items.len]);
@@ -772,15 +778,15 @@ fn match(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.V
     return out_value;
 }
 
-fn replaceAll(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn replaceAll(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var search_value = std.ArrayList(u8).empty;
     defer search_value.deinit(rt.memory.allocator);
-    const search_input = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &search_value, search_input);
 
     var replacement = std.ArrayList(u8).empty;
     defer replacement.deinit(rt.memory.allocator);
-    const replacement_input = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+    const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     try appendValueString(rt, &replacement, replacement_input);
 
     var out = std.ArrayList(u8).empty;
@@ -804,7 +810,7 @@ fn replaceAll(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !c
     return createStringValue(rt, out.items);
 }
 
-fn defineStringElement(rt: *core.Runtime, object: *core.Object, index: u32, bytes: []const u8) !void {
+fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
     var object_value = object.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
@@ -820,7 +826,7 @@ fn defineStringElement(rt: *core.Runtime, object: *core.Object, index: u32, byte
     try defineValueElement(rt, object, index, value);
 }
 
-fn defineStringSliceElement(rt: *core.Runtime, object: *core.Object, index: u32, string_value: *core.string.String, start: usize, slice_len: usize) !void {
+fn defineStringSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u32, string_value: *core.string.String, start: usize, slice_len: usize) !void {
     var object_value = object.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
@@ -836,7 +842,7 @@ fn defineStringSliceElement(rt: *core.Runtime, object: *core.Object, index: u32,
     try defineValueElement(rt, object, index, value);
 }
 
-fn defineValueElement(rt: *core.Runtime, object: *core.Object, index: u32, value: core.Value) !void {
+fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     var object_value = object.value();
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -854,7 +860,7 @@ fn defineValueElement(rt: *core.Runtime, object: *core.Object, index: u32, value
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(rooted_value, true, true, true));
 }
 
-fn defineStringIndexProperty(rt: *core.Runtime, object: *core.Object, index: u32, bytes: []const u8) !void {
+fn defineStringIndexProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
     var object_value = object.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
@@ -871,7 +877,7 @@ fn defineStringIndexProperty(rt: *core.Runtime, object: *core.Object, index: u32
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
 }
 
-fn defineStringIndexUnitProperty(rt: *core.Runtime, object: *core.Object, index: u32, unit: u16) !void {
+fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
     var object_value = object.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
@@ -890,7 +896,7 @@ fn defineStringIndexUnitProperty(rt: *core.Runtime, object: *core.Object, index:
     try object.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(value, false, true, false));
 }
 
-fn htmlWrap(rt: *core.Runtime, bytes: []const u8, tag: []const u8) !core.Value {
+fn htmlWrap(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8) !core.JSValue {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     try out.append(rt.memory.allocator, '<');
@@ -903,7 +909,7 @@ fn htmlWrap(rt: *core.Runtime, bytes: []const u8, tag: []const u8) !core.Value {
     return createStringValue(rt, out.items);
 }
 
-fn htmlWithAttribute(rt: *core.Runtime, bytes: []const u8, tag: []const u8, attr: []const u8, args: []const core.Value) !core.Value {
+fn htmlWithAttribute(rt: *core.JSRuntime, bytes: []const u8, tag: []const u8, attr: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len > 1) return error.TypeError;
     var attr_bytes = std.ArrayList(u8).empty;
     defer attr_bytes.deinit(rt.memory.allocator);
@@ -925,7 +931,7 @@ fn htmlWithAttribute(rt: *core.Runtime, bytes: []const u8, tag: []const u8, attr
     return createStringValue(rt, out.items);
 }
 
-fn appendEscapedHtmlAttribute(rt: *core.Runtime, out: *std.ArrayList(u8), bytes: []const u8) !void {
+fn appendEscapedHtmlAttribute(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8) !void {
     for (bytes) |byte| {
         if (byte == '"') {
             try out.appendSlice(rt.memory.allocator, "&quot;");
@@ -951,7 +957,7 @@ fn isAsciiTrim(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
 }
 
-fn unicodeCaseReceiver(rt: *core.Runtime, receiver: core.Value, to_lower: bool) !core.Value {
+fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue {
     const primitive = try toStringValueForMethod(rt, receiver);
     defer primitive.free(rt);
     const header = primitive.refHeader() orelse return error.TypeError;
@@ -979,7 +985,7 @@ fn unicodeCaseReceiver(rt: *core.Runtime, receiver: core.Value, to_lower: bool) 
     return string.value();
 }
 
-fn toStringValueForMethod(rt: *core.Runtime, receiver: core.Value) !core.Value {
+fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     if (receiver.isString()) return receiver.dup();
     if (receiver.isObject()) {
         const object = try expectObject(receiver);
@@ -1039,7 +1045,7 @@ fn codePointBeforeStringIndex(string_value: core.string.String, end: usize) ?Cod
     return .{ .value = @intCast(last), .start = last_index, .end = end };
 }
 
-fn appendUtf16CodePoint(rt: *core.Runtime, units: *std.ArrayList(u16), cp: u21) !void {
+fn appendUtf16CodePoint(rt: *core.JSRuntime, units: *std.ArrayList(u16), cp: u21) !void {
     if (cp <= 0xffff) {
         try units.append(rt.memory.allocator, @intCast(cp));
         return;
@@ -1070,24 +1076,24 @@ fn isFinalSigma(string_value: core.string.String, sigma_start: usize, after_sigm
     return true;
 }
 
-fn indexOf(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn indexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
     try appendValueString(rt, &needle, args[0]);
     const start = if (args.len >= 2) try stringSearchStart(rt, bytes.len, args[1]) else @as(usize, 0);
     const index = if (start <= bytes.len) std.mem.indexOfPos(u8, bytes, start, needle.items) else null;
-    return core.Value.int32(if (index) |value| @intCast(value) else -1);
+    return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
 }
 
-fn indexOfReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn indexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
-        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.Value.undefinedValue());
+        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer needle_value.free(rt);
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
         const start = if (args.len >= 2) try stringSearchStart(rt, string_value.len(), args[1]) else @as(usize, 0);
         const index = stringIndexOfUnits(string_value, needle, start);
-        return core.Value.int32(if (index) |value| @intCast(value) else -1);
+        return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
     }
 
     var bytes = std.ArrayList(u8).empty;
@@ -1096,7 +1102,7 @@ fn indexOfReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.V
     return indexOf(rt, bytes.items, args);
 }
 
-fn lastIndexOf(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn lastIndexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
@@ -1107,22 +1113,22 @@ fn lastIndexOf(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !
         try stringLastSearchStart(rt, default_start, args[1])
     else
         default_start;
-    if (needle.items.len == 0) return core.Value.int32(@intCast(start));
-    if (needle.items.len > bytes.len) return core.Value.int32(-1);
+    if (needle.items.len == 0) return core.JSValue.int32(@intCast(start));
+    if (needle.items.len > bytes.len) return core.JSValue.int32(-1);
 
     var index = @min(start, default_start) + 1;
     while (index > 0) {
         index -= 1;
         if (std.mem.eql(u8, bytes[index .. index + needle.items.len], needle.items)) {
-            return core.Value.int32(@intCast(index));
+            return core.JSValue.int32(@intCast(index));
         }
     }
-    return core.Value.int32(-1);
+    return core.JSValue.int32(-1);
 }
 
-fn lastIndexOfReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
-        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.Value.undefinedValue());
+        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer needle_value.free(rt);
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
 
@@ -1131,9 +1137,9 @@ fn lastIndexOfReceiver(rt: *core.Runtime, receiver: core.Value, args: []const co
                 try stringLastSearchStart(rt, string_value.len(), args[1])
             else
                 string_value.len();
-            return core.Value.int32(@intCast(start));
+            return core.JSValue.int32(@intCast(start));
         }
-        if (needle.len() > string_value.len()) return core.Value.int32(-1);
+        if (needle.len() > string_value.len()) return core.JSValue.int32(-1);
 
         const default_start = string_value.len() - needle.len();
         const start = if (args.len >= 2 and !args[1].isUndefined())
@@ -1141,7 +1147,7 @@ fn lastIndexOfReceiver(rt: *core.Runtime, receiver: core.Value, args: []const co
         else
             default_start;
         const index = stringLastIndexOfUnits(string_value, needle, start);
-        return core.Value.int32(if (index) |value| @intCast(value) else -1);
+        return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
     }
 
     var bytes = std.ArrayList(u8).empty;
@@ -1150,48 +1156,48 @@ fn lastIndexOfReceiver(rt: *core.Runtime, receiver: core.Value, args: []const co
     return lastIndexOf(rt, bytes.items, args);
 }
 
-fn charCodeAtReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
     defer primitive.free(rt);
     const header = primitive.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.Value.float64(std.math.nan(f64));
-    return core.Value.int32(string_value.codeUnitAt(@intCast(index)));
+    if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.float64(std.math.nan(f64));
+    return core.JSValue.int32(string_value.codeUnitAt(@intCast(index)));
 }
 
-fn codePointAtReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const primitive = try stringPrimitiveValue(receiver);
     defer primitive.free(rt);
     const header = primitive.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.Value.undefinedValue();
+    if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.undefinedValue();
     const unit = string_value.codeUnitAt(@intCast(index));
     if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < string_value.len()) {
         const next = string_value.codeUnitAt(@intCast(index + 1));
         if (next >= 0xdc00 and next <= 0xdfff) {
             const code_point = 0x10000 + ((@as(u32, unit) - 0xd800) << 10) + (@as(u32, next) - 0xdc00);
-            return core.Value.int32(@intCast(code_point));
+            return core.JSValue.int32(@intCast(code_point));
         }
     }
-    return core.Value.int32(unit);
+    return core.JSValue.int32(unit);
 }
 
-fn at(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn at(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const relative = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     const len: i64 = @intCast(bytes.len);
     const index = if (relative < 0) len + relative else relative;
-    if (index < 0 or index >= len) return core.Value.undefinedValue();
+    if (index < 0 or index >= len) return core.JSValue.undefinedValue();
     return createStringValue(rt, bytes[@intCast(index)..@intCast(index + 1)]);
 }
 
-fn atReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         const relative = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
         const len: i64 = @intCast(string_value.len());
         const index = if (relative < 0) len + relative else relative;
-        if (index < 0 or index >= len) return core.Value.undefinedValue();
+        if (index < 0 or index >= len) return core.JSValue.undefinedValue();
         return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
     }
 
@@ -1201,7 +1207,7 @@ fn atReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value)
     return at(rt, bytes.items, args);
 }
 
-fn slice(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn slice(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const len: i64 = @intCast(bytes.len);
     var start = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     var end = if (args.len >= 2 and !args[1].isUndefined()) try stringInteger(rt, args[1]) else len;
@@ -1211,7 +1217,7 @@ fn slice(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.V
     return createStringValue(rt, bytes[@intCast(start)..@intCast(end)]);
 }
 
-fn sliceReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value) !core.Value {
+fn sliceReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
         const range = try stringSliceRange(rt, string_value.len(), args);
         const res = try core.string.String.createSlice(rt, string_value, range.start, range.end - range.start);
@@ -1229,7 +1235,7 @@ const StringSliceRange = struct {
     end: usize,
 };
 
-fn stringSubstringRange(rt: *core.Runtime, len_usize: usize, args: []const core.Value) !StringSliceRange {
+fn stringSubstringRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange {
     const len: i64 = @intCast(len_usize);
     const start_raw = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     const end_raw = if (args.len >= 2 and !args[1].isUndefined()) try stringInteger(rt, args[1]) else len;
@@ -1238,7 +1244,7 @@ fn stringSubstringRange(rt: *core.Runtime, len_usize: usize, args: []const core.
     return .{ .start = @min(start, end), .end = @max(start, end) };
 }
 
-fn stringSliceRange(rt: *core.Runtime, len_usize: usize, args: []const core.Value) !StringSliceRange {
+fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange {
     const len: i64 = @intCast(len_usize);
     var start = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     var end = if (args.len >= 2 and !args[1].isUndefined()) try stringInteger(rt, args[1]) else len;
@@ -1248,7 +1254,7 @@ fn stringSliceRange(rt: *core.Runtime, len_usize: usize, args: []const core.Valu
     return .{ .start = @intCast(start), .end = @intCast(end) };
 }
 
-fn repeat(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (count < 0 or count == std.math.maxInt(i64)) return error.RangeError;
     if (bytes.len == 0 or count == 0) return createStringValue(rt, "");
@@ -1263,7 +1269,7 @@ fn repeat(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.
 
 const PadSide = enum { start, end };
 
-fn pad(rt: *core.Runtime, bytes: []const u8, args: []const core.Value, side: PadSide) !core.Value {
+fn pad(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, side: PadSide) !core.JSValue {
     const target_len_i = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (target_len_i <= @as(i64, @intCast(bytes.len))) return createStringValue(rt, bytes);
     const target_len: usize = @intCast(target_len_i);
@@ -1294,20 +1300,20 @@ fn pad(rt: *core.Runtime, bytes: []const u8, args: []const core.Value, side: Pad
     return createStringValue(rt, out);
 }
 
-fn localeCompare(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn localeCompare(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var other = std.ArrayList(u8).empty;
     defer other.deinit(rt.memory.allocator);
-    const value = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &other, value);
     const result: i32 = switch (std.mem.order(u8, bytes, other.items)) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
     };
-    return core.Value.int32(result);
+    return core.JSValue.int32(result);
 }
 
-fn normalize(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !core.Value {
+fn normalize(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len >= 1 and !args[0].isUndefined()) {
         var form = std.ArrayList(u8).empty;
         defer form.deinit(rt.memory.allocator);
@@ -1322,7 +1328,7 @@ fn normalize(rt: *core.Runtime, bytes: []const u8, args: []const core.Value) !co
 
 const StringContainsMode = enum { contains, starts, ends };
 
-fn contains(rt: *core.Runtime, bytes: []const u8, args: []const core.Value, mode: StringContainsMode) !core.Value {
+fn contains(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var needle = std.ArrayList(u8).empty;
     defer needle.deinit(rt.memory.allocator);
@@ -1337,12 +1343,12 @@ fn contains(rt: *core.Runtime, bytes: []const u8, args: []const core.Value, mode
             break :blk std.mem.eql(u8, bytes[end - needle.items.len .. end], needle.items);
         },
     };
-    return core.Value.boolean(found);
+    return core.JSValue.boolean(found);
 }
 
-fn containsReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.Value, mode: StringContainsMode) !core.Value {
+fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue {
     if (stringValueFromReceiver(receiver)) |string_value| {
-        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.Value.undefinedValue());
+        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
         defer needle_value.free(rt);
         const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
         const pos = if (args.len >= 2) try stringSearchStart(rt, string_value.len(), args[1]) else 0;
@@ -1355,7 +1361,7 @@ fn containsReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.
                 break :blk stringMatchesAtUnits(string_value, needle, end - needle.len());
             },
         };
-        return core.Value.boolean(found);
+        return core.JSValue.boolean(found);
     }
 
     var bytes = std.ArrayList(u8).empty;
@@ -1364,7 +1370,7 @@ fn containsReceiver(rt: *core.Runtime, receiver: core.Value, args: []const core.
     return contains(rt, bytes.items, args, mode);
 }
 
-fn appendStringReceiverBytes(rt: *core.Runtime, buffer: *std.ArrayList(u8), target: core.Value) !void {
+fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), target: core.JSValue) !void {
     if (target.isString()) {
         try appendRawString(rt, buffer, target);
         return;
@@ -1383,7 +1389,7 @@ fn appendStringReceiverBytes(rt: *core.Runtime, buffer: *std.ArrayList(u8), targ
     try appendValueString(rt, buffer, target);
 }
 
-fn createStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     const str = if (isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
@@ -1391,7 +1397,7 @@ fn createStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
     return str.value();
 }
 
-fn stringValueFromSearchArgument(rt: *core.Runtime, value: core.Value) !core.Value {
+fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, value);
@@ -1430,7 +1436,7 @@ fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.St
     return null;
 }
 
-fn codeUnitStringValue(rt: *core.Runtime, unit: u16) !core.Value {
+fn codeUnitStringValue(rt: *core.JSRuntime, unit: u16) !core.JSValue {
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
 }
 
@@ -1441,19 +1447,19 @@ fn isAsciiBytes(bytes: []const u8) bool {
     return true;
 }
 
-fn createLatin1SliceValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn createLatin1SliceValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     const str = try core.string.String.createLatin1(rt, bytes);
     return str.value();
 }
 
-fn stringPrimitiveValue(value: core.Value) !core.Value {
+fn stringPrimitiveValue(value: core.JSValue) !core.JSValue {
     if (value.isString()) return value.dup();
     const object = try expectObject(value);
     if (object.class_id != core.class.ids.string) return error.TypeError;
     return (object.objectData() orelse return error.TypeError).dup();
 }
 
-pub fn stringValueFromReceiver(value: core.Value) ?*core.string.String {
+pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
     const string_value = if (value.isString())
         value
     else if (value.isObject()) blk: {
@@ -1465,7 +1471,7 @@ pub fn stringValueFromReceiver(value: core.Value) ?*core.string.String {
     return @fieldParentPtr("header", header);
 }
 
-fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value {
+fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     defer rooted_value.free(rt);
     var root_values = [_]core.runtime.ValueRootValue{
@@ -1481,12 +1487,12 @@ fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
     try result.defineOwnProperty(rt, core.atom.predefinedId("value", .string).?, core.Descriptor.data(rooted_value, true, true, true));
-    try result.defineOwnProperty(rt, core.atom.predefinedId("done", .string).?, core.Descriptor.data(core.Value.boolean(done), true, true, true));
+    try result.defineOwnProperty(rt, core.atom.predefinedId("done", .string).?, core.Descriptor.data(core.JSValue.boolean(done), true, true, true));
     return result.value();
 }
 
 test "string iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
@@ -1495,11 +1501,11 @@ test "string iteratorResult roots direct function bytecode value while creating 
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var result_value = core.Value.functionBytecode(&fb.header);
+    var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
     defer if (result_alive) result_value.free(rt);
 
@@ -1526,7 +1532,7 @@ test "string iteratorResult roots direct function bytecode value while creating 
 }
 
 test "string wrapper iterator split and match helpers keep values under GC" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const old_threshold = rt.gcThreshold();
@@ -1577,13 +1583,13 @@ test "string wrapper iterator split and match helpers keep values under GC" {
     try std.testing.expect((stringValueFromReceiver(input_value) orelse return error.TypeError).eqlBytes("ababa"));
 }
 
-fn expectObject(value: core.Value) !*core.Object {
+fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn defineIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     var object_value = object.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
@@ -1597,10 +1603,10 @@ fn defineIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, 
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(value), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
 }
 
-fn defineReadonlyIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     var object_value = object.value();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &object_value },
@@ -1614,10 +1620,10 @@ fn defineReadonlyIntProperty(rt: *core.Runtime, object: *core.Object, name: []co
 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(value), false, false, false));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), false, false, false));
 }
 
-fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) AppendStringError!void {
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asInt32()) |int_value| {
         var int_buf: [32]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
@@ -1676,7 +1682,7 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
     }
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -1689,7 +1695,7 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
+fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
@@ -1699,7 +1705,7 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
     }
 }
 
-fn stringSearchStart(rt: *core.Runtime, length: usize, value: core.Value) !usize {
+fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize {
     const number = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or number <= 0) return 0;
     if (std.math.isPositiveInf(number)) return length;
@@ -1708,7 +1714,7 @@ fn stringSearchStart(rt: *core.Runtime, length: usize, value: core.Value) !usize
     return @intFromFloat(truncated);
 }
 
-fn stringLastSearchStart(rt: *core.Runtime, default_start: usize, value: core.Value) !usize {
+fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.JSValue) !usize {
     const number = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return default_start;
     if (number <= 0) return 0;
@@ -1718,7 +1724,7 @@ fn stringLastSearchStart(rt: *core.Runtime, default_start: usize, value: core.Va
     return @intFromFloat(truncated);
 }
 
-fn toUint32Limit(rt: *core.Runtime, value: core.Value) !u32 {
+fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
     if (value.isBigInt() or value.isSymbol()) return error.TypeError;
     const number = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
@@ -1727,7 +1733,7 @@ fn toUint32Limit(rt: *core.Runtime, value: core.Value) !u32 {
     return @intFromFloat(modulo);
 }
 
-fn toIntegerOrInfinity(rt: *core.Runtime, value: core.Value) !f64 {
+fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
@@ -1739,7 +1745,7 @@ fn toIntegerOrInfinity(rt: *core.Runtime, value: core.Value) !f64 {
     return parseJsNumber(buffer.items);
 }
 
-fn stringInteger(rt: *core.Runtime, value: core.Value) !i64 {
+fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
     if (value.asInt32()) |int_value| return int_value;
     const number = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return 0;
@@ -1757,7 +1763,7 @@ fn parseJsNumber(bytes: []const u8) f64 {
     return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
 }
 
-fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
@@ -1767,7 +1773,7 @@ fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
     return error.TypeError;
 }
 
-fn numberValue(value: core.Value) ?f64 {
+fn numberValue(value: core.JSValue) ?f64 {
     if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
     if (value.tag == core.Tag.float64) return value.asFloat64().?;
     return null;
@@ -1777,7 +1783,7 @@ fn isNegativeZero(value: f64) bool {
     return value == 0 and std.math.isNegativeInf(1.0 / value);
 }
 
-fn appendUtf8CodePoint(rt: *core.Runtime, buffer: *std.ArrayList(u8), cp: u32) !void {
+fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
     if (cp <= 0x7f) {
         try buffer.append(rt.memory.allocator, @intCast(cp));
     } else if (cp <= 0x7ff) {

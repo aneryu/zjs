@@ -15,9 +15,9 @@ const expectStringBytes = helpers.expectStringBytes;
 const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 
 test "F2+F3 qjs dispatcher: integer literal executes via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "42");
@@ -26,9 +26,9 @@ test "F2+F3 qjs dispatcher: integer literal executes via qjs_vm" {
 }
 
 test "F10.1: qjs_vm executes push_bigint_i32 literal" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "1n");
@@ -37,9 +37,9 @@ test "F10.1: qjs_vm executes push_bigint_i32 literal" {
 }
 
 test "F10.2: qjs_vm executes push_i8 short integer" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("test");
@@ -58,9 +58,9 @@ test "F10.2: qjs_vm executes push_i8 short integer" {
 }
 
 test "F10.2: qjs_vm executes push_i16 short integer" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("test");
@@ -82,9 +82,9 @@ test "F10.2: qjs_vm executes push_i16 short integer" {
 }
 
 test "M1.2: qjs_vm consumes every special_object subtype" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("test");
@@ -115,9 +115,9 @@ test "M1.2: qjs_vm consumes every special_object subtype" {
 }
 
 test "F10.2: qjs_vm executes get_loc0_loc1 coalesced local reads" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("test");
@@ -146,9 +146,9 @@ test "F10.2: qjs_vm executes get_loc0_loc1 coalesced local reads" {
 }
 
 test "F10.2: qjs_vm executes relative goto" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("test");
@@ -174,9 +174,9 @@ test "F10.2: qjs_vm executes relative goto" {
 }
 
 test "F10.2: qjs_vm executes if_false8 relative branch" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("test");
@@ -204,9 +204,9 @@ test "F10.2: qjs_vm executes if_false8 relative branch" {
 }
 
 test "F2+F3 qjs dispatcher: addition via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "1 + 2");
@@ -215,9 +215,9 @@ test "F2+F3 qjs dispatcher: addition via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: subtraction via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "10 - 3");
@@ -226,9 +226,9 @@ test "F2+F3 qjs dispatcher: subtraction via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: multiplication via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "6 * 7");
@@ -237,9 +237,9 @@ test "F2+F3 qjs dispatcher: multiplication via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: precedence via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "1 + 2 * 3");
@@ -248,9 +248,9 @@ test "F2+F3 qjs dispatcher: precedence via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: parenthesized via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "(1 + 2) * 3");
@@ -259,9 +259,9 @@ test "F2+F3 qjs dispatcher: parenthesized via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: boolean comparison via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "1 < 2");
@@ -270,9 +270,9 @@ test "F2+F3 qjs dispatcher: boolean comparison via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: bitwise and via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "12 & 10");
@@ -281,9 +281,9 @@ test "F2+F3 qjs dispatcher: bitwise and via qjs_vm" {
 }
 
 test "F2+F3 qjs dispatcher: unary negation via qjs_vm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "-5");
@@ -292,9 +292,9 @@ test "F2+F3 qjs dispatcher: unary negation via qjs_vm" {
 }
 
 test "M3.1 F4: unary numeric operators use QuickJS ToNumber semantics" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -318,9 +318,9 @@ test "M3.1 F4: unary numeric operators use QuickJS ToNumber semantics" {
 }
 
 test "M3.1 F4: typeof uses QuickJS value classification" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -355,9 +355,9 @@ test "M3.1 F4: typeof uses QuickJS value classification" {
 }
 
 test "M3.1 F4: loose equality does not numerically coerce same-type strings" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -374,9 +374,9 @@ test "M3.1 F4: loose equality does not numerically coerce same-type strings" {
 }
 
 test "M3.1 F4: loose equality supports ToPrimitive and mixed BigInt" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -405,9 +405,9 @@ test "M3.1 F4: loose equality supports ToPrimitive and mixed BigInt" {
 }
 
 test "M3.1 F4: relational comparison supports ToPrimitive and mixed BigInt" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -430,9 +430,9 @@ test "M3.1 F4: relational comparison supports ToPrimitive and mixed BigInt" {
 }
 
 test "M3.1 F4: logical assignment names anonymous RHS for identifier targets" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -453,9 +453,9 @@ test "M3.1 F4: logical assignment names anonymous RHS for identifier targets" {
 }
 
 test "M3.1 F4: update expressions use ToNumeric and preserve postfix result" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -484,9 +484,9 @@ test "M3.1 F4: update expressions use ToNumeric and preserve postfix result" {
 }
 
 test "M3.1 F4: prefix update in with uses the initial object reference" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -509,9 +509,9 @@ test "M3.1 F4: prefix update in with uses the initial object reference" {
 }
 
 test "M3.1 F4: strict update in with throws when the initial binding disappears" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,

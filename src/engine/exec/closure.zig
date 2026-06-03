@@ -8,7 +8,7 @@ const std = @import("std");
 
 pub const LogMode = enum { initial, again };
 
-pub fn create(rt: *core.Runtime, kind: i32, value: i32, b: i32, c: i32) !core.Value {
+pub fn create(rt: *core.JSRuntime, kind: i32, value: i32, b: i32, c: i32) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.c_closure, null);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try defineIntProperty(rt, object, "__closure_kind", kind);
@@ -18,29 +18,29 @@ pub fn create(rt: *core.Runtime, kind: i32, value: i32, b: i32, c: i32) !core.Va
     return object.value();
 }
 
-pub fn call(rt: *core.Runtime, closure_value: core.Value, args: []const core.Value, globals: []globals_mod.Slot) !core.Value {
-    return callWithThis(rt, closure_value, core.Value.undefinedValue(), args, globals);
+pub fn call(rt: *core.JSRuntime, closure_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
+    return callWithThis(rt, closure_value, core.JSValue.undefinedValue(), args, globals);
 }
 
-pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: core.Value, args: []const core.Value, globals: []globals_mod.Slot) !core.Value {
+pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
     const closure = try expectClosure(closure_value);
     const kind = try closureKind(rt, closure_value);
     switch (kind) {
         1 => {
             const value = try getIntProperty(rt, closure, "__closure_value");
-            return core.Value.int32(value);
+            return core.JSValue.int32(value);
         },
         2 => {
             if (args.len != 0) return error.TypeError;
             const value = try getIntProperty(rt, closure, "__closure_value") + 1;
             try defineIntProperty(rt, closure, "__closure_value", value);
-            return core.Value.int32(value);
+            return core.JSValue.int32(value);
         },
         3 => {
             if (args.len != 1) return error.TypeError;
             const captured = try getIntProperty(rt, closure, "__closure_value");
             const arg = args[0].asInt32() orelse return error.TypeError;
-            return core.Value.int32(captured + arg);
+            return core.JSValue.int32(captured + arg);
         },
         5 => {
             if (args.len != 1) return error.TypeError;
@@ -48,13 +48,13 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
             const b = try getIntProperty(rt, closure, "__closure_b");
             const c = try getIntProperty(rt, closure, "__closure_c");
             try appendLog(rt, globals, .again, 0, b, c, d);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         6 => {
             if (args.len != 1) return error.TypeError;
             const multiplier = try getIntProperty(rt, closure, "__closure_value");
             const arg = args[0].asInt32() orelse return error.TypeError;
-            return core.Value.int32(arg * multiplier);
+            return core.JSValue.int32(arg * multiplier);
         },
         7 => return error.TypeError,
         8 => return error.SyntaxError,
@@ -62,12 +62,12 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         10 => return error.EvalError,
         11 => return error.ReferenceError,
         12 => return error.Test262Error,
-        13 => return core.Value.undefinedValue(),
-        14 => return core.Value.nullValue(),
+        13 => return core.JSValue.undefinedValue(),
+        14 => return core.JSValue.nullValue(),
         15 => {
             if (args.len < 1) return error.TypeError;
             const string = stringFromValue(args[0]) orelse return error.TypeError;
-            return core.Value.int32(@intCast(string.len()));
+            return core.JSValue.int32(@intCast(string.len()));
         },
         16 => {
             if (args.len < 1) return error.TypeError;
@@ -89,7 +89,7 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         },
         19 => {
             try incrementGlobalInt(rt, globals, "calls");
-            return core.Value.nullValue();
+            return core.JSValue.nullValue();
         },
         20 => return try value_ops.createStringValue(rt, "key"),
         29 => return try value_ops.createStringValue(rt, "valid"),
@@ -98,7 +98,7 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
             try incrementGlobalInt(rt, globals, "counter");
             try appendPairToGlobalArray(rt, globals, "results", args[0], args[1]);
             try appendToGlobalArray(rt, globals, "_this", this_value);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         31 => {
             try incrementGlobalInt(rt, globals, "count");
@@ -111,10 +111,10 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         33 => {
             if (args.len < 1) return error.TypeError;
             try globals_mod.setExistingByName(rt, globals, "canonicalKey", args[0]);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
-        34 => return core.Value.int32(3),
-        35 => return core.Value.undefinedValue(),
+        34 => return core.JSValue.int32(3),
+        35 => return core.JSValue.undefinedValue(),
         36 => return try value_ops.createStringValue(rt, "string"),
         37 => {
             try incrementGlobalInt(rt, globals, "callbackCalls");
@@ -130,7 +130,7 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         },
         40 => {
             try incrementGlobalInt(rt, globals, "count");
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         41 => return error.Test262Error,
         42 => return iteratorNextValueGetterThrows(rt, closure),
@@ -145,8 +145,8 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         54 => {
             if (args.len < 1) return error.TypeError;
             const value = args[0].asInt32() orelse return error.Test262Error;
-            if (value == 1) return core.Value.boolean(false);
-            if (value == 2) return core.Value.boolean(true);
+            if (value == 1) return core.JSValue.boolean(false);
+            if (value == 2) return core.JSValue.boolean(true);
             return error.Test262Error;
         },
         55 => {
@@ -160,24 +160,24 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         47 => {
             if (args.len < 2) return error.TypeError;
             try appendWeakMapAdderRecord(rt, globals, args[0], args[1], this_value);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         48 => {
             if (args.len < 1) return error.TypeError;
             try appendToGlobalArray(rt, globals, "added", args[0]);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         49 => {
             if (args.len < 1) return error.TypeError;
             try assertAndShiftExpected(rt, globals, args[0]);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         56 => return setForEachMutation(rt, globals, args, .add_after_begin),
         57 => return setForEachMutation(rt, globals, args, .delete_then_readd),
         58 => return setForEachMutation(rt, globals, args, .revisit_after_readd),
         50 => {
             try incrementGlobalInt(rt, globals, "counter");
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         61 => {
             try incrementGlobalInt(rt, globals, "counter");
@@ -186,30 +186,30 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
         62 => {
             if (args.len < 1) return error.TypeError;
             const value = args[0].asInt32() orelse return error.Test262Error;
-            if (value == 1 or value == 2) return core.Value.boolean(true);
+            if (value == 1 or value == 2) return core.JSValue.boolean(true);
             return error.Test262Error;
         },
         63 => {
             if (args.len < 1) return error.TypeError;
             const value = args[0].asInt32() orelse return error.Test262Error;
-            if (value == 1 or value == 2) return core.Value.boolean(false);
+            if (value == 1 or value == 2) return core.JSValue.boolean(false);
             return error.Test262Error;
         },
         64 => {
             if (args.len < 1) return error.TypeError;
-            if (args[0].asInt32()) |value| return core.Value.boolean(value == 4 or value == 5 or value == 6);
-            const string = stringFromValue(args[0]) orelse return core.Value.boolean(false);
-            return core.Value.boolean(string.eqlBytes("a") or string.eqlBytes("b") or string.eqlBytes("c") or string.eqlBytes("x"));
+            if (args[0].asInt32()) |value| return core.JSValue.boolean(value == 4 or value == 5 or value == 6);
+            const string = stringFromValue(args[0]) orelse return core.JSValue.boolean(false);
+            return core.JSValue.boolean(string.eqlBytes("a") or string.eqlBytes("b") or string.eqlBytes("c") or string.eqlBytes("x"));
         },
         21 => {
             if (args.len < 2) return error.TypeError;
-            try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.Value.undefinedValue());
-            return core.Value.undefinedValue();
+            try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.JSValue.undefinedValue());
+            return core.JSValue.undefinedValue();
         },
         22 => {
             if (args.len < 1) return error.TypeError;
             try appendToGlobalArray(rt, globals, "results", args[0]);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         26 => {
             var value = if (this_value.isUndefined()) try globals_mod.getByName(rt, globals, "globalThis") else this_value.dup();
@@ -219,33 +219,33 @@ pub fn callWithThis(rt: *core.Runtime, closure_value: core.Value, this_value: co
             }
             defer value.free(rt);
             try appendToGlobalArray(rt, globals, "_this", value);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         27 => {
             try appendToGlobalArray(rt, globals, "_this", this_value);
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         23...25 => {
             if (args.len < 2) return error.TypeError;
-            try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.Value.undefinedValue());
+            try appendRecordToGlobalArray(rt, globals, "results", args[0], args[1], if (args.len >= 3) args[2] else core.JSValue.undefinedValue());
             try incrementGlobalInt(rt, globals, "count");
-            return core.Value.undefinedValue();
+            return core.JSValue.undefinedValue();
         },
         else => return error.TypeError,
     }
 }
 
-pub fn closureKind(rt: *core.Runtime, closure_value: core.Value) !i32 {
+pub fn closureKind(rt: *core.JSRuntime, closure_value: core.JSValue) !i32 {
     const closure = try expectClosure(closure_value);
     return getIntProperty(rt, closure, "__closure_kind");
 }
 
-pub fn closureValue(rt: *core.Runtime, closure_value: core.Value) !i32 {
+pub fn closureValue(rt: *core.JSRuntime, closure_value: core.JSValue) !i32 {
     const closure = try expectClosure(closure_value);
     return getIntProperty(rt, closure, "__closure_value");
 }
 
-pub fn appendLog(rt: *core.Runtime, globals: []globals_mod.Slot, mode: LogMode, a: i32, b: i32, c: i32, d: i32) !void {
+pub fn appendLog(rt: *core.JSRuntime, globals: []globals_mod.Slot, mode: LogMode, a: i32, b: i32, c: i32, d: i32) !void {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     const existing = try globals_mod.getByName(rt, globals, "log_str");
@@ -262,7 +262,7 @@ pub fn appendLog(rt: *core.Runtime, globals: []globals_mod.Slot, mode: LogMode, 
     try globals_mod.setExistingByName(rt, globals, "log_str", value);
 }
 
-fn expectClosure(value: core.Value) !*core.Object {
+fn expectClosure(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     const closure: *core.Object = @fieldParentPtr("header", header);
@@ -270,13 +270,13 @@ fn expectClosure(value: core.Value) !*core.Object {
     return closure;
 }
 
-fn defineIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(value), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
 }
 
-fn getIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8) !i32 {
+fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !i32 {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     const value = object.getProperty(key);
@@ -284,14 +284,14 @@ fn getIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8) !i3
     return value.asInt32() orelse error.TypeError;
 }
 
-fn incrementGlobalInt(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !void {
+fn incrementGlobalInt(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !void {
     const existing = try globals_mod.getByName(rt, globals, name);
     defer existing.free(rt);
     const current = existing.asInt32() orelse return error.TypeError;
-    try globals_mod.setExistingByName(rt, globals, name, core.Value.int32(current + 1));
+    try globals_mod.setExistingByName(rt, globals, name, core.JSValue.int32(current + 1));
 }
 
-fn iteratorFactory(rt: *core.Runtime, shape: i32) !core.Value {
+fn iteratorFactory(rt: *core.JSRuntime, shape: i32) !core.JSValue {
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &iterator.header);
 
@@ -322,26 +322,26 @@ fn iteratorFactory(rt: *core.Runtime, shape: i32) !core.Value {
     return iterator.value();
 }
 
-fn iteratorNextGlobalValue(rt: *core.Runtime, closure: *core.Object, globals: []globals_mod.Slot, name: []const u8) !core.Value {
+fn iteratorNextGlobalValue(rt: *core.JSRuntime, closure: *core.Object, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
     const value = try globals_mod.getByName(rt, globals, name);
     defer value.free(rt);
     return iteratorResult(rt, value, false);
 }
 
-fn iteratorNextEmptyArray(rt: *core.Runtime, closure: *core.Object) !core.Value {
+fn iteratorNextEmptyArray(rt: *core.JSRuntime, closure: *core.Object) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
     const value = try core.Object.createArray(rt, null);
     defer value.value().free(rt);
     return iteratorResult(rt, value.value(), false);
 }
 
-fn iteratorNextNull(rt: *core.Runtime, closure: *core.Object) !core.Value {
+fn iteratorNextNull(rt: *core.JSRuntime, closure: *core.Object) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
-    return iteratorResult(rt, core.Value.nullValue(), false);
+    return iteratorResult(rt, core.JSValue.nullValue(), false);
 }
 
-fn iteratorNextValueGetterThrows(rt: *core.Runtime, closure: *core.Object) !core.Value {
+fn iteratorNextValueGetterThrows(rt: *core.JSRuntime, closure: *core.Object) !core.JSValue {
     if (try iteratorNextDoneIfConsumed(rt, closure)) |done| return done;
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
@@ -349,19 +349,19 @@ fn iteratorNextValueGetterThrows(rt: *core.Runtime, closure: *core.Object) !core
     defer getter.free(rt);
     const value_key = try rt.internAtom("value");
     defer rt.atoms.free(value_key);
-    try result.defineOwnProperty(rt, value_key, core.Descriptor.accessor(getter, core.Value.undefinedValue(), true, true));
-    try defineValueProperty(rt, result, "done", core.Value.boolean(false));
+    try result.defineOwnProperty(rt, value_key, core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true));
+    try defineValueProperty(rt, result, "done", core.JSValue.boolean(false));
     return result.value();
 }
 
-fn iteratorNextDoneIfConsumed(rt: *core.Runtime, closure: *core.Object) !?core.Value {
+fn iteratorNextDoneIfConsumed(rt: *core.JSRuntime, closure: *core.Object) !?core.JSValue {
     const consumed = try getIntProperty(rt, closure, "__closure_value");
-    if (consumed != 0) return try iteratorResult(rt, core.Value.undefinedValue(), true);
+    if (consumed != 0) return try iteratorResult(rt, core.JSValue.undefinedValue(), true);
     try defineIntProperty(rt, closure, "__closure_value", 1);
     return null;
 }
 
-fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value {
+fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -376,12 +376,12 @@ fn iteratorResult(rt: *core.Runtime, value: core.Value, done: bool) !core.Value 
     const result = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &result.header);
     try defineValueProperty(rt, result, "value", rooted_value);
-    try defineValueProperty(rt, result, "done", core.Value.boolean(done));
+    try defineValueProperty(rt, result, "done", core.JSValue.boolean(done));
     return result.value();
 }
 
 test "closure iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
@@ -390,11 +390,11 @@ test "closure iteratorResult roots direct function bytecode value while creating
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
-    var result_value = core.Value.functionBytecode(&fb.header);
+    var result_value = core.JSValue.functionBytecode(&fb.header);
     var result_alive = true;
     defer if (result_alive) result_value.free(rt);
 
@@ -423,28 +423,28 @@ test "closure iteratorResult roots direct function bytecode value while creating
 }
 
 const TestFunctionBytecodeValue = struct {
-    value: core.Value,
+    value: core.JSValue,
     symbol_atom: core.Atom,
 };
 
-fn createTestFunctionBytecodeValue(rt: *core.Runtime, symbol_name: []const u8) !TestFunctionBytecodeValue {
+fn createTestFunctionBytecodeValue(rt: *core.JSRuntime, symbol_name: []const u8) !TestFunctionBytecodeValue {
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
     fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol(symbol_name);
-    fb.cpool = try rt.memory.alloc(core.Value, 1);
-    fb.cpool[0] = core.Value.symbol(symbol_atom);
+    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
+    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
     fb.cpool_count = 1;
 
     return .{
-        .value = core.Value.functionBytecode(&fb.header),
+        .value = core.JSValue.functionBytecode(&fb.header),
         .symbol_atom = symbol_atom,
     };
 }
 
-fn expectObjectPropertySame(rt: *core.Runtime, object: *core.Object, name: []const u8, expected: core.Value) !void {
+fn expectObjectPropertySame(rt: *core.JSRuntime, object: *core.Object, name: []const u8, expected: core.JSValue) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
     const stored = object.getProperty(atom_id);
@@ -452,14 +452,14 @@ fn expectObjectPropertySame(rt: *core.Runtime, object: *core.Object, name: []con
     try std.testing.expect(stored.same(expected));
 }
 
-fn expectArrayIndexSame(rt: *core.Runtime, array: *core.Object, index: u32, expected: core.Value) !void {
+fn expectArrayIndexSame(rt: *core.JSRuntime, array: *core.Object, index: u32, expected: core.JSValue) !void {
     const stored = array.getProperty(core.atom.atomFromUInt32(index));
     defer stored.free(rt);
     try std.testing.expect(stored.same(expected));
 }
 
 test "appendRecordToGlobalArray roots direct function bytecode fields while creating record" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
@@ -516,7 +516,7 @@ test "appendRecordToGlobalArray roots direct function bytecode fields while crea
 }
 
 test "appendWeakMapAdderRecord roots direct function bytecode fields while creating record" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
@@ -573,7 +573,7 @@ test "appendWeakMapAdderRecord roots direct function bytecode fields while creat
 }
 
 test "appendPairToGlobalArray roots direct function bytecode entries while creating pair" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
@@ -622,7 +622,7 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
 }
 
 test "appendToGlobalArray roots direct function bytecode value while appending" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const results_name = try rt.internAtom("results");
@@ -657,7 +657,7 @@ test "appendToGlobalArray roots direct function bytecode value while appending" 
 }
 
 test "appendArrayValue roots direct function bytecode value while appending" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -687,22 +687,22 @@ test "appendArrayValue roots direct function bytecode value while appending" {
     try std.testing.expect(rt.atoms.name(item.symbol_atom) == null);
 }
 
-fn arrayFromShape(rt: *core.Runtime, shape: i32) !core.Value {
+fn arrayFromShape(rt: *core.JSRuntime, shape: i32) !core.JSValue {
     const array = try core.Object.createArray(rt, null);
     errdefer core.Object.destroyFromHeader(rt, &array.header);
     switch (shape) {
         0 => {},
-        1 => try appendArrayValue(rt, array, core.Value.int32(1)),
+        1 => try appendArrayValue(rt, array, core.JSValue.int32(1)),
         23 => {
-            try appendArrayValue(rt, array, core.Value.int32(2));
-            try appendArrayValue(rt, array, core.Value.int32(3));
+            try appendArrayValue(rt, array, core.JSValue.int32(2));
+            try appendArrayValue(rt, array, core.JSValue.int32(3));
         },
         234 => {
-            try appendArrayValue(rt, array, core.Value.int32(2));
-            try appendArrayValue(rt, array, core.Value.int32(3));
-            try appendArrayValue(rt, array, core.Value.int32(4));
+            try appendArrayValue(rt, array, core.JSValue.int32(2));
+            try appendArrayValue(rt, array, core.JSValue.int32(3));
+            try appendArrayValue(rt, array, core.JSValue.int32(4));
         },
-        100 => try appendArrayValue(rt, array, core.Value.int32(0)),
+        100 => try appendArrayValue(rt, array, core.JSValue.int32(0)),
         101 => {
             const a_value = try value_ops.createStringValue(rt, "a");
             defer a_value.free(rt);
@@ -748,7 +748,7 @@ fn arrayFromShape(rt: *core.Runtime, shape: i32) !core.Value {
     return array.value();
 }
 
-fn appendArrayValue(rt: *core.Runtime, array: *core.Object, value: core.Value) !void {
+fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -764,18 +764,19 @@ fn appendArrayValue(rt: *core.Runtime, array: *core.Object, value: core.Value) !
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
 }
 
-fn setGlobalMapString(rt: *core.Runtime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
+fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
     const map_value = try globals_mod.getByName(rt, globals, "map");
     defer map_value.free(rt);
     const map_object = try expectObject(map_value);
     if (map_object.class_id == core.class.ids.weakmap) return setGlobalWeakMapString(rt, globals, map_object, key_int, bytes);
     if (map_object.class_id != core.class.ids.map) return error.TypeError;
-    const key = core.Value.int32(key_int);
+    const key = core.JSValue.int32(key_int);
     const value = try value_ops.createStringValue(rt, bytes);
     defer value.free(rt);
     for (map_object.collectionEntriesSlot().*) |*entry| {
         if (!entry.active) continue;
         if (entry.key.asInt32() == key_int) {
+            try rt.writeBarrierValueAt(&map_object.header, value, &entry.value);
             const next_value = value.dup();
             const old_value = entry.value;
             entry.value = next_value;
@@ -786,7 +787,7 @@ fn setGlobalMapString(rt: *core.Runtime, globals: []globals_mod.Slot, key_int: i
     try appendUnindexedCollectionEntryAndDefineSize(rt, map_object, .{ .key = key.dup(), .value = value.dup(), .active = true });
 }
 
-fn setGlobalWeakMapString(rt: *core.Runtime, globals: []globals_mod.Slot, map_object: *core.Object, key_int: i32, bytes: []const u8) !void {
+fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_object: *core.Object, key_int: i32, bytes: []const u8) !void {
     var key_name_buf: [32]u8 = undefined;
     const key_name = try std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int});
     var key_value = try globals_mod.getByName(rt, globals, key_name);
@@ -800,7 +801,7 @@ fn setGlobalWeakMapString(rt: *core.Runtime, globals: []globals_mod.Slot, map_ob
     try collection_builtin.setWeakMapEntry(rt, map_object, key_value, value);
 }
 
-fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value, key: core.Value, this_arg: core.Value) !void {
+fn appendRecordToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, value: core.JSValue, key: core.JSValue, this_arg: core.JSValue) !void {
     var rooted_value = value;
     var rooted_key = key;
     var rooted_this_arg = this_arg;
@@ -825,7 +826,7 @@ fn appendRecordToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, nam
     try appendToGlobalArray(rt, globals, name, record_value);
 }
 
-fn appendWeakMapAdderRecord(rt: *core.Runtime, globals: []globals_mod.Slot, key: core.Value, value: core.Value, this_arg: core.Value) !void {
+fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, key: core.JSValue, value: core.JSValue, this_arg: core.JSValue) !void {
     var rooted_key = key;
     var rooted_value = value;
     var rooted_this_arg = this_arg;
@@ -850,7 +851,7 @@ fn appendWeakMapAdderRecord(rt: *core.Runtime, globals: []globals_mod.Slot, key:
     try appendToGlobalArray(rt, globals, "results", record_value);
 }
 
-fn assertAndShiftExpected(rt: *core.Runtime, globals: []globals_mod.Slot, actual: core.Value) !void {
+fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     defer expects_value.free(rt);
     const expects = try expectArray(expects_value);
@@ -873,7 +874,7 @@ const SetForEachMutation = enum {
     revisit_after_readd,
 };
 
-fn setForEachMutation(rt: *core.Runtime, globals: []globals_mod.Slot, args: []const core.Value, mode: SetForEachMutation) !core.Value {
+fn setForEachMutation(rt: *core.JSRuntime, globals: []globals_mod.Slot, args: []const core.JSValue, mode: SetForEachMutation) !core.JSValue {
     if (args.len < 3) return error.TypeError;
     try assertAndShiftExpected(rt, globals, args[0]);
     const value = args[0].asInt32() orelse return error.TypeError;
@@ -893,18 +894,18 @@ fn setForEachMutation(rt: *core.Runtime, globals: []globals_mod.Slot, args: []co
             if (value == 3) try setAddInt(rt, set, 1);
         },
     }
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-fn setAddInt(rt: *core.Runtime, set: *core.Object, value: i32) !void {
+fn setAddInt(rt: *core.JSRuntime, set: *core.Object, value: i32) !void {
     for (set.collectionEntriesSlot().*) |entry| {
         if (!entry.active) continue;
         if (entry.key.asInt32() == value) return;
     }
-    try appendUnindexedCollectionEntryAndDefineSize(rt, set, .{ .key = core.Value.int32(value), .value = core.Value.undefinedValue(), .active = true });
+    try appendUnindexedCollectionEntryAndDefineSize(rt, set, .{ .key = core.JSValue.int32(value), .value = core.JSValue.undefinedValue(), .active = true });
 }
 
-fn setDeleteInt(rt: *core.Runtime, set: *core.Object, value: i32) !void {
+fn setDeleteInt(rt: *core.JSRuntime, set: *core.Object, value: i32) !void {
     for (set.collectionEntriesSlot().*, 0..) |*entry, index| {
         if (!entry.active) continue;
         if (entry.key.asInt32() == value) {
@@ -914,7 +915,7 @@ fn setDeleteInt(rt: *core.Runtime, set: *core.Object, value: i32) !void {
     }
 }
 
-fn appendUnindexedCollectionEntryAndDefineSize(rt: *core.Runtime, object: *core.Object, entry: core.object.CollectionEntry) !void {
+fn appendUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
     const pending_entry = entry;
     var entry_owned = true;
     errdefer if (entry_owned) pending_entry.destroy(rt);
@@ -931,25 +932,25 @@ fn appendUnindexedCollectionEntryAndDefineSize(rt: *core.Runtime, object: *core.
     inserted = false;
 }
 
-fn rollbackLastUnindexedCollectionEntry(rt: *core.Runtime, object: *core.Object, index: usize) void {
+fn rollbackLastUnindexedCollectionEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
     const entries_slot = object.collectionEntriesSlot();
     std.debug.assert(index + 1 == entries_slot.*.len);
     if (!entries_slot.*[index].active) return;
     const removed = entries_slot.*[index];
-    entries_slot.*[index] = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false };
+    entries_slot.*[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
     entries_slot.* = entries_slot.*.ptr[0..index];
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
     removed.destroy(rt);
 }
 
-fn removeUnindexedCollectionEntryAndDefineSize(rt: *core.Runtime, object: *core.Object, index: usize) !void {
+fn removeUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const entries = object.collectionEntriesSlot().*;
     std.debug.assert(index < entries.len);
     std.debug.assert(entries[index].active);
 
     const removed = entries[index];
-    entries[index] = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false };
+    entries[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
     const active_count = object.collectionActiveCountSlot();
     const old_active_count = active_count.*;
     if (active_count.* != 0) active_count.* -= 1;
@@ -967,7 +968,7 @@ fn removeUnindexedCollectionEntryAndDefineSize(rt: *core.Runtime, object: *core.
     removed.destroy(rt);
 }
 
-fn appendPairToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, key: core.Value, value: core.Value) !void {
+fn appendPairToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, key: core.JSValue, value: core.JSValue) !void {
     var rooted_key = key;
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -989,7 +990,7 @@ fn appendPairToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name:
     try appendToGlobalArray(rt, globals, name, pair_value);
 }
 
-fn appendToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8, value: core.Value) !void {
+fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8, value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -1011,18 +1012,18 @@ fn appendToGlobalArray(rt: *core.Runtime, globals: []globals_mod.Slot, name: []c
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
 }
 
-fn getGlobalObjectProperty(rt: *core.Runtime, globals: []globals_mod.Slot, name: []const u8) !core.Value {
+fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
     const global = try getGlobalThisObject(rt, globals);
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     return global.getProperty(key);
 }
 
-fn getGlobalThisValue(rt: *core.Runtime, globals: []globals_mod.Slot) !core.Value {
+fn getGlobalThisValue(rt: *core.JSRuntime, globals: []globals_mod.Slot) !core.JSValue {
     return (try getGlobalThisObject(rt, globals)).value().dup();
 }
 
-fn getGlobalThisObject(rt: *core.Runtime, globals: []globals_mod.Slot) !*core.Object {
+fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.Object {
     const global_value = try globals_mod.getByName(rt, globals, "globalThis");
     defer global_value.free(rt);
     const header = global_value.refHeader() orelse return error.TypeError;
@@ -1030,7 +1031,7 @@ fn getGlobalThisObject(rt: *core.Runtime, globals: []globals_mod.Slot) !*core.Ob
     return @fieldParentPtr("header", header);
 }
 
-fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -1047,7 +1048,7 @@ fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8
     try object.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, true, true, true));
 }
 
-fn expectArray(value: core.Value) !*core.Object {
+fn expectArray(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -1055,19 +1056,19 @@ fn expectArray(value: core.Value) !*core.Object {
     return object;
 }
 
-fn expectObject(value: core.Value) !*core.Object {
+fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn stringFromValue(value: core.Value) ?*core.string.String {
+fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-fn appendIntField(rt: *core.Runtime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {
+fn appendIntField(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), label: []const u8, value: i32) !void {
     var int_buf: [32]u8 = undefined;
     const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{value});
     try buffer.appendSlice(rt.memory.allocator, label);

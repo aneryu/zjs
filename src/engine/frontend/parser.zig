@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const atom = @import("../core/atom.zig");
-const Runtime = @import("../core/runtime.zig").Runtime;
+const JSRuntime = @import("../core/runtime.zig").JSRuntime;
 const bytecode = @import("../bytecode/root.zig");
 const zjs_lexer = @import("zjs_lexer.zig");
 const zjs_parser = @import("zjs_parser.zig");
@@ -24,7 +24,7 @@ pub const ParsePath = enum {
 };
 
 pub const Result = struct {
-    runtime: *Runtime,
+    runtime: *JSRuntime,
     function: bytecode.Bytecode,
     mode: Mode,
     parse_path: ParsePath = .quickjs_parser,
@@ -59,7 +59,7 @@ pub const Options = struct {
     eval_annex_b_blocked_function_names: []const atom.Atom = &.{},
 };
 
-pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
+pub fn parse(rt: *JSRuntime, source: []const u8, options: Options) !Result {
     var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
     errdefer arena.deinit();
 
@@ -113,7 +113,7 @@ pub fn parse(rt: *Runtime, source: []const u8, options: Options) !Result {
 }
 
 fn compileQjsProgram(
-    rt: *Runtime,
+    rt: *JSRuntime,
     filename_atom: atom.Atom,
     source: []const u8,
     options: Options,
@@ -252,7 +252,7 @@ fn skipJsTrivia(source: []const u8, start: usize) usize {
 
 fn setFallbackSyntaxError(
     result: *Result,
-    rt: *Runtime,
+    rt: *JSRuntime,
     filename_atom: atom.Atom,
     source: []const u8,
     message: []const u8,

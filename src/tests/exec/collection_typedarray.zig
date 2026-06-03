@@ -550,19 +550,19 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
     var saw_success = false;
 
     if (!oom_helpers.fullSweep()) {
-        const rt = try core.Runtime.create(std.testing.allocator);
-        const ctx = try core.Context.create(rt);
+        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const ctx = try core.JSContext.create(rt);
         var warmup = try engine.frontend.parser.parse(rt, setup_src, .{ .return_completion = true });
         var compiled = try engine.frontend.parser.parse(rt, src, .{ .return_completion = true });
         var vm = engine.exec.Vm.init(ctx);
 
         const warmup_result = try vm.run(&warmup.function);
-        const warmup_global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        const warmup_global = try engine.exec.zjs_vm.contextGlobal(ctx);
         try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, warmup_global);
         warmup_result.free(rt);
 
         const result = try vm.run(&compiled.function);
-        const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        const global = try engine.exec.zjs_vm.contextGlobal(ctx);
         try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, global);
         result.free(rt);
 
@@ -575,15 +575,15 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
-        const ctx = try core.Context.create(rt);
+        const rt = try core.JSRuntime.create(failing.allocator());
+        const ctx = try core.JSContext.create(rt);
 
         var warmup = try engine.frontend.parser.parse(rt, setup_src, .{ .return_completion = true });
         var compiled = try engine.frontend.parser.parse(rt, src, .{ .return_completion = true });
 
         var vm = engine.exec.Vm.init(ctx);
         const warmup_result = try vm.run(&warmup.function);
-        const warmup_global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+        const warmup_global = try engine.exec.zjs_vm.contextGlobal(ctx);
         try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, warmup_global);
         warmup_result.free(rt);
 
@@ -593,7 +593,7 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
 
         if (result) |value| {
             saw_success = true;
-            const global = try engine.exec.zjs_vm.ensureContextGlobal(ctx);
+            const global = try engine.exec.zjs_vm.contextGlobal(ctx);
             try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, global);
             value.free(rt);
         } else |err| switch (err) {
@@ -613,8 +613,8 @@ fn expectPromiseKeyedCombinatorOOMCleanup(setup_src: []const u8, src: []const u8
 }
 
 fn cleanupPromiseKeyedCombinatorOOMIteration(
-    rt: *core.Runtime,
-    ctx: *core.Context,
+    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
     vm: *engine.exec.Vm,
     compiled: *engine.frontend.parser.Result,
     warmup: *engine.frontend.parser.Result,
@@ -1016,13 +1016,13 @@ test "typed array constructor OOM releases owned backing buffer once" {
     var saw_success = false;
 
     if (!oom_helpers.fullSweep()) {
-        const rt = try core.Runtime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
         const value = try engine.exec.construct.constructTypedArrayValue(
             rt,
             null,
             .{ .size = 1, .kind = 2 },
-            &.{core.Value.int32(4)},
+            &.{core.JSValue.int32(4)},
             null,
         );
         value.free(rt);
@@ -1034,14 +1034,14 @@ test "typed array constructor OOM releases owned backing buffer once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = engine.exec.construct.constructTypedArrayValue(
             rt,
             null,
             .{ .size = 1, .kind = 2 },
-            &.{core.Value.int32(4)},
+            &.{core.JSValue.int32(4)},
             null,
         );
         failing.fail_index = std.math.maxInt(usize);
@@ -1078,7 +1078,7 @@ fn expectVmEvalOOMCleanup(source: []const u8, comptime fail_limit: usize) !void 
     var saw_success = false;
 
     if (!oom_helpers.fullSweep()) {
-        var js = try engine.Engine.init(std.testing.allocator);
+        var js = try engine.harness.Engine.init(std.testing.allocator);
         defer js.deinit();
         const value = try js.eval(source);
         value.free(js.runtime);
@@ -1090,7 +1090,7 @@ fn expectVmEvalOOMCleanup(source: []const u8, comptime fail_limit: usize) !void 
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
 
         const warmup = try js.eval(source);
         warmup.free(js.runtime);
@@ -1228,7 +1228,7 @@ test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
 }
 
 test "host WeakMap mutation closure rejects registered symbol keys" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const map_value = try engine.builtins.collection.construct(rt, 3);
@@ -1250,7 +1250,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
 
     var globals = [_]engine.exec.globals.Slot{
         .{ .name = map_name, .value = map_value.dup() },
-        .{ .name = key_name, .value = core.Value.symbol(registered_atom) },
+        .{ .name = key_name, .value = core.JSValue.symbol(registered_atom) },
     };
     defer globals[0].value.free(rt);
 
@@ -1264,7 +1264,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
 }
 
 test "host WeakMap mutation closure links entries into existing weak index" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const map_value = try engine.builtins.collection.construct(rt, 3);
@@ -1281,7 +1281,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
         const key = try core.Object.create(rt, core.class.ids.object, null);
         slot.* = key;
         key_count += 1;
-        const result = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ key.value(), core.Value.int32(@intCast(index)) });
+        const result = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
         result.free(rt);
     }
     try std.testing.expectEqual(@as(usize, 8), map_object.weakCollectionEntries().len);
@@ -1314,7 +1314,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
 }
 
 test "Set.prototype.symmetricDifference tracks receiver mutations without fixture skips" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const base_set_value = try engine.builtins.collection.construct(rt, 2);
@@ -1334,11 +1334,11 @@ test "Set.prototype.symmetricDifference tracks receiver mutations without fixtur
 
     const size_key = try rt.internAtom("size");
     defer rt.atoms.free(size_key);
-    try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.Value.int32(4), true, true, true));
+    try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
 
     const mode_key = try rt.internAtom("__setlike_mode");
     defer rt.atoms.free(mode_key);
-    try setlike.defineOwnProperty(rt, mode_key, core.Descriptor.data(core.Value.int32(5), true, true, true));
+    try setlike.defineOwnProperty(rt, mode_key, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
 
     const noop = try engine.exec.closure.create(rt, 13, 0, 0, 0);
     defer noop.free(rt);
@@ -1367,7 +1367,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations without fixtur
 }
 
 test "host map closure releases appended value when entry allocation fails" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const map_value = try engine.builtins.collection.construct(rt, 1);
@@ -1375,7 +1375,7 @@ test "host map closure releases appended value when entry allocation fails" {
     const map_object = objectFromValue(map_value);
 
     inline for (.{ 10, 11, 12, 13, 14, 15, 16, 17 }) |key| {
-        const result = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ core.Value.int32(key), core.Value.int32(key) });
+        const result = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(key), core.JSValue.int32(key) });
         result.free(rt);
     }
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntries().len);
@@ -1404,14 +1404,14 @@ test "host map closure releases appended value when entry allocation fails" {
 }
 
 test "host map closure rolls back appended entry when size update fails" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const map_value = try engine.builtins.collection.construct(rt, 1);
     defer map_value.free(rt);
     const map_object = objectFromValue(map_value);
 
-    const first_set = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ core.Value.int32(1), core.Value.int32(11) });
+    const first_set = try engine.builtins.collection.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(1), core.JSValue.int32(11) });
     first_set.free(rt);
 
     try fillOwnPropertyStorageForFailure(rt, map_object);
@@ -1440,7 +1440,7 @@ test "host map closure rolls back appended entry when size update fails" {
     const observed_active = map_object.collectionActiveCount();
     if (entries_slot.*.len > old_len) {
         entries_slot.*[old_len].destroy(rt);
-        entries_slot.*[old_len] = .{ .key = core.Value.undefinedValue(), .value = core.Value.undefinedValue(), .active = false };
+        entries_slot.*[old_len] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
         entries_slot.* = entries_slot.*.ptr[0..old_len];
         map_object.collectionActiveCountSlot().* = old_active;
         map_object.clearCollectionIndex(rt);
@@ -1456,7 +1456,7 @@ test "fused Map prefix-int range rolls back inserted entry when size update fail
     var saw_success = false;
 
     if (!oom_helpers.fullSweep()) {
-        const rt = try core.Runtime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator);
         defer rt.destroy();
         const map_value = try engine.builtins.collection.construct(rt, 1);
         defer map_value.free(rt);
@@ -1473,7 +1473,7 @@ test "fused Map prefix-int range rolls back inserted entry when size update fail
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
         defer rt.destroy();
 
         const map_value = try engine.builtins.collection.construct(rt, 1);
@@ -1873,9 +1873,9 @@ test "Engine eval closures inherit direct eval function declarations" {
 }
 
 test "invalid opcode reports invalid bytecode without context exception" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     var function = try makeFunction(rt, &.{250});
@@ -1922,7 +1922,7 @@ test "module top-level await works in class computed fields inside try" {
     try std.testing.expect(result.isUndefined());
 }
 
-fn fillOwnPropertyStorageForFailure(rt: *core.Runtime, object: *core.Object) !void {
+fn fillOwnPropertyStorageForFailure(rt: *core.JSRuntime, object: *core.Object) !void {
     var index: usize = 0;
     while (object.properties.len < object.property_capacity or object.shape_ref.prop_count < object.shape_ref.props.len) : (index += 1) {
         if (index > 512) return error.TestUnexpectedResult;
@@ -1930,7 +1930,7 @@ fn fillOwnPropertyStorageForFailure(rt: *core.Runtime, object: *core.Object) !vo
         const name = try std.fmt.bufPrint(&name_buf, "fill_{d}", .{index});
         const atom_id = try rt.internAtom(name);
         errdefer rt.atoms.free(atom_id);
-        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(core.Value.int32(@intCast(index)), true, true, true));
+        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
         rt.atoms.free(atom_id);
     }
 }

@@ -27,14 +27,14 @@ const core = @import("../core/root.zig");
 pub const Intrinsics = struct {
     global: *core.Object,
 
-    pub fn init(rt: *core.Runtime) !Intrinsics {
+    pub fn init(rt: *core.JSRuntime) !Intrinsics {
         const global = try core.Object.create(rt, core.class.ids.object, null);
         errdefer global.value().free(rt);
         try registry.installStandardGlobals(rt, global);
         return .{ .global = global };
     }
 
-    pub fn deinit(self: *Intrinsics, rt: *core.Runtime) void {
+    pub fn deinit(self: *Intrinsics, rt: *core.JSRuntime) void {
         self.global.value().free(rt);
     }
 };

@@ -25,20 +25,20 @@ pub const closure = @import("closure.zig");
 pub const test262_helpers = @import("test262_helpers.zig");
 
 pub const Vm = struct {
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: stack_mod.Stack,
     output: ?*std.Io.Writer = null,
     globals: []globals_mod.Slot = &.{},
     global_object: ?*core.Object = null,
 
-    pub fn init(ctx: *core.Context) Vm {
+    pub fn init(ctx: *core.JSContext) Vm {
         return .{
             .ctx = ctx,
             .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
         };
     }
 
-    pub fn initWithOutput(ctx: *core.Context, output: *std.Io.Writer) Vm {
+    pub fn initWithOutput(ctx: *core.JSContext, output: *std.Io.Writer) Vm {
         return .{
             .ctx = ctx,
             .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stack_limit),
@@ -51,7 +51,7 @@ pub const Vm = struct {
         self.globals = &.{};
         for (owned_globals) |*slot| {
             const value = slot.value;
-            slot.value = core.Value.undefinedValue();
+            slot.value = core.JSValue.undefinedValue();
             value.free(self.ctx.runtime);
         }
         if (owned_globals.len != 0) self.ctx.runtime.memory.free(globals_mod.Slot, owned_globals);
@@ -61,12 +61,12 @@ pub const Vm = struct {
         self.stack.deinit(self.ctx.runtime);
     }
 
-    pub fn run(self: *Vm, function: *const bytecode.Bytecode) !core.Value {
+    pub fn run(self: *Vm, function: *const bytecode.Bytecode) !core.JSValue {
         try self.stack.reserveAdditional(function.stack_size);
         return zjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
     }
 
-    pub fn runWithVarRefs(self: *Vm, function: *const bytecode.Bytecode, var_refs: []const core.Value) !core.Value {
+    pub fn runWithVarRefs(self: *Vm, function: *const bytecode.Bytecode, var_refs: []const core.JSValue) !core.JSValue {
         try self.stack.reserveAdditional(function.stack_size);
         return zjs_vm.runWithOutputAndVarRefs(self.ctx, &self.stack, function, self.output, var_refs);
     }

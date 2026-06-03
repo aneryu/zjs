@@ -3,16 +3,16 @@ const core = @import("../core/root.zig");
 
 pub const MaxArgs = 5;
 
-pub const Func = *const fn (*core.Context, []const core.Value) core.Value;
+pub const Func = *const fn (*core.JSContext, []const core.JSValue) core.JSValue;
 
 pub const Job = struct {
-    context: *core.Context,
+    context: *core.JSContext,
     func: Func,
     argc: u3 = 0,
-    argv: [MaxArgs]core.Value = [_]core.Value{core.Value.undefinedValue()} ** MaxArgs,
+    argv: [MaxArgs]core.JSValue = [_]core.JSValue{core.JSValue.undefinedValue()} ** MaxArgs,
     symbol_arg_mask: u5 = 0,
 
-    pub fn init(context: *core.Context, func: Func, args: []const core.Value) !Job {
+    pub fn init(context: *core.JSContext, func: Func, args: []const core.JSValue) !Job {
         if (args.len > MaxArgs) return error.TooManyJobArgs;
         var job = Job{
             .context = context,
@@ -35,7 +35,7 @@ pub const Job = struct {
         var index: usize = 0;
         while (index < argc) : (index += 1) {
             const value = self.argv[index];
-            self.argv[index] = core.Value.undefinedValue();
+            self.argv[index] = core.JSValue.undefinedValue();
             if ((self.symbol_arg_mask & (@as(u5, 1) << @intCast(index))) != 0) {
                 self.context.runtime.unregisterExternalValueSymbolRoot(value);
             }
@@ -44,8 +44,14 @@ pub const Job = struct {
         self.symbol_arg_mask = 0;
     }
 
-    pub fn run(self: *Job) core.Value {
+    pub fn run(self: *Job) core.JSValue {
         return self.func(self.context, self.argv[0..self.argc]);
+    }
+
+    pub fn traceRoots(self: *Job, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        for (self.argv[0..self.argc]) |*arg| {
+            try visitor.value(arg);
+        }
     }
 };
 
@@ -84,7 +90,7 @@ pub const Queue = struct {
         self.jobs[len] = job;
     }
 
-    pub fn enqueueFunc(self: *Queue, context: *core.Context, func: Func, args: []const core.Value) !void {
+    pub fn enqueueFunc(self: *Queue, context: *core.JSContext, func: Func, args: []const core.JSValue) !void {
         var job = try Job.init(context, func, args);
         errdefer job.deinit();
         try self.enqueue(job);
@@ -105,6 +111,12 @@ pub const Queue = struct {
             std.mem.copyForwards(Job, self.jobs[0 .. self.jobs.len - 1], self.jobs[1..]);
         }
         self.jobs = self.jobs[0 .. self.jobs.len - 1];
+    }
+
+    pub fn traceRoots(self: *Queue, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+        for (self.jobs) |*job| {
+            try job.traceRoots(visitor);
+        }
     }
 };
 

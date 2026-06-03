@@ -14,9 +14,9 @@ const parseStmtAndRunWithTopLevelChildren = helpers.parseStmtAndRunWithTopLevelC
 const expectStringBytes = helpers.expectStringBytes;
 const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 test "M3.1 F4: Object prototype Annex B accessors are callable" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o = {}; var g = function(){ return 7; }; o.__defineGetter__('x', g); return o.__lookupGetter__('x') === g; })()");
@@ -25,9 +25,9 @@ test "M3.1 F4: Object prototype Annex B accessors are callable" {
 }
 
 test "M3.1 F4: Object prototype __proto__ accessor mutates ordinary prototypes" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o = {}; var p = {}; o.__proto__ = p; return Object.getPrototypeOf(o) === p; })()");
@@ -36,9 +36,9 @@ test "M3.1 F4: Object prototype __proto__ accessor mutates ordinary prototypes" 
 }
 
 test "M3.1 F4: Object prototype methods handle null and primitive wrappers" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var n = new Object(3); return Object.prototype.toString.call(null) + '|' + Object.prototype.toString.call(n) + '|' + n.valueOf(); })()");
@@ -47,9 +47,9 @@ test "M3.1 F4: Object prototype methods handle null and primitive wrappers" {
 }
 
 test "M3.1 F4: Object.defineProperty reads accessor descriptors through VM semantics" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o = {}; Object.defineProperty(o, 'x', { get: function(){ return 3; }, enumerable: 12 }); var d = Object.getOwnPropertyDescriptor(o, 'x'); return o.x + '|' + (typeof d.get) + '|' + d.enumerable; })()");
@@ -58,9 +58,9 @@ test "M3.1 F4: Object.defineProperty reads accessor descriptors through VM seman
 }
 
 test "M3.1 F4: Object.defineProperty rejects mixed data and accessor descriptors" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ try { Object.defineProperty({}, 'x', { get: function(){}, value: 1 }); return 'bad'; } catch (e) { return e.name; } })()");
@@ -69,9 +69,9 @@ test "M3.1 F4: Object.defineProperty rejects mixed data and accessor descriptors
 }
 
 test "M3.1 F4: Object.defineProperty observes descriptor proxy fields in spec order" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -102,9 +102,9 @@ test "M3.1 F4: Object.defineProperty observes descriptor proxy fields in spec or
 }
 
 test "M3.1 F4: Object.defineProperties boxes primitive properties argument" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o = {}; var same = Object.defineProperties(o, false) === o; Object.defineProperties(o, { a: { value: 4, enumerable: 12 } }); return same + '|' + o.a + '|' + Object.keys(o)[0]; })()");
@@ -113,9 +113,9 @@ test "M3.1 F4: Object.defineProperties boxes primitive properties argument" {
 }
 
 test "M3.1 F4: Object.create applies descriptor properties through VM semantics" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var p = { p: 1 }; var o = Object.create(p, { x: { get: function(){ return 5; }, enumerable: 12 } }); return (Object.getPrototypeOf(o) === p) + '|' + o.x + '|' + Object.keys(o)[0]; })()");
@@ -124,9 +124,9 @@ test "M3.1 F4: Object.create applies descriptor properties through VM semantics"
 }
 
 test "M3.1 F4: Object.create boxes primitive properties argument" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var p = {}; var o = Object.create(p, Symbol('s')); return Object.getPrototypeOf(o) === p && Object.getOwnPropertySymbols(o).length === 0; })()");
@@ -135,9 +135,9 @@ test "M3.1 F4: Object.create boxes primitive properties argument" {
 }
 
 test "M3.1 F4: Date internal slots are hidden from Object.create descriptors" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var props = new Date(0); props.prop = { value: 12, enumerable: true }; var o = Object.create({}, props); return Object.keys(props).join(',') + '|' + o.hasOwnProperty('prop') + '|' + o.prop; })()");
@@ -146,9 +146,9 @@ test "M3.1 F4: Date internal slots are hidden from Object.create descriptors" {
 }
 
 test "M3.1 F4: Date internal slot ignores public __date properties" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -167,9 +167,9 @@ test "M3.1 F4: Date internal slot ignores public __date properties" {
 }
 
 test "M3.1 F4: Object.hasOwn checks boxed own properties only" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -197,9 +197,9 @@ test "M3.1 F4: Object.hasOwn checks boxed own properties only" {
 }
 
 test "M3.1 F4: Object.getOwnPropertyDescriptors includes strings and symbols" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -234,9 +234,9 @@ test "M3.1 F4: Object.getOwnPropertyDescriptors includes strings and symbols" {
 }
 
 test "M3.1 F4: Object entries statics box primitive receivers" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -263,9 +263,9 @@ test "M3.1 F4: Object entries statics box primitive receivers" {
 }
 
 test "M3.1 F4: Object entries statics merge dense and property array indices" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -291,9 +291,9 @@ test "M3.1 F4: Object entries statics merge dense and property array indices" {
 }
 
 test "M3.1 F4: Object.fromEntries defines data properties from iterables" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -313,9 +313,9 @@ test "M3.1 F4: Object.fromEntries defines data properties from iterables" {
 }
 
 test "M3.1 F4: Object prototype statics handle primitives and topology" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -354,9 +354,9 @@ test "M3.1 F4: Object prototype statics handle primitives and topology" {
 }
 
 test "M3.1 F4: Object.groupBy creates null-prototype grouped arrays" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -377,9 +377,9 @@ test "M3.1 F4: Object.groupBy creates null-prototype grouped arrays" {
 }
 
 test "M3.1 F4: missing function arguments allocate undefined formal slots" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ function f(a, b, c) { c = 3; return b === undefined ? c : 0; } return f(1); })()");
@@ -388,9 +388,9 @@ test "M3.1 F4: missing function arguments allocate undefined formal slots" {
 }
 
 test "M3.1 F4: qjs_vm executes logical or assignment in computed object key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var x = 0; var o = { [x ||= 1]: 2 }; return o[1] + x; })()");
@@ -399,9 +399,9 @@ test "M3.1 F4: qjs_vm executes logical or assignment in computed object key" {
 }
 
 test "M3.1 F4: qjs_vm executes indexed logical assignment in computed object key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var a = [0]; var o = { [a[0] ||= 1]: 2 }; return o[1] + a[0]; })()");
@@ -410,9 +410,9 @@ test "M3.1 F4: qjs_vm executes indexed logical assignment in computed object key
 }
 
 test "M3.1 F4: qjs_vm executes logical and assignment in computed object key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var x = 0; var o = { [x &&= 1]: 2 }; return o[0] + x; })()");
@@ -421,9 +421,9 @@ test "M3.1 F4: qjs_vm executes logical and assignment in computed object key" {
 }
 
 test "M3.1 F4: qjs_vm executes nullish assignment in computed object key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var x = null; var o = { [x ??= 1]: 2 }; return o[1] + x; })()");
@@ -432,9 +432,9 @@ test "M3.1 F4: qjs_vm executes nullish assignment in computed object key" {
 }
 
 test "M3.1 F4: qjs_vm supports Object.create null prototype for computed accessor in" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ return ({ get [\"x\" in Object.create(null)]() { return 5; } }).false; })()");
@@ -443,9 +443,9 @@ test "M3.1 F4: qjs_vm supports Object.create null prototype for computed accesso
 }
 
 test "M3.1 F4: qjs_vm executes unlabelled break in for loop" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var value = 0; for (; ; ) { value = 7; break; value = 1; } return value; })()");
@@ -454,9 +454,9 @@ test "M3.1 F4: qjs_vm executes unlabelled break in for loop" {
 }
 
 test "M3.1 F4: qjs_vm executes object literal __proto__ null" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "Object.getPrototypeOf({__proto__: null}) === null");

@@ -1,6 +1,6 @@
 const gc = @import("gc.zig");
-const Runtime = @import("runtime.zig").Runtime;
-const Value = @import("value.zig").Value;
+const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSValue = @import("value.zig").JSValue;
 
 pub const StringError = error{
     InvalidUtf8,
@@ -39,14 +39,14 @@ pub const String = struct {
     atom_id: ?u32 = null,
 
     /// Returns an owned runtime string. The runtime releases it through
-    /// reference counting when all `Value` handles are freed.
-    pub fn createAscii(rt: *Runtime, bytes: []const u8) !*String {
+    /// reference counting when all `JSValue` handles are freed.
+    pub fn createAscii(rt: *JSRuntime, bytes: []const u8) !*String {
         return createLatin1(rt, bytes);
     }
 
     /// Returns an owned runtime string decoded from UTF-8 into QuickJS-style
     /// 8-bit or 16-bit code-unit storage.
-    pub fn createUtf8(rt: *Runtime, bytes: []const u8) !*String {
+    pub fn createUtf8(rt: *JSRuntime, bytes: []const u8) !*String {
         const plan = try scanUtf8(bytes);
         if (!plan.wide) {
             const self = try createUninitialized(rt, .latin1, plan.units);
@@ -64,8 +64,8 @@ pub const String = struct {
     }
 
     /// Returns an owned runtime string. Caller transfers the returned value to
-    /// `Value.free` or another owner.
-    pub fn createUtf16(rt: *Runtime, units: []const u16) !*String {
+    /// `JSValue.free` or another owner.
+    pub fn createUtf16(rt: *JSRuntime, units: []const u16) !*String {
         var needs_wide = false;
         for (units) |unit| {
             if (unit > 0xff) {
@@ -89,7 +89,7 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createUtf16Owned(rt: *Runtime, units: []u16, capacity: usize) !*String {
+    pub fn createUtf16Owned(rt: *JSRuntime, units: []u16, capacity: usize) !*String {
         std.debug.assert(capacity >= units.len);
         var needs_wide = false;
         for (units) |unit| {
@@ -124,7 +124,7 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createUtf16Pair(rt: *Runtime, first: u16, second: u16) !*String {
+    pub fn createUtf16Pair(rt: *JSRuntime, first: u16, second: u16) !*String {
         if (first <= 0xff and second <= 0xff) {
             const self = try createUninitialized(rt, .latin1, 2);
             errdefer destroyUninitialized(rt, self);
@@ -142,7 +142,7 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createAtomBacked(rt: *Runtime, atom_id: u32) !*String {
+    pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
         const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
         const self = try createUtf8(rt, name);
         self.atom_id = rt.atoms.dup(atom_id);
@@ -154,11 +154,11 @@ pub const String = struct {
     ///
     /// Used by the `+` operator string fast path so we skip the per-call
     /// `ArrayList(u8)` intermediate (and its `deinit`).
-    pub fn createLatin1Concat(rt: *Runtime, a: []const u8, b: []const u8) !*String {
+    pub fn createLatin1Concat(rt: *JSRuntime, a: []const u8, b: []const u8) !*String {
         return createLatin1ConcatWithSeed(rt, a, b, hashLatin1(a, 0));
     }
 
-    pub fn createLatin1ConcatWithSeed(rt: *Runtime, a: []const u8, b: []const u8, seed: u32) !*String {
+    pub fn createLatin1ConcatWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
         const total = a.len + b.len;
         const self = try createUninitialized(rt, .latin1, total);
         errdefer destroyUninitialized(rt, self);
@@ -168,7 +168,7 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createLatin1RepeatedConcatWithSeed(rt: *Runtime, a: []const u8, suffix: []const u8, repeat_count: usize, seed: u32) !*String {
+    pub fn createLatin1RepeatedConcatWithSeed(rt: *JSRuntime, a: []const u8, suffix: []const u8, repeat_count: usize, seed: u32) !*String {
         const append_len = try std.math.mul(usize, suffix.len, repeat_count);
         const total = try std.math.add(usize, a.len, append_len);
         const self = try createUninitialized(rt, .latin1, total);
@@ -194,11 +194,11 @@ pub const String = struct {
 
     /// Concatenate two utf16 unit buffers into a single freshly allocated
     /// utf16 string. The runtime owns the result.
-    pub fn createUtf16Concat(rt: *Runtime, a: []const u16, b: []const u16) !*String {
+    pub fn createUtf16Concat(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
         return createUtf16ConcatWithSeed(rt, a, b, hashUtf16(a, 0));
     }
 
-    pub fn createUtf16ConcatWithSeed(rt: *Runtime, a: []const u16, b: []const u16, seed: u32) !*String {
+    pub fn createUtf16ConcatWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
         const total = a.len + b.len;
         const self = try createUninitialized(rt, .utf16, total);
         errdefer destroyUninitialized(rt, self);
@@ -208,7 +208,7 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createLatin1(rt: *Runtime, bytes: []const u8) !*String {
+    pub fn createLatin1(rt: *JSRuntime, bytes: []const u8) !*String {
         const self = try rt.memory.create(String);
         errdefer rt.memory.destroy(String, self);
 
@@ -225,8 +225,8 @@ pub const String = struct {
         return self;
     }
 
-    pub fn value(self: *String) Value {
-        return Value.string(&self.header);
+    pub fn value(self: *String) JSValue {
+        return JSValue.string(&self.header);
     }
 
     pub fn len(self: String) usize {
@@ -310,7 +310,7 @@ pub const String = struct {
         };
     }
 
-    pub fn createSlice(rt: *Runtime, parent: *String, start: usize, slice_len: usize) !*String {
+    pub fn createSlice(rt: *JSRuntime, parent: *String, start: usize, slice_len: usize) !*String {
         if (slice_len == 0) return try createAscii(rt, "");
         const self = try rt.memory.create(String);
         errdefer rt.memory.destroy(String, self);
@@ -327,7 +327,7 @@ pub const String = struct {
         return self;
     }
 
-    pub fn appendLatin1InPlace(self: *String, rt: *Runtime, suffix: []const u8) !bool {
+    pub fn appendLatin1InPlace(self: *String, rt: *JSRuntime, suffix: []const u8) !bool {
         if (self.atom_id != null) return false;
         if (suffix.len == 0) return true;
         const bytes = switch (self.data) {
@@ -361,7 +361,7 @@ pub const String = struct {
         return true;
     }
 
-    pub fn appendUtf16InPlace(self: *String, rt: *Runtime, suffix: []const u16) !bool {
+    pub fn appendUtf16InPlace(self: *String, rt: *JSRuntime, suffix: []const u16) !bool {
         if (self.atom_id != null) return false;
         if (suffix.len == 0) return true;
         const units = switch (self.data) {
@@ -392,7 +392,7 @@ pub const String = struct {
         return true;
     }
 
-    pub fn appendLatin1ToUtf16InPlace(self: *String, rt: *Runtime, suffix: []const u8) !bool {
+    pub fn appendLatin1ToUtf16InPlace(self: *String, rt: *JSRuntime, suffix: []const u8) !bool {
         if (self.atom_id != null) return false;
         if (suffix.len == 0) return true;
         const units = switch (self.data) {
@@ -423,7 +423,7 @@ pub const String = struct {
         return true;
     }
 
-    pub fn appendUtf16WidenInPlace(self: *String, rt: *Runtime, suffix: []const u16) !bool {
+    pub fn appendUtf16WidenInPlace(self: *String, rt: *JSRuntime, suffix: []const u16) !bool {
         if (self.atom_id != null) return false;
         if (suffix.len == 0) return true;
         const bytes = switch (self.data) {
@@ -446,7 +446,7 @@ pub const String = struct {
         return true;
     }
 
-    pub fn appendLatin1RepeatedInPlace(self: *String, rt: *Runtime, suffix: []const u8, repeat_count: usize) !bool {
+    pub fn appendLatin1RepeatedInPlace(self: *String, rt: *JSRuntime, suffix: []const u8, repeat_count: usize) !bool {
         if (self.atom_id != null) return false;
         if (repeat_count == 0 or suffix.len == 0) return true;
         const bytes = switch (self.data) {
@@ -500,13 +500,13 @@ pub const String = struct {
         return true;
     }
 
-    pub fn destroyFromHeader(rt: *Runtime, header: *gc.Header) void {
+    pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         const self: *String = @alignCast(@fieldParentPtr("header", header));
         if (self.atom_id) |atom_id| rt.atoms.free(atom_id);
         destroyUninitialized(rt, self);
     }
 
-    fn createUninitialized(rt: *Runtime, comptime tag: std.meta.Tag(Data), unit_count: usize) !*String {
+    fn createUninitialized(rt: *JSRuntime, comptime tag: std.meta.Tag(Data), unit_count: usize) !*String {
         const self = try rt.memory.create(String);
         errdefer rt.memory.destroy(String, self);
         self.header = .{ .kind = .string };
@@ -521,11 +521,11 @@ pub const String = struct {
         return self;
     }
 
-    fn destroyUninitialized(rt: *Runtime, self: *String) void {
+    fn destroyUninitialized(rt: *JSRuntime, self: *String) void {
         switch (self.data) {
             .latin1 => |bytes| rt.memory.free(u8, bytes.ptr[0..self.capacity]),
             .utf16 => |units| rt.memory.free(u16, units.ptr[0..self.capacity]),
-            .slice => |s| Value.string(&s.parent.header).free(rt),
+            .slice => |s| JSValue.string(&s.parent.header).free(rt),
         }
         rt.memory.destroy(String, self);
     }

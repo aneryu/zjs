@@ -29,12 +29,34 @@ const ModuleNamespaceError = error{
     TypeError,
 };
 
+const ValueSliceRoot = struct {
+    rt: ?*core.JSRuntime = null,
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    fn init(self: *ValueSliceRoot, rt: *core.JSRuntime, values: *[]core.JSValue) void {
+        self.rt = rt;
+        self.slices[0] = .{ .mutable = values };
+        self.frame = .{
+            .previous = rt.active_value_roots,
+            .slices = &self.slices,
+        };
+        rt.active_value_roots = &self.frame;
+    }
+
+    fn deinit(self: *ValueSliceRoot) void {
+        const rt = self.rt orelse return;
+        rt.active_value_roots = self.frame.previous;
+        self.rt = null;
+    }
+};
+
 pub fn isLinked(function: bytecode.Bytecode) bool {
     return function.module_record != null;
 }
 
 pub fn instantiateParsedRecord(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
 ) !*core.module.ModuleRecord {
@@ -42,7 +64,7 @@ pub fn instantiateParsedRecord(
 }
 
 pub fn instantiateParsedRecordWithReferrer(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
     referrer_path: ?[]const u8,
@@ -97,7 +119,7 @@ pub fn instantiateParsedRecordWithReferrer(
 pub fn preloadFileModuleGraph(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -113,7 +135,7 @@ pub fn preloadFileModuleGraph(
 pub fn preloadFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -130,7 +152,7 @@ pub fn preloadFileModuleGraphWithOrder(
 pub fn preloadMissingFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -156,10 +178,10 @@ pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []con
 }
 
 pub fn buildModuleVarRefs(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
-) ![]core.Value {
+) ![]core.JSValue {
     if (function.var_ref_names.len == 0) return &.{};
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     for (function.var_ref_names, 0..) |name, idx| {
@@ -167,11 +189,19 @@ pub fn buildModuleVarRefs(
         const cell = try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
         cell.free(ctx.runtime);
     }
-    const refs = try ctx.runtime.memory.alloc(core.Value, function.var_ref_names.len);
-    errdefer ctx.runtime.memory.free(core.Value, refs);
+    const refs = try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
+    errdefer ctx.runtime.memory.free(core.JSValue, refs);
+    var rooted_refs: []core.JSValue = refs[0..0];
+    var refs_root = ValueSliceRoot{};
+    refs_root.init(ctx.runtime, &rooted_refs);
+    defer refs_root.deinit();
     var initialized: usize = 0;
     errdefer {
-        for (refs[0..initialized]) |value| value.free(ctx.runtime);
+        for (refs[0..initialized]) |*value| {
+            value.free(ctx.runtime);
+            value.* = core.JSValue.undefinedValue();
+        }
+        rooted_refs = &.{};
     }
 
     for (function.var_ref_names, 0..) |name, idx| {
@@ -180,6 +210,7 @@ pub fn buildModuleVarRefs(
         else
             try moduleLocalCell(ctx, record, name, moduleVarRefIsLexical(function, idx), moduleVarRefIsConst(function, idx));
         initialized += 1;
+        rooted_refs = refs[0..initialized];
     }
     return refs;
 }
@@ -194,12 +225,12 @@ fn moduleVarRefIsConst(function: *const bytecode.Bytecode, index: usize) bool {
     return function.var_ref_is_const[index];
 }
 
-pub fn freeModuleVarRefs(runtime: *core.Runtime, refs: []core.Value) void {
+pub fn freeModuleVarRefs(runtime: *core.JSRuntime, refs: []core.JSValue) void {
     for (refs) |value| value.free(runtime);
-    if (refs.len != 0) runtime.memory.free(core.Value, refs);
+    if (refs.len != 0) runtime.memory.free(core.JSValue, refs);
 }
 
-pub fn moduleNamespaceValue(ctx: *core.Context, module_name: core.Atom) !core.Value {
+pub fn moduleNamespaceValue(ctx: *core.JSContext, module_name: core.Atom) !core.JSValue {
     const record = ctx.runtime.modules.find(module_name) orelse return error.ModuleNotFound;
     const cell = try moduleNamespaceCell(ctx, record);
     defer cell.free(ctx.runtime);
@@ -207,21 +238,29 @@ pub fn moduleNamespaceValue(ctx: *core.Context, module_name: core.Atom) !core.Va
 }
 
 pub fn initializeModuleFunctionDeclarations(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     module_name: core.Atom,
     function: *const bytecode.Bytecode,
 ) !void {
     if (!function.flags.is_module) return;
 
-    const module_var_refs = try buildModuleVarRefs(ctx, module_name, function);
+    var module_var_refs = try buildModuleVarRefs(ctx, module_name, function);
     defer freeModuleVarRefs(ctx.runtime, module_var_refs);
+    var module_var_refs_root = ValueSliceRoot{};
+    module_var_refs_root.init(ctx.runtime, &module_var_refs);
+    defer module_var_refs_root.deinit();
 
     var frame = frame_mod.Frame.init(function);
     defer frame.deinit(&ctx.runtime.memory, ctx.runtime);
+    var rooted_frame_var_refs: []core.JSValue = &.{};
+    var frame_var_refs_root = ValueSliceRoot{};
+    frame_var_refs_root.init(ctx.runtime, &rooted_frame_var_refs);
+    defer frame_var_refs_root.deinit();
     if (module_var_refs.len != 0) {
-        frame.var_refs = try ctx.runtime.memory.alloc(core.Value, module_var_refs.len);
+        frame.var_refs = try ctx.runtime.memory.alloc(core.JSValue, module_var_refs.len);
         for (module_var_refs, 0..) |value, idx| frame.var_refs[idx] = value.dup();
+        rooted_frame_var_refs = frame.var_refs;
     }
 
     var pc: usize = moduleFunctionDeclarationPrologueEnd(function);
@@ -262,7 +301,7 @@ pub fn initializeModuleFunctionDeclarations(
         const value = function.constants.get(constant_index) orelse return error.InvalidBytecode;
         defer value.free(ctx.runtime);
         const function_value = try shared_vm.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true, &.{}, &.{}, &.{}, &.{}, &.{});
-        shared_vm.setSlotValue(ctx, &frame.var_refs[ref_idx], function_value);
+        try shared_vm.setSlotValue(ctx, &frame.var_refs[ref_idx], function_value);
     }
 }
 
@@ -282,7 +321,7 @@ fn requestName(record: bytecode.module.Record, request_index: u32) !bytecode.mod
 }
 
 fn resolvedRequestAtomForParsed(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     parsed: *const bytecode.module.Record,
     request_atom: core.Atom,
     request_index: u32,
@@ -299,7 +338,7 @@ fn resolvedRequestAtomForParsed(
     return runtime.internAtom(tagged_name);
 }
 
-fn moduleImportCell(ctx: *core.Context, record: *const core.module.ModuleRecord, local_name: core.Atom) !core.Value {
+fn moduleImportCell(ctx: *core.JSContext, record: *const core.module.ModuleRecord, local_name: core.Atom) !core.JSValue {
     for (record.resolved_imports) |entry| {
         if (entry.local_name != local_name) continue;
         if (entry.module_index >= ctx.runtime.modules.modules.len) return error.ModuleNotFound;
@@ -323,13 +362,13 @@ fn moduleHasResolvedImport(record: *const core.module.ModuleRecord, local_name: 
     return false;
 }
 
-fn moduleLocalCell(ctx: *core.Context, record: *core.module.ModuleRecord, name: core.Atom, is_lexical: bool, is_const: bool) !core.Value {
+fn moduleLocalCell(ctx: *core.JSContext, record: *core.module.ModuleRecord, name: core.Atom, is_lexical: bool, is_const: bool) !core.JSValue {
     try record.ensureLocalBinding(name);
     const index = record.findLocalBindingIndex(name) orelse return error.MissingExport;
     if (varRefCellFromValue(record.local_bindings[index].cell) == null) {
         const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
         errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-        try object.initVarRefPayload(ctx.runtime, if (is_lexical) core.Value.uninitialized() else core.Value.undefinedValue());
+        try object.initVarRefPayload(ctx.runtime, if (is_lexical) core.JSValue.uninitialized() else core.JSValue.undefinedValue());
         object.varRefIsConstSlot().* = is_const;
         record.local_bindings[index].cell = object.value();
     } else if (is_const) {
@@ -339,7 +378,7 @@ fn moduleLocalCell(ctx: *core.Context, record: *core.module.ModuleRecord, name: 
     return record.local_bindings[index].cell.dup();
 }
 
-fn moduleNamespaceCell(ctx: *core.Context, record: *core.module.ModuleRecord) !core.Value {
+fn moduleNamespaceCell(ctx: *core.JSContext, record: *core.module.ModuleRecord) !core.JSValue {
     try record.ensureLocalBinding(atom_star);
     const index = record.findLocalBindingIndex(atom_star) orelse return error.MissingExport;
     if (varRefCellFromValue(record.local_bindings[index].cell) == null) {
@@ -351,7 +390,7 @@ fn moduleNamespaceCell(ctx: *core.Context, record: *core.module.ModuleRecord) !c
         namespace_owned = false;
         errdefer {
             const old_cell = record.local_bindings[index].cell;
-            record.local_bindings[index].cell = core.Value.undefinedValue();
+            record.local_bindings[index].cell = core.JSValue.undefinedValue();
             old_cell.free(ctx.runtime);
         }
         try initializeModuleNamespaceObject(ctx, record, object);
@@ -359,15 +398,15 @@ fn moduleNamespaceCell(ctx: *core.Context, record: *core.module.ModuleRecord) !c
     return record.local_bindings[index].cell.dup();
 }
 
-fn createVarRefCell(ctx: *core.Context, value: core.Value) !core.Value {
+fn createVarRefCell(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
     return createVarRefCellWithConst(ctx, value, false);
 }
 
-fn createConstVarRefCell(ctx: *core.Context, value: core.Value) !core.Value {
+fn createConstVarRefCell(ctx: *core.JSContext, value: core.JSValue) !core.JSValue {
     return createVarRefCellWithConst(ctx, value, true);
 }
 
-fn createVarRefCellWithConst(ctx: *core.Context, value: core.Value, is_const: bool) !core.Value {
+fn createVarRefCellWithConst(ctx: *core.JSContext, value: core.JSValue, is_const: bool) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -387,9 +426,9 @@ fn createVarRefCellWithConst(ctx: *core.Context, value: core.Value, is_const: bo
 }
 
 test "createVarRefCellWithConst roots direct symbol value while creating cell" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-module-var-ref-cell-symbol");
@@ -398,14 +437,14 @@ test "createVarRefCellWithConst roots direct symbol value while creating cell" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const cell_value = try createVarRefCellWithConst(ctx, core.Value.symbol(symbol_atom), true);
+    const cell_value = try createVarRefCellWithConst(ctx, core.JSValue.symbol(symbol_atom), true);
     var cell_alive = true;
     defer if (cell_alive) cell_value.free(rt);
     const cell = varRefCellFromValue(cell_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = cell.varRefValueSlot().* orelse return error.TypeError;
-    try std.testing.expect(stored.same(core.Value.symbol(symbol_atom)));
+    try std.testing.expect(stored.same(core.JSValue.symbol(symbol_atom)));
     try std.testing.expect(cell.varRefIsConstSlot().*);
 
     cell_value.free(rt);
@@ -414,27 +453,36 @@ test "createVarRefCellWithConst roots direct symbol value while creating cell" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn createModuleNamespaceObject(ctx: *core.Context, record: *core.module.ModuleRecord) ModuleNamespaceError!core.Value {
+fn createModuleNamespaceObject(ctx: *core.JSContext, record: *core.module.ModuleRecord) ModuleNamespaceError!core.JSValue {
     const object = try core.Object.create(ctx.runtime, core.class.ids.module_ns, null);
     errdefer object.value().free(ctx.runtime);
     try initializeModuleNamespaceObject(ctx, record, object);
     return object.value();
 }
 
-fn initializeModuleNamespaceObject(ctx: *core.Context, record: *core.module.ModuleRecord, object: *core.Object) ModuleNamespaceError!void {
+fn initializeModuleNamespaceObject(ctx: *core.JSContext, record: *core.module.ModuleRecord, object: *core.Object) ModuleNamespaceError!void {
     var exports = std.ArrayList(core.Atom).empty;
     defer exports.deinit(ctx.runtime.memory.allocator);
     try collectModuleNamespaceExports(ctx, record, &exports);
     std.mem.sort(core.Atom, exports.items, ctx.runtime, atomLessThan);
 
     var payload_names = std.ArrayList(core.Atom).empty;
-    var payload_cells = std.ArrayList(core.Value).empty;
+    var payload_cells = std.ArrayList(core.JSValue).empty;
     errdefer {
         for (payload_names.items) |name| ctx.runtime.atoms.free(name);
         payload_names.deinit(ctx.runtime.memory.allocator);
         for (payload_cells.items) |cell| cell.free(ctx.runtime);
         payload_cells.deinit(ctx.runtime.memory.allocator);
     }
+    var payload_cell_root_slices = [_]core.runtime.ValueRootSlice{
+        .{ .mutable = &payload_cells.items },
+    };
+    const payload_cell_root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .slices = &payload_cell_root_slices,
+    };
+    ctx.runtime.active_value_roots = &payload_cell_root_frame;
+    defer ctx.runtime.active_value_roots = payload_cell_root_frame.previous;
 
     for (exports.items) |export_name| {
         const resolution = try ctx.runtime.modules.resolveExport(record.module_name, export_name);
@@ -442,31 +490,44 @@ fn initializeModuleNamespaceObject(ctx: *core.Context, record: *core.module.Modu
         const binding = resolution.resolved;
         if (binding.module_index >= ctx.runtime.modules.modules.len) continue;
         const dep = &ctx.runtime.modules.modules[binding.module_index];
-        const cell = if (binding.local_name == atom_star)
+        var rooted_cell = if (binding.local_name == atom_star)
             try moduleNamespaceCell(ctx, dep)
         else if (explicitStarNamespaceTarget(dep, binding.local_name) != null)
             try moduleExplicitNamespaceExportCell(ctx, dep, binding.local_name)
         else
             try moduleLocalCell(ctx, dep, binding.local_name, true, false);
-        errdefer cell.free(ctx.runtime);
-        const value = moduleBindingCellValue(cell);
-        defer value.free(ctx.runtime);
-        try object.defineOwnProperty(ctx.runtime, export_name, core.Descriptor.data(value, true, true, false));
+        var cell_owned = true;
+        errdefer if (cell_owned) rooted_cell.free(ctx.runtime);
+        var rooted_value = moduleBindingCellValue(rooted_cell);
+        defer rooted_value.free(ctx.runtime);
+        var loop_root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &rooted_cell },
+            .{ .value = &rooted_value },
+        };
+        const loop_root_frame = core.runtime.ValueRootFrame{
+            .previous = ctx.runtime.active_value_roots,
+            .values = &loop_root_values,
+        };
+        ctx.runtime.active_value_roots = &loop_root_frame;
+        defer ctx.runtime.active_value_roots = loop_root_frame.previous;
+
+        try object.defineOwnProperty(ctx.runtime, export_name, core.Descriptor.data(rooted_value, true, true, false));
         const payload_name = ctx.runtime.atoms.dup(export_name);
         var payload_name_owned = true;
         errdefer if (payload_name_owned) ctx.runtime.atoms.free(payload_name);
         try payload_names.append(ctx.runtime.memory.allocator, payload_name);
         payload_name_owned = false;
-        try payload_cells.append(ctx.runtime.memory.allocator, cell);
+        try payload_cells.append(ctx.runtime.memory.allocator, rooted_cell);
+        cell_owned = false;
     }
     try defineModuleNamespaceToStringTag(ctx, object);
     const payload = object.moduleNamespacePayload() orelse return error.InvalidBytecode;
     payload.names = try ownedAtomSliceFromList(ctx, &payload_names);
-    payload.cells = try ownedValueSliceFromList(ctx, &payload_cells);
+    try object.setModuleNamespaceCells(ctx.runtime, try ownedValueSliceFromList(ctx, &payload_cells));
     object.extensible = false;
 }
 
-fn defineModuleNamespaceToStringTag(ctx: *core.Context, object: *core.Object) !void {
+fn defineModuleNamespaceToStringTag(ctx: *core.JSContext, object: *core.Object) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.InvalidAtom;
     const tag_string = try core.string.String.createUtf8(ctx.runtime, "Module");
     const tag_value = tag_string.value();
@@ -474,7 +535,7 @@ fn defineModuleNamespaceToStringTag(ctx: *core.Context, object: *core.Object) !v
     try object.defineOwnProperty(ctx.runtime, tag_atom, core.Descriptor.data(tag_value, false, false, false));
 }
 
-fn ownedAtomSliceFromList(ctx: *core.Context, list: *std.ArrayList(core.Atom)) ![]core.Atom {
+fn ownedAtomSliceFromList(ctx: *core.JSContext, list: *std.ArrayList(core.Atom)) ![]core.Atom {
     if (list.items.len == 0) return &.{};
     const out = try ctx.runtime.memory.alloc(core.Atom, list.items.len);
     @memcpy(out, list.items);
@@ -482,15 +543,97 @@ fn ownedAtomSliceFromList(ctx: *core.Context, list: *std.ArrayList(core.Atom)) !
     return out;
 }
 
-fn ownedValueSliceFromList(ctx: *core.Context, list: *std.ArrayList(core.Value)) ![]core.Value {
+fn ownedValueSliceFromList(ctx: *core.JSContext, list: *std.ArrayList(core.JSValue)) ![]core.JSValue {
     if (list.items.len == 0) return &.{};
-    const out = try ctx.runtime.memory.alloc(core.Value, list.items.len);
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        .{ .mutable = &list.items },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .slices = &root_slices,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    const out = try ctx.runtime.memory.alloc(core.JSValue, list.items.len);
     @memcpy(out, list.items);
     list.clearAndFree(ctx.runtime.memory.allocator);
     return out;
 }
 
-fn collectModuleNamespaceExports(ctx: *core.Context, record: *core.module.ModuleRecord, exports: *std.ArrayList(core.Atom)) !void {
+test "ownedValueSliceFromList roots source list during runtime allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const first_atom = try rt.atoms.newValueSymbol("gc-module-owned-value-list-source");
+    var list = std.ArrayList(core.JSValue).empty;
+    defer {
+        for (list.items) |value| value.free(rt);
+        list.deinit(rt.memory.allocator);
+    }
+    try list.append(rt.memory.allocator, core.JSValue.symbol(first_atom));
+
+    const Trigger = struct {
+        rt: *core.JSRuntime,
+        atom_id: u32,
+        saw_value: bool = false,
+        trace_failed: bool = false,
+
+        fn trigger(context: ?*anyopaque, size: usize) void {
+            _ = size;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var visitor = core.runtime.RootVisitor{
+                .context = self,
+                .visit_value = @This().visitValue,
+                .visit_object = @This().visitObject,
+            };
+            self.rt.traceActiveRoots(&visitor) catch {
+                self.trace_failed = true;
+            };
+        }
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.asSymbolAtom()) |atom_id| {
+                if (atom_id == self.atom_id) self.saw_value = true;
+            }
+        }
+
+        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+            _ = context;
+            _ = slot;
+        }
+    };
+
+    const saved_trigger_fn = rt.memory.trigger_gc_fn;
+    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    var trigger = Trigger{
+        .rt = rt,
+        .atom_id = first_atom,
+    };
+    rt.memory.trigger_gc_fn = Trigger.trigger;
+    rt.memory.trigger_gc_ctx = &trigger;
+    defer {
+        rt.memory.trigger_gc_fn = saved_trigger_fn;
+        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    }
+
+    const out = try ownedValueSliceFromList(ctx, &list);
+    defer {
+        for (out) |value| value.free(rt);
+        if (out.len != 0) rt.memory.free(core.JSValue, out);
+    }
+
+    try std.testing.expect(!trigger.trace_failed);
+    try std.testing.expect(trigger.saw_value);
+    try std.testing.expectEqual(@as(usize, 0), list.items.len);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expect(out[0].same(core.JSValue.symbol(first_atom)));
+}
+
+fn collectModuleNamespaceExports(ctx: *core.JSContext, record: *core.module.ModuleRecord, exports: *std.ArrayList(core.Atom)) !void {
     for (record.exports) |entry| {
         try appendUniqueExport(ctx, exports, entry.export_name);
     }
@@ -522,14 +665,14 @@ fn collectModuleNamespaceExports(ctx: *core.Context, record: *core.module.Module
     }
 }
 
-fn appendUniqueExport(ctx: *core.Context, exports: *std.ArrayList(core.Atom), atom_id: core.Atom) !void {
+fn appendUniqueExport(ctx: *core.JSContext, exports: *std.ArrayList(core.Atom), atom_id: core.Atom) !void {
     for (exports.items) |existing| {
         if (existing == atom_id) return;
     }
     try exports.append(ctx.runtime.memory.allocator, atom_id);
 }
 
-fn atomLessThan(rt: *core.Runtime, lhs: core.Atom, rhs: core.Atom) bool {
+fn atomLessThan(rt: *core.JSRuntime, lhs: core.Atom, rhs: core.Atom) bool {
     const lhs_name = rt.atoms.name(lhs) orelse "";
     const rhs_name = rt.atoms.name(rhs) orelse "";
     const order = std.mem.order(u8, lhs_name, rhs_name);
@@ -540,11 +683,11 @@ fn atomLessThan(rt: *core.Runtime, lhs: core.Atom, rhs: core.Atom) bool {
     };
 }
 
-fn moduleBindingCellValue(cell_value: core.Value) core.Value {
+fn moduleBindingCellValue(cell_value: core.JSValue) core.JSValue {
     return shared_vm.slotValueDup(cell_value);
 }
 
-fn moduleExplicitNamespaceExportCell(ctx: *core.Context, record: *core.module.ModuleRecord, export_name: core.Atom) ModuleNamespaceError!core.Value {
+fn moduleExplicitNamespaceExportCell(ctx: *core.JSContext, record: *core.module.ModuleRecord, export_name: core.Atom) ModuleNamespaceError!core.JSValue {
     const target_name = explicitStarNamespaceTarget(record, export_name) orelse return moduleLocalCell(ctx, record, export_name, true, false);
     const target_index = ctx.runtime.modules.findIndex(target_name) orelse return error.ModuleNotFound;
     const target = &ctx.runtime.modules.modules[target_index];
@@ -565,7 +708,7 @@ fn explicitStarNamespaceTarget(record: *const core.module.ModuleRecord, export_n
     return null;
 }
 
-fn varRefCellFromValue(value: core.Value) ?*core.Object {
+fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
     if (object.class_payload_kind != .var_ref) return null;
@@ -575,7 +718,7 @@ fn varRefCellFromValue(value: core.Value) ?*core.Object {
 fn preloadFileModuleGraphInner(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     source_text: []const u8,
     path: []const u8,
     max_source_size: usize,
@@ -588,7 +731,7 @@ fn preloadFileModuleGraphInner(
 fn preloadFileModuleGraphInnerMode(
     io: std.Io,
     allocator: std.mem.Allocator,
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     source_text: []const u8,
     path: []const u8,
     max_source_size: usize,
@@ -651,7 +794,7 @@ fn appendTrackedPath(allocator: std.mem.Allocator, paths: *std.ArrayList([]const
 }
 
 fn syntheticKindForRequestIndex(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     record: *const bytecode.module.Record,
     request_index: u32,
 ) ?core.module.SyntheticKind {
@@ -673,7 +816,7 @@ fn nativeModuleKindForSpecifier(specifier: []const u8) ?core.module.SyntheticKin
     return null;
 }
 
-fn nativeModuleKindForAtom(runtime: *core.Runtime, module_name: core.Atom) ?core.module.SyntheticKind {
+fn nativeModuleKindForAtom(runtime: *core.JSRuntime, module_name: core.Atom) ?core.module.SyntheticKind {
     const specifier = runtime.atoms.name(module_name) orelse return null;
     return nativeModuleKindForSpecifier(specifier);
 }
@@ -709,7 +852,7 @@ pub fn syntheticModuleFilePath(path: []const u8) []const u8 {
 }
 
 pub fn preloadNativeModule(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     kind: core.module.SyntheticKind,
 ) !*core.module.ModuleRecord {
     const module_name = try runtime.internAtom(nativeModuleName(kind));
@@ -725,7 +868,7 @@ pub fn preloadNativeModule(
     return record;
 }
 
-fn addNativeExports(runtime: *core.Runtime, record: *core.module.ModuleRecord, names: []const []const u8) !void {
+fn addNativeExports(runtime: *core.JSRuntime, record: *core.module.ModuleRecord, names: []const []const u8) !void {
     for (names) |name| {
         const atom = try runtime.internAtom(name);
         defer runtime.atoms.free(atom);
@@ -734,7 +877,7 @@ fn addNativeExports(runtime: *core.Runtime, record: *core.module.ModuleRecord, n
 }
 
 fn preloadSyntheticFileModule(
-    runtime: *core.Runtime,
+    runtime: *core.JSRuntime,
     path: []const u8,
     kind: core.module.SyntheticKind,
 ) !*core.module.ModuleRecord {
@@ -748,7 +891,7 @@ fn preloadSyntheticFileModule(
 }
 
 pub fn initializeSyntheticFileModule(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     module_name: core.Atom,
     source_text: []const u8,
@@ -781,7 +924,7 @@ pub fn initializeSyntheticFileModule(
     return true;
 }
 
-fn initializeNativeStdModule(ctx: *core.Context, record: *core.module.ModuleRecord) !bool {
+fn initializeNativeStdModule(ctx: *core.JSContext, record: *core.module.ModuleRecord) !bool {
     try initializeNativeModule(ctx, record, &.{ "loadFile", "writeFile", "exists", "exit", "getenv", "setenv", "unsetenv", "getenviron", "gc", "evalScript", "loadScript", "open", "fdopen", "tmpfile", "popen", "puts", "printf", "sprintf", "strerror", "urlGet" });
     try initializeNativeStdIntValue(ctx, record, "SEEK_SET", std.c.SEEK.SET);
     try initializeNativeStdIntValue(ctx, record, "SEEK_CUR", std.c.SEEK.CUR);
@@ -794,7 +937,7 @@ fn initializeNativeStdModule(ctx: *core.Context, record: *core.module.ModuleReco
 }
 
 fn initializeNativeStdIntValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     record: *core.module.ModuleRecord,
     name: []const u8,
     value: i32,
@@ -802,11 +945,11 @@ fn initializeNativeStdIntValue(
     const atom = try ctx.runtime.internAtom(name);
     defer ctx.runtime.atoms.free(atom);
     if (moduleBindingInitialized(record, atom)) return;
-    try setModuleBinding(ctx, record, atom, core.Value.int32(value));
+    try setModuleBinding(ctx, record, atom, core.JSValue.int32(value));
 }
 
 fn initializeNativeStringValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     record: *core.module.ModuleRecord,
     name: []const u8,
     value: []const u8,
@@ -831,7 +974,7 @@ fn builtinPlatformName() []const u8 {
     };
 }
 
-fn initializeNativeStdErrorValue(ctx: *core.Context, record: *core.module.ModuleRecord) !void {
+fn initializeNativeStdErrorValue(ctx: *core.JSContext, record: *core.module.ModuleRecord) !void {
     const atom = try ctx.runtime.internAtom("Error");
     defer ctx.runtime.atoms.free(atom);
     if (moduleBindingInitialized(record, atom)) return;
@@ -853,14 +996,14 @@ fn initializeNativeStdErrorValue(ctx: *core.Context, record: *core.module.Module
     try setModuleBinding(ctx, record, atom, object.value());
 }
 
-fn defineNativeStdErrorConstant(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineNativeStdErrorConstant(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     const atom = try rt.internAtom(name);
     defer rt.atoms.free(atom);
-    try object.defineOwnProperty(rt, atom, core.Descriptor.data(core.Value.int32(value), false, false, true));
+    try object.defineOwnProperty(rt, atom, core.Descriptor.data(core.JSValue.int32(value), false, false, true));
 }
 
 fn initializeNativeStdFileValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     record: *core.module.ModuleRecord,
     name: []const u8,
     file: *std.c.FILE,
@@ -870,12 +1013,12 @@ fn initializeNativeStdFileValue(
     const atom = try ctx.runtime.internAtom(name);
     defer ctx.runtime.atoms.free(atom);
     if (moduleBindingInitialized(record, atom)) return;
-    const value = try call_mod.createStdFileValue(ctx.runtime, ctx.cached_global, file, is_popen, is_stdio);
+    const value = try call_mod.createStdFileValue(ctx.runtime, ctx.global, file, is_popen, is_stdio);
     errdefer value.free(ctx.runtime);
     try setModuleBinding(ctx, record, atom, value);
 }
 
-fn initializeNativeOsModule(ctx: *core.Context, record: *core.module.ModuleRecord) !bool {
+fn initializeNativeOsModule(ctx: *core.JSContext, record: *core.module.ModuleRecord) !bool {
     try initializeNativeModule(ctx, record, &.{ "getenv", "getcwd", "chdir", "remove", "rename", "open", "close", "read", "write", "seek", "mkdir", "readdir", "stat", "lstat", "realpath", "symlink", "readlink", "utimes", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "exec", "waitpid", "getpid", "pipe", "kill", "dup", "dup2", "isatty", "ttyGetWinSize", "ttySetRaw", "setReadHandler", "setWriteHandler", "signal", "cputime", "exePath", "now", "sleepAsync", "mkdtemp", "mkstemp", "Worker", "poll", "sleep" });
     try initializeNativeStringValue(ctx, record, "platform", builtinPlatformName());
     try initializeNativeStdIntValue(ctx, record, "O_RDONLY", osFlagValue(.{ .ACCMODE = .RDONLY }));
@@ -920,7 +1063,7 @@ fn osFlagValue(value: std.c.O) i32 {
     return @intCast(@as(u32, @bitCast(value)));
 }
 
-fn initializeNativeModule(ctx: *core.Context, record: *core.module.ModuleRecord, names: []const []const u8) !void {
+fn initializeNativeModule(ctx: *core.JSContext, record: *core.module.ModuleRecord, names: []const []const u8) !void {
     for (names) |name| {
         const atom = try ctx.runtime.internAtom(name);
         defer ctx.runtime.atoms.free(atom);
@@ -943,21 +1086,19 @@ fn moduleBindingInitialized(record: *const core.module.ModuleRecord, name: core.
     return false;
 }
 
-fn setModuleBinding(ctx: *core.Context, record: *core.module.ModuleRecord, name: core.Atom, value: core.Value) !void {
+fn setModuleBinding(ctx: *core.JSContext, record: *core.module.ModuleRecord, name: core.Atom, value: core.JSValue) !void {
     try record.ensureLocalBinding(name);
     const index = record.findLocalBindingIndex(name) orelse return error.MissingExport;
     if (varRefCellFromValue(record.local_bindings[index].cell)) |cell| {
-        const old_value = cell.varRefValueSlot().*;
-        cell.varRefValueSlot().* = value;
+        try cell.setVarRefValue(ctx.runtime, value);
         record.local_bindings[index].initialized = true;
-        if (old_value) |stored| stored.free(ctx.runtime);
         return;
     }
     record.local_bindings[index].cell = try createVarRefCell(ctx, value);
     record.local_bindings[index].initialized = true;
 }
 
-fn syntheticBytesModuleValue(ctx: *core.Context, global: *core.Object, source_text: []const u8) !core.Value {
+fn syntheticBytesModuleValue(ctx: *core.JSContext, global: *core.Object, source_text: []const u8) !core.JSValue {
     const value = try shared_vm.createUint8ArrayFromBytes(ctx.runtime, global, source_text);
     errdefer value.free(ctx.runtime);
     const object = try shared_vm.expectUint8ArrayObject(value);
@@ -970,14 +1111,14 @@ fn syntheticBytesModuleValue(ctx: *core.Context, global: *core.Object, source_te
     return value;
 }
 
-fn markImmutableArrayBuffer(rt: *core.Runtime, object: *core.Object) !void {
+fn markImmutableArrayBuffer(rt: *core.JSRuntime, object: *core.Object) !void {
     object.markImmutablePrototype();
     const visible = try rt.internAtom("immutable");
     defer rt.atoms.free(visible);
-    try object.defineOwnProperty(rt, visible, core.Descriptor.data(core.Value.boolean(true), false, false, true));
+    try object.defineOwnProperty(rt, visible, core.Descriptor.data(core.JSValue.boolean(true), false, false, true));
 }
 
-fn resolvedRequestAtom(runtime: *core.Runtime, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
+fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
     const referrer = referrer_path orelse return runtime.atoms.dup(request_atom);
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
     if (nativeModuleKindForSpecifier(specifier)) |kind| return runtime.internAtom(nativeModuleName(kind));

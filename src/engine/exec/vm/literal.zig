@@ -12,7 +12,7 @@ const op = bytecode.opcode.op;
 const atom_print = core.atom.predefinedId("print", .string).?;
 
 pub fn object(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -20,7 +20,7 @@ pub fn object(
     global: *core.Object,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime objectPrototypeFromGlobal: anytype,
     comptime globalLexicalValue: anytype,
 ) !void {
@@ -32,7 +32,7 @@ pub fn object(
 }
 
 fn tryFuseOneShotObjectFieldUndefinedPrint(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -40,7 +40,7 @@ fn tryFuseOneShotObjectFieldUndefinedPrint(
     global: *core.Object,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const code = function.code;
@@ -75,7 +75,7 @@ fn tryFuseOneShotObjectFieldUndefinedPrint(
     if (undefined_op != op.get_var and undefined_op != op.get_var_undef) return false;
     if (readInt(u32, code[pc + 1 ..][0..4]) != core.atom.ids.undefined_) return false;
     if (!canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx.runtime, global, core.atom.ids.undefined_)) |lex_value| {
+    if (globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -90,10 +90,10 @@ fn tryFuseOneShotObjectFieldUndefinedPrint(
 
     const property_is_undefined = queried_atom != defined_atom;
     const result = if (cmp_op == op.strict_eq) property_is_undefined else !property_is_undefined;
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.Value.boolean(result)});
+    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.boolean(result)});
     if (canFinishWithUndefinedAt(function, after_drop)) {
         frame.pc = code.len;
-        try stack.pushOwned(core.Value.undefinedValue());
+        try stack.pushOwned(core.JSValue.undefinedValue());
     } else {
         frame.pc = after_drop;
     }
@@ -101,7 +101,7 @@ fn tryFuseOneShotObjectFieldUndefinedPrint(
 }
 
 pub fn arrayFrom(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -117,7 +117,7 @@ pub fn arrayFrom(
             const value = try stack.pop();
             value.free(ctx.runtime);
         }
-        if (frame.pc == function.code.len) try stack.pushOwned(core.Value.undefinedValue());
+        if (frame.pc == function.code.len) try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     }
     if (try tryFuseOneElementArrayValueAndLengthPrint(ctx, output, stack, function, frame, global, argc)) {
@@ -126,7 +126,7 @@ pub fn arrayFrom(
             const value = try stack.pop();
             value.free(ctx.runtime);
         }
-        if (frame.pc == function.code.len) try stack.pushOwned(core.Value.undefinedValue());
+        if (frame.pc == function.code.len) try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     }
     if (try tryFuseOneShotArrayLengthPrint(ctx, output, function, frame, global, argc)) {
@@ -135,15 +135,15 @@ pub fn arrayFrom(
             const value = try stack.pop();
             value.free(ctx.runtime);
         }
-        if (frame.pc == function.code.len) try stack.pushOwned(core.Value.undefinedValue());
+        if (frame.pc == function.code.len) try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     }
-    var stack_values: [8]core.Value = undefined;
+    var stack_values: [8]core.JSValue = undefined;
     const values = if (argc <= stack_values.len)
         stack_values[0..argc]
     else
-        try ctx.runtime.memory.alloc(core.Value, argc);
-    defer if (argc > stack_values.len) ctx.runtime.memory.free(core.Value, values);
+        try ctx.runtime.memory.alloc(core.JSValue, argc);
+    defer if (argc > stack_values.len) ctx.runtime.memory.free(core.JSValue, values);
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
@@ -156,7 +156,7 @@ pub fn arrayFrom(
 }
 
 fn tryFuseOneShotArrayNamedPropertyPrint(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -191,7 +191,7 @@ fn tryFuseOneShotArrayNamedPropertyPrint(
     const after_drop = pc + 2;
     if (!nextInstructionReturnsUndefined(code, after_drop)) return false;
 
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.Value.int32(assigned.value)});
+    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.int32(assigned.value)});
     frame.pc = if (canFinishWithUndefinedAt(function, after_drop)) code.len else after_drop;
     return true;
 }
@@ -225,7 +225,7 @@ fn decodeStoredArrayGet(code: []const u8, pc: usize, put: ArrayLengthPrintStore)
 }
 
 fn canFastSetFreshArrayNamedProperty(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     global: *core.Object,
     atom_id: core.Atom,
     comptime arrayPrototypeFromGlobal: anytype,
@@ -242,7 +242,7 @@ fn canFastSetFreshArrayNamedProperty(
 }
 
 fn tryFuseOneElementArrayValueAndLengthPrint(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -290,7 +290,7 @@ fn tryFuseOneElementArrayValueAndLengthPrint(
 
     const first = stack.values[stack.values.len - 1];
     try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{first});
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.Value.int32(1)});
+    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.int32(1)});
     if (canFinishWithUndefinedAt(function, after_drop)) {
         frame.pc = code.len;
     } else {
@@ -309,7 +309,7 @@ fn decodeDefaultPrintGet(global: *core.Object, code: []const u8, pc: *usize) boo
 }
 
 fn tryFuseOneShotArrayLengthPrint(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -335,7 +335,7 @@ fn tryFuseOneShotArrayLengthPrint(
     if (pc + 3 > code.len or code[pc] != op.get_length or code[pc + 1] != op.call1 or code[pc + 2] != op.drop) return false;
     if (!nextInstructionReturnsUndefined(code, pc + 3)) return false;
 
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.Value.int32(argc)});
+    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.int32(argc)});
     const after_drop = pc + 3;
     if (canFinishWithUndefinedAt(function, after_drop)) {
         frame.pc = code.len;
@@ -470,7 +470,7 @@ fn canUseFastGlobalUndefinedLookup(
     frame: *const frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     if (!eval_with_object.isUndefined()) return false;
     if (!frame.current_function.isUndefined()) return false;
@@ -502,7 +502,7 @@ fn globalHostOutputAutoInit(global: *core.Object, atom_id: core.Atom) bool {
 }
 
 pub fn defineField(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -562,7 +562,7 @@ pub fn defineField(
 }
 
 pub fn setProto(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
 ) !void {
     const proto_value = try stack.pop();
@@ -578,7 +578,7 @@ pub fn setProto(
 }
 
 pub fn defineArrayEl(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -601,7 +601,7 @@ pub fn defineArrayEl(
 }
 
 pub fn appendSpreadValues(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -633,11 +633,11 @@ pub fn appendSpreadValues(
     } else {
         out_index = try appendIteratorValues(ctx, output, global, array, iterable, out_index);
     }
-    try stack.pushOwned(core.Value.int32(out_index));
+    try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
 pub fn copyDataProperties(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -672,15 +672,15 @@ pub fn copyDataProperties(
 }
 
 pub fn specialObject(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     global: *core.Object,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     comptime capturedArgumentsObject: anytype,
     comptime frameArgumentsObjectForSpecialObject: anytype,
 ) !void {
@@ -708,12 +708,12 @@ pub fn specialObject(
     } else if (try shared_vm.internalSpecialObjectValue(ctx.runtime, subtype)) |value| {
         try stack.pushOwned(value);
     } else {
-        try stack.pushOwned(core.Value.undefinedValue());
+        try stack.pushOwned(core.JSValue.undefinedValue());
     }
 }
 
 pub fn getLength(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -735,11 +735,11 @@ pub fn getLength(
 }
 
 fn tryFuseArrayLengthLessThanFalseBranch(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    value: core.Value,
+    value: core.JSValue,
 ) bool {
     if (frame.pc + 3 > function.code.len) return false;
     if (function.code[frame.pc] != op.lt or function.code[frame.pc + 1] != op.if_false8) return false;
@@ -762,7 +762,7 @@ fn tryFuseArrayLengthLessThanFalseBranch(
 }
 
 pub fn rest(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -771,7 +771,7 @@ pub fn rest(
     frame.pc += 2;
     const object_value = try core.Object.createArray(ctx.runtime, null);
     var array_value = object_value.value();
-    var element_value = core.Value.undefinedValue();
+    var element_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &array_value },
         .{ .value = &element_value },
@@ -785,7 +785,7 @@ pub fn rest(
 
     errdefer {
         const failed_array = array_value;
-        array_value = core.Value.undefinedValue();
+        array_value = core.JSValue.undefinedValue();
         failed_array.free(ctx.runtime);
     }
     var source_index: usize = first_arg_idx;
@@ -794,32 +794,32 @@ pub fn rest(
         element_value = value;
         var value_owned = true;
         errdefer if (value_owned) {
-            element_value = core.Value.undefinedValue();
+            element_value = core.JSValue.undefinedValue();
             value.free(ctx.runtime);
         };
         try object_value.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(object_value.length), core.Descriptor.data(value, true, true, true));
-        element_value = core.Value.undefinedValue();
+        element_value = core.JSValue.undefinedValue();
         value.free(ctx.runtime);
         value_owned = false;
     }
     try stack.pushOwned(array_value);
 }
 
-fn slotValueDup(slot: core.Value) core.Value {
+fn slotValueDup(slot: core.JSValue) core.JSValue {
     return slotValueBorrow(slot).dup();
 }
 
-fn slotValueBorrow(slot: core.Value) core.Value {
+fn slotValueBorrow(slot: core.JSValue) core.JSValue {
     var current = slot;
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.Value.undefinedValue();
+        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
     }
     return current;
 }
 
-fn varRefCellFromValue(value: core.Value) ?*core.Object {
+fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const cell: *core.Object = @fieldParentPtr("header", header);
@@ -827,7 +827,7 @@ fn varRefCellFromValue(value: core.Value) ?*core.Object {
     return cell;
 }
 
-fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.Value {
+fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.values.len) return error.StackUnderflow;
     return stack.values[stack.values.len - 1 - index_from_top].dup();

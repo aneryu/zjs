@@ -14,9 +14,9 @@ const QjsLexer = engine.frontend.zjs_lexer.Lexer;
 const atom = engine.core.atom;
 
 const TestEnv = struct {
-    rt: *engine.core.runtime.Runtime,
+    rt: *engine.core.runtime.JSRuntime,
     fn init() !TestEnv {
-        return .{ .rt = try engine.core.runtime.Runtime.create(std.testing.allocator) };
+        return .{ .rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator) };
     }
     fn deinit(self: *TestEnv) void {
         self.rt.destroy();

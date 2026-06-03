@@ -22,7 +22,7 @@ const atom_string = core.atom.predefinedId("String", .string).?;
 pub const Step = enum { done, continue_loop };
 
 pub fn loc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -32,7 +32,7 @@ pub fn loc(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime execGetLoc: anytype,
     comptime execPutLoc: anytype,
@@ -131,7 +131,7 @@ pub fn loc(
 }
 
 pub fn arg(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
@@ -161,7 +161,7 @@ pub fn arg(
 }
 
 fn tryFuseLocalFieldGet(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
@@ -206,7 +206,7 @@ fn tryFuseLocalFieldGet(
 }
 
 pub fn varRef(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -219,7 +219,7 @@ pub fn varRef(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime execGetVarRefMaybeTdz: anytype,
     comptime execPutVarRef: anytype,
     comptime execSetVarRef: anytype,
@@ -308,7 +308,7 @@ fn tryFastDirectVarRefGet(frame: *frame_mod.Frame, stack: *stack_mod.Stack, idx:
 }
 
 const BorrowedArg = struct {
-    value: core.Value,
+    value: core.JSValue,
     next_pc: usize,
 };
 
@@ -455,12 +455,12 @@ const SimpleNumericRangeCall = struct {
     binop: u8,
     rhs: i32 = 0,
     capture0: i32 = 0,
-    capture0_slot: core.Value = core.Value.undefinedValue(),
+    capture0_slot: core.JSValue = core.JSValue.undefinedValue(),
 };
 
 const SimpleNumericRangeSource = struct {
     fb: *const bytecode.FunctionBytecode,
-    captures: []const core.Value,
+    captures: []const core.JSValue,
 };
 
 const SimpleNumericRangeArg = union(enum) {
@@ -561,7 +561,7 @@ fn decodeFalseBranch(code: []const u8, branch_pc: usize) ?DecodedFalseBranch {
 }
 
 fn tryFuseVarRefSimpleNumericCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -572,7 +572,7 @@ fn tryFuseVarRefSimpleNumericCall(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -584,7 +584,7 @@ fn tryFuseVarRefSimpleNumericCall(
     const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, arg0_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
     if (arg0.next_pc >= function.code.len) return false;
 
-    var args_buf: [2]core.Value = undefined;
+    var args_buf: [2]core.JSValue = undefined;
     args_buf[0] = arg0.value;
     var argc: usize = 1;
     var call_pc = arg0.next_pc;
@@ -611,12 +611,12 @@ fn tryFuseVarRefSimpleNumericCall(
 }
 
 const BorrowedCallable = struct {
-    value: core.Value,
+    value: core.JSValue,
     next_pc: usize,
 };
 
 fn tryFuseVarRefAccumulatorSimpleNumericCallAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -626,7 +626,7 @@ fn tryFuseVarRefAccumulatorSimpleNumericCallAddStore(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -637,7 +637,7 @@ fn tryFuseVarRefAccumulatorSimpleNumericCallAddStore(
     const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, callee.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
     if (arg0.next_pc >= function.code.len) return false;
 
-    var args_buf: [2]core.Value = undefined;
+    var args_buf: [2]core.JSValue = undefined;
     args_buf[0] = arg0.value;
     var argc: usize = 1;
     var call_pc = arg0.next_pc;
@@ -675,21 +675,21 @@ fn tryFuseVarRefAccumulatorSimpleNumericCallAddStore(
     const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
     errdefer updated.free(ctx.runtime);
 
-    setSlotValue(ctx, &frame.var_refs[store.idx], updated);
+    try setSlotValue(ctx, &frame.var_refs[store.idx], updated);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
     return true;
 }
 
 fn borrowedSimpleCallable(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) ?BorrowedCallable {
     if (pc >= function.code.len) return null;
@@ -778,7 +778,7 @@ fn decodeArgGet(code: []const u8, pc: usize) ?ArgGet {
     };
 }
 
-fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: bool) ?core.Value {
+fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: bool) ?core.JSValue {
     if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return null;
     if (checked and frame.localIsUninitialized(idx)) return null;
     const value = slotValueBorrowed(frame.locals[idx]);
@@ -786,7 +786,7 @@ fn localReadableBorrowed(frame: *const frame_mod.Frame, idx: u16, checked: bool)
     return value;
 }
 
-fn argReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.Value {
+fn argReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (idx >= frame.args.len) return null;
     return slotValueBorrowed(frame.args[idx]);
 }
@@ -799,7 +799,7 @@ fn decodeFieldAtom(code: []const u8, pc: usize, expected_op: u8) ?FieldAtom {
     };
 }
 
-fn bindingReadableBorrowed(frame: *const frame_mod.Frame, binding: BindingGet) ?core.Value {
+fn bindingReadableBorrowed(frame: *const frame_mod.Frame, binding: BindingGet) ?core.JSValue {
     return if (binding.is_var_ref)
         varRefReadableBorrowed(frame, binding.idx)
     else
@@ -888,12 +888,13 @@ fn loopLimitReadableInt32(frame: *const frame_mod.Frame, limit: LoopLimitGet) ?i
 }
 
 fn bindingStoreWritableForFastPath(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: BindingPut,
 ) bool {
+    _ = global;
     if (binding.is_var_ref) {
         if (binding.idx >= frame.var_refs.len) return false;
         const slot = frame.var_refs[binding.idx];
@@ -904,7 +905,7 @@ fn bindingStoreWritableForFastPath(
         }
         if (slot.isUninitialized()) return false;
         if (binding.idx < function.var_ref_is_const.len and function.var_ref_is_const[binding.idx]) return false;
-        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and shared_vm.globalLexicalHas(ctx.runtime, global, function.var_ref_names[binding.idx])) return false;
+        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and shared_vm.globalLexicalHas(ctx, function.var_ref_names[binding.idx])) return false;
         return true;
     }
     if (binding.idx >= frame.locals.len or binding.idx >= frame.locals_uninit.len) return false;
@@ -916,25 +917,26 @@ fn bindingStoreWritableForFastPath(
 }
 
 fn canUseRegExpLoopGlobalData(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
+    _ = global;
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
     if (!frame.current_function.isUndefined()) return false;
     if (!eval_with_object.isUndefined()) return false;
     if (eval_local_names.len != 0) return false;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (shared_vm.globalLexicalHas(ctx.runtime, global, atom_id)) return false;
+    if (shared_vm.globalLexicalHas(ctx, atom_id)) return false;
     return true;
 }
 
-fn regExpLoopFrameVarRefIndex(rt: *core.Runtime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) ?u16 {
+fn regExpLoopFrameVarRefIndex(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) ?u16 {
     const count = @min(frame.var_refs.len, function.var_ref_names.len);
     for (function.var_ref_names[0..count], 0..) |name, idx| {
         if (!shared_vm.atomIdOrNameEql(rt, name, atom_id)) continue;
@@ -944,7 +946,7 @@ fn regExpLoopFrameVarRefIndex(rt: *core.Runtime, function: *const bytecode.Bytec
     return null;
 }
 
-fn regExpLoopNamedVarRefIndex(rt: *core.Runtime, names: []const core.Atom, refs: []const core.Value, atom_id: core.Atom) ?usize {
+fn regExpLoopNamedVarRefIndex(rt: *core.JSRuntime, names: []const core.Atom, refs: []const core.JSValue, atom_id: core.Atom) ?usize {
     for (names, 0..) |name, idx| {
         if (idx >= refs.len) return null;
         if (!shared_vm.atomIdOrNameEql(rt, name, atom_id)) continue;
@@ -966,7 +968,7 @@ fn regExpLoopNamedVarRefStoreWritable(function: *const bytecode.Bytecode, frame:
     return true;
 }
 
-fn namedVarRefReadableBorrowed(refs: []const core.Value, idx: usize) ?core.Value {
+fn namedVarRefReadableBorrowed(refs: []const core.JSValue, idx: usize) ?core.JSValue {
     if (idx >= refs.len) return null;
     const slot = refs[idx];
     if (varRefCellFromValue(slot)) |cell| {
@@ -979,7 +981,7 @@ fn namedVarRefReadableBorrowed(refs: []const core.Value, idx: usize) ?core.Value
     return slot;
 }
 
-fn namedVarRefStoreWritable(refs: []const core.Value, idx: usize) bool {
+fn namedVarRefStoreWritable(refs: []const core.JSValue, idx: usize) bool {
     if (idx >= refs.len) return false;
     const slot = refs[idx];
     const cell = varRefCellFromValue(slot) orelse return false;
@@ -988,23 +990,22 @@ fn namedVarRefStoreWritable(refs: []const core.Value, idx: usize) bool {
     return !stored.isUninitialized();
 }
 
-fn storeNamedVarRefOwnedValue(rt: *core.Runtime, refs: []const core.Value, idx: usize, value: core.Value) void {
+fn storeNamedVarRefOwnedValue(rt: *core.JSRuntime, refs: []const core.JSValue, idx: usize, value: core.JSValue) !void {
     const cell = varRefCellFromValue(refs[idx]).?;
-    const old_value = cell.varRefValueSlot().*;
-    cell.varRefValueSlot().* = value;
-    if (old_value) |stored| stored.free(rt);
+    errdefer value.free(rt);
+    try cell.setVarRefValue(rt, value);
 }
 
 fn globalDataStoreWritableForFastPath(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
 ) bool {
     if (!eval_with_object.isUndefined() or eval_local_names.len != 0 or frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
     if (regExpLoopNamedVarRefIndex(ctx.runtime, eval_var_ref_names, eval_var_refs, atom_id)) |idx| {
@@ -1020,16 +1021,16 @@ fn globalDataStoreWritableForFastPath(
 }
 
 fn regExpLoopReadableBorrowed(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
     binding: RegExpLoopGet,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
-) ?core.Value {
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
+) ?core.JSValue {
     return switch (binding) {
         .binding => |get| bindingReadableBorrowed(frame, get),
         .global => |get| blk: {
@@ -1048,15 +1049,15 @@ fn regExpLoopReadableBorrowed(
 }
 
 fn regExpMatchStoreWritableForFastPath(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: RegExpMatchPut,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
 ) bool {
     return switch (binding) {
         .binding => |put| bindingStoreWritableForFastPath(ctx, function, global, frame, put),
@@ -1065,7 +1066,7 @@ fn regExpMatchStoreWritableForFastPath(
 }
 
 fn storeBindingInt32(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -1076,42 +1077,42 @@ fn storeBindingInt32(
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (binding.is_var_ref) {
-        setSlotValue(ctx, &frame.var_refs[binding.idx], core.Value.int32(value));
+        try setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
     } else {
-        setSlotValue(ctx, &frame.locals[binding.idx], core.Value.int32(value));
+        try setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
 fn storeBindingOwnedValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: BindingPut,
-    value: core.Value,
+    value: core.JSValue,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (binding.is_var_ref) {
-        setSlotValue(ctx, &frame.var_refs[binding.idx], value);
+        try setSlotValue(ctx, &frame.var_refs[binding.idx], value);
     } else {
-        setSlotValue(ctx, &frame.locals[binding.idx], value);
+        try setSlotValue(ctx, &frame.locals[binding.idx], value);
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
 fn storeRegExpLoopOwnedValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: RegExpLoopPut,
-    value: core.Value,
+    value: core.JSValue,
     sync_global_lexical_locals: bool,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
@@ -1119,11 +1120,11 @@ fn storeRegExpLoopOwnedValue(
         .binding => |put| try storeBindingOwnedValue(ctx, function, global, frame, put, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal),
         .global => |put| {
             if (regExpLoopNamedVarRefIndex(ctx.runtime, eval_var_ref_names, eval_var_refs, put.atom)) |idx| {
-                storeNamedVarRefOwnedValue(ctx.runtime, eval_var_refs, idx, value);
+                try storeNamedVarRefOwnedValue(ctx.runtime, eval_var_refs, idx, value);
                 return;
             }
             if (regExpLoopFrameVarRefIndex(ctx.runtime, function, frame, put.atom)) |idx| {
-                setSlotValue(ctx, &frame.var_refs[idx], value);
+                try setSlotValue(ctx, &frame.var_refs[idx], value);
                 return;
             }
             defer value.free(ctx.runtime);
@@ -1134,29 +1135,29 @@ fn storeRegExpLoopOwnedValue(
 }
 
 fn storeRegExpMatchNull(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     binding: RegExpMatchPut,
     sync_global_lexical_locals: bool,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     switch (binding) {
-        .binding => |put| try storeBindingOwnedValue(ctx, function, global, frame, put, core.Value.nullValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal),
+        .binding => |put| try storeBindingOwnedValue(ctx, function, global, frame, put, core.JSValue.nullValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal),
         .global => |put| {
             if (regExpLoopNamedVarRefIndex(ctx.runtime, eval_var_ref_names, eval_var_refs, put.atom)) |idx| {
-                storeNamedVarRefOwnedValue(ctx.runtime, eval_var_refs, idx, core.Value.nullValue());
+                try storeNamedVarRefOwnedValue(ctx.runtime, eval_var_refs, idx, core.JSValue.nullValue());
                 return;
             }
             if (regExpLoopFrameVarRefIndex(ctx.runtime, function, frame, put.atom)) |idx| {
-                setSlotValue(ctx, &frame.var_refs[idx], core.Value.nullValue());
+                try setSlotValue(ctx, &frame.var_refs[idx], core.JSValue.nullValue());
                 return;
             }
-            const stored = try global.setOwnWritableDataProperty(ctx.runtime, put.atom, core.Value.nullValue());
+            const stored = try global.setOwnWritableDataProperty(ctx.runtime, put.atom, core.JSValue.nullValue());
             std.debug.assert(stored);
         },
     }
@@ -1170,19 +1171,18 @@ fn asciiBytes(bytes: []const u8) bool {
 }
 
 fn varRefGlobalLexicalWritable(
-    rt: *core.Runtime,
-    global: *core.Object,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     var_ref_idx: u16,
 ) bool {
     if (var_ref_idx >= function.var_ref_names.len) return false;
-    const env = shared_vm.existingGlobalLexicalEnv(rt, global) orelse return false;
+    const env = shared_vm.existingGlobalLexicalEnv(ctx) orelse return false;
     const desc = env.getOwnProperty(function.var_ref_names[var_ref_idx]) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
 }
 
 pub fn tryFuseCheckedLocalSimpleNumericCallAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -1200,7 +1200,7 @@ pub fn tryFuseCheckedLocalSimpleNumericCallAddStore(
 
     const arg0 = borrowedSimpleCallArg(frame, function, frame.pc) orelse return false;
     if (arg0.next_pc >= function.code.len) return false;
-    var args_buf: [2]core.Value = undefined;
+    var args_buf: [2]core.JSValue = undefined;
     args_buf[0] = arg0.value;
     var argc: usize = 1;
     var call_pc = arg0.next_pc;
@@ -1225,7 +1225,7 @@ pub fn tryFuseCheckedLocalSimpleNumericCallAddStore(
 }
 
 pub fn tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -1234,7 +1234,7 @@ pub fn tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -1245,7 +1245,7 @@ pub fn tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(
     const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, callee.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
     if (arg0.next_pc >= function.code.len) return false;
 
-    var args_buf: [2]core.Value = undefined;
+    var args_buf: [2]core.JSValue = undefined;
     args_buf[0] = arg0.value;
     var argc: usize = 1;
     var call_pc = arg0.next_pc;
@@ -1287,7 +1287,7 @@ pub fn tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(
     const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
     errdefer updated.free(ctx.runtime);
 
-    setSlotValue(ctx, &frame.locals[store.idx], updated);
+    try setSlotValue(ctx, &frame.locals[store.idx], updated);
     if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
         frame.clearLocalUninitialized(store.idx);
     }
@@ -1298,7 +1298,7 @@ pub fn tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(
 }
 
 fn tryFuseLocalAccumulatorSimpleNumericCallAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -1315,7 +1315,7 @@ fn tryFuseLocalAccumulatorSimpleNumericCallAddStore(
     const arg0 = borrowedSimpleCallArg(frame, function, callee.next_pc) orelse return false;
     if (arg0.next_pc >= function.code.len) return false;
 
-    var args_buf: [2]core.Value = undefined;
+    var args_buf: [2]core.JSValue = undefined;
     args_buf[0] = arg0.value;
     var argc: usize = 1;
     var call_pc = arg0.next_pc;
@@ -1357,7 +1357,7 @@ fn tryFuseLocalAccumulatorSimpleNumericCallAddStore(
     const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
     errdefer updated.free(ctx.runtime);
 
-    setSlotValue(ctx, &frame.locals[store.idx], updated);
+    try setSlotValue(ctx, &frame.locals[store.idx], updated);
     if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
         frame.clearLocalUninitialized(store.idx);
     }
@@ -1368,13 +1368,13 @@ fn tryFuseLocalAccumulatorSimpleNumericCallAddStore(
 }
 
 fn tryFuseVarRefCallResultAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     call_pc: usize,
-    result: core.Value,
+    result: core.JSValue,
     result_owned: *bool,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
@@ -1418,7 +1418,7 @@ fn tryFuseVarRefCallResultAddStore(
         defer lhs_owned.free(ctx.runtime);
         result_owned.* = false;
         defer result.free(ctx.runtime);
-        setSlotValue(ctx, &frame.var_refs[store.idx], updated);
+        try setSlotValue(ctx, &frame.var_refs[store.idx], updated);
         frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
         _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
         return true;
@@ -1428,7 +1428,7 @@ fn tryFuseVarRefCallResultAddStore(
         defer lhs_owned.free(ctx.runtime);
         result_owned.* = false;
         defer result.free(ctx.runtime);
-        setSlotValue(ctx, &frame.locals[store.idx], updated);
+        try setSlotValue(ctx, &frame.locals[store.idx], updated);
         if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
             frame.clearLocalUninitialized(store.idx);
         }
@@ -1441,21 +1441,21 @@ fn tryFuseVarRefCallResultAddStore(
 }
 
 fn tryFuseGlobalSimpleNumericCallAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    callee: core.Value,
+    callee: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
     if (arg0.next_pc >= function.code.len) return false;
 
-    var args_buf: [2]core.Value = undefined;
+    var args_buf: [2]core.JSValue = undefined;
     args_buf[0] = arg0.value;
     var argc: usize = 1;
     var call_pc = arg0.next_pc;
@@ -1480,15 +1480,15 @@ fn tryFuseGlobalSimpleNumericCallAddStore(
 }
 
 fn tryFuseGlobalSimpleNumericCallAddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     accumulator_atom: core.Atom,
-    accumulator_value: core.Value,
+    accumulator_value: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
@@ -1531,7 +1531,7 @@ fn tryFuseGlobalSimpleNumericCallAddRange(
         tail_pc = store.next_pc;
     }
     if (!canFuseGlobalDataWrite(function, frame, accumulator_atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    const accumulator_store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, store_pc, accumulator_atom) orelse return false;
+    const accumulator_store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, accumulator_atom) orelse return false;
 
     const induction_get = decodeGlobalDataGet(code, tail_pc) orelse return false;
     if (induction_get.atom == accumulator_atom) return false;
@@ -1554,7 +1554,7 @@ fn tryFuseGlobalSimpleNumericCallAddRange(
     const branch = decodeFalseBranch(code, limit.next_pc + 1) orelse return false;
     if (branch.true_pc != body_pc or condition_pc >= body_pc) return false;
 
-    const induction_store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, induction_put_pc, induction_get.atom) orelse return false;
+    const induction_store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, induction_put_pc, induction_get.atom) orelse return false;
     const induction_value = globalOwnDataPropertyBorrowedAt(global, induction_store_index, induction_get.atom) orelse return false;
     const current_i = induction_value.asInt32() orelse return false;
     if (current_i >= limit.value) {
@@ -1587,7 +1587,7 @@ fn tryFuseGlobalSimpleNumericCallAddRange(
         accumulator_next.free(ctx.runtime);
         return false;
     }
-    const induction_next = core.Value.int32(limit.value);
+    const induction_next = core.JSValue.int32(limit.value);
     if (!setGlobalOwnWritableDataPropertyAtOwned(ctx.runtime, global, induction_store_index, induction_get.atom, induction_next)) {
         return false;
     }
@@ -1596,17 +1596,17 @@ fn tryFuseGlobalSimpleNumericCallAddRange(
 }
 
 fn tryFuseCallResultAddGlobalStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     call_pc: usize,
-    result: core.Value,
+    result: core.JSValue,
     result_owned: *bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) !bool {
     const add_pc = call_pc + 1;
     if (add_pc >= function.code.len or function.code[add_pc] != op.add) return false;
@@ -1621,10 +1621,10 @@ fn tryFuseCallResultAddGlobalStore(
     }
     const store = decodeGlobalPut(function.code, store_pc) orelse return false;
     if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (global.global_lexical_env) |env| {
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(store.atom)) return false;
     }
-    const store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, store_pc, store.atom) orelse return false;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, store.atom) orelse return false;
 
     const lhs = stack.peekBorrowed() orelse return false;
     if (!lhs.isNumber() or !result.isNumber()) return false;
@@ -1645,15 +1645,15 @@ fn tryFuseCallResultAddGlobalStore(
 }
 
 fn tryFuseGlobalPropertyReadAddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     accumulator_atom: core.Atom,
-    accumulator_value: core.Value,
+    accumulator_value: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
@@ -1693,7 +1693,7 @@ fn tryFuseGlobalPropertyReadAddRange(
         if (store.atom != accumulator_atom) return false;
         tail_pc = store.next_pc;
     }
-    const accumulator_store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, store_pc, accumulator_atom) orelse return false;
+    const accumulator_store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, accumulator_atom) orelse return false;
 
     const induction_get = decodeGlobalDataGet(code, tail_pc) orelse return false;
     if (induction_get.atom == accumulator_atom) return false;
@@ -1717,7 +1717,7 @@ fn tryFuseGlobalPropertyReadAddRange(
     const branch = decodeFalseBranch(code, limit.next_pc + 1) orelse return false;
     if (branch.true_pc != body_pc or condition_pc >= body_pc) return false;
 
-    const induction_store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, induction_put_pc, induction_get.atom) orelse return false;
+    const induction_store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, induction_put_pc, induction_get.atom) orelse return false;
     const induction_value = globalOwnDataPropertyBorrowedAt(global, induction_store_index, induction_get.atom) orelse return false;
     const current_i = induction_value.asInt32() orelse return false;
     if (current_i >= limit.value) {
@@ -1738,7 +1738,7 @@ fn tryFuseGlobalPropertyReadAddRange(
         accumulator_next.free(ctx.runtime);
         return false;
     }
-    const induction_next = core.Value.int32(limit.value);
+    const induction_next = core.JSValue.int32(limit.value);
     if (!setGlobalOwnWritableDataPropertyAtOwned(ctx.runtime, global, induction_store_index, induction_get.atom, induction_next)) {
         return false;
     }
@@ -1881,7 +1881,7 @@ fn regExpLoopGetConflictsWithMatchPut(get: RegExpLoopGet, put: RegExpMatchPut) b
     return sameRegExpMatchGetPut(get, put);
 }
 
-fn decodeLatin1PrefixIntLocalKey(ctx: *core.Context, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {
+fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {
     if (pc + 6 > code.len or code[pc] != op.push_atom_value) return null;
     const prefix_atom = readInt(u32, code[pc + 1 ..][0..4]);
     const prefix = ctx.runtime.atoms.name(prefix_atom) orelse return null;
@@ -2054,41 +2054,41 @@ fn borrowedSimpleCallArg(frame: *const frame_mod.Frame, function: *const bytecod
         };
     }
     switch (code[pc]) {
-        op.push_minus1 => return .{ .value = core.Value.int32(-1), .next_pc = pc + 1 },
-        op.push_0 => return .{ .value = core.Value.int32(0), .next_pc = pc + 1 },
-        op.push_1 => return .{ .value = core.Value.int32(1), .next_pc = pc + 1 },
-        op.push_2 => return .{ .value = core.Value.int32(2), .next_pc = pc + 1 },
-        op.push_3 => return .{ .value = core.Value.int32(3), .next_pc = pc + 1 },
-        op.push_4 => return .{ .value = core.Value.int32(4), .next_pc = pc + 1 },
-        op.push_5 => return .{ .value = core.Value.int32(5), .next_pc = pc + 1 },
-        op.push_6 => return .{ .value = core.Value.int32(6), .next_pc = pc + 1 },
-        op.push_7 => return .{ .value = core.Value.int32(7), .next_pc = pc + 1 },
+        op.push_minus1 => return .{ .value = core.JSValue.int32(-1), .next_pc = pc + 1 },
+        op.push_0 => return .{ .value = core.JSValue.int32(0), .next_pc = pc + 1 },
+        op.push_1 => return .{ .value = core.JSValue.int32(1), .next_pc = pc + 1 },
+        op.push_2 => return .{ .value = core.JSValue.int32(2), .next_pc = pc + 1 },
+        op.push_3 => return .{ .value = core.JSValue.int32(3), .next_pc = pc + 1 },
+        op.push_4 => return .{ .value = core.JSValue.int32(4), .next_pc = pc + 1 },
+        op.push_5 => return .{ .value = core.JSValue.int32(5), .next_pc = pc + 1 },
+        op.push_6 => return .{ .value = core.JSValue.int32(6), .next_pc = pc + 1 },
+        op.push_7 => return .{ .value = core.JSValue.int32(7), .next_pc = pc + 1 },
         op.push_i8 => {
             if (pc + 2 > code.len) return null;
             const value: i8 = @bitCast(code[pc + 1]);
-            return .{ .value = core.Value.int32(value), .next_pc = pc + 2 };
+            return .{ .value = core.JSValue.int32(value), .next_pc = pc + 2 };
         },
         op.push_i16 => {
             if (pc + 3 > code.len) return null;
-            return .{ .value = core.Value.int32(readInt(i16, code[pc + 1 ..][0..2])), .next_pc = pc + 3 };
+            return .{ .value = core.JSValue.int32(readInt(i16, code[pc + 1 ..][0..2])), .next_pc = pc + 3 };
         },
         op.push_i32 => {
             if (pc + 5 > code.len) return null;
-            return .{ .value = core.Value.int32(readInt(i32, code[pc + 1 ..][0..4])), .next_pc = pc + 5 };
+            return .{ .value = core.JSValue.int32(readInt(i32, code[pc + 1 ..][0..4])), .next_pc = pc + 5 };
         },
         else => return null,
     }
 }
 
 fn borrowedSimpleCallArgWithContext(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) ?BorrowedArg {
     if (pc >= function.code.len) return null;
@@ -2102,7 +2102,7 @@ fn borrowedSimpleCallArgWithContext(
     return borrowedSimpleCallArg(frame, function, pc);
 }
 
-fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.Value {
+fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.JSValue {
     if (idx >= frame.var_refs.len) return null;
     const slot = frame.var_refs[idx];
     if (varRefCellFromValue(slot)) |cell| {
@@ -2115,7 +2115,7 @@ fn varRefReadableBorrowed(frame: *const frame_mod.Frame, idx: u16) ?core.Value {
     return slot;
 }
 
-fn borrowedVarRefOrLocalRhs(frame: *const frame_mod.Frame, code: []const u8, pc: usize) ?struct { value: core.Value, next_pc: usize } {
+fn borrowedVarRefOrLocalRhs(frame: *const frame_mod.Frame, code: []const u8, pc: usize) ?struct { value: core.JSValue, next_pc: usize } {
     if (decodeVarRefGet(code, pc)) |rhs| {
         return .{
             .value = varRefReadableBorrowed(frame, rhs.idx) orelse return null,
@@ -2131,7 +2131,7 @@ fn borrowedVarRefOrLocalRhs(frame: *const frame_mod.Frame, code: []const u8, pc:
     return null;
 }
 
-fn fastNumericAddBorrowed(rt: *core.Runtime, lhs: core.Value, rhs: core.Value) !?core.Value {
+fn fastNumericAddBorrowed(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue) !?core.JSValue {
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| return fastInt32Add(lhs_int, rhs_int);
     }
@@ -2145,7 +2145,7 @@ fn fastNumericAddBorrowed(rt: *core.Runtime, lhs: core.Value, rhs: core.Value) !
 }
 
 fn tryFuseDroppedVarRefNumericAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -2168,18 +2168,19 @@ fn tryFuseDroppedVarRefNumericAdd(
     const updated = try fastNumericAddBorrowed(ctx.runtime, lhs, rhs.value) orelse return false;
     errdefer updated.free(ctx.runtime);
 
-    setSlotValue(ctx, &frame.var_refs[store.idx], updated);
+    try setSlotValue(ctx, &frame.var_refs[store.idx], updated);
     frame.pc = drop_pc + 1;
     return true;
 }
 
 fn varRefStoreWritableForFastPath(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     store: VarRefPut,
 ) bool {
+    _ = global;
     if (store.idx >= frame.var_refs.len) return false;
     const slot = frame.var_refs[store.idx];
     if (varRefCellFromValue(slot)) |cell| {
@@ -2189,17 +2190,17 @@ fn varRefStoreWritableForFastPath(
     }
     if (slot.isUninitialized()) return false;
     if (store.opc == op.put_var_ref_check) {
-        if (store.idx < function.var_ref_names.len and shared_vm.globalLexicalHas(ctx.runtime, global, function.var_ref_names[store.idx])) return false;
+        if (store.idx < function.var_ref_names.len and shared_vm.globalLexicalHas(ctx, function.var_ref_names[store.idx])) return false;
         if (store.idx < function.var_ref_is_const.len and function.var_ref_is_const[store.idx]) return false;
     }
     return true;
 }
 
-fn isSimpleNumericCallableCandidate(func: core.Value) bool {
+fn isSimpleNumericCallableCandidate(func: core.JSValue) bool {
     return func.isFunctionBytecode() or shared_vm.functionObjectFromValue(func) != null;
 }
 
-fn simpleNumericFunctionResult(rt: *core.Runtime, func: core.Value, args: []const core.Value) !?core.Value {
+fn simpleNumericFunctionResult(rt: *core.JSRuntime, func: core.JSValue, args: []const core.JSValue) !?core.JSValue {
     if (func.isFunctionBytecode()) {
         const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
         return try simpleNumericBytecodeResult(rt, fb, args, &.{});
@@ -2210,7 +2211,7 @@ fn simpleNumericFunctionResult(rt: *core.Runtime, func: core.Value, args: []cons
     return try simpleNumericBytecodeResult(rt, fb, args, object.functionCapturesSlot().*);
 }
 
-fn simpleNumericArg0ConstCallable(func: core.Value) ?SimpleNumericArg0ConstCall {
+fn simpleNumericArg0ConstCallable(func: core.JSValue) ?SimpleNumericArg0ConstCall {
     const fb = if (func.isFunctionBytecode())
         shared_vm.functionBytecodeFromValue(func) orelse return null
     else blk: {
@@ -2222,18 +2223,18 @@ fn simpleNumericArg0ConstCallable(func: core.Value) ?SimpleNumericArg0ConstCall 
     return .{ .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs };
 }
 
-fn simpleNumericRangeCallable(func: core.Value) ?SimpleNumericRangeCall {
+fn simpleNumericRangeCallable(func: core.JSValue) ?SimpleNumericRangeCall {
     const callable: SimpleNumericRangeSource = if (func.isFunctionBytecode())
         SimpleNumericRangeSource{
             .fb = shared_vm.functionBytecodeFromValue(func) orelse return null,
-            .captures = @as([]const core.Value, &.{}),
+            .captures = @as([]const core.JSValue, &.{}),
         }
     else blk: {
         const object = shared_vm.functionObjectFromValue(func) orelse return null;
         const function_value = object.functionBytecodeSlot().* orelse return null;
         break :blk SimpleNumericRangeSource{
             .fb = shared_vm.functionBytecodeFromValue(function_value) orelse return null,
-            .captures = @as([]const core.Value, object.functionCapturesSlot().*),
+            .captures = @as([]const core.JSValue, object.functionCapturesSlot().*),
         };
     };
     const fb = callable.fb;
@@ -2257,15 +2258,15 @@ fn simpleNumericRangeCallable(func: core.Value) ?SimpleNumericRangeCall {
 }
 
 fn simpleNumericBytecodeResult(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     fb: *const bytecode.FunctionBytecode,
-    args: []const core.Value,
-    captures: []const core.Value,
-) !?core.Value {
+    args: []const core.JSValue,
+    captures: []const core.JSValue,
+) !?core.JSValue {
     return switch (fb.simple_numeric_kind) {
         .arg0_const => {
             if (args.len == 0 or !args[0].isNumber()) return null;
-            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], core.Value.int32(fb.simple_numeric_rhs));
+            return try simpleNumericBinary(rt, fb.simple_numeric_op, args[0], core.JSValue.int32(fb.simple_numeric_rhs));
         },
         .arg0_arg1 => {
             if (args.len < 2 or !args[0].isNumber() or !args[1].isNumber()) return null;
@@ -2357,7 +2358,7 @@ fn simpleNumericRangeCallAliasesBinding(simple: SimpleNumericRangeCall, frame: *
     return simple.capture0_slot.same(raw_binding);
 }
 
-fn simpleNumericBinary(rt: *core.Runtime, binop: u8, lhs: core.Value, rhs: core.Value) !core.Value {
+fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             return switch (binop) {
@@ -2371,18 +2372,18 @@ fn simpleNumericBinary(rt: *core.Runtime, binop: u8, lhs: core.Value, rhs: core.
     return try value_ops.binary(rt, binop, lhs, rhs);
 }
 
-fn slotValueBorrowed(slot: core.Value) core.Value {
+fn slotValueBorrowed(slot: core.JSValue) core.JSValue {
     var current = slot;
     var depth: usize = 0;
     while (depth < 16) : (depth += 1) {
         const cell = varRefCellFromValue(current) orelse return current;
-        current = cell.varRefValueSlot().* orelse return core.Value.undefinedValue();
+        current = cell.varRefValueSlot().* orelse return core.JSValue.undefinedValue();
     }
     return current;
 }
 
 pub fn lexicalTdz(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -2423,12 +2424,12 @@ pub fn lexicalTdz(
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
-            setSlotValue(ctx, &frame.locals[idx], value);
+            try setSlotValue(ctx, &frame.locals[idx], value);
             try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         op.put_loc_check_init => {
             const value = try stack.pop();
-            setSlotValue(ctx, &frame.locals[idx], value);
+            try setSlotValue(ctx, &frame.locals[idx], value);
             frame.clearLocalUninitialized(idx);
             try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
@@ -2438,7 +2439,7 @@ pub fn lexicalTdz(
 }
 
 pub fn toPropKey(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2454,7 +2455,7 @@ pub fn toPropKey(
 }
 
 pub fn toPropKey2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2474,7 +2475,7 @@ pub fn toPropKey2(
 }
 
 pub fn setName(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2519,7 +2520,7 @@ pub fn setName(
 }
 
 pub fn getVar(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2529,10 +2530,10 @@ pub fn getVar(
     opc: u8,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime frameCurrentFunctionIsArrow: anytype,
     comptime lookupFrameLocalValue: anytype,
     comptime lookupFrameVarRef: anytype,
@@ -2553,20 +2554,20 @@ pub fn getVar(
     frame.pc += 4;
     if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
     if (atom_id == core.atom.ids.undefined_ and canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (globalLexicalValue(ctx.runtime, global, atom_id)) |lex_value| {
+        if (globalLexicalValue(ctx, atom_id)) |lex_value| {
             lex_value.free(ctx.runtime);
         } else {
-            try stack.pushOwned(core.Value.undefinedValue());
+            try stack.pushOwned(core.JSValue.undefinedValue());
             return .done;
         }
     }
-    if (canUseInstalledGlobalDataIc(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) {
+    if (canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) {
         if (cachedOwnDataPropertyLookupForObject(function, site_pc, ctx.runtime, global, atom_id)) |cached| {
             return try useFastGlobalDataValue(ctx, stack, function, global, frame, catch_target, atom_id, .{ .index = cached.index, .value = cached.value }, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal, handleCatchableRuntimeError);
         }
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (globalLexicalValue(ctx.runtime, global, atom_id)) |lex_value| {
+        if (globalLexicalValue(ctx, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
@@ -2649,11 +2650,11 @@ pub fn getVar(
             }
             break :value slot_value;
         }
-        if (atom_id == core.atom.ids.undefined_) break :value core.Value.undefinedValue();
+        if (atom_id == core.atom.ids.undefined_) break :value core.JSValue.undefinedValue();
         if (atom_id == core.atom.ids.arguments and directEvalShouldExposeImplicitArguments(frame)) {
             break :value try frameArgumentsObject(ctx, global, frame);
         }
-        if (globalLexicalValue(ctx.runtime, global, atom_id)) |lex_value| {
+        if (globalLexicalValue(ctx, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
@@ -2695,7 +2696,7 @@ pub fn getVar(
 }
 
 fn tryFuseTypedArrayArrayBufferLengthPrintFromGlobalGet(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2704,7 +2705,7 @@ fn tryFuseTypedArrayArrayBufferLengthPrintFromGlobalGet(
     typed_array_atom: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     if (stack.len() != 0) return false;
@@ -2749,9 +2750,9 @@ fn tryFuseTypedArrayArrayBufferLengthPrintFromGlobalGet(
     const typed_length = @divExact(byte_length.value, element_size);
     if (typed_length < 0 or typed_length > std.math.maxInt(i32)) return false;
 
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.Value.int32(typed_length)});
+    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.int32(typed_length)});
     if (canFinishWithUndefinedAt(function, after_drop)) {
-        try stack.pushOwned(core.Value.undefinedValue());
+        try stack.pushOwned(core.JSValue.undefinedValue());
         frame.pc = code.len;
     } else {
         frame.pc = after_drop;
@@ -2877,7 +2878,7 @@ fn nextInstructionReturnsUndefined(code: []const u8, pc: usize) bool {
 }
 
 fn tryFuseHostOutputAutoInitAtomCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2886,7 +2887,7 @@ fn tryFuseHostOutputAutoInitAtomCall1(
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     if (atom_id != atom_print) return false;
@@ -2907,7 +2908,7 @@ fn tryFuseHostOutputAutoInitAtomCall1(
 }
 
 fn tryFuseHostOutputAtomLiteralCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -2922,7 +2923,7 @@ fn tryFuseHostOutputAtomLiteralCall1(
     return true;
 }
 
-fn printHostOutputAtomLiteral(rt: *core.Runtime, output: ?*std.Io.Writer, atom_id: core.Atom) !void {
+fn printHostOutputAtomLiteral(rt: *core.JSRuntime, output: ?*std.Io.Writer, atom_id: core.Atom) !void {
     const writer = output orelse return;
     if (core.atom.isTaggedInt(atom_id)) {
         try writer.print("{d}\n", .{core.atom.atomToUInt32(atom_id)});
@@ -2933,7 +2934,7 @@ fn printHostOutputAtomLiteral(rt: *core.Runtime, output: ?*std.Io.Writer, atom_i
 }
 
 fn tryFuseHostOutputStringNumberConstCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2941,7 +2942,7 @@ fn tryFuseHostOutputStringNumberConstCall1(
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const pc = frame.pc;
@@ -2952,7 +2953,7 @@ fn tryFuseHostOutputStringNumberConstCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_string) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx.runtime, global, callee_atom)) |lex_value| {
+    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -2968,7 +2969,7 @@ fn tryFuseHostOutputStringNumberConstCall1(
 }
 
 fn tryFuseHostOutputStringLocalNumberCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -2976,7 +2977,7 @@ fn tryFuseHostOutputStringLocalNumberCall1(
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const pc = frame.pc;
@@ -2987,7 +2988,7 @@ fn tryFuseHostOutputStringLocalNumberCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_string) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx.runtime, global, callee_atom)) |lex_value| {
+    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -3005,7 +3006,7 @@ fn tryFuseHostOutputStringLocalNumberCall1(
 }
 
 fn tryFuseHostOutputNumberStaticLiteralCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -3013,7 +3014,7 @@ fn tryFuseHostOutputNumberStaticLiteralCall1(
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const pc = frame.pc;
@@ -3024,7 +3025,7 @@ fn tryFuseHostOutputNumberStaticLiteralCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_number) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx.runtime, global, callee_atom)) |lex_value| {
+    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -3046,7 +3047,7 @@ fn tryFuseHostOutputNumberStaticLiteralCall1(
 }
 
 fn tryFuseHostOutputLocalCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -3063,7 +3064,7 @@ fn tryFuseHostOutputLocalCall1(
 }
 
 fn tryFuseHostOutputTypeofLocalCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -3084,7 +3085,7 @@ fn tryFuseHostOutputTypeofLocalCall1(
 }
 
 fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -3092,9 +3093,10 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
+    _ = global;
     const code = function.code;
     const local_get = decodeLocalGet(code, frame.pc) orelse return false;
     if (local_get.next_pc + 5 > code.len or code[local_get.next_pc] != op.get_field) return false;
@@ -3110,7 +3112,7 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
     const call_pc = cmp_pc + 1;
     if (call_pc >= code.len or code[call_pc] != op.call1) return false;
     if (!canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx.runtime, global, core.atom.ids.undefined_)) |lex_value| {
+    if (globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -3121,14 +3123,14 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
         .undefined => true,
         .slow => return false,
     };
-    const result_value = core.Value.boolean(if (cmp_op == op.strict_eq) is_undefined else !is_undefined);
+    const result_value = core.JSValue.boolean(if (cmp_op == op.strict_eq) is_undefined else !is_undefined);
     try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{result_value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
 
 fn tryFuseHostOutputLocalImmediateCompareCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -3155,14 +3157,14 @@ fn tryFuseHostOutputLocalImmediateCompareCall1(
         op.neq, op.strict_neq => lhs != rhs_number,
         else => unreachable,
     };
-    const result_value = core.Value.boolean(result);
+    const result_value = core.JSValue.boolean(result);
     try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{result_value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
 
 fn tryFuseHostOutputLocalLengthCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -3182,7 +3184,7 @@ fn tryFuseHostOutputLocalLengthCall1(
 }
 
 fn tryFuseHostOutputLocalFieldCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -3198,7 +3200,7 @@ fn tryFuseHostOutputLocalFieldCall1(
     const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
     const value = switch (fastOrdinaryDataPropertyLookup(ctx.runtime, receiver, field_atom)) {
         .value => |property_value| property_value,
-        .undefined => core.Value.undefinedValue(),
+        .undefined => core.JSValue.undefinedValue(),
         .slow => return false,
     };
     try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{value});
@@ -3207,7 +3209,7 @@ fn tryFuseHostOutputLocalFieldCall1(
 }
 
 fn tryFuseHostOutputLocalDenseElementCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -3221,7 +3223,7 @@ fn tryFuseHostOutputLocalDenseElementCall1(
     if (call_pc >= code.len or code[call_pc] != op.call1) return false;
 
     const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    const value = fastDenseArrayElementValue(receiver, core.Value.int32(key_operand.value)) orelse return false;
+    const value = fastDenseArrayElementValue(receiver, core.JSValue.int32(key_operand.value)) orelse return false;
     defer value.free(ctx.runtime);
     try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
@@ -3237,14 +3239,14 @@ fn finishUndefinedCallResult(
     if (next_pc < function.code.len and function.code[next_pc] == op.drop) {
         const after_drop = next_pc + 1;
         if (canFinishWithUndefinedAt(function, after_drop)) {
-            try stack.pushOwned(core.Value.undefinedValue());
+            try stack.pushOwned(core.JSValue.undefinedValue());
             frame.pc = function.code.len;
             return;
         }
         frame.pc = after_drop;
         return;
     }
-    try stack.pushOwned(core.Value.undefinedValue());
+    try stack.pushOwned(core.JSValue.undefinedValue());
     frame.pc = next_pc;
 }
 
@@ -3270,7 +3272,7 @@ fn globalHostOutputAutoInit(global: *core.Object, atom_id: core.Atom) bool {
 }
 
 fn useFastGlobalDataValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
@@ -3281,7 +3283,7 @@ fn useFastGlobalDataValue(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -3317,11 +3319,11 @@ fn useFastGlobalDataValue(
 }
 
 fn tryFuseGlobalStringCall1NumberConst(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    callee: core.Value,
+    callee: core.JSValue,
 ) !bool {
     if (!isStringConstructorValue(callee)) return false;
     const result = stringNumberConstCall1At(rt, function, frame.pc) orelse return false;
@@ -3332,12 +3334,12 @@ fn tryFuseGlobalStringCall1NumberConst(
 }
 
 const StringNumberConstCall = struct {
-    value: core.Value,
+    value: core.JSValue,
     next_pc: usize,
 };
 
 const StringNumberConstArg = struct {
-    value: core.Value,
+    value: core.JSValue,
     next_pc: usize,
 };
 
@@ -3346,7 +3348,7 @@ fn stringNumberConstArgAt(function: *const bytecode.Bytecode, pc: usize) ?String
     if (pc >= code.len) return null;
     if (immediateInt32Operand(code, pc)) |immediate| {
         if (immediate.next_pc >= code.len or code[immediate.next_pc] != op.call1) return null;
-        return .{ .value = core.Value.int32(immediate.value), .next_pc = immediate.next_pc + 1 };
+        return .{ .value = core.JSValue.int32(immediate.value), .next_pc = immediate.next_pc + 1 };
     }
     const const_index: usize, const call_pc: usize = switch (code[pc]) {
         op.push_const8 => blk: {
@@ -3366,7 +3368,7 @@ fn stringNumberConstArgAt(function: *const bytecode.Bytecode, pc: usize) ?String
     return .{ .value = input, .next_pc = call_pc + 1 };
 }
 
-fn printHostOutputStringifiedNumber(output: ?*std.Io.Writer, value: core.Value) !void {
+fn printHostOutputStringifiedNumber(output: ?*std.Io.Writer, value: core.JSValue) !void {
     const writer = output orelse return;
     if (value.asInt32()) |int_value| {
         var buffer: [32]u8 = undefined;
@@ -3396,12 +3398,12 @@ fn printHostOutputStringifiedNumber(output: ?*std.Io.Writer, value: core.Value) 
     try writer.writeByte('\n');
 }
 
-fn stringNumberConstCall1At(rt: *core.Runtime, function: *const bytecode.Bytecode, pc: usize) ?StringNumberConstCall {
+fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.Bytecode, pc: usize) ?StringNumberConstCall {
     const code = function.code;
     if (pc >= code.len) return null;
     if (immediateInt32Operand(code, pc)) |immediate| {
         if (immediate.next_pc >= code.len or code[immediate.next_pc] != op.call1) return null;
-        const input = core.Value.int32(immediate.value);
+        const input = core.JSValue.int32(immediate.value);
         const value = value_ops.toStringValue(rt, input) catch return null;
         return .{ .value = value, .next_pc = immediate.next_pc + 1 };
     }
@@ -3427,19 +3429,19 @@ fn stringNumberConstCall1At(rt: *core.Runtime, function: *const bytecode.Bytecod
     return .{ .value = value, .next_pc = call_pc + 1 };
 }
 
-fn isStringConstructorValue(value: core.Value) bool {
+fn isStringConstructorValue(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
     return native_ref.domain == .string and native_ref.id == @intFromEnum(builtins.string.ConstructorMethod.call);
 }
 
 fn pushValueOrFuseLocalAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
-    value: core.Value,
+    value: core.JSValue,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -3453,12 +3455,12 @@ fn pushValueOrFuseLocalAdd(
 }
 
 fn pushBorrowedValueOrFuseLocalAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
-    value: core.Value,
+    value: core.JSValue,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -3473,13 +3475,13 @@ fn nextOpIsPostUpdate(function: *const bytecode.Bytecode, frame: *const frame_mo
 }
 
 fn tryFuseDroppedGlobalDataPostUpdateFromValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
     property_index: usize,
-    old: core.Value,
+    old: core.JSValue,
 ) !bool {
     if (frame.pc + 7 > function.code.len) return false;
     const update_op = function.code[frame.pc];
@@ -3517,7 +3519,7 @@ fn tryFuseDroppedGlobalDataPostUpdateFromValue(
 }
 
 fn tryFuseFollowingGlobalInt32Goto16Condition(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
@@ -3572,7 +3574,7 @@ fn tryFuseFollowingGlobalInt32Goto16Condition(
 }
 
 pub fn tryFuseCheckedLocalCachedGlobalInt32Add(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -3606,8 +3608,8 @@ pub fn tryFuseCheckedLocalCachedGlobalInt32Add(
 
     const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
     const cached: BorrowedGlobalDataLookup = cached: {
-        if (global.global_lexical_env != null) {
-            if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+        if (ctx.lexicals != null) {
+            if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
                 lexical_value.free(ctx.runtime);
                 return false;
             }
@@ -3627,7 +3629,7 @@ pub fn tryFuseCheckedLocalCachedGlobalInt32Add(
     const rhs = cached.value.asInt32() orelse return false;
 
     if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
-    setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
+    try setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -3635,7 +3637,7 @@ pub fn tryFuseCheckedLocalCachedGlobalInt32Add(
 }
 
 pub fn tryFuseCheckedLocalRegExpTestConstStringCountRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -3719,20 +3721,20 @@ pub fn tryFuseCheckedLocalRegExpTestConstStringCountRange(
         const next_count_i64 = @as(i64, current_count) + @as(i64, iteration_count);
         if (next_count_i64 < std.math.minInt(i32) or next_count_i64 > std.math.maxInt(i32)) return false;
         if (counter_get.is_var_ref) {
-            setSlotValue(ctx, &frame.var_refs[counter_get.idx], core.Value.int32(@intCast(next_count_i64)));
+            try setSlotValue(ctx, &frame.var_refs[counter_get.idx], core.JSValue.int32(@intCast(next_count_i64)));
         } else {
-            setSlotValue(ctx, &frame.locals[counter_get.idx], core.Value.int32(@intCast(next_count_i64)));
+            try setSlotValue(ctx, &frame.locals[counter_get.idx], core.JSValue.int32(@intCast(next_count_i64)));
             try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, counter_get.idx, sync_global_lexical_locals);
         }
     }
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalSimpleNumericCallAddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -3741,7 +3743,7 @@ pub fn tryFuseCheckedLocalSimpleNumericCallAddRange(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -3836,14 +3838,14 @@ pub fn tryFuseCheckedLocalSimpleNumericCallAddRange(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -3923,14 +3925,14 @@ pub fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
     try storeBindingInt32(ctx, function, global, frame, accumulator_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalInductionInt32AddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4009,14 +4011,14 @@ pub fn tryFuseCheckedLocalInductionInt32AddRange(
     const final_accumulator = @as(i128, accumulator) + delta.total;
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalLatin1AtomAppendRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4093,14 +4095,14 @@ pub fn tryFuseCheckedLocalLatin1AtomAppendRange(
     const repeat_count: usize = @intCast(limit - current_i);
     const final_value = try value_ops.latin1AtomRepeatedConcatValue(ctx.runtime, accumulator, suffix_atom, repeat_count) orelse return false;
     try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalShortBigIntInductionAddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4178,15 +4180,15 @@ pub fn tryFuseCheckedLocalShortBigIntInductionAddRange(
 
     const final_accumulator = @as(i128, accumulator) + delta.total;
     if (!fitsI64(final_accumulator)) return false;
-    try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, core.Value.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.shortBigInt(limit));
+    try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, core.JSValue.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4264,14 +4266,14 @@ pub fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
     try storeBindingInt32(ctx, function, global, frame, accumulator_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4357,14 +4359,14 @@ pub fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4379,7 +4381,7 @@ pub fn tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(
 }
 
 fn tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4394,7 +4396,7 @@ fn tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(
 }
 
 fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4484,14 +4486,14 @@ fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4548,13 +4550,13 @@ pub fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
 
     try builtins.collection.mapSetLatin1PrefixInt32Range(ctx.runtime, map_object, key.prefix, current_i, limit);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4633,14 +4635,14 @@ pub fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
     }
 
     try storeBindingInt32(ctx, function, global, frame, accumulator_put, @intCast(total), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4733,14 +4735,14 @@ pub fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     const mapped = try shared_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback) orelse return false;
     errdefer mapped.free(ctx.runtime);
     try storeBindingOwnedValue(ctx, function, global, frame, result_put, mapped, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseLocalInt32GlobalInt32AddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4749,7 +4751,7 @@ pub fn tryFuseLocalInt32GlobalInt32AddRange(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -4794,8 +4796,8 @@ pub fn tryFuseLocalInt32GlobalInt32AddRange(
     if (global_read_op != op.get_var and global_read_op != op.get_var_undef) return false;
     if (code[global_pc + 5] != op.add) return false;
     const atom_id = readInt(u32, code[global_pc + 1 ..][0..4]);
-    if (global.global_lexical_env != null) {
-        if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+    if (ctx.lexicals != null) {
+        if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
             lexical_value.free(ctx.runtime);
             return false;
         }
@@ -4848,16 +4850,16 @@ pub fn tryFuseLocalInt32GlobalInt32AddRange(
     const target_pc_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
     if (target_pc_i64 < 0 or @as(usize, @intCast(target_pc_i64)) != pc - 3) return false;
 
-    setSlotValue(ctx, &frame.locals[accumulator_idx], core.Value.int32(@intCast(final_accumulator)));
+    try setSlotValue(ctx, &frame.locals[accumulator_idx], core.JSValue.int32(@intCast(final_accumulator)));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, accumulator_idx, sync_global_lexical_locals);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalFieldInt32Add(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4897,7 +4899,7 @@ pub fn tryFuseCheckedLocalFieldInt32Add(
     const value = fastOrdinaryDataPropertyBorrowedValue(ctx.runtime, object_slot, atom_id) orelse return false;
     const rhs = value.asInt32() orelse return false;
 
-    setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
+    try setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -4905,7 +4907,7 @@ pub fn tryFuseCheckedLocalFieldInt32Add(
 }
 
 pub fn tryFuseCheckedLocalCheckedLocalNumericAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -4952,7 +4954,7 @@ pub fn tryFuseCheckedLocalCheckedLocalNumericAdd(
         break :blk try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
     };
     errdefer updated.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[local_idx], updated);
+    try setSlotValue(ctx, &frame.locals[local_idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -4960,7 +4962,7 @@ pub fn tryFuseCheckedLocalCheckedLocalNumericAdd(
 }
 
 pub fn tryFuseCheckedLocalDenseArrayConstInt32Add(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5005,7 +5007,7 @@ pub fn tryFuseCheckedLocalDenseArrayConstInt32Add(
 
     const lhs = frame.locals[local_idx].asInt32() orelse return false;
     const rhs = element.asInt32() orelse return false;
-    setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
+    try setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -5013,7 +5015,7 @@ pub fn tryFuseCheckedLocalDenseArrayConstInt32Add(
 }
 
 pub fn tryFuseCheckedLocalDenseArrayIndexedInt32Add(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5068,7 +5070,7 @@ pub fn tryFuseCheckedLocalDenseArrayIndexedInt32Add(
     if (!lhs.isNumber() or !rhs.isNumber()) return false;
     const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, rhs);
     errdefer updated.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[store.idx], updated);
+    try setSlotValue(ctx, &frame.locals[store.idx], updated);
     if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
         frame.clearLocalUninitialized(store.idx);
     }
@@ -5079,7 +5081,7 @@ pub fn tryFuseCheckedLocalDenseArrayIndexedInt32Add(
 }
 
 pub fn tryFuseCheckedLocalDenseArrayIndexedAppend(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5123,7 +5125,7 @@ pub fn tryFuseCheckedLocalDenseArrayIndexedAppend(
 }
 
 fn tryFuseLocal0Local1DenseArrayIndexedAppend(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !bool {
@@ -5180,13 +5182,13 @@ fn tryFuseLocal0Local1Int32ArithmeticStore(
     const term = product ^ logical_shift;
     const updated = (accumulator +% term) | or_mask.value;
 
-    frame.locals[0] = core.Value.int32(updated);
+    frame.locals[0] = core.JSValue.int32(updated);
     frame.pc = store.operand_pc + store.consume;
     return true;
 }
 
 fn tryFuseShortLocal0Local1Int32ArithmeticStoreRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5267,8 +5269,8 @@ fn tryFuseShortLocal0Local1Int32ArithmeticStoreRange(
         accumulator = accumulator +% (product ^ logical_shift);
     }
 
-    setSlotValue(ctx, &frame.locals[0], core.Value.int32(accumulator));
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[0], core.JSValue.int32(accumulator));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 0, sync_global_lexical_locals);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
@@ -5276,7 +5278,7 @@ fn tryFuseShortLocal0Local1Int32ArithmeticStoreRange(
 }
 
 const DenseArrayAppendValue = struct {
-    value: core.Value,
+    value: core.JSValue,
     next_pc: usize,
 };
 
@@ -5296,7 +5298,7 @@ const ObjectFieldUpdateAccumulateSlots = struct {
 };
 
 fn tryFuseShortLocalObjectFieldUpdateAccumulateRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5346,11 +5348,11 @@ fn tryFuseShortLocalObjectFieldUpdateAccumulateRange(
         if (!safeIntegerI128(accumulator)) return false;
     }
 
-    if (!setOwnDataPropertyAt(ctx.runtime, object, slots.a_index, pattern.a_atom, core.Value.int32(a))) return false;
+    if (!(try setOwnDataPropertyAt(ctx.runtime, object, slots.a_index, pattern.a_atom, core.JSValue.int32(a)))) return false;
     const accumulator_value = value_ops.numberToValue(@floatFromInt(accumulator));
     errdefer accumulator_value.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[1], accumulator_value);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[1], accumulator_value);
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 1, sync_global_lexical_locals);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = pattern.false_pc;
@@ -5489,7 +5491,7 @@ fn denseArrayAppendValueFromBytecode(
 
     const product = std.math.mul(i32, source, multiplier.value) catch return null;
     return .{
-        .value = core.Value.int32(product & mask.value),
+        .value = core.JSValue.int32(product & mask.value),
         .next_pc = mask.next_pc + 1,
     };
 }
@@ -5509,7 +5511,7 @@ fn denseArrayMulAndMaskFormulaFromBytecode(code: []const u8, pc: usize) ?DenseAr
 }
 
 fn tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5573,14 +5575,14 @@ fn tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(
     const array_object = objectFromValue(array_slot) orelse return false;
     if (!try array_object.appendDenseArrayInt32MulAndMaskRange(ctx.runtime, @intCast(current_i), @intCast(limit), formula.multiplier, formula.mask)) return false;
 
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5667,8 +5669,8 @@ pub fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
 
     if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, @intCast(length_value), current_value, count)) return false;
 
-    setSlotValue(ctx, &frame.locals[length_idx], core.Value.int32(@intCast(next_length_i64)));
-    setSlotValue(ctx, &frame.locals[value_idx], core.Value.int32(@intCast(next_value_i64)));
+    try setSlotValue(ctx, &frame.locals[length_idx], core.JSValue.int32(@intCast(next_length_i64)));
+    try setSlotValue(ctx, &frame.locals[value_idx], core.JSValue.int32(@intCast(next_value_i64)));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, length_idx, sync_global_lexical_locals);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, value_idx, sync_global_lexical_locals);
     frame.pc = if (hit_chunk) chunk_branch.true_pc else if (capped_for_interrupt) condition_pc else exit_branch.false_pc;
@@ -5676,7 +5678,7 @@ pub fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
 }
 
 pub fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5742,14 +5744,14 @@ pub fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     const end: u32 = @intCast(limit);
     if (!try array_object.appendDenseArrayInt32Range(ctx.runtime, start, end)) return false;
 
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalMathMinMaxAddRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5758,7 +5760,7 @@ pub fn tryFuseCheckedLocalMathMinMaxAddRange(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -5853,21 +5855,21 @@ pub fn tryFuseCheckedLocalMathMinMaxAddRange(
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
     try storeBindingInt32(ctx, function, global, frame, accumulator_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    setSlotValue(ctx, &frame.locals[induction_idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
 pub fn tryFuseCheckedLocalMathMinMaxAdd(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     local_idx: u16,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
     comptime globalLexicalValue: anytype,
@@ -5928,7 +5930,7 @@ pub fn tryFuseCheckedLocalMathMinMaxAdd(
     errdefer updated.free(ctx.runtime);
 
     if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
-    setSlotValue(ctx, &frame.locals[store.idx], updated);
+    try setSlotValue(ctx, &frame.locals[store.idx], updated);
     if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
         frame.clearLocalUninitialized(store.idx);
     }
@@ -5939,18 +5941,18 @@ pub fn tryFuseCheckedLocalMathMinMaxAdd(
 }
 
 fn fastGlobalDataValueForAtom(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
-) ?core.Value {
+) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -5959,7 +5961,7 @@ fn fastGlobalDataValueForAtom(
 }
 
 fn fastGlobalDataValueForAtomAtPc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5967,11 +5969,11 @@ fn fastGlobalDataValueForAtomAtPc(
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
-) ?core.Value {
+) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -5988,7 +5990,7 @@ fn fastGlobalDataValueForAtomAtPc(
 }
 
 fn fastGlobalDataValueForAtomAtPcNoProfile(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -5996,11 +5998,11 @@ fn fastGlobalDataValueForAtomAtPcNoProfile(
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
-) ?core.Value {
+) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -6017,7 +6019,7 @@ fn fastGlobalDataValueForAtomAtPcNoProfile(
 }
 
 fn fastInstalledGlobalDataValueForAtomAtPc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6025,12 +6027,12 @@ fn fastInstalledGlobalDataValueForAtomAtPc(
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
-) ?core.Value {
-    if (!canUseInstalledGlobalDataIc(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
+) ?core.JSValue {
+    if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
     if (!frame.current_function.isUndefined() and function.name == atom_id) return null;
-    if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -6047,21 +6049,21 @@ fn fastInstalledGlobalDataValueForAtomAtPc(
 }
 
 fn fastGlobalDataValueForRange(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
-) ?core.Value {
+) ?core.JSValue {
     if (!eval_with_object.isUndefined()) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return null;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return null;
-    if (globalLexicalValue(ctx.runtime, global, atom_id)) |lexical_value| {
+    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -6076,7 +6078,7 @@ fn fastGlobalDataValueForRange(
     return global_data.value;
 }
 
-fn mathMinMaxPrimitive2(arg0: core.Value, arg1: core.Value, is_max: bool) ?f64 {
+fn mathMinMaxPrimitive2(arg0: core.JSValue, arg1: core.JSValue, is_max: bool) ?f64 {
     const a = primitiveMathNumber(arg0) orelse return null;
     const b = primitiveMathNumber(arg1) orelse return null;
     if (std.math.isNan(a)) return a;
@@ -6169,7 +6171,7 @@ fn safeIntegerI128(value: i128) bool {
     return value >= -max_safe_integer and value <= max_safe_integer;
 }
 
-fn primitiveMathNumber(value: core.Value) ?f64 {
+fn primitiveMathNumber(value: core.JSValue) ?f64 {
     if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
     if (value.tag == core.Tag.float64) return value.asFloat64().?;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
@@ -6189,7 +6191,7 @@ fn mathFmax(a: f64, b: f64) f64 {
 }
 
 fn tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6216,7 +6218,7 @@ fn tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(
 }
 
 fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6260,7 +6262,7 @@ fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
         else => unreachable,
     };
 
-    setSlotValue(ctx, &frame.locals[idx], core.Value.int32(updated_int));
+    try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = target_pc;
     _ = tryFuseLocalInt32LessThanArgFalseBranchAtPc(function, frame, target_pc);
@@ -6268,7 +6270,7 @@ fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
 }
 
 fn tryFuseDroppedLocalPostUpdateGoto8AtPc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6310,7 +6312,7 @@ fn tryFuseLocalInt32LessThanArgFalseBranchFromGet(
 }
 
 pub fn tryFuseCheckedLocalDenseArrayModFieldInt32Add(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6367,7 +6369,7 @@ pub fn tryFuseCheckedLocalDenseArrayModFieldInt32Add(
     const lhs = frame.locals[local_idx].asInt32() orelse return false;
     const rhs = field_value.asInt32() orelse return false;
 
-    setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
+    try setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -6401,11 +6403,11 @@ fn nextOpCanStartGlobalUriCall1(function: *const bytecode.Bytecode, frame: *cons
 }
 
 fn tryFuseGlobalDateNowCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    receiver: core.Value,
+    receiver: core.JSValue,
 ) !bool {
     const pc = frame.pc;
     const code = function.code;
@@ -6425,16 +6427,16 @@ fn tryFuseGlobalDateNowCall(
 }
 
 fn tryFuseGlobalUriCall1(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    callee: core.Value,
+    callee: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime handleCatchableRuntimeError: anytype,
@@ -6459,7 +6461,7 @@ fn tryFuseGlobalUriCall1(
 }
 
 fn tryFuseGlobalUriCall1AtCurrentPc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -6467,7 +6469,7 @@ fn tryFuseGlobalUriCall1AtCurrentPc(
     global: *core.Object,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime handleCatchableRuntimeError: anytype,
@@ -6487,16 +6489,16 @@ fn tryFuseGlobalUriCall1AtCurrentPc(
 }
 
 fn tryFuseGlobalUriCall1WithStringArgument(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    argument: core.Value,
+    argument: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime handleCatchableRuntimeError: anytype,
 ) !?Step {
@@ -6509,7 +6511,7 @@ fn tryFuseGlobalUriCall1WithStringArgument(
 
     const callee_atom = readInt(u32, code[frame.pc + 1 ..][0..4]);
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx.runtime, global, callee_atom)) |lex_value| {
+    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return null;
     }
@@ -6531,7 +6533,7 @@ fn tryFuseGlobalUriCall1WithStringArgument(
 fn tryFuseGlobalDataInt32CompareFalseBranch(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    value: core.Value,
+    value: core.JSValue,
 ) bool {
     const lhs = value.asInt32() orelse return false;
     const immediate = immediateInt32Operand(function.code, frame.pc) orelse return false;
@@ -6566,19 +6568,19 @@ fn tryFuseGlobalDataInt32CompareFalseBranch(
 }
 
 pub fn tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     goto_opc: u8,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     const operand_pc = frame.pc;
     const target_pc = backwardGotoTarget(function.code, operand_pc, goto_opc) orelse return false;
     const global_get = decodeGlobalDataGet(function.code, target_pc) orelse return false;
-    if (!canUseInstalledGlobalDataIc(function, global_get.atom, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return false;
+    if (!canUseInstalledGlobalDataIc(ctx, function, global_get.atom, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return false;
     const lhs_value = if (cachedOwnDataPropertyLookupForObject(function, target_pc, ctx.runtime, global, global_get.atom)) |lookup|
         lookup.value
     else lookup: {
@@ -6632,16 +6634,16 @@ fn int32ImmediateCompare(lhs: i32, cmp_op: u8, rhs: i32) ?bool {
 }
 
 fn tryFuseGlobalDataInt32ImmediateBinary(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     source_atom: core.Atom,
-    value: core.Value,
+    value: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     var current = value.asInt32() orelse return false;
@@ -6662,25 +6664,25 @@ fn tryFuseGlobalDataInt32ImmediateBinary(
     }
     if (!consumed) return false;
     frame.pc = pc;
-    if (tryFuseGlobalDataValueStore(ctx.runtime, global, function, frame, core.Value.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) |stored| {
+    if (tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) |stored| {
         if (stored.atom != source_atom) {
             _ = tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, source_atom, source_value, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue);
         }
         return true;
     }
-    try pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(ctx, global, stack, function, frame, core.Value.int32(current), eval_local_names, eval_var_ref_names, eval_with_object);
+    try pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(ctx, global, stack, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object);
     return true;
 }
 
 pub fn tryFuseGlobalInt32PrefixTermsStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     start_pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) bool {
     const start = immediateInt32Operand(function.code, start_pc) orelse return false;
@@ -6702,7 +6704,7 @@ pub fn tryFuseGlobalInt32PrefixTermsStore(
 
     const saved_pc = frame.pc;
     frame.pc = pc;
-    if (tryFuseGlobalDataValueStore(ctx.runtime, global, function, frame, core.Value.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) |stored| {
+    if (tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object)) |stored| {
         while (tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, stored.atom, current, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) {}
         return true;
     }
@@ -6710,7 +6712,7 @@ pub fn tryFuseGlobalInt32PrefixTermsStore(
     return false;
 }
 
-fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.Value {
+fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
     const immediate = immediateInt32Operand(code, pc.*) orelse return null;
     if (immediate.next_pc >= code.len) return null;
     const result = fastInt32ImmediateBinary(code[immediate.next_pc], current.*, immediate.value) orelse return null;
@@ -6718,7 +6720,7 @@ fn tryFoldImmediateInt32At(code: []const u8, pc: *usize, current: *const i32) ?c
     return result;
 }
 
-fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *const i32) ?core.Value {
+fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *const i32) ?core.JSValue {
     const rhs = immediateInt32Operand(code, pc.*) orelse return null;
     var rhs_value = rhs.value;
     var rhs_pc = rhs.next_pc;
@@ -6732,7 +6734,7 @@ fn tryFoldFollowingImmediateInt32Term(code: []const u8, pc: *usize, current: *co
 }
 
 fn tryFoldFollowingGlobalInt32Term(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -6740,9 +6742,9 @@ fn tryFoldFollowingGlobalInt32Term(
     current: *const i32,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
-) ?core.Value {
+) ?core.JSValue {
     const get = decodeGlobalDataGet(function.code, pc.*) orelse return null;
     const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc.*, get.atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
     var rhs_value = value.asInt32() orelse return null;
@@ -6757,7 +6759,7 @@ fn tryFoldFollowingGlobalInt32Term(
 }
 
 fn tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -6765,7 +6767,7 @@ fn tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(
     source_value: i32,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) bool {
     const start_pc = frame.pc;
@@ -6789,41 +6791,42 @@ fn tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(
     if (!consumed) return false;
 
     frame.pc = pc;
-    if (tryFuseGlobalDataValueStore(ctx.runtime, global, function, frame, core.Value.int32(current), eval_local_names, eval_var_ref_names, eval_with_object) != null) return true;
+    if (tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object) != null) return true;
     frame.pc = start_pc;
     return false;
 }
 
 fn tryFuseGlobalDataValueStore(
-    rt: *core.Runtime,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    value: core.Value,
+    value: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) ?StoredGlobalDataValue {
+    const rt = ctx.runtime;
     if (frame.pc + 5 > function.code.len or function.code[frame.pc] != op.put_var) return null;
     const store_pc = frame.pc;
     const atom_id = readInt(u32, function.code[frame.pc + 1 ..][0..4]);
     if (!canFuseGlobalDataWrite(function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    const store_index = globalWritableDataStoreIndexForFastPath(rt, global, function, store_pc, atom_id) orelse return null;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, atom_id) orelse return null;
     if (!setGlobalOwnWritableDataPropertyAtOwned(rt, global, store_index, atom_id, value)) return null;
     frame.pc += 5;
     return .{ .atom = atom_id };
 }
 
 fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    rhs_value: core.Value,
+    rhs_value: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) !void {
     const rhs = rhs_value.asInt32() orelse {
         try stack.pushOwned(rhs_value);
@@ -6836,7 +6839,7 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
                     const lhs_owned = try stack.pop();
                     defer lhs_owned.free(ctx.runtime);
                     frame.pc += 1;
-                    if (tryFuseGlobalDataValueStore(ctx.runtime, global, function, frame, result, eval_local_names, eval_var_ref_names, eval_with_object) != null) {
+                    if (tryFuseGlobalDataValueStore(ctx, global, function, frame, result, eval_local_names, eval_var_ref_names, eval_with_object) != null) {
                         return;
                     }
                     try stack.pushOwned(result);
@@ -6849,7 +6852,7 @@ fn pushImmediateBinaryResultMaybeFuseStackBinaryOrGlobalStore(
 }
 
 fn tryFuseVarRefSimpleStringCall1GlobalIntArgument(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6858,7 +6861,7 @@ fn tryFuseVarRefSimpleStringCall1GlobalIntArgument(
     consume: u8,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const callee = varRefReadableBorrowed(frame, var_ref_idx) orelse return false;
@@ -6891,7 +6894,7 @@ fn tryFuseVarRefSimpleStringCall1GlobalIntArgument(
 }
 
 fn tryFuseStackAddPercentHexGlobalStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -6900,7 +6903,7 @@ fn tryFuseStackAddPercentHexGlobalStore(
     add_pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const code = function.code;
@@ -6915,10 +6918,10 @@ fn tryFuseStackAddPercentHexGlobalStore(
     }
     const store = decodeGlobalPut(code, store_pc) orelse return false;
     if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (global.global_lexical_env) |env| {
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(store.atom)) return false;
     }
-    const store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, store_pc, store.atom) orelse return false;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, store.atom) orelse return false;
 
     const lhs = stack.peekBorrowed() orelse return false;
     const lhs_string = stringFromValue(lhs) orelse return false;
@@ -6940,16 +6943,16 @@ fn tryFuseStackAddPercentHexGlobalStore(
 }
 
 fn tryFuseGlobalStringPercentHexAddStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    lhs: core.Value,
+    lhs: core.JSValue,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime handleCatchableRuntimeError: anytype,
@@ -6967,7 +6970,7 @@ fn tryFuseGlobalStringPercentHexAddStore(
     const store_pc = call_pc + 2;
     const store = decodeGlobalPut(function.code, store_pc) orelse return null;
     if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    const store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, store_pc, store.atom) orelse return null;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, store.atom) orelse return null;
 
     const lhs_string = stringFromValue(lhs) orelse return null;
     const lhs_bytes = lhs_string.borrowLatin1() orelse return null;
@@ -6987,13 +6990,13 @@ fn tryFuseGlobalStringPercentHexAddStore(
 }
 
 pub fn tryFuseAtomPercentHexGlobalStringStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     if (frame.pc + 4 > function.code.len) return false;
@@ -7004,7 +7007,7 @@ pub fn tryFuseAtomPercentHexGlobalStringStore(
 }
 
 fn tryFusePercentHexGlobalStringStoreAfterPrefix(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -7012,7 +7015,7 @@ fn tryFusePercentHexGlobalStringStoreAfterPrefix(
     callee_pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) !bool {
     const callee_get = decodeVarRefGet(function.code, callee_pc) orelse return false;
@@ -7028,7 +7031,7 @@ fn tryFusePercentHexGlobalStringStoreAfterPrefix(
     const store_pc = call_pc + 2;
     const store = decodeGlobalPut(function.code, store_pc) orelse return false;
     if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    const store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, store_pc, store.atom) orelse return false;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, store_pc, store.atom) orelse return false;
 
     const suffix_string = try ctx.runtime.percentHexString(@truncate(@as(u32, @bitCast(arg_i32))));
     const suffix_bytes = suffix_string.borrowLatin1() orelse return false;
@@ -7044,16 +7047,16 @@ fn tryFusePercentHexGlobalStringStoreAfterPrefix(
 }
 
 fn tryFuseStackAddGlobalStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    rhs: core.Value,
+    rhs: core.JSValue,
     rhs_owned: *bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) !bool {
     if (frame.pc + 6 > function.code.len or function.code[frame.pc] != op.add or function.code[frame.pc + 1] != op.put_var) return false;
     const store_atom = readInt(u32, function.code[frame.pc + 2 ..][0..4]);
@@ -7065,7 +7068,7 @@ fn tryFuseStackAddGlobalStore(
     errdefer updated.free(ctx.runtime);
     const store_pc = frame.pc + 1;
     const stored = stored: {
-        if (global.global_lexical_env) |env| {
+        if (ctx.lexicals) |env| {
             if (env.hasOwnProperty(store_atom)) break :stored false;
         }
         if (cachedOwnDataPropertyLookupForObject(function, store_pc, ctx.runtime, global, store_atom)) |cached| {
@@ -7088,7 +7091,7 @@ fn tryFuseStackAddGlobalStore(
     return true;
 }
 
-fn simpleStringCallResultFromInt32(rt: *core.Runtime, kind: bytecode.function.SimpleStringKind, value: i32) !?core.Value {
+fn simpleStringCallResultFromInt32(rt: *core.JSRuntime, kind: bytecode.function.SimpleStringKind, value: i32) !?core.JSValue {
     return switch (kind) {
         .percent_hex_byte => blk: {
             const byte: u8 = @truncate(@as(u32, @bitCast(value)));
@@ -7099,7 +7102,7 @@ fn simpleStringCallResultFromInt32(rt: *core.Runtime, kind: bytecode.function.Si
     };
 }
 
-fn simpleStringCallableKind(func: core.Value) ?bytecode.function.SimpleStringKind {
+fn simpleStringCallableKind(func: core.JSValue) ?bytecode.function.SimpleStringKind {
     if (func.isFunctionBytecode()) {
         const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
         return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
@@ -7110,15 +7113,15 @@ fn simpleStringCallableKind(func: core.Value) ?bytecode.function.SimpleStringKin
     return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
 }
 
-fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.Value {
+fn fastInt32ImmediateBinary(opcode_id: u8, lhs: i32, rhs: i32) ?core.JSValue {
     return switch (opcode_id) {
         op.add => fastInt32Add(lhs, rhs),
         op.sub => fastInt32Sub(lhs, rhs),
         op.mul => fastInt32Mul(lhs, rhs),
-        op.sar => core.Value.int32(lhs >> @intCast(rhs & 31)),
-        op.@"and" => core.Value.int32(lhs & rhs),
-        op.@"or" => core.Value.int32(lhs | rhs),
-        op.xor => core.Value.int32(lhs ^ rhs),
+        op.sar => core.JSValue.int32(lhs >> @intCast(rhs & 31)),
+        op.@"and" => core.JSValue.int32(lhs & rhs),
+        op.@"or" => core.JSValue.int32(lhs | rhs),
+        op.xor => core.JSValue.int32(lhs ^ rhs),
         else => null,
     };
 }
@@ -7175,7 +7178,7 @@ fn immediateShortBigIntI32Operand(code: []const u8, pc: usize) ?ImmediateShortBi
 }
 
 const UriCall1Argument = struct {
-    value: core.Value,
+    value: core.JSValue,
     next_pc: usize,
     owned: bool,
 };
@@ -7191,18 +7194,18 @@ const UriStrictEqBranch = struct {
 };
 
 fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
     uri_mode: u32,
-    argument: core.Value,
+    argument: core.JSValue,
     after_uri_call_pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime handleCatchableRuntimeError: anytype,
@@ -7240,13 +7243,13 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     const expected_low: u16 = @intCast(@as(u32, @bitCast(low_arg.value)) & 0xffff);
     const matched = units.high == expected_high and units.low == expected_low;
     if (tryFuseUriStrictEqBranchCount(ctx, function, global, frame, strict_eq_pc, matched, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue)) return .done;
-    try stack.pushOwned(core.Value.boolean(matched));
+    try stack.pushOwned(core.JSValue.boolean(matched));
     frame.pc = strict_eq_pc + 1;
     return .done;
 }
 
 fn tryFuseUriStrictEqBranchCount(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -7254,7 +7257,7 @@ fn tryFuseUriStrictEqBranchCount(
     matched: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime setSlotValue: anytype,
 ) bool {
     const branch_pc = strict_eq_pc + 1;
@@ -7291,12 +7294,13 @@ fn tryFuseUriStrictEqBranchCount(
 }
 
 fn tryFuseUriStrictEqVarRefPostInc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     branch: UriStrictEqBranch,
     comptime setSlotValue: anytype,
 ) bool {
+    _ = setSlotValue;
     const code = function.code;
     const get = decodeVarRefGet(code, branch.true_pc) orelse return false;
     if (get.next_pc >= code.len or code[get.next_pc] != op.post_inc) return false;
@@ -7308,22 +7312,25 @@ fn tryFuseUriStrictEqVarRefPostInc(
     if (put.idx >= frame.var_refs.len) return false;
     if (varRefCellFromValue(frame.var_refs[put.idx])) |cell| {
         if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
+        return false;
     }
     const current = (varRefReadableBorrowed(frame, get.idx) orelse return false).asInt32() orelse return false;
-    setSlotValue(ctx, &frame.var_refs[put.idx], fastInt32Add(current, 1));
+    const old_value = frame.var_refs[put.idx];
+    frame.var_refs[put.idx] = fastInt32Add(current, 1);
+    old_value.free(ctx.runtime);
     frame.pc = branch.false_pc;
     return true;
 }
 
 fn tryFuseUriStrictEqGlobalDataPostInc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     branch: UriStrictEqBranch,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     const code = function.code;
     const get = decodeGlobalDataGet(code, branch.true_pc) orelse return false;
@@ -7334,7 +7341,7 @@ fn tryFuseUriStrictEqGlobalDataPostInc(
     if (put.next_pc >= code.len or code[put.next_pc] != op.drop) return false;
     if (put.next_pc + 1 != branch.false_pc) return false;
     if (!canUseFastGlobalVarLookup(function, get.atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    const store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, put_pc, put.atom) orelse return false;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, put_pc, put.atom) orelse return false;
     const current_value = globalOwnDataPropertyBorrowedAt(global, store_index, get.atom) orelse return false;
     const current = current_value.asInt32() orelse return false;
     if (!setGlobalOwnWritableDataPropertyAtOwned(ctx.runtime, global, store_index, put.atom, fastInt32Add(current, 1))) return false;
@@ -7344,13 +7351,13 @@ fn tryFuseUriStrictEqGlobalDataPostInc(
 }
 
 fn tryFuseFollowingDroppedGlobalDataPostUpdateAndGoto16Condition(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     const code = function.code;
     const start_pc = frame.pc;
@@ -7364,7 +7371,7 @@ fn tryFuseFollowingDroppedGlobalDataPostUpdateAndGoto16Condition(
     if (put.atom != get.atom) return false;
     if (put.next_pc >= code.len or code[put.next_pc] != op.drop) return false;
 
-    const store_index = globalWritableDataStoreIndexForFastPath(ctx.runtime, global, function, put_pc, put.atom) orelse return false;
+    const store_index = globalWritableDataStoreIndexForFastPath(ctx, global, function, put_pc, put.atom) orelse return false;
     const current_value = globalOwnDataPropertyBorrowedAt(global, store_index, get.atom) orelse return false;
     const current = current_value.asInt32() orelse return false;
     const updated = switch (update_op) {
@@ -7385,14 +7392,14 @@ fn tryFuseFollowingDroppedGlobalDataPostUpdateAndGoto16Condition(
 }
 
 fn uriStrictEqIntArg(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     pc: usize,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) ?UriStrictEqIntArg {
     if (pc >= function.code.len) return null;
@@ -7442,7 +7449,7 @@ fn uriStrictEqIntArg(
 }
 
 fn uriCall1StringArgument(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     global: *core.Object,
@@ -7489,7 +7496,7 @@ fn uriCall1VarRefStringArgument(frame: *const frame_mod.Frame, idx: usize, next_
 }
 
 fn uriCall1GlobalStringArgument(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     global: *core.Object,
@@ -7500,7 +7507,7 @@ fn uriCall1GlobalStringArgument(
 ) ?UriCall1Argument {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
-    if (globalLexicalValue(ctx.runtime, global, atom_id)) |value| {
+    if (globalLexicalValue(ctx, atom_id)) |value| {
         value.free(ctx.runtime);
         return null;
     }
@@ -7515,7 +7522,7 @@ fn uriCall1GlobalStringArgument(
     return .{ .value = value, .next_pc = next_pc, .owned = false };
 }
 
-fn setGlobalOwnWritableDataPropertyAt(rt: *core.Runtime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.Value) bool {
+fn setGlobalOwnWritableDataPropertyAt(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool {
     if (global.exotic != null or index >= global.properties.len) return false;
     const entry = &global.properties[index];
     if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor or !entry.flags.writable) return false;
@@ -7530,7 +7537,7 @@ fn setGlobalOwnWritableDataPropertyAt(rt: *core.Runtime, global: *core.Object, i
     return true;
 }
 
-fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.Runtime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.Value) bool {
+fn setGlobalOwnWritableDataPropertyAtOwned(rt: *core.JSRuntime, global: *core.Object, index: usize, atom_id: core.Atom, new_value: core.JSValue) bool {
     if (global.exotic != null or index >= global.properties.len) return false;
     const entry = &global.properties[index];
     if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor or !entry.flags.writable) return false;
@@ -7554,7 +7561,7 @@ fn declaredGlobalVarDataBorrowedLookup(global: *core.Object, function: *const by
 
 const BorrowedGlobalDataLookup = struct {
     index: usize,
-    value: core.Value,
+    value: core.JSValue,
 };
 
 fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom) ?BorrowedGlobalDataLookup {
@@ -7570,7 +7577,7 @@ fn globalOwnDataPropertyBorrowedLookup(global: *core.Object, atom_id: core.Atom)
     return null;
 }
 
-fn globalOwnDataPropertyBorrowedAt(global: *core.Object, index: usize, atom_id: core.Atom) ?core.Value {
+fn globalOwnDataPropertyBorrowedAt(global: *core.Object, index: usize, atom_id: core.Atom) ?core.JSValue {
     if (global.exotic != null or index >= global.properties.len) return null;
     const entry = &global.properties[index];
     if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return null;
@@ -7581,7 +7588,7 @@ fn globalOwnDataPropertyBorrowedAt(global: *core.Object, index: usize, atom_id: 
 }
 
 pub fn putVar(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -7592,10 +7599,10 @@ pub fn putVar(
     eval_global_var_bindings: bool,
     is_eval_code: bool,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime setNamedSlotValue: anytype,
     comptime setNamedVarRefValue: anytype,
     comptime directEvalShouldExposeImplicitArguments: anytype,
@@ -7609,19 +7616,19 @@ pub fn putVar(
     const value = try stack.pop();
     const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (globalWritableDataWriteFastOwned(ctx.runtime, global, function, frame, atom_id, value) catch |err| {
+        if (globalWritableDataWriteFastOwned(ctx, global, function, frame, atom_id, value) catch |err| {
             value.free(ctx.runtime);
             return err;
         }) {
             return .continue_loop;
         }
     }
-    if (setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
     if (setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     }) return .continue_loop;
-    if (setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
     if (setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -7632,7 +7639,7 @@ pub fn putVar(
         if (old_value) |stored| stored.free(ctx.runtime);
         return .continue_loop;
     }
-    const updated_global_lexical = setGlobalLexicalValue(ctx.runtime, global, atom_id, value) catch |err| {
+    const updated_global_lexical = setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
         value.free(ctx.runtime);
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
@@ -7700,14 +7707,16 @@ fn globalOwnRejectedNonStrictSet(global: *core.Object, atom_id: core.Atom) bool 
     return false;
 }
 
-fn globalWritableDataWriteFastOwned(rt: *core.Runtime, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.Value) !bool {
+fn globalWritableDataWriteFastOwned(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) !bool {
+    const rt = ctx.runtime;
     const site_pc = frame.pc - 5;
-    const index = globalWritableDataStoreIndexForFastPath(rt, global, function, site_pc, atom_id) orelse return false;
+    const index = globalWritableDataStoreIndexForFastPath(ctx, global, function, site_pc, atom_id) orelse return false;
     return setGlobalOwnWritableDataPropertyAtOwned(rt, global, index, atom_id, value);
 }
 
-fn globalWritableDataStoreIndexForFastPath(rt: *core.Runtime, global: *core.Object, function: *const bytecode.Bytecode, site_pc: usize, atom_id: core.Atom) ?usize {
-    if (global.global_lexical_env) |env| {
+fn globalWritableDataStoreIndexForFastPath(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, site_pc: usize, atom_id: core.Atom) ?usize {
+    const rt = ctx.runtime;
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return null;
     }
     if (cachedOwnDataPropertyLookupForObject(function, site_pc, rt, global, atom_id)) |cached| {
@@ -7735,7 +7744,7 @@ fn globalWritableDataPropertyIndex(global: *core.Object, index: usize, atom_id: 
 }
 
 pub fn withGetOrDelete(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -7789,7 +7798,7 @@ pub fn withGetOrDelete(
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
-        try stack.pushOwned(core.Value.undefinedValue());
+        try stack.pushOwned(core.JSValue.undefinedValue());
         frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
         return .continue_loop;
     }
@@ -7809,7 +7818,7 @@ pub fn withGetOrDelete(
             }
             const dropped = try stack.pop();
             dropped.free(ctx.runtime);
-            try stack.pushOwned(core.Value.boolean(deleted));
+            try stack.pushOwned(core.JSValue.boolean(deleted));
         },
         op.with_get_ref => {
             const value = try getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
@@ -7823,7 +7832,7 @@ pub fn withGetOrDelete(
             try stack.reserveAdditional(1);
             const dropped = try stack.pop();
             dropped.free(ctx.runtime);
-            stack.pushOwnedAssumeCapacity(core.Value.undefinedValue());
+            stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
             stack.pushOwnedAssumeCapacity(value);
             value_owned = false;
         },
@@ -7839,7 +7848,7 @@ pub fn withGetOrDelete(
 }
 
 pub fn makeSlotRef(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -7876,16 +7885,16 @@ pub fn makeSlotRef(
 }
 
 pub fn makeVarRef(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
 ) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -7923,17 +7932,17 @@ pub fn makeVarRef(
     }
     const global_value = global.value();
     const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
-    const object_value = if (shared_vm.existingGlobalLexicalEnv(ctx.runtime, global)) |env|
+    const object_value = if (shared_vm.existingGlobalLexicalEnv(ctx)) |env|
         if (env.hasOwnProperty(atom_id))
             env.value()
         else if (has_global_binding)
             global_value
         else
-            core.Value.undefinedValue()
+            core.JSValue.undefinedValue()
     else if (has_global_binding)
         global_value
     else
-        core.Value.undefinedValue();
+        core.JSValue.undefinedValue();
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
     try stack.push(object_value);
@@ -7941,14 +7950,14 @@ pub fn makeVarRef(
 }
 
 pub fn tryFuseMakeVarRefPercentHexGlobalStringAssignment(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
 ) !bool {
     _ = eval_local_slots;
     _ = eval_var_refs;
@@ -7959,12 +7968,12 @@ pub fn tryFuseMakeVarRefPercentHexGlobalStringAssignment(
 
     const store_atom = readInt(u32, code[frame.pc..][0..4]);
     const lhs_pc = frame.pc + 4;
-    if (!globalReferenceAtomCanUseFastData(function, global, frame, store_atom)) return false;
+    if (!globalReferenceAtomCanUseFastData(ctx, function, global, frame, store_atom)) return false;
     const store_lookup = globalOwnDataPropertyBorrowedLookup(global, store_atom) orelse return false;
     const store_index = globalWritableDataPropertyIndex(global, store_lookup.index, store_atom) orelse return false;
 
     const lhs_get = decodeGlobalDataGet(code, lhs_pc) orelse return false;
-    if (!globalReferenceAtomCanUseFastData(function, global, frame, lhs_get.atom)) return false;
+    if (!globalReferenceAtomCanUseFastData(ctx, function, global, frame, lhs_get.atom)) return false;
     const lhs = (globalOwnDataPropertyBorrowedLookup(global, lhs_get.atom) orelse return false).value;
     const lhs_string = stringFromValue(lhs) orelse return false;
     const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
@@ -7974,7 +7983,7 @@ pub fn tryFuseMakeVarRefPercentHexGlobalStringAssignment(
     if (simpleStringCallableKind(callee) != .percent_hex_byte) return false;
 
     const arg_get = decodeGlobalDataGet(code, callee_get.next_pc) orelse return false;
-    if (!globalReferenceAtomCanUseFastData(function, global, frame, arg_get.atom)) return false;
+    if (!globalReferenceAtomCanUseFastData(ctx, function, global, frame, arg_get.atom)) return false;
     const arg_value = (globalOwnDataPropertyBorrowedLookup(global, arg_get.atom) orelse return false).value;
     const arg_i32 = arg_value.asInt32() orelse return false;
 
@@ -7994,6 +8003,7 @@ pub fn tryFuseMakeVarRefPercentHexGlobalStringAssignment(
 }
 
 fn globalReferenceAtomCanUseFastData(
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
@@ -8002,7 +8012,8 @@ fn globalReferenceAtomCanUseFastData(
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
     if (!frame.current_function.isUndefined()) return false;
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
-    if (global.global_lexical_env) |env| {
+    _ = global;
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
     }
     return true;
@@ -8019,11 +8030,11 @@ fn decodeGlobalDataGet(code: []const u8, pc: usize) ?GlobalBindingGet {
 }
 
 fn makeEvalBindingRef(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     names: []const core.Atom,
-    slots: []core.Value,
+    slots: []core.JSValue,
     atom_id: core.Atom,
-) !?core.Value {
+) !?core.JSValue {
     for (names, 0..) |name, idx| {
         if (idx >= slots.len) continue;
         if (!shared_vm.atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
@@ -8033,11 +8044,11 @@ fn makeEvalBindingRef(
 }
 
 fn makeEvalVarRef(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     names: []const core.Atom,
-    refs: []const core.Value,
+    refs: []const core.JSValue,
     atom_id: core.Atom,
-) ?core.Value {
+) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (idx >= refs.len) continue;
         if (!shared_vm.atomIdOrNameEql(rt, name, atom_id)) continue;
@@ -8048,7 +8059,7 @@ fn makeEvalVarRef(
 }
 
 pub fn getRefValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8079,7 +8090,7 @@ pub fn getRefValue(
 }
 
 pub fn putRefValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8118,7 +8129,7 @@ pub fn putRefValue(
         }
         var ref_slot = obj.dup();
         defer ref_slot.free(ctx.runtime);
-        setSlotValue(ctx, &ref_slot, value);
+        try setSlotValue(ctx, &ref_slot, value);
         return;
     }
     defer value.free(ctx.runtime);
@@ -8133,10 +8144,10 @@ pub fn putRefValue(
 }
 
 fn hasObjectBinding(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver: core.Value,
+    receiver: core.JSValue,
     object: *core.Object,
     atom_id: core.Atom,
     function: *const bytecode.Bytecode,
@@ -8146,7 +8157,7 @@ fn hasObjectBinding(
 }
 
 pub fn getPrivateField(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8167,7 +8178,7 @@ pub fn getPrivateField(
 }
 
 pub fn putPrivateField(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8189,7 +8200,7 @@ pub fn putPrivateField(
 }
 
 pub fn definePrivateField(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8211,7 +8222,7 @@ pub fn definePrivateField(
 }
 
 pub fn withPut(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8245,30 +8256,30 @@ pub fn withPut(
 }
 
 pub fn deleteVar(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     comptime deleteEvalBinding: anytype,
 ) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     if (deleteEvalBinding(ctx.runtime, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| {
-        try stack.pushOwned(core.Value.boolean(deleted));
+        try stack.pushOwned(core.JSValue.boolean(deleted));
     } else if (global.hasProperty(atom_id)) {
-        try stack.pushOwned(core.Value.boolean(global.deleteProperty(ctx.runtime, atom_id)));
+        try stack.pushOwned(core.JSValue.boolean(global.deleteProperty(ctx.runtime, atom_id)));
     } else {
-        try stack.pushOwned(core.Value.boolean(true));
+        try stack.pushOwned(core.JSValue.boolean(true));
     }
 }
 
 pub fn deleteProperty(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8288,7 +8299,7 @@ pub fn deleteProperty(
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     } else if (!obj.isObject()) {
-        try stack.pushOwned(core.Value.boolean(true));
+        try stack.pushOwned(core.JSValue.boolean(true));
     } else {
         const object = try property_ops.expectObject(obj);
         const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, prop);
@@ -8310,13 +8321,13 @@ pub fn deleteProperty(
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         }
-        try stack.pushOwned(core.Value.boolean(deleted));
+        try stack.pushOwned(core.JSValue.boolean(deleted));
     }
     return .done;
 }
 
 pub fn inOrInstanceof(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8340,7 +8351,7 @@ pub fn inOrInstanceof(
 }
 
 pub fn field(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -8351,8 +8362,8 @@ pub fn field(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime getValueProperty: anytype,
     comptime setValueProperty: anytype,
     comptime setSlotValue: anytype,
@@ -8398,7 +8409,7 @@ pub fn field(
                     return .done;
                 },
                 .undefined => {
-                    try stack.pushOwned(core.Value.undefinedValue());
+                    try stack.pushOwned(core.JSValue.undefinedValue());
                     return .done;
                 },
                 .slow => {},
@@ -8472,7 +8483,7 @@ pub fn field(
                     return .done;
                 },
                 .undefined => {
-                    try stack.pushOwned(core.Value.undefinedValue());
+                    try stack.pushOwned(core.JSValue.undefinedValue());
                     return .done;
                 },
                 .slow => {},
@@ -8506,7 +8517,7 @@ pub fn field(
             defer value.free(ctx.runtime);
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
-            if (setCachedOwnDataProperty(ctx.runtime, function, site_pc, obj, atom_id, value)) return .done;
+            if (try setCachedOwnDataProperty(ctx.runtime, function, site_pc, obj, atom_id, value)) return .done;
             if (try tryFastSetObjectDataPropertyForPutField(ctx.runtime, obj, atom_id, value)) {
                 installOwnDataIcAfterWrite(function, site_pc, ctx.runtime, obj, atom_id);
                 return .done;
@@ -8523,7 +8534,7 @@ pub fn field(
     return .done;
 }
 
-fn tryFastSetObjectDataPropertyForPutField(rt: *core.Runtime, receiver: core.Value, atom_id: core.Atom, value: core.Value) !bool {
+fn tryFastSetObjectDataPropertyForPutField(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
     if (rt.atoms.kind(atom_id) == .private) return false;
     const object = objectFromValue(receiver) orelse return false;
     if (object.proxyTarget() != null or object.exotic != null) return false;
@@ -8536,11 +8547,11 @@ fn tryFastSetObjectDataPropertyForPutField(rt: *core.Runtime, receiver: core.Val
 }
 
 fn tryFuseMathMinMaxPrimitiveCallFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
 ) !bool {
     const method = fastOwnDataPropertyBorrowedValueMaterialized(ctx.runtime, receiver, atom_id) orelse return false;
@@ -8570,12 +8581,12 @@ fn tryFuseMathMinMaxPrimitiveCallFromField2(
 }
 
 fn tryFuseMathMinMaxAddRangeFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     site_pc: usize,
     sync_global_lexical_locals: bool,
@@ -8656,15 +8667,15 @@ fn tryFuseMathMinMaxAddRangeFromField2(
     dropped_receiver.free(ctx.runtime);
     const dropped_accumulator = try stack.pop();
     dropped_accumulator.free(ctx.runtime);
-    setSlotValue(ctx, &frame.locals[0], core.Value.int32(@intCast(final_accumulator)));
-    setSlotValue(ctx, &frame.locals[condition_get.idx], core.Value.int32(limit));
+    try setSlotValue(ctx, &frame.locals[0], core.JSValue.int32(@intCast(final_accumulator)));
+    try setSlotValue(ctx, &frame.locals[condition_get.idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 0, sync_global_lexical_locals);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, condition_get.idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
 
-fn mathMinMaxNativeRefFromReceiver(rt: *core.Runtime, receiver: core.Value, atom_id: core.Atom) ?core.function.NativeBuiltinRef {
+fn mathMinMaxNativeRefFromReceiver(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?core.function.NativeBuiltinRef {
     const method = fastOwnDataPropertyBorrowedValueMaterialized(rt, receiver, atom_id) orelse return null;
     const method_object = objectFromValue(method) orelse return null;
     const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return null;
@@ -8672,12 +8683,12 @@ fn mathMinMaxNativeRefFromReceiver(rt: *core.Runtime, receiver: core.Value, atom
 }
 
 fn tryFuseStringFromCharCodeInt32CallFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     site_pc: usize,
     sync_global_lexical_locals: bool,
@@ -8704,12 +8715,12 @@ fn tryFuseStringFromCharCodeInt32CallFromField2(
 }
 
 fn tryFuseGlobalStringFromCharCodeInt32LocalAppend(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -8729,7 +8740,7 @@ fn tryFuseGlobalStringFromCharCodeInt32LocalAppend(
 }
 
 fn tryFuseStringFromCharCodeInt32LocalAppend(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -8778,7 +8789,7 @@ fn tryFuseStringFromCharCodeInt32LocalAppend(
     const lhs_header = lhs.refHeader() orelse return false;
     const appended_in_place = @as(usize, @intCast(lhs_header.rc)) <= max_ref_count and
         try lhs_string.appendLatin1InPlace(ctx.runtime, &.{byte});
-    var replacement = core.Value.undefinedValue();
+    var replacement = core.JSValue.undefinedValue();
     var replacement_owned = false;
     errdefer if (replacement_owned) replacement.free(ctx.runtime);
     if (!appended_in_place) {
@@ -8794,7 +8805,7 @@ fn tryFuseStringFromCharCodeInt32LocalAppend(
     const lhs_owned = try stack.pop();
     lhs_owned.free(ctx.runtime);
     if (replacement_owned) {
-        setSlotValue(ctx, &frame.locals[idx], replacement);
+        try setSlotValue(ctx, &frame.locals[idx], replacement);
         replacement_owned = false;
     }
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
@@ -8805,7 +8816,7 @@ fn tryFuseStringFromCharCodeInt32LocalAppend(
 }
 
 fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -8815,7 +8826,7 @@ fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -8842,7 +8853,7 @@ fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
 }
 
 fn tryStoreStringFromCharCodeInt32LocalAppend(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -8889,7 +8900,7 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     if (!appended_in_place) {
         const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
         const replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
-        setSlotValue(ctx, &frame.locals[local_idx], replacement);
+        try setSlotValue(ctx, &frame.locals[local_idx], replacement);
     }
     if (local_idx < function.var_is_lexical.len and function.var_is_lexical[local_idx]) {
         frame.clearLocalUninitialized(local_idx);
@@ -8902,7 +8913,7 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
 }
 
 fn tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -8923,11 +8934,11 @@ const StringSliceConstLocalStore = struct {
 };
 
 fn decodeStringSliceConstLocalStore(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *const frame_mod.Frame,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     arg_pc: usize,
 ) ?StringSliceConstLocalStore {
@@ -8962,11 +8973,11 @@ fn decodeStringSliceConstLocalStore(
 }
 
 fn storeStringSliceConstLocal(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
-    receiver: core.Value,
+    receiver: core.JSValue,
     decoded: StringSliceConstLocalStore,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
@@ -8976,7 +8987,7 @@ fn storeStringSliceConstLocal(
     var result_owned = true;
     errdefer if (result_owned) result.free(ctx.runtime);
 
-    setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
+    try setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
     result_owned = false;
     if (decoded.store.idx < function.var_is_lexical.len and function.var_is_lexical[decoded.store.idx]) {
         frame.clearLocalUninitialized(decoded.store.idx);
@@ -8986,7 +8997,7 @@ fn storeStringSliceConstLocal(
 }
 
 fn tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -9022,7 +9033,7 @@ fn tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(
 }
 
 fn tryFuseLocalStringSliceConstLocalStoreFromGet(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -9042,12 +9053,12 @@ fn tryFuseLocalStringSliceConstLocalStoreFromGet(
 }
 
 fn tryFuseStringSliceConstLocalStoreFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
@@ -9092,7 +9103,7 @@ fn stringFromCharCodeInt32Arg(
     };
 }
 
-fn stringFromCharCodeInt32Value(rt: *core.Runtime, code: i32) !core.Value {
+fn stringFromCharCodeInt32Value(rt: *core.JSRuntime, code: i32) !core.JSValue {
     const unit: u16 = @intCast(@as(u32, @bitCast(code)) & 0xffff);
     if (unit <= 0xff) {
         const byte: u8 = @intCast(unit);
@@ -9103,11 +9114,11 @@ fn stringFromCharCodeInt32Value(rt: *core.Runtime, code: i32) !core.Value {
 }
 
 fn tryFuseDateNowCallFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     site_pc: usize,
 ) !bool {
@@ -9128,12 +9139,12 @@ fn tryFuseDateNowCallFromField2(
 }
 
 fn tryFuseNumberStaticLiteralCallFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     site_pc: usize,
 ) !bool {
@@ -9197,7 +9208,7 @@ const NumberStaticLiteralResult = struct {
 };
 
 fn numberStaticLiteralResultAt(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
     native_id: u32,
     pc: usize,
@@ -9235,12 +9246,12 @@ fn numberStaticLiteralResultAt(
     };
 }
 
-fn isHostOutputFunctionValue(value: core.Value) bool {
+fn isHostOutputFunctionValue(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     return object.hostFunctionKindSlot().* == core.host_function.ids.output;
 }
 
-fn atomAsciiText(rt: *core.Runtime, atom_id: core.Atom, buffer: []u8) ?[]const u8 {
+fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: []u8) ?[]const u8 {
     if (core.atom.isTaggedInt(atom_id)) {
         return std.fmt.bufPrint(buffer, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch return null;
     }
@@ -9251,7 +9262,7 @@ fn atomAsciiText(rt: *core.Runtime, atom_id: core.Atom, buffer: []u8) ?[]const u
 }
 
 pub fn arrayElement(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -9390,7 +9401,7 @@ pub fn arrayElement(
     return .done;
 }
 
-fn putInt32TypedArrayElementFast(rt: *core.Runtime, obj: core.Value, key: core.Value, value: core.Value) !bool {
+fn putInt32TypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
     const object = objectFromValue(obj) orelse return false;
     if (!builtins.buffer.isTypedArrayObject(object)) return false;
     const key_int = key.asInt32() orelse return false;
@@ -9400,11 +9411,11 @@ fn putInt32TypedArrayElementFast(rt: *core.Runtime, obj: core.Value, key: core.V
 }
 
 fn tryFuseRegExpTestConstStringFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     method_atom: core.Atom,
 ) !bool {
     if (!value_ops.atomNameEql(ctx.runtime, method_atom, "test")) return false;
@@ -9426,7 +9437,7 @@ fn tryFuseRegExpTestConstStringFromField2(
     stacked_receiver.free(ctx.runtime);
     const next_pc = pc + 8;
     if (tryFuseBooleanIfFalseBranch(function, frame, next_pc, matched)) return true;
-    try stack.pushOwned(core.Value.boolean(matched));
+    try stack.pushOwned(core.JSValue.boolean(matched));
     frame.pc = next_pc;
     return true;
 }
@@ -9442,19 +9453,19 @@ const RegExpLiteralLastIndexZeroLoop = struct {
 };
 
 fn tryFuseRegExpLiteralLastIndexZeroLoopFromField(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     field_pc: usize,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
@@ -9486,7 +9497,7 @@ fn tryFuseRegExpLiteralLastIndexZeroLoopFromField(
 
     const dropped_accumulator = try stack.pop();
     dropped_accumulator.free(ctx.runtime);
-    try storeRegExpLoopOwnedValue(ctx, function, global, frame, loop.induction_put, core.Value.int32(loop.limit), sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try storeRegExpLoopOwnedValue(ctx, function, global, frame, loop.induction_put, core.JSValue.int32(loop.limit), sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
     frame.pc = loop.false_pc;
     return true;
 }
@@ -9798,20 +9809,20 @@ fn decodeRegExpExecCaptureLengthWhileLoop(code: []const u8, pc: usize) ?RegExpEx
 }
 
 fn tryFuseRegExpExecLengthLoopFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     method_atom: core.Atom,
     field_pc: usize,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
@@ -9847,9 +9858,9 @@ fn tryFuseRegExpExecLengthLoopFromField2(
         },
         .matched => |len| {
             const len_value = if (len <= @as(usize, @intCast(std.math.maxInt(i32))))
-                core.Value.int32(@intCast(len))
+                core.JSValue.int32(@intCast(len))
             else
-                core.Value.float64(@floatFromInt(len));
+                core.JSValue.float64(@floatFromInt(len));
             const updated = try simpleNumericBinary(ctx.runtime, op.add, accumulator_value, len_value);
             errdefer updated.free(ctx.runtime);
             try storeRegExpLoopOwnedValue(ctx, function, global, frame, loop.accumulator_put, updated, sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -9860,23 +9871,23 @@ fn tryFuseRegExpExecLengthLoopFromField2(
 }
 
 fn tryFuseRegExpExecWholeLengthLoop(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     regexp_object: *core.Object,
-    input_value: core.Value,
-    accumulator_value: core.Value,
+    input_value: core.JSValue,
+    accumulator_value: core.JSValue,
     loop: RegExpExecLengthLoop,
     field_pc: usize,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
@@ -9901,7 +9912,7 @@ fn tryFuseRegExpExecWholeLengthLoop(
     switch (result) {
         .unsupported => unreachable,
         .done => |sum| {
-            const updated = core.Value.int32(accumulator + @as(i32, @intCast(sum)));
+            const updated = core.JSValue.int32(accumulator + @as(i32, @intCast(sum)));
             try storeRegExpMatchNull(ctx, function, global, frame, loop.match_put, sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
             try storeRegExpLoopOwnedValue(ctx, function, global, frame, loop.accumulator_put, updated, sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
             frame.pc = loop.false_pc;
@@ -9911,20 +9922,20 @@ fn tryFuseRegExpExecWholeLengthLoop(
 }
 
 fn tryFuseRegExpExecCountLoopFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     method_atom: core.Atom,
     field_pc: usize,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
@@ -9958,9 +9969,9 @@ fn tryFuseRegExpExecCountLoopFromField2(
         .unsupported => unreachable,
         .done => |count| {
             const count_value = if (count <= @as(usize, @intCast(std.math.maxInt(i32))))
-                core.Value.int32(@intCast(count))
+                core.JSValue.int32(@intCast(count))
             else
-                core.Value.float64(@floatFromInt(count));
+                core.JSValue.float64(@floatFromInt(count));
             const updated = try simpleNumericBinary(ctx.runtime, op.add, accumulator_value, count_value);
             errdefer updated.free(ctx.runtime);
             try storeRegExpMatchNull(ctx, function, global, frame, loop.match_put, sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -9972,20 +9983,20 @@ fn tryFuseRegExpExecCountLoopFromField2(
 }
 
 fn tryFuseRegExpExecCaptureLengthWhileLoopFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     method_atom: core.Atom,
     field_pc: usize,
     sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-    eval_with_object: core.Value,
+    eval_var_refs: []const core.JSValue,
+    eval_with_object: core.JSValue,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
@@ -10019,9 +10030,9 @@ fn tryFuseRegExpExecCaptureLengthWhileLoopFromField2(
         .unsupported => unreachable,
         .done => |sum| {
             const sum_value = if (sum <= @as(usize, @intCast(std.math.maxInt(i32))))
-                core.Value.int32(@intCast(sum))
+                core.JSValue.int32(@intCast(sum))
             else
-                core.Value.float64(@floatFromInt(sum));
+                core.JSValue.float64(@floatFromInt(sum));
             const updated = try simpleNumericBinary(ctx.runtime, op.add, accumulator_value, sum_value);
             errdefer updated.free(ctx.runtime);
             try storeRegExpMatchNull(ctx, function, global, frame, loop.match_put, sync_global_lexical_locals, eval_var_ref_names, eval_var_refs, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -10111,13 +10122,13 @@ fn decodeRegExpExecCaptureLengthSumLoop(code: []const u8, pc: usize, field_pc: u
 }
 
 fn tryFuseRegExpExecCaptureLengthSumLoopFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     method_atom: core.Atom,
     field_pc: usize,
     sync_global_lexical_locals: bool,
@@ -10157,7 +10168,7 @@ fn tryFuseRegExpExecCaptureLengthSumLoopFromField2(
                                     const product = std.math.mul(usize, sum, remaining) catch return false;
                                     const available = @as(usize, @intCast(std.math.maxInt(i32) - accumulator));
                                     if (product <= available) {
-                                        const updated = core.Value.int32(accumulator + @as(i32, @intCast(product)));
+                                        const updated = core.JSValue.int32(accumulator + @as(i32, @intCast(product)));
                                         try storeBindingOwnedValue(ctx, function, global, frame, loop.accumulator_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
                                         frame.pc = loop.false_pc;
                                         return true;
@@ -10169,9 +10180,9 @@ fn tryFuseRegExpExecCaptureLengthSumLoopFromField2(
                 }
             }
             const sum_value = if (sum <= @as(usize, @intCast(std.math.maxInt(i32))))
-                core.Value.int32(@intCast(sum))
+                core.JSValue.int32(@intCast(sum))
             else
-                core.Value.float64(@floatFromInt(sum));
+                core.JSValue.float64(@floatFromInt(sum));
             const updated = try simpleNumericBinary(ctx.runtime, op.add, accumulator_value, sum_value);
             errdefer updated.free(ctx.runtime);
             try storeBindingOwnedValue(ctx, function, global, frame, loop.accumulator_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
@@ -10182,13 +10193,13 @@ fn tryFuseRegExpExecCaptureLengthSumLoopFromField2(
 }
 
 fn tryFuseRegExpExecStringBindingFromField2(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
-    receiver: core.Value,
+    receiver: core.JSValue,
     method_atom: core.Atom,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
@@ -10243,7 +10254,7 @@ fn canUseFastGlobalVarLookup(
     frame: *const frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
     if (!eval_with_object.isUndefined()) return false;
@@ -10255,12 +10266,13 @@ fn canUseFastGlobalVarLookup(
 }
 
 fn canUseInstalledGlobalDataIc(
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     atom_id: core.Atom,
     frame: *const frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     global: *const core.Object,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
@@ -10268,7 +10280,8 @@ fn canUseInstalledGlobalDataIc(
     if (frameHasVarRefBinding(function, frame, atom_id)) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return false;
-    if (global.global_lexical_env) |env| {
+    _ = global;
+    if (ctx.lexicals) |env| {
         if (env.hasOwnProperty(atom_id)) return false;
     }
     return true;
@@ -10280,7 +10293,7 @@ fn canFuseGlobalDataWrite(
     atom_id: core.Atom,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
     if (!eval_with_object.isUndefined()) return false;
@@ -10295,7 +10308,7 @@ fn canUseFastGlobalUndefinedLookup(
     frame: *const frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
 ) bool {
     if (!eval_with_object.isUndefined()) return false;
     if (!frame.current_function.isUndefined()) return false;
@@ -10327,20 +10340,20 @@ fn evalFunctionDeclaresGlobalVar(function: *const bytecode.Bytecode, atom_id: co
     return false;
 }
 
-fn globalOwnAccessorWithoutSetter(rt: *core.Runtime, global: *core.Object, atom_id: core.Atom) bool {
+fn globalOwnAccessorWithoutSetter(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
     const desc = global.getOwnProperty(atom_id) orelse return false;
     defer desc.destroy(rt);
     return desc.kind == .accessor and desc.setter.isUndefined();
 }
 
-fn fastOrdinaryDataPropertyBorrowedValue(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) ?core.Value {
+fn fastOrdinaryDataPropertyBorrowedValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     return switch (fastOrdinaryDataPropertyLookup(rt, value, atom_id)) {
         .value => |property_value| property_value,
         .undefined, .slow => null,
     };
 }
 
-fn invariantInt32LoadValue(rt: *core.Runtime, receiver: core.Value, code: []const u8, pc: usize) ?InvariantInt32Load {
+fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []const u8, pc: usize) ?InvariantInt32Load {
     if (pc >= code.len) return null;
     if (code[pc] == op.get_field) {
         if (pc + 5 > code.len) return null;
@@ -10385,7 +10398,7 @@ fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?
     };
 }
 
-fn denseArrayModFieldInt32Increments(rt: *core.Runtime, array_value: core.Value, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
+fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.JSValue, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
     const array_object = objectFromValue(array_value) orelse return null;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return null;
     if (!array_object.is_array or array_object.arrayElementStorageMode() != .dense) return null;
@@ -10421,7 +10434,7 @@ fn periodicNonNegativeDelta(start: i32, limit: i32, increments: DenseArrayModFie
     return total;
 }
 
-fn fastOwnDataPropertyBorrowedValueMaterialized(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) ?core.Value {
+fn fastOwnDataPropertyBorrowedValueMaterialized(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     const object = objectFromValue(value) orelse return null;
     if (object.proxyTarget() != null or object.exotic != null) return null;
@@ -10443,27 +10456,27 @@ fn fastOwnDataPropertyBorrowedValueMaterialized(rt: *core.Runtime, value: core.V
     };
 }
 
-fn fastLengthValue(rt: *core.Runtime, value: core.Value) !core.Value {
+fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) {
         const header = value.refHeader() orelse return error.TypeError;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
-        return core.Value.int32(@intCast(string_value.len()));
+        return core.JSValue.int32(@intCast(string_value.len()));
     }
     const object = objectFromValue(value) orelse return error.TypeError;
     if (object.proxyTarget() != null) return error.TypeError;
     if (object.is_array) {
         if (object.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
-            return core.Value.int32(@intCast(object.length));
+            return core.JSValue.int32(@intCast(object.length));
         }
-        return core.Value.float64(@floatFromInt(object.length));
+        return core.JSValue.float64(@floatFromInt(object.length));
     }
     if (builtins.buffer.isTypedArrayObject(object)) {
-        return core.Value.int32(@intCast(try builtins.buffer.typedArrayLength(rt, object)));
+        return core.JSValue.int32(@intCast(try builtins.buffer.typedArrayLength(rt, object)));
     }
     return error.TypeError;
 }
 
-fn fastOrdinaryDataPropertyLookup(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) FastOrdinaryDataLookupResult {
+fn fastOrdinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) FastOrdinaryDataLookupResult {
     if (rt.atoms.kind(atom_id) == .private) return .slow;
     var cursor = objectFromValue(value) orelse return .slow;
     while (true) {
@@ -10483,12 +10496,12 @@ fn fastOrdinaryDataPropertyLookup(rt: *core.Runtime, value: core.Value, atom_id:
 }
 
 const FastOrdinaryDataLookupResult = union(enum) {
-    value: core.Value,
+    value: core.JSValue,
     undefined,
     slow,
 };
 
-fn fastRegExpPrototypeMethodValue(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) ?core.Value {
+fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
     if (object.class_id != core.class.ids.regexp) return null;
     const name = rt.atoms.name(atom_id) orelse return null;
@@ -10523,7 +10536,7 @@ fn nativeBuiltinIdMatches(native_builtin_id: i32, domain: core.function.NativeBu
     return native_ref.domain == domain and native_ref.id == expected_id;
 }
 
-fn nativeBuiltinFunctionValueMatches(value: core.Value, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
+fn nativeBuiltinFunctionValueMatches(value: core.JSValue, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
     const function_object = objectFromValue(value) orelse return false;
     return nativeBuiltinIdMatches(function_object.nativeFunctionIdSlot().*, domain, expected_id);
 }
@@ -10546,7 +10559,7 @@ fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_id: c
     return false;
 }
 
-fn fastRegExpPrototypeMethodIsDefault(rt: *core.Runtime, value: core.Value, atom_id: core.Atom, expected_id: u32) bool {
+fn fastRegExpPrototypeMethodIsDefault(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom, expected_id: u32) bool {
     _ = rt;
     const object = objectFromValue(value) orelse return false;
     if (object.class_id != core.class.ids.regexp) return false;
@@ -10555,27 +10568,27 @@ fn fastRegExpPrototypeMethodIsDefault(rt: *core.Runtime, value: core.Value, atom
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .regexp, expected_id);
 }
 
-fn fastCollectionPrototypeMethodIsDefault(value: core.Value, atom_id: core.Atom, expected_id: u32) bool {
+fn fastCollectionPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom, expected_id: u32) bool {
     const object = objectFromValue(value) orelse return false;
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .collection, expected_id);
 }
 
-fn fastArrayPrototypeMethodIsDefault(value: core.Value, atom_id: core.Atom, expected_id: u32) bool {
+fn fastArrayPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom, expected_id: u32) bool {
     const object = objectFromValue(value) orelse return false;
     if (!object.is_array or object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .array, expected_id);
 }
 
-fn fastStringPrototypeMethodIsDefault(rt: *core.Runtime, global: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
+fn fastStringPrototypeMethodIsDefault(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
     if (!value_ops.atomNameEql(rt, atom_id, "slice")) return false;
     const proto = shared_vm.constructorPrototypeFromGlobalAtom(rt, global, atom_string) orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .string, expected_id);
 }
 
-fn fastCollectionPrototypeMethodValue(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) ?core.Value {
+fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
     const expected_id = expectedCollectionMethodId(rt, object.class_id, atom_id) orelse return null;
     if (object.hasOwnProperty(atom_id)) return null;
@@ -10597,7 +10610,7 @@ fn fastCollectionPrototypeMethodValue(rt: *core.Runtime, value: core.Value, atom
     return method;
 }
 
-fn expectedCollectionMethodId(rt: *core.Runtime, class_id: core.ClassId, atom_id: core.Atom) ?u32 {
+fn expectedCollectionMethodId(rt: *core.JSRuntime, class_id: core.ClassId, atom_id: core.Atom) ?u32 {
     const name = rt.atoms.name(atom_id) orelse return null;
     return switch (class_id) {
         core.class.ids.map, core.class.ids.weakmap => {
@@ -10617,7 +10630,7 @@ fn expectedCollectionMethodId(rt: *core.Runtime, class_id: core.ClassId, atom_id
     };
 }
 
-fn fastFunctionOwnDataPropertyValue(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) ?core.Value {
+fn fastFunctionOwnDataPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
     if (!isFunctionLikeClassId(object.class_id)) return null;
     if (atom_id == core.atom.ids.arguments or value_ops.atomNameEql(rt, atom_id, "caller")) return null;
@@ -10627,8 +10640,8 @@ fn fastFunctionOwnDataPropertyValue(rt: *core.Runtime, value: core.Value, atom_i
 fn fastFunctionOwnNativeBuiltinIdAtPc(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
-    value: core.Value,
+    rt: *core.JSRuntime,
+    value: core.JSValue,
     atom_id: core.Atom,
 ) ?core.function.NativeBuiltinRef {
     const object = objectFromValue(value) orelse return null;
@@ -10673,7 +10686,7 @@ fn fastFunctionOwnNativeBuiltinIdAtPc(
     return null;
 }
 
-fn nativeBuiltinRefFromFunctionValue(value: core.Value) ?core.function.NativeBuiltinRef {
+fn nativeBuiltinRefFromFunctionValue(value: core.JSValue) ?core.function.NativeBuiltinRef {
     const function_object = objectFromValue(value) orelse return null;
     return core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*);
 }
@@ -10687,7 +10700,7 @@ fn isFunctionLikeClassId(class_id: core.ClassId) bool {
 }
 
 const FastOwnDataResult = union(enum) {
-    value: core.Value,
+    value: core.JSValue,
     missing,
     slow,
 };
@@ -10700,13 +10713,13 @@ const FastOwnDataLookup = union(enum) {
 
 const BorrowedOwnDataLookup = struct {
     index: usize,
-    value: core.Value,
+    value: core.JSValue,
 };
 
 const BorrowedProtoDataLookup = struct {
     holder: *core.Object,
     index: usize,
-    value: core.Value,
+    value: core.JSValue,
 };
 
 const FastProtoDataLookup = union(enum) {
@@ -10718,10 +10731,10 @@ const FastProtoDataLookup = union(enum) {
 fn cachedOwnDataPropertyValue(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
-    receiver: core.Value,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
     atom_id: core.Atom,
-) ?core.Value {
+) ?core.JSValue {
     const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return null;
     const lookup = cachedOwnDataPropertyLookupForObject(function, site_pc, rt, object, atom_id) orelse return null;
     return lookup.value;
@@ -10730,10 +10743,10 @@ fn cachedOwnDataPropertyValue(
 fn cachedProtoDataPropertyValue(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
-    receiver: core.Value,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
     atom_id: core.Atom,
-) ?core.Value {
+) ?core.JSValue {
     const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return null;
     const lookup = cachedProtoDataPropertyLookupForObject(function, site_pc, rt, object, atom_id) orelse return null;
     return lookup.value;
@@ -10742,8 +10755,8 @@ fn cachedProtoDataPropertyValue(
 fn installOwnDataIc(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
-    receiver: core.Value,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     index: usize,
 ) void {
@@ -10754,8 +10767,8 @@ fn installOwnDataIc(
 fn installOwnDataIcAfterWrite(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
-    receiver: core.Value,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
     atom_id: core.Atom,
 ) void {
     switch (fastOwnOrdinaryDataPropertyLookup(rt, receiver, atom_id)) {
@@ -10767,8 +10780,8 @@ fn installOwnDataIcAfterWrite(
 fn installProtoDataIc(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
-    receiver: core.Value,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
     atom_id: core.Atom,
     holder: *core.Object,
     index: usize,
@@ -10780,22 +10793,22 @@ fn installProtoDataIc(
 }
 
 fn setCachedOwnDataProperty(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    receiver: core.Value,
+    receiver: core.JSValue,
     atom_id: core.Atom,
-    value: core.Value,
-) bool {
+    value: core.JSValue,
+) !bool {
     const object = cacheableOwnDataReceiver(rt, receiver, atom_id) orelse return false;
     const cached = cachedOwnDataPropertyLookupForObject(function, site_pc, rt, object, atom_id) orelse return false;
-    return setOwnDataPropertyAt(rt, object, cached.index, atom_id, value);
+    return try setOwnDataPropertyAt(rt, object, cached.index, atom_id, value);
 }
 
 fn cachedOwnDataPropertyLookupForObject(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
     atom_id: core.Atom,
 ) ?BorrowedOwnDataLookup {
@@ -10837,7 +10850,7 @@ fn cachedOwnDataPropertyLookupForObjectNoProfile(
 fn cachedProtoDataPropertyLookupForObject(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
     atom_id: core.Atom,
 ) ?BorrowedProtoDataLookup {
@@ -10864,7 +10877,7 @@ fn cachedProtoDataPropertyLookupForObject(
 fn installOwnDataIcForObject(
     function: *const bytecode.Bytecode,
     site_pc: usize,
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     object: *core.Object,
     atom_id: core.Atom,
     index: usize,
@@ -10874,22 +10887,22 @@ fn installOwnDataIcForObject(
     recordOwnDataIcInstall(rt, slot.installOwnData(&rt.shapes, object, atom_id, index));
 }
 
-fn recordOwnDataIcHit(rt: *core.Runtime) void {
+fn recordOwnDataIcHit(rt: *core.JSRuntime) void {
     const profile = rt.opcode_profile orelse return;
     profile.recordIcHit(core.profile.activeOpcode());
 }
 
-fn recordOwnDataIcMiss(rt: *core.Runtime) void {
+fn recordOwnDataIcMiss(rt: *core.JSRuntime) void {
     const profile = rt.opcode_profile orelse return;
     profile.recordIcMiss(core.profile.activeOpcode());
 }
 
-fn recordOwnDataIcInvalidate(rt: *core.Runtime) void {
+fn recordOwnDataIcInvalidate(rt: *core.JSRuntime) void {
     const profile = rt.opcode_profile orelse return;
     profile.recordIcInvalidate(core.profile.activeOpcode());
 }
 
-fn recordOwnDataIcInstall(rt: *core.Runtime, result: bytecode.ic.InstallResult) void {
+fn recordOwnDataIcInstall(rt: *core.JSRuntime, result: bytecode.ic.InstallResult) void {
     _ = rt;
     const profile = core.profile.active() orelse return;
     const opcode = core.profile.activeOpcode();
@@ -10904,14 +10917,14 @@ fn icSlot(function: *const bytecode.Bytecode, site_pc: usize) ?*bytecode.ic.Slot
     return function.icSlotForPc(site_pc);
 }
 
-fn cacheableOwnDataReceiver(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) ?*core.Object {
+fn cacheableOwnDataReceiver(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?*core.Object {
     if (rt.atoms.kind(atom_id) == .private) return null;
     const object = objectFromValue(value) orelse return null;
     if (!cacheableNamedDataObject(rt, object, atom_id)) return null;
     return object;
 }
 
-fn cacheableNamedDataObject(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom) bool {
+fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (object.proxyTarget() != null or object.exotic != null) return false;
     if (object.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
@@ -10919,12 +10932,12 @@ fn cacheableNamedDataObject(rt: *core.Runtime, object: *core.Object, atom_id: co
     return true;
 }
 
-fn fastOwnOrdinaryDataPropertyLookup(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) FastOwnDataLookup {
+fn fastOwnOrdinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) FastOwnDataLookup {
     const object = cacheableOwnDataReceiver(rt, value, atom_id) orelse return .slow;
     return fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id);
 }
 
-fn fastImmediatePrototypeDataPropertyLookup(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) FastProtoDataLookup {
+fn fastImmediatePrototypeDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) FastProtoDataLookup {
     const object = cacheableOwnDataReceiver(rt, value, atom_id) orelse return .slow;
     switch (fastOwnOrdinaryDataPropertyLookupForObject(object, atom_id)) {
         .value, .slow => return .slow,
@@ -10952,7 +10965,7 @@ fn fastOwnOrdinaryDataPropertyLookupForObject(object: *core.Object, atom_id: cor
     return .missing;
 }
 
-fn ownDataPropertyBorrowedAt(object: *core.Object, index: usize, atom_id: core.Atom) ?core.Value {
+fn ownDataPropertyBorrowedAt(object: *core.Object, index: usize, atom_id: core.Atom) ?core.JSValue {
     if (object.exotic != null or index >= object.properties.len) return null;
     const entry = &object.properties[index];
     if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return null;
@@ -10962,7 +10975,7 @@ fn ownDataPropertyBorrowedAt(object: *core.Object, index: usize, atom_id: core.A
     };
 }
 
-fn setOwnDataPropertyAt(rt: *core.Runtime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.Value) bool {
+fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize, atom_id: core.Atom, value: core.JSValue) !bool {
     if (object.exotic != null or index >= object.properties.len) return false;
     const entry = &object.properties[index];
     if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor or !entry.flags.writable) return false;
@@ -10973,6 +10986,8 @@ fn setOwnDataPropertyAt(rt: *core.Runtime, object: *core.Object, index: usize, a
                 return true;
             }
             const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, value);
+            errdefer core.object.destroyPropertySlot(rt, entry.atom_id, .{ .data = next_value });
+            try rt.writeBarrierValueAt(&object.header, next_value, stored);
             const old_value = stored.*;
             stored.* = next_value;
             core.object.destroyPropertySlot(rt, entry.atom_id, .{ .data = old_value });
@@ -10995,7 +11010,7 @@ fn fastOwnOrdinaryDataPropertyBorrowedValue(object: *core.Object, atom_id: core.
     return .missing;
 }
 
-fn fastDenseArrayElementValue(value: core.Value, key: core.Value) ?core.Value {
+fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
     const index_i32 = key.asInt32() orelse return null;
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
@@ -11010,7 +11025,7 @@ fn fastDenseArrayElementValue(value: core.Value, key: core.Value) ?core.Value {
     return null;
 }
 
-fn fastStringIndexValue(rt: *core.Runtime, value: core.Value, key: core.Value) ?core.Value {
+fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue) ?core.JSValue {
     if (!value.isString() or key.tag != core.Tag.int) return null;
     const index_i32 = key.asInt32().?;
     if (index_i32 < 0) return null;
@@ -11027,12 +11042,12 @@ fn fastStringIndexValue(rt: *core.Runtime, value: core.Value, key: core.Value) ?
 }
 
 fn tryFuseLocalAddWithValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
-    rhs: core.Value,
+    rhs: core.JSValue,
     sync_global_lexical_locals: bool,
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
@@ -11084,49 +11099,49 @@ fn tryFuseLocalAddWithValue(
     const lhs_owned = try stack.pop();
     lhs_owned.free(ctx.runtime);
     if (store) |local_store| {
-        setSlotValue(ctx, &frame.locals[local_store.idx], updated);
+        try setSlotValue(ctx, &frame.locals[local_store.idx], updated);
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_store.idx, sync_global_lexical_locals);
         frame.pc = local_store.operand_pc + local_store.consume;
     } else if (var_ref_store) |ref_store| {
-        setSlotValue(ctx, &frame.var_refs[ref_store.idx], updated);
+        try setSlotValue(ctx, &frame.var_refs[ref_store.idx], updated);
         frame.pc = ref_store.operand_pc + ref_store.consume;
     }
     return true;
 }
 
-fn fastInt32Add(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Sub(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Mul(lhs: i32, rhs: i32) core.Value {
-    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.Value.float64(-0.0);
+fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
+    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
     const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
-fn objectFromValue(value: core.Value) ?*core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-fn stringFromValue(value: core.Value) ?*core.string.String {
+fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
 pub fn globalDefinition(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -11134,9 +11149,9 @@ pub fn globalDefinition(
     catch_target: *?usize,
     opc: u8,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
     comptime globalLexicalHas: anytype,
@@ -11157,7 +11172,7 @@ pub fn globalDefinition(
             const is_lexical = (flags & (1 << 7)) != 0;
             const is_function_var = (flags & (1 << 6)) != 0;
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
-            const has_global_lexical = globalLexicalHas(ctx.runtime, global, atom_id);
+            const has_global_lexical = globalLexicalHas(ctx, atom_id);
             var has_own_global_property = false;
             if (global.getOwnProperty(atom_id)) |desc| {
                 has_own_global_property = true;
@@ -11177,10 +11192,10 @@ pub fn globalDefinition(
                 if (define_atom == atom_id and define_flags == flags) {
                     const is_const = (flags & (1 << 4)) != 0;
                     if (is_lexical) {
-                        try defineGlobalLexicalValue(ctx.runtime, global, atom_id, core.Value.uninitialized(), is_const);
+                        try defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
                     } else if (!has_own_global_property) {
                         const configurable = (flags & (1 << 5)) != 0;
-                        const define_desc = core.Descriptor.data(core.Value.undefinedValue(), true, true, configurable);
+                        const define_desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
                         if (global.exotic == null and !global.is_array and global.isExtensible()) {
                             try global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, define_desc);
                         } else if (!global.hasOwnProperty(atom_id)) {
@@ -11209,10 +11224,10 @@ pub fn globalDefinition(
             const is_function_var = (flags & (1 << 6)) != 0;
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
             if (is_lexical) {
-                try defineGlobalLexicalValue(ctx.runtime, global, atom_id, core.Value.uninitialized(), is_const);
+                try defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
             } else if (!global.hasOwnProperty(atom_id)) {
                 const configurable = (flags & (1 << 5)) != 0;
-                const desc = core.Descriptor.data(core.Value.undefinedValue(), true, true, configurable);
+                const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
                 const define_result = if (global.exotic == null and !global.is_array and global.isExtensible())
                     global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
                 else
@@ -11232,12 +11247,12 @@ pub fn globalDefinition(
             const configurable = (flags & (1 << 5)) != 0;
             const global_function_binding = (flags & (1 << 4)) != 0;
             var local_value = func_val.dup();
-            const updated_frame_local = setFrameLocalValue(ctx, function, frame, atom_id, local_value);
+            const updated_frame_local = try setFrameLocalValue(ctx, function, frame, atom_id, local_value);
             if (!updated_frame_local) local_value.free(ctx.runtime);
             var frame_ref_value = func_val.dup();
             if (!try setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
             var eval_local_value = func_val.dup();
-            const updated_eval_local = setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
+            const updated_eval_local = try setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
             if (!updated_eval_local) eval_local_value.free(ctx.runtime);
             var eval_ref_value = func_val.dup();
             const updated_eval_ref = try setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
@@ -11263,7 +11278,7 @@ pub fn globalDefinition(
             const value = try stack.pop();
             defer value.free(ctx.runtime);
             if (!function.flags.is_indirect_eval) {
-                const updated_global_lexical = setGlobalLexicalValue(ctx.runtime, global, atom_id, value) catch |err| {
+                const updated_global_lexical = setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
                     if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
@@ -11277,7 +11292,7 @@ pub fn globalDefinition(
 }
 
 pub fn closeLoc(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     comptime closeLocalVarRef: anytype,
@@ -11287,13 +11302,13 @@ pub fn closeLoc(
     try closeLocalVarRef(ctx, frame, idx);
 }
 
-fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.Value {
+fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     const index_from_top: usize = offset;
     if (index_from_top >= stack.values.len) return error.StackUnderflow;
     return stack.values[stack.values.len - 1 - index_from_top].dup();
 }
 
-fn varRefCellFromValue(value: core.Value) ?*core.Object {
+fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -11302,10 +11317,10 @@ fn varRefCellFromValue(value: core.Value) ?*core.Object {
 }
 
 fn testHasPropertyForWith(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    value: core.Value,
+    value: core.JSValue,
     key: core.Atom,
     caller_function: *const bytecode.Bytecode,
     caller_frame: *frame_mod.Frame,
@@ -11320,10 +11335,10 @@ fn testHasPropertyForWith(
 }
 
 fn testIsBlockedByUnscopables(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    value: core.Value,
+    value: core.JSValue,
     key: core.Atom,
     caller_function: *const bytecode.Bytecode,
     caller_frame: *frame_mod.Frame,
@@ -11339,14 +11354,14 @@ fn testIsBlockedByUnscopables(
 }
 
 fn testGetValueProperty(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    value: core.Value,
+    value: core.JSValue,
     key: core.Atom,
     caller_function: *const bytecode.Bytecode,
     caller_frame: *frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     _ = ctx;
     _ = output;
     _ = global;
@@ -11357,7 +11372,7 @@ fn testGetValueProperty(
 }
 
 fn testHandleCatchableRuntimeError(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
@@ -11374,8 +11389,8 @@ fn testHandleCatchableRuntimeError(
 
 test "with get-ref-undef keeps object on stack when result reservation fails" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(failing.allocator());
-    const ctx = try core.Context.create(rt);
+    const rt = try core.JSRuntime.create(failing.allocator());
+    const ctx = try core.JSContext.create(rt);
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const object = try core.Object.create(rt, core.class.ids.object, null);
     var stack = stack_mod.Stack.init(&rt.memory, 16);
@@ -11401,8 +11416,8 @@ test "with get-ref-undef keeps object on stack when result reservation fails" {
         rt.destroy();
     }
 
-    try object.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(core.Value.int32(123), true, true, true));
-    for (0..7) |index| try stack.pushOwned(core.Value.int32(@intCast(index)));
+    try object.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(core.JSValue.int32(123), true, true, true));
+    for (0..7) |index| try stack.pushOwned(core.JSValue.int32(@intCast(index)));
     try stack.push(object.value());
 
     failing.fail_index = failing.alloc_index;
@@ -11417,7 +11432,7 @@ test "with get-ref-undef keeps object on stack when result reservation fails" {
 }
 
 test "fast own data property replacement retains private brand atom" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
@@ -11426,12 +11441,12 @@ test "fast own data property replacement retains private brand atom" {
     try object.defineOwnProperty(
         rt,
         core.atom.ids.Private_brand,
-        core.Descriptor.data(core.Value.symbol(brand), true, true, true),
+        core.Descriptor.data(core.JSValue.symbol(brand), true, true, true),
     );
     rt.atoms.free(brand);
     try std.testing.expect(rt.atoms.name(brand) != null);
 
-    try std.testing.expect(setOwnDataPropertyAt(rt, object, 0, core.atom.ids.Private_brand, core.Value.symbol(brand)));
+    try std.testing.expect(try setOwnDataPropertyAt(rt, object, 0, core.atom.ids.Private_brand, core.JSValue.symbol(brand)));
     try std.testing.expect(rt.atoms.name(brand) != null);
     const stored = object.getProperty(core.atom.ids.Private_brand);
     try std.testing.expectEqual(@as(?core.Atom, brand), stored.asSymbolAtom());

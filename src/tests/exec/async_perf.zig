@@ -373,7 +373,7 @@ test "Engine eval executes microbench-compatible loop fixtures" {
 }
 
 test "Engine declared global reads install property inline cache" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -397,7 +397,7 @@ test "Engine declared global reads install property inline cache" {
 }
 
 test "Engine global int32 stack binary declaration stores before put_var" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -423,7 +423,7 @@ test "Engine global int32 stack binary declaration stores before put_var" {
 }
 
 test "Engine same global int32 derived declarations fuse second source read" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -449,7 +449,7 @@ test "Engine same global int32 derived declarations fuse second source read" {
 }
 
 test "Engine URI-shaped global int32 loops fuse goto16 tail while profiling" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -488,7 +488,7 @@ test "Engine URI-shaped global int32 loops fuse goto16 tail while profiling" {
 }
 
 test "Engine empty int32 for loop skips checked-local induction range" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -512,7 +512,7 @@ test "Engine empty int32 for loop skips checked-local induction range" {
 }
 
 test "Engine dense array var-local indexed sum loop fuses range" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -547,7 +547,7 @@ test "Engine dense array var-local indexed sum loop fuses range" {
 }
 
 test "Engine int32 arithmetic var-local loop fuses range" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -576,7 +576,7 @@ test "Engine int32 arithmetic var-local loop fuses range" {
 }
 
 test "Engine int32 arithmetic range fusion keeps dynamic accumulator limit slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -604,7 +604,7 @@ test "Engine int32 arithmetic range fusion keeps dynamic accumulator limit slow"
 }
 
 test "Engine object field update accumulate loop fuses range" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -636,7 +636,7 @@ test "Engine object field update accumulate loop fuses range" {
 }
 
 test "Engine object field range fusion keeps accessor fields slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -672,7 +672,7 @@ test "Engine object field range fusion keeps accessor fields slow" {
 }
 
 test "Engine object field range fusion keeps aliased read fields slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -711,7 +711,7 @@ test "Engine object field range fusion keeps aliased read fields slow" {
 }
 
 test "Engine global var property read accumulate loop fuses range" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -738,7 +738,7 @@ test "Engine global var property read accumulate loop fuses range" {
 }
 
 test "Engine global var property read range fusion keeps accessor getter slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -769,7 +769,7 @@ test "Engine global var property read range fusion keeps accessor getter slow" {
 }
 
 test "Engine global dense array modulo field read loop fuses range" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -802,7 +802,7 @@ test "Engine global dense array modulo field read loop fuses range" {
 }
 
 test "Engine global dense array modulo field read range fusion keeps accessor slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -860,7 +860,7 @@ test "Engine empty int32 for loop keeps const update errors observable" {
 }
 
 test "Engine local field reads fuse through data property inline cache" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -887,7 +887,7 @@ test "Engine local field reads fuse through data property inline cache" {
 }
 
 test "Engine local arg branch and dropped post update tail fuse" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -922,7 +922,7 @@ test "Engine local arg branch and dropped post update tail fuse" {
 }
 
 test "Engine local arg branch keeps object coercion observable" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -980,7 +980,7 @@ test "Engine local arg branch reads updated argument slots" {
 }
 
 test "Engine dropped local post update folds target local arg branch" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1011,7 +1011,7 @@ test "Engine dropped local post update folds target local arg branch" {
 }
 
 test "Engine String.fromCharCode int32 method calls fuse before call_method" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1090,7 +1090,7 @@ test "Engine String.fromCharCode append fusion keeps named function shadow obser
 }
 
 test "Engine String.prototype.slice const local store fuses before call_method" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1118,7 +1118,7 @@ test "Engine String.prototype.slice const local store fuses before call_method" 
 }
 
 test "Engine String.prototype.slice const local store keeps patched method slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1149,7 +1149,7 @@ test "Engine String.prototype.slice const local store keeps patched method slow"
 }
 
 test "Engine string length gt const slice branch fuses local store" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1178,7 +1178,7 @@ test "Engine string length gt const slice branch fuses local store" {
 }
 
 test "Engine string length gt const slice branch keeps patched method slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1210,7 +1210,7 @@ test "Engine string length gt const slice branch keeps patched method slow" {
 }
 
 test "Engine String.fromCharCode append fusion writes back sliced Latin1 strings" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1239,7 +1239,7 @@ test "Engine String.fromCharCode append fusion writes back sliced Latin1 strings
 }
 
 test "Engine String.fromCharCode append folds following length slice branch" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1274,7 +1274,7 @@ test "Engine String.fromCharCode append folds following length slice branch" {
 }
 
 test "Engine percent-hex simple string call add-store preserves lhs binding" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1305,7 +1305,7 @@ test "Engine percent-hex simple string call add-store preserves lhs binding" {
 }
 
 test "Engine percent-hex global string declaration initializer skips closure call" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1337,7 +1337,7 @@ test "Engine percent-hex global string declaration initializer skips closure cal
 }
 
 test "Engine percent-hex literal declaration initializer skips closure call" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1367,7 +1367,7 @@ test "Engine percent-hex literal declaration initializer skips closure call" {
 }
 
 test "Engine Math min max primitive method calls fuse before call_method" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1396,7 +1396,7 @@ test "Engine Math min max primitive method calls fuse before call_method" {
 }
 
 test "Engine Math min add loop fuses range from method field" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1426,7 +1426,7 @@ test "Engine Math min add loop fuses range from method field" {
 }
 
 test "Engine Math min add loop keeps monkey patched method slow" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1458,7 +1458,7 @@ test "Engine Math min add loop keeps monkey patched method slow" {
 }
 
 test "Engine local simple numeric call add-store fuses before call2" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1484,7 +1484,7 @@ test "Engine local simple numeric call add-store fuses before call2" {
 }
 
 test "Engine global simple numeric call add-store fuses before call2" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1507,7 +1507,7 @@ test "Engine global simple numeric call add-store fuses before call2" {
 }
 
 test "Engine global simple numeric call add-store fuses range before call2" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1534,7 +1534,7 @@ test "Engine global simple numeric call add-store fuses range before call2" {
 }
 
 test "Engine closure simple numeric call add-store fuses before call2" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1563,7 +1563,7 @@ test "Engine closure simple numeric call add-store fuses before call2" {
 }
 
 test "Engine global closure simple numeric call add-store fuses range before call1" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var profile = core.OpcodeProfile{};
@@ -1708,8 +1708,8 @@ test "Engine eval exposes basic console methods" {
     );
 }
 
-test "Runtime memory limit rejects allocations beyond configured cap" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+test "JSRuntime memory limit rejects allocations beyond configured cap" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const base = rt.memory.allocated_bytes;
@@ -1790,7 +1790,7 @@ test "Atomics waitAsync supports BigInt shared typed arrays" {
 }
 
 test "Atomics waitAsync pending waiter is released on engine deinit" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [64]u8 = undefined;
@@ -1983,7 +1983,7 @@ test "Atomics waitAsync timeout runs pre-settlement then callback" {
     try std.testing.expect(setup.isUndefined());
 
     std.Io.sleep(std.Io.Threaded.global_single_threaded.io(), std.Io.Duration.fromMilliseconds(3), .awake) catch {};
-    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     try engine.exec.zjs_vm.drainPendingPromiseJobs(js.context, &stream, global);
 
     try std.testing.expectEqualStrings("true true\ntimed-out\n", stream.buffered());
@@ -2026,7 +2026,7 @@ test "test262 agent broadcast shares SharedArrayBuffer backing store" {
 }
 
 test "Atomics wait honors runtime CanBlock setting for timeout paths" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     try std.testing.expect(!js.runtime.canBlock());

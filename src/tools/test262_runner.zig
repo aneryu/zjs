@@ -1700,7 +1700,7 @@ fn runEmbeddedEngine(
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
-    var js = try engine.Engine.init(allocator);
+    var js = try engine.harness.Engine.init(allocator);
     defer js.deinit();
     js.runtime.setCanBlock(can_block);
     var output_buffer: [64 * 1024]u8 = undefined;
@@ -1712,11 +1712,11 @@ fn runEmbeddedEngine(
         if (err == error.Test262Error) {
             if (try formatPendingExceptionName(&js, stderr_storage)) |name| {
                 stderr_out.* = name;
-                break :failed engine.core.Value.exception();
+                break :failed engine.core.JSValue.exception();
             }
         }
         stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
-        break :failed engine.core.Value.exception();
+        break :failed engine.core.JSValue.exception();
     };
     defer value.free(js.runtime);
 
@@ -1732,7 +1732,7 @@ fn runEmbeddedEngine(
     return !value.isException();
 }
 
-fn formatPendingExceptionName(js: *engine.Engine, storage: *[stderr_storage_len]u8) !?[]const u8 {
+fn formatPendingExceptionName(js: *engine.harness.Engine, storage: *[stderr_storage_len]u8) !?[]const u8 {
     if (!js.context.hasException()) return null;
     const thrown = js.takeException();
     defer thrown.free(js.runtime);
@@ -1755,13 +1755,13 @@ fn formatPendingExceptionName(js: *engine.Engine, storage: *[stderr_storage_len]
     };
 }
 
-fn objectFromValue(value: engine.core.Value) ?*engine.core.Object {
+fn objectFromValue(value: engine.core.JSValue) ?*engine.core.Object {
     const header = value.refHeader() orelse return null;
     if (header.kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
-fn stringFromValue(value: engine.core.Value) ?*engine.core.string.String {
+fn stringFromValue(value: engine.core.JSValue) ?*engine.core.string.String {
     const header = value.refHeader() orelse return null;
     if (header.kind != .string) return null;
     return @fieldParentPtr("header", header);

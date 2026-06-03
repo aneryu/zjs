@@ -1,13 +1,13 @@
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
-const Value = @import("value.zig").Value;
+const JSValue = @import("value.zig").JSValue;
 
-fn dupOwnedValue(atoms: *atom.AtomTable, value: Value) Value {
-    if (value.asSymbolAtom()) |atom_id| return Value.symbol(atoms.dup(atom_id));
+fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
+    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
     return value.dup();
 }
 
-fn freeOwnedValue(atoms: *atom.AtomTable, value: Value, rt: anytype) void {
+fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
     if (value.asSymbolAtom()) |atom_id| {
         atoms.free(atom_id);
         return;
@@ -89,7 +89,7 @@ pub const FunctionKind = enum {
     async_generator,
 };
 
-pub const NativeCall = *const fn () Value;
+pub const NativeCall = *const fn () JSValue;
 
 pub const NativeRecord = struct {
     name: atom.Atom = atom.null_atom,
@@ -100,13 +100,13 @@ pub const NativeRecord = struct {
 pub const BytecodeRecord = struct {
     name: atom.Atom = atom.null_atom,
     bytecode: []u8 = &.{},
-    constants: []Value = &.{},
+    constants: []JSValue = &.{},
 };
 
 pub const BoundRecord = struct {
-    target: Value = Value.undefinedValue(),
-    this_value: Value = Value.undefinedValue(),
-    args: []Value = &.{},
+    target: JSValue = JSValue.undefinedValue(),
+    this_value: JSValue = JSValue.undefinedValue(),
+    args: []JSValue = &.{},
 };
 
 pub const FunctionRecord = struct {
@@ -115,7 +115,7 @@ pub const FunctionRecord = struct {
     kind: Kind,
     function_kind: FunctionKind = .normal,
     is_constructor: bool = false,
-    home_object: Value = Value.undefinedValue(),
+    home_object: JSValue = JSValue.undefinedValue(),
     payload: Payload,
 
     const Payload = union(Kind) {
@@ -150,10 +150,10 @@ pub const FunctionRecord = struct {
         atoms: *atom.AtomTable,
         name: atom.Atom,
         bytecode: []const u8,
-        constants: []const Value,
+        constants: []const JSValue,
         function_kind: FunctionKind,
         is_constructor: bool,
-        home_object: Value,
+        home_object: JSValue,
     ) !FunctionRecord {
         const owned_code: []u8 = if (bytecode.len == 0)
             &.{}
@@ -165,11 +165,11 @@ pub const FunctionRecord = struct {
         var owned_code_owned = owned_code.len != 0;
         errdefer if (owned_code_owned) account.free(u8, owned_code);
 
-        const owned_constants: []Value = if (constants.len == 0)
+        const owned_constants: []JSValue = if (constants.len == 0)
             &.{}
         else blk: {
-            const owned = try account.alloc(Value, constants.len);
-            errdefer account.free(Value, owned);
+            const owned = try account.alloc(JSValue, constants.len);
+            errdefer account.free(JSValue, owned);
             for (constants, owned) |constant, *slot| slot.* = dupOwnedValue(atoms, constant);
             break :blk owned;
         };
@@ -193,16 +193,16 @@ pub const FunctionRecord = struct {
     pub fn createBound(
         account: *memory.MemoryAccount,
         atoms: *atom.AtomTable,
-        target: Value,
-        this_value: Value,
-        args: []const Value,
+        target: JSValue,
+        this_value: JSValue,
+        args: []const JSValue,
         is_constructor: bool,
     ) !FunctionRecord {
-        const owned_args: []Value = if (args.len == 0)
+        const owned_args: []JSValue = if (args.len == 0)
             &.{}
         else blk: {
-            const owned = try account.alloc(Value, args.len);
-            errdefer account.free(Value, owned);
+            const owned = try account.alloc(JSValue, args.len);
+            errdefer account.free(JSValue, owned);
             for (args, owned) |arg, *slot| slot.* = dupOwnedValue(atoms, arg);
             break :blk owned;
         };
@@ -241,10 +241,10 @@ pub const FunctionRecord = struct {
                 if (record.name != atom.null_atom) atoms.free(record.name);
                 for (record.constants) |*constant| {
                     const value = constant.*;
-                    constant.* = Value.undefinedValue();
+                    constant.* = JSValue.undefinedValue();
                     freeOwnedValue(atoms, value, rt);
                 }
-                if (record.constants.len != 0) account.free(Value, record.constants);
+                if (record.constants.len != 0) account.free(JSValue, record.constants);
                 if (record.bytecode.len != 0) account.free(u8, record.bytecode);
             },
             .bound => |record| {
@@ -252,10 +252,10 @@ pub const FunctionRecord = struct {
                 freeOwnedValue(atoms, record.this_value, rt);
                 for (record.args) |*arg| {
                     const value = arg.*;
-                    arg.* = Value.undefinedValue();
+                    arg.* = JSValue.undefinedValue();
                     freeOwnedValue(atoms, value, rt);
                 }
-                if (record.args.len != 0) account.free(Value, record.args);
+                if (record.args.len != 0) account.free(JSValue, record.args);
             },
         }
     }

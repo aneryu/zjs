@@ -28,7 +28,7 @@ const core = @import("../core/root.zig");
 const regexp_builtin = @import("../builtins/regexp.zig");
 const libs_bignum = @import("../libs/bignum.zig");
 const memory = @import("../core/memory.zig");
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 
 const bytecode_function = @import("../bytecode/function.zig");
 const function_def_mod = @import("../bytecode/function_def.zig");
@@ -274,7 +274,7 @@ pub const ClassElementKind = enum {
 pub const ParseState = struct {
     lex: *lexer_mod.Lexer,
     function: *bytecode_function.Bytecode,
-    runtime: ?*core.Runtime = null,
+    runtime: ?*core.JSRuntime = null,
     /// One-token lookahead. The lexer is the source of truth; we cache
     /// the most recently produced token here so the parser can `peek`.
     token: tok.Token,
@@ -1840,7 +1840,7 @@ pub const ParseState = struct {
         }
     }
 
-    fn emitPushConst(self: *ParseState, value: Value) Error!void {
+    fn emitPushConst(self: *ParseState, value: JSValue) Error!void {
         const idx = if (self.emit_to_function_def or self.top_level_functions_as_children)
             try self.cur_func().appendCpool(value)
         else
@@ -1848,7 +1848,7 @@ pub const ParseState = struct {
         try self.emitOpU32(opcode.op.push_const, idx);
     }
 
-    fn emitPushConstOwned(self: *ParseState, value: Value) Error!void {
+    fn emitPushConstOwned(self: *ParseState, value: JSValue) Error!void {
         var value_owned = true;
         errdefer if (value_owned) value.free(self.runtime.?);
         const idx = if (self.emit_to_function_def or self.top_level_functions_as_children)
@@ -5039,7 +5039,7 @@ fn parsePrimary(s: *ParseState, flags: ParseFlags) Error!void {
             } else if (numberIsExactI32(value)) {
                 try s.emitOpI32(opcode.op.push_i32, @as(i32, @intFromFloat(value)));
             } else {
-                try s.emitPushConst(Value.float64(value));
+                try s.emitPushConst(JSValue.float64(value));
             }
             try s.advance();
         },
@@ -5407,14 +5407,14 @@ fn emitTaggedTemplateSingletonObject(s: *ParseState, bytes: []const u8, raw_byte
 }
 
 const TaggedTemplateObjectBuilder = struct {
-    rt: *core.Runtime,
-    template_value: Value,
-    raw_value: Value,
+    rt: *core.JSRuntime,
+    template_value: JSValue,
+    raw_value: JSValue,
     template_object: *core.Object,
     raw_array: *core.Object,
     depth: u32 = 0,
 
-    fn init(rt: *core.Runtime) Error!TaggedTemplateObjectBuilder {
+    fn init(rt: *core.JSRuntime) Error!TaggedTemplateObjectBuilder {
         const template_object = core.Object.createArray(rt, null) catch return Error.OutOfMemory;
         errdefer core.Object.destroyFromHeader(rt, &template_object.header);
         const raw_array = core.Object.createArray(rt, null) catch return Error.OutOfMemory;
@@ -5444,7 +5444,7 @@ const TaggedTemplateObjectBuilder = struct {
         raw_bytes: []const u8,
         cooked_invalid: bool,
     ) Error!void {
-        const cooked_value = if (cooked_invalid) core.Value.undefinedValue() else blk: {
+        const cooked_value = if (cooked_invalid) core.JSValue.undefinedValue() else blk: {
             const cooked = core.string.String.createUtf8(self.rt, cooked_bytes) catch return Error.InvalidUtf8;
             break :blk cooked.value();
         };
@@ -11202,7 +11202,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
         s.return_expr_emitted_return = saved_return_expr_emitted_return;
         s.is_strict = saved_is_strict;
         s.lex.is_strict_mode = saved_lex_is_strict;
-        const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(Value.undefinedValue()));
+        const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         const keep_child_value = child_ptr.child_decl_init_keep_value;
         const emit_child_decl_inline = child_ptr.child_decl_emit_inline;
         const emit_child_decl_var_inline = child_ptr.child_decl_emit_var_inline;
@@ -11596,7 +11596,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
         s.is_strict = saved_is_strict;
         s.lex.is_strict_mode = saved_lex_is_strict;
         s.new_target_allowed = saved_new_target_allowed;
-        const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(Value.undefinedValue()));
+        const child_cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
         child_ptr.parent_cpool_idx = child_cpool_idx;
         try attachVisibleClassPrivateBoundNamesToFunction(s, child_ptr);
         try parent_fd.addChild(child_ptr.*);
@@ -13952,7 +13952,7 @@ fn ensureClassFieldsInitFunction(s: *ParseState) Error!usize {
     child_fd.new_target_allowed = true;
     child_fd.super_allowed = true;
     _ = child_fd.appendScope(-1) catch return error.OutOfMemory;
-    const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(Value.undefinedValue()));
+    const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
     child_fd.parent_cpool_idx = cpool_idx;
     try parent_fd.addChild(child_fd.*);
     child_moved = true;
@@ -14825,7 +14825,7 @@ fn appendDefaultClassConstructor(s: *ParseState, name_atom: Atom) Error!u16 {
     for (s.class_private_bound_names.items) |atom_id| {
         try child_fd.appendPrivateBoundName(atom_id);
     }
-    const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(Value.undefinedValue()));
+    const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
     child_fd.parent_cpool_idx = cpool_idx;
     try parent_fd.addChild(child_fd.*);
     child_moved = true;
@@ -15400,7 +15400,7 @@ fn parseWithClause(s: *ParseState, request_index: u32) Error!void {
 
         try s.expectToken(':');
 
-        // Value (string)
+        // JSValue (string)
         if (s.peekKind() != tok.TOK_STRING) {
             return Error.UnexpectedToken;
         }

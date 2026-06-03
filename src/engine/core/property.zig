@@ -1,7 +1,7 @@
 const atom = @import("atom.zig");
 const class = @import("class.zig");
-const Value = @import("value.zig").Value;
-const Runtime = @import("runtime.zig").Runtime;
+const JSValue = @import("value.zig").JSValue;
+const JSRuntime = @import("runtime.zig").JSRuntime;
 
 pub const Flags = packed struct(u6) {
     writable: bool = false,
@@ -37,8 +37,8 @@ pub const Flags = packed struct(u6) {
 };
 
 pub const Accessor = struct {
-    getter: Value = Value.undefinedValue(),
-    setter: Value = Value.undefinedValue(),
+    getter: JSValue = JSValue.undefinedValue(),
+    setter: JSValue = JSValue.undefinedValue(),
 };
 
 pub const AutoInitKind = enum(u8) {
@@ -76,7 +76,7 @@ pub const TypedArrayBuiltinMarker = enum(u8) {
 
 /// Lazy-materialization payload for `Slot.auto_init`. The slot holds
 /// just enough metadata for the first reader to call `builder`,
-/// receive a fresh `Value`, and replace the slot with `.data`.
+/// receive a fresh `JSValue`, and replace the slot with `.data`.
 ///
 /// Borrowed from QuickJS's `JS_PROP_AUTOINIT` mechanism
 /// (`JSCFunctionListEntry` + `JS_AutoInitProperty`): the standard
@@ -89,13 +89,13 @@ pub const TypedArrayBuiltinMarker = enum(u8) {
 ///
 /// `name` and `length` are the same pair that `nativeFunction` would
 /// have received eagerly. `rt` is captured so `getProperty` can
-/// materialize without threading the Runtime through every prop-read
+/// materialize without threading the JSRuntime through every prop-read
 /// call site (zjs's `getProperty(self: Object, ...)` is reached by
 /// 300+ callers; we want this change to be local).
 pub const AutoInit = struct {
     name: []const u8,
     length: i32,
-    rt: *Runtime,
+    rt: *JSRuntime,
     kind: AutoInitKind = .native_function,
     host_function_kind: i32 = 0,
     host_function_prototype: bool = false,
@@ -112,7 +112,7 @@ pub const AutoInit = struct {
 };
 
 pub const Slot = union(enum) {
-    data: Value,
+    data: JSValue,
     accessor: Accessor,
     auto_init: AutoInit,
     deleted,

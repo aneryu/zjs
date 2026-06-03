@@ -14,11 +14,11 @@ const op = bytecode.opcode.op;
 
 pub const TailCallMethodResult = union(enum) {
     handled,
-    return_value: core.Value,
+    return_value: core.JSValue,
 };
 
 pub fn closure(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -27,9 +27,9 @@ pub fn closure(
     catch_target: *?usize,
     opc: u8,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    eval_var_refs: []const core.JSValue,
     comptime handleCatchableRuntimeError: anytype,
     comptime pushFunctionClosure: anytype,
 ) !void {
@@ -47,7 +47,7 @@ pub fn closure(
 }
 
 fn tryFuseImmediateSimpleArrayMapClosure(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -74,7 +74,7 @@ fn tryFuseImmediateSimpleArrayMapClosure(
     const map_id = @intFromEnum(builtins.array.PrototypeMethod.map);
     if (native_ref.domain != .array or native_ref.id != map_id) return false;
 
-    const args = [_]core.Value{callback};
+    const args = [_]core.JSValue{callback};
     if (try shared_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback)) |fast_value| {
         errdefer fast_value.free(ctx.runtime);
         const method_owned = try stack.pop();
@@ -102,7 +102,7 @@ fn tryFuseImmediateSimpleArrayMapClosure(
 }
 
 fn tryFastMathCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     argc: u16,
 ) !bool {
@@ -120,19 +120,19 @@ fn tryFastMathCall(
             const arg = stack.values[base + 1];
             if (arg.asInt32()) |val| {
                 if (val == std.math.minInt(i32)) {
-                    break :blk core.Value.float64(@abs(@as(f64, @floatFromInt(val))));
+                    break :blk core.JSValue.float64(@abs(@as(f64, @floatFromInt(val))));
                 } else {
-                    break :blk core.Value.int32(@intCast(@abs(val)));
+                    break :blk core.JSValue.int32(@intCast(@abs(val)));
                 }
             }
-            if (arg.asFloat64()) |val| break :blk core.Value.float64(@abs(val));
+            if (arg.asFloat64()) |val| break :blk core.JSValue.float64(@abs(val));
             return false;
         },
         2 => blk: { // Math.floor
             if (argc != 1) return false;
             const arg = stack.values[base + 1];
-            if (arg.asInt32()) |val| break :blk core.Value.int32(val);
-            if (arg.asFloat64()) |val| break :blk core.Value.float64(@floor(val));
+            if (arg.asInt32()) |val| break :blk core.JSValue.int32(val);
+            if (arg.asFloat64()) |val| break :blk core.JSValue.float64(@floor(val));
             return false;
         },
         7 => blk: { // Math.min
@@ -144,12 +144,12 @@ fn tryFastMathCall(
                 const arg1 = stack.values[base + 2];
                 if (arg0.asInt32()) |v0| {
                     if (arg1.asInt32()) |v1| {
-                        break :blk core.Value.int32(@min(v0, v1));
+                        break :blk core.JSValue.int32(@min(v0, v1));
                     }
                 }
                 if (arg0.asFloat64()) |v0| {
                     if (arg1.asFloat64()) |v1| {
-                        break :blk core.Value.float64(@min(v0, v1));
+                        break :blk core.JSValue.float64(@min(v0, v1));
                     }
                 }
             }
@@ -164,12 +164,12 @@ fn tryFastMathCall(
                 const arg1 = stack.values[base + 2];
                 if (arg0.asInt32()) |v0| {
                     if (arg1.asInt32()) |v1| {
-                        break :blk core.Value.int32(@max(v0, v1));
+                        break :blk core.JSValue.int32(@max(v0, v1));
                     }
                 }
                 if (arg0.asFloat64()) |v0| {
                     if (arg1.asFloat64()) |v1| {
-                        break :blk core.Value.float64(@max(v0, v1));
+                        break :blk core.JSValue.float64(@max(v0, v1));
                     }
                 }
             }
@@ -189,7 +189,7 @@ fn tryFastMathCall(
 }
 
 pub fn call(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -218,7 +218,7 @@ pub fn call(
 }
 
 fn tryFastSimpleStringCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     argc: u16,
 ) !bool {
@@ -250,7 +250,7 @@ fn tryFastSimpleStringCall(
     return true;
 }
 
-fn simpleStringCallableKind(func: core.Value) ?bytecode.function.SimpleStringKind {
+fn simpleStringCallableKind(func: core.JSValue) ?bytecode.function.SimpleStringKind {
     if (func.isFunctionBytecode()) {
         const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
         return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
@@ -262,7 +262,7 @@ fn simpleStringCallableKind(func: core.Value) ?bytecode.function.SimpleStringKin
 }
 
 fn tryFastSimpleNumericCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     argc: u16,
 ) !bool {
@@ -292,10 +292,10 @@ const SimpleNumericCallable = struct {
     kind: bytecode.function.SimpleNumericKind,
     binop: u8,
     rhs: i32,
-    capture0: ?core.Value = null,
+    capture0: ?core.JSValue = null,
 };
 
-fn simpleNumericCallable(func: core.Value) ?SimpleNumericCallable {
+fn simpleNumericCallable(func: core.JSValue) ?SimpleNumericCallable {
     if (func.isFunctionBytecode()) {
         const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
         return simpleNumericCallableFromBytecode(fb, null);
@@ -308,7 +308,7 @@ fn simpleNumericCallable(func: core.Value) ?SimpleNumericCallable {
     return simpleNumericCallableFromBytecode(fb, capture0);
 }
 
-fn simpleNumericCallableFromBytecode(fb: *const bytecode.FunctionBytecode, capture0: ?core.Value) ?SimpleNumericCallable {
+fn simpleNumericCallableFromBytecode(fb: *const bytecode.FunctionBytecode, capture0: ?core.JSValue) ?SimpleNumericCallable {
     return switch (fb.simple_numeric_kind) {
         .arg0_const => .{ .kind = .arg0_const, .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs },
         .arg0_arg1 => .{ .kind = .arg0_arg1, .binop = fb.simple_numeric_op, .rhs = 0 },
@@ -317,11 +317,11 @@ fn simpleNumericCallableFromBytecode(fb: *const bytecode.FunctionBytecode, captu
     };
 }
 
-fn simpleNumericCallResult(rt: *core.Runtime, simple: SimpleNumericCallable, args: []const core.Value) !core.Value {
+fn simpleNumericCallResult(rt: *core.JSRuntime, simple: SimpleNumericCallable, args: []const core.JSValue) !core.JSValue {
     return switch (simple.kind) {
         .arg0_const => {
             if (args.len == 0 or !args[0].isNumber()) return error.NotSimpleNumericCall;
-            return simpleNumericBinary(rt, simple.binop, args[0], core.Value.int32(simple.rhs));
+            return simpleNumericBinary(rt, simple.binop, args[0], core.JSValue.int32(simple.rhs));
         },
         .arg0_arg1 => {
             if (args.len < 2 or !args[0].isNumber() or !args[1].isNumber()) return error.NotSimpleNumericCall;
@@ -337,7 +337,7 @@ fn simpleNumericCallResult(rt: *core.Runtime, simple: SimpleNumericCallable, arg
     };
 }
 
-fn simpleNumericBinary(rt: *core.Runtime, binop: u8, lhs: core.Value, rhs: core.Value) !core.Value {
+fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             return switch (binop) {
@@ -351,26 +351,26 @@ fn simpleNumericBinary(rt: *core.Runtime, binop: u8, lhs: core.Value, rhs: core.
     return try value_ops.binary(rt, binop, lhs, rhs);
 }
 
-fn fastInt32Add(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) + @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Sub(lhs: i32, rhs: i32) core.Value {
+fn fastInt32Sub(lhs: i32, rhs: i32) core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) - @as(f64, @floatFromInt(rhs)));
 }
 
-fn fastInt32Mul(lhs: i32, rhs: i32) core.Value {
-    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.Value.float64(-0.0);
+fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
+    if ((lhs == 0 and rhs < 0) or (rhs == 0 and lhs < 0)) return core.JSValue.float64(-0.0);
     const result = @mulWithOverflow(lhs, rhs);
-    if (result[1] == 0) return core.Value.int32(result[0]);
+    if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
 }
 
-fn primitiveMathNumber(value: core.Value) ?f64 {
+fn primitiveMathNumber(value: core.JSValue) ?f64 {
     if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
     if (value.tag == core.Tag.float64) return value.asFloat64().?;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
@@ -380,7 +380,7 @@ fn primitiveMathNumber(value: core.Value) ?f64 {
 }
 
 pub fn tailCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -388,16 +388,16 @@ pub fn tailCall(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     comptime execCall: anytype,
-) !core.Value {
+) !core.JSValue {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     try execCall(ctx, stack, function, frame, catch_target, argc, output, global);
     if (stack.peek()) |value| return value;
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
 pub fn callMethod(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -411,12 +411,12 @@ pub fn callMethod(
 ) !void {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    var inline_args: [4]core.Value = undefined;
-    const args_buf: []core.Value = if (argc <= inline_args.len)
+    var inline_args: [4]core.JSValue = undefined;
+    const args_buf: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
     else
-        try ctx.runtime.memory.alloc(core.Value, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.Value, args_buf);
+        try ctx.runtime.memory.alloc(core.JSValue, argc);
+    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args_buf);
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
@@ -454,10 +454,10 @@ pub fn callMethod(
 }
 
 fn dropUnusedCallResult(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    value: core.Value,
+    value: core.JSValue,
 ) bool {
     if (frame.pc >= function.code.len or function.code[frame.pc] != op.drop) return false;
     frame.pc += 1;
@@ -466,7 +466,7 @@ fn dropUnusedCallResult(
 }
 
 pub fn tailCallMethod(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -479,12 +479,12 @@ pub fn tailCallMethod(
 ) !TailCallMethodResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    var inline_args: [4]core.Value = undefined;
-    const args_buf: []core.Value = if (argc <= inline_args.len)
+    var inline_args: [4]core.JSValue = undefined;
+    const args_buf: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
     else
-        try ctx.runtime.memory.alloc(core.Value, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.Value, args_buf);
+        try ctx.runtime.memory.alloc(core.JSValue, argc);
+    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args_buf);
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
@@ -517,15 +517,15 @@ pub fn tailCallMethod(
 }
 
 fn fastNativeMethodCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
-    func: core.Value,
-    args: []const core.Value,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const function_object = property_ops.expectObject(func) catch return null;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     switch (native_ref.domain) {
@@ -543,13 +543,13 @@ fn fastNativeMethodCall(
             }
         },
         .number => switch (native_ref.id) {
-            @intFromEnum(builtins.number.StaticMethod.parse_int) => return @as(?core.Value, try shared_vm.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame)),
-            @intFromEnum(builtins.number.StaticMethod.parse_float) => return @as(?core.Value, try shared_vm.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame)),
+            @intFromEnum(builtins.number.StaticMethod.parse_int) => return @as(?core.JSValue, try shared_vm.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame)),
+            @intFromEnum(builtins.number.StaticMethod.parse_float) => return @as(?core.JSValue, try shared_vm.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame)),
             else => {},
         },
         .string => switch (native_ref.id) {
             @intFromEnum(builtins.string.StaticMethod.from_char_code) => {
-                return @as(?core.Value, try shared_vm.qjsStringFromCharCode(ctx, output, global, args));
+                return @as(?core.JSValue, try shared_vm.qjsStringFromCharCode(ctx, output, global, args));
             },
             @intFromEnum(builtins.string.PrototypeMethod.substring) => {
                 if (try fastStringSubstringPrimitive(ctx.runtime, this_value, args)) |value| return value;
@@ -557,7 +557,7 @@ fn fastNativeMethodCall(
             else => {},
         },
         .date => switch (native_ref.id) {
-            @intFromEnum(builtins.date.StaticMethod.now) => return @as(?core.Value, try builtins.date.staticCall(ctx.runtime, native_ref.id, &.{})),
+            @intFromEnum(builtins.date.StaticMethod.now) => return @as(?core.JSValue, try builtins.date.staticCall(ctx.runtime, native_ref.id, &.{})),
             else => {},
         },
         .array => {
@@ -575,17 +575,17 @@ fn fastNativeMethodCall(
         .collection => {
             if (try collection_vm.qjsCollectionNativeRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame)) |value| return value;
         },
-        .json => return @as(?core.Value, try shared_vm.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame)),
+        .json => return @as(?core.JSValue, try shared_vm.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame)),
         else => {},
     }
     return null;
 }
 
 fn fastStringSubstringPrimitive(
-    rt: *core.Runtime,
-    this_value: core.Value,
-    args: []const core.Value,
-) !?core.Value {
+    rt: *core.JSRuntime,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+) !?core.JSValue {
     if (!this_value.isString() or args.len > 2) return null;
     const header = this_value.refHeader() orelse return null;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
@@ -610,8 +610,8 @@ fn fastStringSubstringPrimitive(
     return out.value();
 }
 
-fn mathMinMaxPrimitive(args: []const core.Value, is_max: bool) ?core.Value {
-    if (args.len == 0) return core.Value.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
+fn mathMinMaxPrimitive(args: []const core.JSValue, is_max: bool) ?core.JSValue {
+    if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
     var result = if (is_max) -std.math.inf(f64) else std.math.inf(f64);
     for (args) |arg| {
         const number = primitiveMathNumber(arg) orelse return null;
@@ -638,7 +638,7 @@ fn mathFmax(a: f64, b: f64) f64 {
 }
 
 pub fn apply(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -706,7 +706,7 @@ pub fn apply(
     if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
         if (varRefSlotIsUninitialized(frame.this_value)) {
             const next_this = if (result.isObject()) result else frame.constructor_this_value;
-            setSlotValue(ctx, &frame.this_value, next_this.dup());
+            try setSlotValue(ctx, &frame.this_value, next_this.dup());
             initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
                 return err;
@@ -730,7 +730,7 @@ pub fn apply(
             value
         else
             result;
-        setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
+        try setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
         try stack.push(next_this);
         return;
     }
@@ -738,7 +738,7 @@ pub fn apply(
 }
 
 pub fn constructor(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -751,12 +751,12 @@ pub fn constructor(
 ) !void {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    var inline_args: [4]core.Value = undefined;
-    const args_buf: []core.Value = if (argc <= inline_args.len)
+    var inline_args: [4]core.JSValue = undefined;
+    const args_buf: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
     else
-        try ctx.runtime.memory.alloc(core.Value, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.Value, args_buf);
+        try ctx.runtime.memory.alloc(core.JSValue, argc);
+    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args_buf);
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
@@ -818,20 +818,20 @@ pub fn checkCtor(frame: *frame_mod.Frame) !void {
     if (frame.new_target.isUndefined()) return error.TypeError;
 }
 
-pub fn checkCtorReturn(ctx: *core.Context, stack: *stack_mod.Stack) !void {
+pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
     if (value.isObject()) {
-        try stack.pushOwned(core.Value.boolean(false));
+        try stack.pushOwned(core.JSValue.boolean(false));
     } else if (value.isUndefined()) {
-        try stack.pushOwned(core.Value.boolean(true));
+        try stack.pushOwned(core.JSValue.boolean(true));
     } else {
         return error.TypeError;
     }
 }
 
 pub fn initCtor(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,

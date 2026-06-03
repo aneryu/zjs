@@ -10,7 +10,7 @@ const stack_mod = @import("../stack.zig");
 const op = bytecode.opcode.op;
 
 pub fn pushLiteral(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     prototype: ?*core.Object,
 ) !void {
@@ -25,7 +25,7 @@ pub fn pushLiteral(
 }
 
 pub fn tryPushLiteralFromAtomPair(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -82,7 +82,7 @@ const LocalAccess = struct {
 };
 
 fn tryFuseLiteralLengthScan(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
@@ -103,9 +103,9 @@ fn tryFuseLiteralLengthScan(
         .unsupported => unreachable,
         .done => |sum| {
             const value = if (sum <= @as(usize, @intCast(std.math.maxInt(i32))))
-                core.Value.int32(@intCast(sum))
+                core.JSValue.int32(@intCast(sum))
             else
-                core.Value.float64(@floatFromInt(sum));
+                core.JSValue.float64(@floatFromInt(sum));
             try stack.pushOwned(value);
             frame.pc = decoded.return_pc;
             return true;
@@ -118,7 +118,7 @@ const LiteralLengthScan = struct {
     return_pc: usize,
 };
 
-fn decodeLiteralLengthScan(rt: *core.Runtime, code: []const u8, pc: usize) ?LiteralLengthScan {
+fn decodeLiteralLengthScan(rt: *core.JSRuntime, code: []const u8, pc: usize) ?LiteralLengthScan {
     const regexp_put = decodeLocalPut(code, pc) orelse return null;
     const input_push = decodeAtomPush(code, regexp_put.next_pc) orelse return null;
     const input_put = decodeLocalPut(code, input_push.next_pc) orelse return null;
@@ -166,11 +166,11 @@ fn decodeLiteralLengthScan(rt: *core.Runtime, code: []const u8, pc: usize) ?Lite
     return .{ .input_atom = input_push.atom, .return_pc = exit_get.next_pc };
 }
 
-fn atomNameEql(rt: *core.Runtime, atom_id: core.Atom, name: []const u8) bool {
+fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool {
     return if (rt.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
-fn atomStringBytes(rt: *core.Runtime, atom_id: core.Atom, buf: *[10]u8) ?[]const u8 {
+fn atomStringBytes(rt: *core.JSRuntime, atom_id: core.Atom, buf: *[10]u8) ?[]const u8 {
     if (rt.atoms.name(atom_id)) |name| return name;
     if (core.atom.isTaggedInt(atom_id)) {
         return std.fmt.bufPrint(buf, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch null;

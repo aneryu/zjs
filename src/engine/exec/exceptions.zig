@@ -1,5 +1,5 @@
-const Context = @import("../core/context.zig").Context;
-const Value = @import("../core/value.zig").Value;
+const JSContext = @import("../core/context.zig").JSContext;
+const JSValue = @import("../core/value.zig").JSValue;
 
 pub const RuntimeError = error{
     AccessorWithoutSetter,
@@ -128,10 +128,10 @@ pub const HostError = RuntimeError || error{
     WriteFailed,
 };
 
-pub fn throwValue(ctx: *Context, value: Value) Value {
+pub fn throwValue(ctx: *JSContext, value: JSValue) JSValue {
     return ctx.throwValue(value);
 }
 
-pub fn takeException(ctx: *Context) Value {
+pub fn takeException(ctx: *JSContext) JSValue {
     return ctx.takeException();
 }

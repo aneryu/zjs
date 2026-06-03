@@ -19,27 +19,49 @@ const SetMethodMode = enum {
 };
 
 const SetLikeRecordVm = struct {
-    object_value: core.Value,
+    object_value: core.JSValue,
     size: f64,
-    has: core.Value,
-    keys: core.Value,
+    has: core.JSValue,
+    keys: core.JSValue,
     native_kind: enum { none, set, map },
 
-    fn deinit(self: *const SetLikeRecordVm, rt: *core.Runtime) void {
+    fn deinit(self: *const SetLikeRecordVm, rt: *core.JSRuntime) void {
         self.object_value.free(rt);
         self.has.free(rt);
         self.keys.free(rt);
     }
 };
 
+const ValueListRoot = struct {
+    rt: ?*core.JSRuntime = null,
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    fn init(self: *ValueListRoot, rt: *core.JSRuntime, values: *[]core.JSValue) void {
+        self.rt = rt;
+        self.slices[0] = .{ .mutable = values };
+        self.frame = .{
+            .previous = rt.active_value_roots,
+            .slices = &self.slices,
+        };
+        rt.active_value_roots = &self.frame;
+    }
+
+    fn deinit(self: *ValueListRoot) void {
+        const rt = self.rt orelse return;
+        rt.active_value_roots = self.frame.previous;
+        self.rt = null;
+    }
+};
+
 pub fn qjsCollectionIteratorMethodCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     function_object: *core.Object,
     name: []const u8,
-    args: []const core.Value,
-) !?core.Value {
+    args: []const core.JSValue,
+) !?core.JSValue {
     _ = args;
     const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
     if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
@@ -51,60 +73,60 @@ pub fn qjsCollectionIteratorMethodCall(
         9
     else
         return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    if (receiver.class_id != owner_class) return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     return try builtins.collection.methodCallWithGlobal(ctx, global, this_value, method_id, &.{}, &.{});
 }
 
 pub fn qjsCollectionForEachCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     function_object: *core.Object,
     name: []const u8,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     if (!std.mem.eql(u8, name, "forEach")) return null;
     const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
     if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    if (receiver.class_id != owner_class) return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     if (args.len < 1 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
-    const this_arg = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
         const callback_args = if (receiver.class_id == core.class.ids.set)
-            [_]core.Value{ entry.key, entry.key, receiver.value() }
+            [_]core.JSValue{ entry.key, entry.key, receiver.value() }
         else
-            [_]core.Value{ entry.value, entry.key, receiver.value() };
+            [_]core.JSValue{ entry.value, entry.key, receiver.value() };
         const result = try shared_vm.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
         result.free(ctx.runtime);
     }
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
 pub fn qjsSetMethodCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     function_object: *core.Object,
     name: []const u8,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
     if (owner_class != core.class.ids.set) return null;
     const mode = qjsSetMethodMode(name) orelse return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
-    if (receiver.class_id != core.class.ids.set) return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
+    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
+    if (receiver.class_id != core.class.ids.set) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
     var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     defer other_record.deinit(ctx.runtime);
@@ -120,24 +142,24 @@ pub fn qjsSetMethodCall(
 }
 
 pub fn qjsCollectionNativeRecord(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     function_object: *core.Object,
     id: u32,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const receiver = shared_vm.objectFromValue(this_value) orelse {
         if (collectionMethodOwnerClass(function_object)) |owner_class| {
-            return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+            return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
         }
         return error.TypeError;
     };
     if (collectionMethodOwnerClass(function_object)) |owner_class| {
-        if (receiver.class_id != owner_class) return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+        if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     }
 
     const method: builtins.collection.PrototypeMethod = switch (id) {
@@ -166,10 +188,10 @@ pub fn qjsCollectionNativeRecord(
 
     if (collectionCallResultIsDropped(caller_function, caller_frame)) {
         const handled = builtins.collection.methodCallDroppedResult(ctx.runtime, receiver, id, args) catch |err| switch (err) {
-            error.TypeError => return @as(?core.Value, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
+            error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
             else => return err,
         };
-        if (handled) return core.Value.undefinedValue();
+        if (handled) return core.JSValue.undefinedValue();
     }
 
     return switch (method) {
@@ -185,7 +207,7 @@ pub fn qjsCollectionNativeRecord(
         .get_or_insert,
         .size_getter,
         => builtins.collection.methodCallWithGlobal(ctx, global, this_value, id, args, &.{}) catch |err| switch (err) {
-            error.TypeError => return @as(?core.Value, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
+            error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
             else => err,
         },
         .for_each => try qjsCollectionForEachRecord(ctx, output, global, this_value, receiver, args, caller_function, caller_frame),
@@ -209,43 +231,43 @@ fn collectionCallResultIsDropped(caller_function: ?*const bytecode.Bytecode, cal
 }
 
 fn qjsCollectionForEachRecord(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    this_value: core.Value,
+    this_value: core.JSValue,
     receiver: *core.Object,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     if (receiver.class_id != core.class.ids.map and receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, receiver.class_id);
     if (args.len < 1 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
-    const this_arg = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
         const callback_args = if (receiver.class_id == core.class.ids.set)
-            [_]core.Value{ entry.key, entry.key, this_value }
+            [_]core.JSValue{ entry.key, entry.key, this_value }
         else
-            [_]core.Value{ entry.value, entry.key, this_value };
+            [_]core.JSValue{ entry.value, entry.key, this_value };
         const result = try shared_vm.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
         result.free(ctx.runtime);
     }
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
 fn qjsSetMethodRecord(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     method: builtins.collection.PrototypeMethod,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     if (receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, core.class.ids.set);
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
     var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
@@ -287,10 +309,10 @@ fn qjsSetMethodModeFromRecord(method: builtins.collection.PrototypeMethod) ?SetM
 }
 
 fn qjsGetSetRecord(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    other_value: core.Value,
+    other_value: core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !SetLikeRecordVm {
@@ -299,8 +321,8 @@ fn qjsGetSetRecord(
         return .{
             .object_value = other_value.dup(),
             .size = @floatFromInt(qjsSetStrongSize(object)),
-            .has = core.Value.undefinedValue(),
-            .keys = core.Value.undefinedValue(),
+            .has = core.JSValue.undefinedValue(),
+            .keys = core.JSValue.undefinedValue(),
             .native_kind = if (object.class_id == core.class.ids.set) .set else .map,
         };
     }
@@ -346,33 +368,33 @@ fn qjsSetStrongSize(object: *core.Object) usize {
     return count;
 }
 
-fn qjsConstructPlainSet(ctx: *core.Context, global: *core.Object) !core.Value {
+fn qjsConstructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     const set_proto = shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
     return builtins.collection.constructWithPrototype(ctx.runtime, 2, set_proto);
 }
 
-fn qjsSetAddValue(rt: *core.Runtime, set_value: core.Value, key: core.Value) !void {
+fn qjsSetAddValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
     const out = try builtins.collection.methodCall(rt, set_value, 6, &.{key});
     out.free(rt);
 }
 
-fn qjsSetDeleteValue(rt: *core.Runtime, set_value: core.Value, key: core.Value) !void {
+fn qjsSetDeleteValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
     const out = try builtins.collection.methodCall(rt, set_value, 4, &.{key});
     out.free(rt);
 }
 
-fn qjsSetHasValue(rt: *core.Runtime, set_value: core.Value, key: core.Value) !bool {
+fn qjsSetHasValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !bool {
     const out = try builtins.collection.methodCall(rt, set_value, 3, &.{key});
     defer out.free(rt);
     return shared_vm.valueTruthy(out);
 }
 
 fn qjsSetLikeHas(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     record: SetLikeRecordVm,
-    key: core.Value,
+    key: core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
@@ -387,13 +409,13 @@ fn qjsSetLikeHas(
 }
 
 fn qjsSetLikeKeysIterator(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     const source = if (record.native_kind != .none)
         try builtins.collection.methodCall(ctx.runtime, record.object_value, 7, &.{})
     else
@@ -406,14 +428,11 @@ fn qjsSetLikeKeysIterator(
     defer next_method.free(ctx.runtime);
     if (!shared_vm.isCallableValue(next_method)) return error.TypeError;
     const cached = iterator_object.cachedIteratorNextSlot();
-    const next_cached = next_method.dup();
-    const old_cached = cached.*;
-    cached.* = next_cached;
-    if (old_cached) |stored| stored.free(ctx.runtime);
+    try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
     return source;
 }
 
-fn qjsSetCloneReceiver(ctx: *core.Context, global: *core.Object, receiver: *core.Object) !core.Value {
+fn qjsSetCloneReceiver(ctx: *core.JSContext, global: *core.Object, receiver: *core.Object) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
     var index: usize = 0;
@@ -425,11 +444,11 @@ fn qjsSetCloneReceiver(ctx: *core.Context, global: *core.Object, receiver: *core
     return result_value;
 }
 
-fn qjsSetSnapshotKeys(rt: *core.Runtime, receiver: *core.Object) ![]core.Value {
+fn qjsSetSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue {
     const count = qjsSetStrongSize(receiver);
     if (count == 0) return &.{};
-    const keys = try rt.memory.alloc(core.Value, count);
-    errdefer rt.memory.free(core.Value, keys);
+    const keys = try rt.memory.alloc(core.JSValue, count);
+    errdefer rt.memory.free(core.JSValue, keys);
     var out: usize = 0;
     errdefer {
         for (keys[0..out]) |key| key.free(rt);
@@ -442,20 +461,60 @@ fn qjsSetSnapshotKeys(rt: *core.Runtime, receiver: *core.Object) ![]core.Value {
     return keys;
 }
 
-fn qjsFreeValueList(rt: *core.Runtime, values: []core.Value) void {
+fn qjsFreeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
     for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.Value, values);
+    if (values.len != 0) rt.memory.free(core.JSValue, values);
+}
+
+test "set difference snapshot key root exposes dynamic key slice" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
+    var keys = try rt.memory.alloc(core.JSValue, 1);
+    keys[0] = core.JSValue.symbol(first_atom);
+    defer qjsFreeValueList(rt, keys);
+
+    var keys_root = ValueListRoot{};
+    keys_root.init(rt, &keys);
+    defer keys_root.deinit();
+
+    const Visitor = struct {
+        atom_id: u32,
+        saw_key: bool = false,
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.asSymbolAtom()) |atom_id| {
+                if (atom_id == self.atom_id) self.saw_key = true;
+            }
+        }
+
+        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+            _ = context;
+            _ = slot;
+        }
+    };
+    var state = Visitor{ .atom_id = first_atom };
+    var visitor = core.runtime.RootVisitor{
+        .context = &state,
+        .visit_value = Visitor.visitValue,
+        .visit_object = Visitor.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+
+    try std.testing.expect(state.saw_key);
 }
 
 fn qjsSetDifference(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
     if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) {
@@ -481,8 +540,11 @@ fn qjsSetDifference(
             try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
         }
     } else {
-        const keys = try qjsSetSnapshotKeys(ctx.runtime, receiver);
+        var keys = try qjsSetSnapshotKeys(ctx.runtime, receiver);
         defer qjsFreeValueList(ctx.runtime, keys);
+        var keys_root = ValueListRoot{};
+        keys_root.init(ctx.runtime, &keys);
+        defer keys_root.deinit();
         for (keys) |key| {
             if (!try qjsSetLikeHas(ctx, output, global, other_record, key, caller_function, caller_frame)) {
                 try qjsSetAddValue(ctx.runtime, result_value, key);
@@ -493,14 +555,14 @@ fn qjsSetDifference(
 }
 
 fn qjsSetIntersection(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     const result_value = try qjsConstructPlainSet(ctx, global);
     errdefer result_value.free(ctx.runtime);
     if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
@@ -535,14 +597,14 @@ fn qjsSetIntersection(
 }
 
 fn qjsSetUnion(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
@@ -564,14 +626,14 @@ fn qjsSetUnion(
 }
 
 fn qjsSetSymmetricDifference(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
@@ -597,24 +659,24 @@ fn qjsSetSymmetricDifference(
 }
 
 fn qjsSetIsDisjointFrom(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
+) !core.JSValue {
     if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
         while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
             const entry = receiver.collectionEntriesSlot().*[index];
             if (!entry.active) continue;
             if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
-                return core.Value.boolean(false);
+                return core.JSValue.boolean(false);
             }
         }
-        return core.Value.boolean(true);
+        return core.JSValue.boolean(true);
     }
 
     var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
@@ -628,47 +690,47 @@ fn qjsSetIsDisjointFrom(
         defer step.value.free(ctx.runtime);
         if (step.done) {
             iterator_done = true;
-            return core.Value.boolean(true);
+            return core.JSValue.boolean(true);
         }
         if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
             shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             iterator_done = true;
-            return core.Value.boolean(false);
+            return core.JSValue.boolean(false);
         }
     }
 }
 
 fn qjsSetIsSubsetOf(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) return core.Value.boolean(false);
+) !core.JSValue {
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
     var index: usize = 0;
     while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = receiver.collectionEntriesSlot().*[index];
         if (!entry.active) continue;
         if (!try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
-            return core.Value.boolean(false);
+            return core.JSValue.boolean(false);
         }
     }
-    return core.Value.boolean(true);
+    return core.JSValue.boolean(true);
 }
 
 fn qjsSetIsSupersetOf(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     receiver: *core.Object,
     other_record: SetLikeRecordVm,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !core.Value {
-    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) < other_record.size) return core.Value.boolean(false);
+) !core.JSValue {
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
     var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
@@ -680,37 +742,37 @@ fn qjsSetIsSupersetOf(
         defer step.value.free(ctx.runtime);
         if (step.done) {
             iterator_done = true;
-            return core.Value.boolean(true);
+            return core.JSValue.boolean(true);
         }
         if (!try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
             shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             iterator_done = true;
-            return core.Value.boolean(false);
+            return core.JSValue.boolean(false);
         }
     }
 }
 
 pub fn qjsMapGroupByCall(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const map_proto = shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
     return qjsMapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
 }
 
 pub fn qjsMapGroupByRecord(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    args: []const core.Value,
+    args: []const core.JSValue,
     prototype: ?*core.Object,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
     if (!shared_vm.isCallableValue(args[1])) return error.TypeError;
 
@@ -737,7 +799,7 @@ pub fn qjsMapGroupByRecord(
             ctx,
             output,
             global,
-            core.Value.undefinedValue(),
+            core.JSValue.undefinedValue(),
             args[1],
             &.{ step.value, index_value },
             caller_function,
@@ -757,19 +819,19 @@ pub fn qjsMapGroupByRecord(
 }
 
 pub fn qjsMapGetOrInsertComputed(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    receiver_value: core.Value,
+    receiver_value: core.JSValue,
     function_object: *core.Object,
-    args: []const core.Value,
+    args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.Value {
+) !?core.JSValue {
     const receiver = property_ops.expectObject(receiver_value) catch return null;
     if (receiver.class_id != core.class.ids.weakmap and receiver.class_id != core.class.ids.map) return null;
     if (collectionMethodOwnerClass(function_object)) |owner_class| {
-        if (receiver.class_id != owner_class) return @as(?core.Value, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+        if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     }
     if (args.len < 2) return error.TypeError;
     if (!shared_vm.isCallableValue(args[1])) return error.TypeError;
@@ -780,7 +842,7 @@ pub fn qjsMapGetOrInsertComputed(
         args[0].dup();
     defer key.free(ctx.runtime);
     if (receiver.class_id == core.class.ids.weakmap and !canBeHeldWeakly(ctx.runtime, key)) {
-        return @as(?core.Value, try shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
+        return @as(?core.JSValue, try shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
     }
 
     const has_value = try builtins.collection.methodCall(ctx.runtime, receiver_value, 3, &.{key});
@@ -793,7 +855,7 @@ pub fn qjsMapGetOrInsertComputed(
         ctx,
         output,
         global,
-        core.Value.undefinedValue(),
+        core.JSValue.undefinedValue(),
         args[1],
         &.{key},
         caller_function,
@@ -805,7 +867,7 @@ pub fn qjsMapGetOrInsertComputed(
     return computed;
 }
 
-pub fn canBeHeldWeakly(rt: *core.Runtime, value: core.Value) bool {
+pub fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (value.isObject()) return true;
     if (value.asSymbolAtom()) |atom_id| {
         return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
@@ -819,24 +881,24 @@ pub fn collectionMethodOwnerClass(function_object: *core.Object) ?core.ClassId {
     return null;
 }
 
-fn canonicalizeMapKey(key: core.Value) core.Value {
+fn canonicalizeMapKey(key: core.JSValue) core.JSValue {
     if (key.asFloat64()) |number| {
-        if (number == 0) return core.Value.int32(0);
+        if (number == 0) return core.JSValue.int32(0);
     }
     return key.dup();
 }
 
-fn throwCollectionReceiverTypeError(ctx: *core.Context, global: *core.Object, owner_class: core.ClassId) !core.Value {
+fn throwCollectionReceiverTypeError(ctx: *core.JSContext, global: *core.Object, owner_class: core.ClassId) !core.JSValue {
     return shared_vm.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
 }
 
 fn throwCollectionMethodTypeError(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     receiver: *core.Object,
     method: builtins.collection.PrototypeMethod,
-    args: []const core.Value,
-) !core.Value {
+    args: []const core.JSValue,
+) !core.JSValue {
     if (receiver.class_id == core.class.ids.weakmap and
         (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
         args.len >= 1 and !canBeHeldWeakly(ctx.runtime, args[0]))
@@ -861,11 +923,11 @@ fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
 }
 
 fn qjsMapAppendGroupByValue(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
-    map_value: core.Value,
-    key: core.Value,
-    value: core.Value,
+    map_value: core.JSValue,
+    key: core.JSValue,
+    value: core.JSValue,
 ) !void {
     const existing = try builtins.collection.methodCall(ctx.runtime, map_value, 2, &.{key});
     defer existing.free(ctx.runtime);

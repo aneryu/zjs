@@ -10,7 +10,7 @@ const stack_mod = @import("../stack.zig");
 const value_ops = @import("../value_ops.zig");
 
 pub fn directEval(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -40,7 +40,7 @@ pub fn directEval(
 }
 
 pub fn applyEval(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -67,7 +67,7 @@ pub fn applyEval(
 }
 
 pub fn dynamicImport(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     stack: *stack_mod.Stack,
@@ -144,10 +144,10 @@ pub fn dynamicImport(
 }
 
 fn enumerateImportAttributes(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    attributes: core.Value,
+    attributes: core.JSValue,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     comptime getValueProperty: anytype,
@@ -184,7 +184,7 @@ fn enumerateImportAttributes(
 }
 
 fn pushRejectedTypeError(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     global: *core.Object,
     stack: *stack_mod.Stack,
     prototype: ?*core.Object,

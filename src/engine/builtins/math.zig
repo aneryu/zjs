@@ -12,7 +12,7 @@ pub const SQRT2 = std.math.sqrt2;
 
 /// QuickJS source map: Math builtin functions in quickjs.c. This is the
 /// current narrow Math subset used by transitional `math_call` bytecode.
-pub fn call(id: u32, args: []const core.Value) !f64 {
+pub fn call(id: u32, args: []const core.JSValue) !f64 {
     const missing = std.math.nan(f64);
     const a = if (args.len >= 1) try numberValue(args[0]) else missing;
     const b = if (args.len >= 2) try numberValue(args[1]) else missing;
@@ -117,19 +117,19 @@ pub fn max(a: f64, b: f64) f64 {
     return if (a > b) a else b;
 }
 
-fn min(args: []const core.Value) !f64 {
+fn min(args: []const core.JSValue) !f64 {
     var out = std.math.inf(f64);
     for (args) |arg| out = @min(out, try numberValue(arg));
     return out;
 }
 
-fn maxSlice(args: []const core.Value) !f64 {
+fn maxSlice(args: []const core.JSValue) !f64 {
     var out = -std.math.inf(f64);
     for (args) |arg| out = @max(out, try numberValue(arg));
     return out;
 }
 
-fn hypot(args: []const core.Value) !f64 {
+fn hypot(args: []const core.JSValue) !f64 {
     var sum: f64 = 0;
     for (args) |arg| {
         const number = try numberValue(arg);
@@ -175,7 +175,7 @@ fn toUint32(value: f64) u32 {
     return @intFromFloat(modulo);
 }
 
-fn numberValue(value: core.Value) !f64 {
+fn numberValue(value: core.JSValue) !f64 {
     if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
     if (value.tag == core.Tag.float64) return value.asFloat64().?;
     if (value.asBool()) |v| return if (v) 1 else 0;

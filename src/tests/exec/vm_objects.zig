@@ -15,9 +15,9 @@ const expectStringBytes = helpers.expectStringBytes;
 const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 
 test "eval_ret: var-only script returns undefined" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // `var x = 5;` is a statement (not an expression) so <ret>
@@ -28,7 +28,7 @@ test "eval_ret: var-only script returns undefined" {
 }
 
 test "eval_ret: <ret> is allocated at slot 0 (first var)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -55,9 +55,9 @@ test "eval_ret: <ret> is allocated at slot 0 (first var)" {
 }
 
 test "TDZ: get_loc_check throws ReferenceError on uninitialised slot" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // Construct bytecode by hand: set_loc_uninitialized 0 ;
@@ -83,9 +83,9 @@ test "TDZ: get_loc_check throws ReferenceError on uninitialised slot" {
 }
 
 test "TDZ: put_loc_check_init clears flag, subsequent get_loc_check OK" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     // set_loc_uninitialized 0 ; push 42 ; put_loc_check_init 0 ;
@@ -116,9 +116,9 @@ test "TDZ: put_loc_check_init clears flag, subsequent get_loc_check OK" {
 }
 
 test "M3.1 F4: qjs_vm executes computed object property literal" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "({[\"x\"]: 7}).x");
@@ -127,9 +127,9 @@ test "M3.1 F4: qjs_vm executes computed object property literal" {
 }
 
 test "M3.1 F4: qjs_vm executes object spread literal" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "({a: 1, ...{b: 2}, a: 3}).b");
@@ -138,9 +138,9 @@ test "M3.1 F4: qjs_vm executes object spread literal" {
 }
 
 test "M3.1 F4: qjs_vm executes keyword object property literal" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRun(rt, ctx, "({default: 1, while: 2}).default");
@@ -149,9 +149,9 @@ test "M3.1 F4: qjs_vm executes keyword object property literal" {
 }
 
 test "M3.1 F4: qjs_vm executes object method shorthand" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "({m() { return 7; }}).m()");
@@ -160,9 +160,9 @@ test "M3.1 F4: qjs_vm executes object method shorthand" {
 }
 
 test "M3.1 F4: qjs_vm executes computed object method shorthand" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "({[\"m\"]() { return 3; }}).m()");
@@ -171,9 +171,9 @@ test "M3.1 F4: qjs_vm executes computed object method shorthand" {
 }
 
 test "M3.1 F4: qjs_vm executes computed object getter" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "({get [\"default\"]() { return 11; }}).default");
@@ -182,9 +182,9 @@ test "M3.1 F4: qjs_vm executes computed object getter" {
 }
 
 test "M3.1 F4: qjs_vm executes computed object setter" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var out; var obj = {set [\"default\"](v) { out = v; }}; obj.default = 13; return out; })()");
@@ -193,9 +193,9 @@ test "M3.1 F4: qjs_vm executes computed object setter" {
 }
 
 test "M3.1 F4: qjs_vm exposes object accessor descriptor" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "Object.getOwnPropertyDescriptor({get x() { return 1; }}, \"x\").enumerable");
@@ -205,9 +205,9 @@ test "M3.1 F4: qjs_vm exposes object accessor descriptor" {
 }
 
 test "M3.1 F4: qjs_vm converts computed property key before value" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var value = 1; var key = { toString() { value = 2; return \"p\"; } }; return ({ [key]: value }).p; })()");
@@ -216,9 +216,9 @@ test "M3.1 F4: qjs_vm converts computed property key before value" {
 }
 
 test "M3.1 F4: qjs_vm allows in expression in computed accessor name" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var empty = {}; return ({ get [\"x\" in empty]() { return 5; } }).false; })()");
@@ -227,9 +227,9 @@ test "M3.1 F4: qjs_vm allows in expression in computed accessor name" {
 }
 
 test "M3.1 F4: object accessors receive prefixed function names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -261,9 +261,9 @@ test "M3.1 F4: object accessors receive prefixed function names" {
 }
 
 test "M3.1 F4: object methods do not create function-expression name bindings" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -283,9 +283,9 @@ test "M3.1 F4: object methods do not create function-expression name bindings" {
 }
 
 test "M3.1 F4: qjs_vm treats computed __proto__ as data property" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var proto = {}; var obj = { [\"__proto__\"]: proto }; return obj.__proto__ === proto; })()");
@@ -295,9 +295,9 @@ test "M3.1 F4: qjs_vm treats computed __proto__ as data property" {
 }
 
 test "M3.1 F4: qjs_vm supports Object.prototype.hasOwnProperty for object literals" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var obj = { [\"__proto__\"]: 1 }; return obj.hasOwnProperty(\"__proto__\") && Object.prototype.hasOwnProperty.call(obj, \"__proto__\"); })()");
@@ -306,9 +306,9 @@ test "M3.1 F4: qjs_vm supports Object.prototype.hasOwnProperty for object litera
 }
 
 test "M2.4: qjs_vm dispatches Object.prototype methods on native constructors" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ return WeakMap.hasOwnProperty(\"length\") && Object.prototype.hasOwnProperty.call(WeakMap, \"length\") && !Object.prototype.propertyIsEnumerable.call(WeakMap, \"length\"); })()");
@@ -317,9 +317,9 @@ test "M2.4: qjs_vm dispatches Object.prototype methods on native constructors" {
 }
 
 test "M2.4: qjs_vm deletes ordinary prototype constructor property" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var before = WeakMap.prototype.constructor === WeakMap; delete WeakMap.prototype.constructor; return before && !Object.prototype.hasOwnProperty.call(WeakMap.prototype, \"constructor\"); })()");
@@ -328,9 +328,9 @@ test "M2.4: qjs_vm deletes ordinary prototype constructor property" {
 }
 
 test "F7: class prototype exposes ordinary constructor property" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -360,9 +360,9 @@ test "F7: class prototype exposes ordinary constructor property" {
 }
 
 test "F7: public class fields without initializers are installed" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -392,9 +392,9 @@ test "F7: public class fields without initializers are installed" {
 }
 
 test "F7: class constructor captures class binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -410,9 +410,9 @@ test "F7: class constructor captures class binding" {
 }
 
 test "F7: top-level class declaration writes module binding, not class-name local" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -429,9 +429,9 @@ test "F7: top-level class declaration writes module binding, not class-name loca
 }
 
 test "F7: default derived constructor forwards arguments" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -451,9 +451,9 @@ test "F7: default derived constructor forwards arguments" {
 }
 
 test "F7: derived constructor super spread preserves new.target and initializes this once" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -475,9 +475,9 @@ test "F7: derived constructor super spread preserves new.target and initializes 
 }
 
 test "F7: native subclass super spread uses derived new.target" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -494,9 +494,9 @@ test "F7: native subclass super spread uses derived new.target" {
 }
 
 test "F7: Object subclass constructor ignores object argument when new.target differs" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -513,9 +513,9 @@ test "F7: Object subclass constructor ignores object argument when new.target di
 }
 
 test "Reflect.construct invokes ordinary constructors with array-like arguments" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -564,9 +564,9 @@ test "Reflect.construct invokes ordinary constructors with array-like arguments"
 }
 
 test "Reflect.construct keeps escaped this alive when constructor throws" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -588,9 +588,9 @@ test "Reflect.construct keeps escaped this alive when constructor throws" {
 }
 
 test "Reflect.construct observes revoked proxy newTarget after prototype lookup" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -622,9 +622,9 @@ test "Reflect.construct observes revoked proxy newTarget after prototype lookup"
 }
 
 test "constructor results do not install proto keepalive reserved property" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -645,9 +645,9 @@ test "constructor results do not install proto keepalive reserved property" {
 }
 
 test "F7: function fallthrough after switch no match returns undefined" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -664,9 +664,9 @@ test "F7: function fallthrough after switch no match returns undefined" {
 }
 
 test "F7: optional method call preserves receiver and nullish exit stack" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -686,9 +686,9 @@ test "F7: optional method call preserves receiver and nullish exit stack" {
 }
 
 test "F7: yield star preserves catch target and return-through-finally" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -753,9 +753,9 @@ test "F7: yield star preserves catch target and return-through-finally" {
 }
 
 test "F7: super property update uses depth-three lvalue stack shape" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -771,9 +771,9 @@ test "F7: super property update uses depth-three lvalue stack shape" {
 }
 
 test "F7: super computed compound assignment uses depth-three lvalue stack shape" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -789,9 +789,9 @@ test "F7: super computed compound assignment uses depth-three lvalue stack shape
 }
 
 test "F7: super computed update checks derived this before evaluating key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -818,9 +818,9 @@ test "F7: super computed update checks derived this before evaluating key" {
 }
 
 test "F7: static super assignment observes null constructor prototype after RHS" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -844,9 +844,9 @@ test "F7: static super assignment observes null constructor prototype after RHS"
 }
 
 test "F7: derived class fields initialize from captured class fields init binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -869,9 +869,9 @@ test "F7: derived class fields initialize from captured class fields init bindin
 }
 
 test "F7: derived class fields run once when arrow calls super twice" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -907,9 +907,9 @@ test "F7: derived class fields run once when arrow calls super twice" {
 }
 
 test "F7: class constructor names and property order follow QuickJS" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -939,9 +939,9 @@ test "F7: class constructor names and property order follow QuickJS" {
 }
 
 test "F7: class methods are strict and method descriptor failures throw TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -982,9 +982,9 @@ test "F7: class methods are strict and method descriptor failures throw TypeErro
 }
 
 test "F7: derived class observes superclass prototype getter" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx,
@@ -1020,9 +1020,9 @@ test "F7: derived class observes superclass prototype getter" {
 }
 
 test "M2.4: qjs_vm enforces collection prototype internal slots" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var key = {}; assert.throws(TypeError, function(){ WeakMap.prototype.get.call(new Map(), key); }); assert.throws(TypeError, function(){ WeakMap.prototype.delete.call(new Set(), key); }); assert.throws(TypeError, function(){ WeakSet.prototype.add.call(new Set(), key); }); assert.throws(TypeError, function(){ Map.prototype.get.call(new WeakMap(), key); }); return true; })()");

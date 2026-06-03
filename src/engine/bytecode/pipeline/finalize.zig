@@ -14,7 +14,7 @@ const resolve_variables = @import("resolve_variables.zig");
 const resolve_labels = @import("resolve_labels.zig");
 const pc2line = @import("pc2line.zig");
 const stack_size = @import("stack_size.zig");
-const Value = @import("../../core/value.zig").Value;
+const JSValue = @import("../../core/value.zig").JSValue;
 
 pub const FinalizeError = error{
     OutOfMemory,
@@ -29,8 +29,8 @@ pub const FinalizeError = error{
     Pc2LineOverflow,
 };
 
-/// Context for finalization.
-pub const Context = struct {
+/// JSContext for finalization.
+pub const JSContext = struct {
     // For the interim Bytecode-based implementation, we just need
     // the function to process. The full FunctionDef-based version
     // will include parent/child relationship tracking.
@@ -175,7 +175,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
 
     // Copy constants.
     if (fd.cpool.len > 0) {
-        fb.cpool = try fd.memory.alloc(Value, fd.cpool.len);
+        fb.cpool = try fd.memory.alloc(JSValue, fd.cpool.len);
         fb.cpool_count = @intCast(fd.cpool.len);
         for (fd.cpool, 0..) |value, idx| {
             fb.cpool[idx] = value.dup();
@@ -372,7 +372,7 @@ pub fn runWithFunctionDef(
     if (fd) |def| try syncFunctionDefCpool(function, def);
 }
 
-/// Runtime-aware variant used when the parser produced FunctionDef child
+/// JSRuntime-aware variant used when the parser produced FunctionDef child
 /// entries. It recursively materialises child FunctionBytecode objects and
 /// installs them into the executable Bytecode constant pool so `fclosure*`
 /// operands have real callees.
@@ -395,9 +395,9 @@ fn runPhases(
 ) !void {
     // Phase 2: resolve_variables (with optional FunctionDef).
     var resolve_ctx = if (fd) |def|
-        resolve_variables.Context.initWithFunctionDef(function, def)
+        resolve_variables.JSContext.initWithFunctionDef(function, def)
     else
-        resolve_variables.Context.init(function);
+        resolve_variables.JSContext.init(function);
     try resolve_variables.run(&resolve_ctx);
 
     // After resolve_variables, enable short opcodes for resolve_labels
@@ -409,9 +409,9 @@ fn runPhases(
 
     // Phase 3a: resolve_labels (with optional FunctionDef prologue metadata).
     var labels_ctx = if (fd) |def|
-        resolve_labels.Context.initWithFunctionDef(function, def)
+        resolve_labels.JSContext.initWithFunctionDef(function, def)
     else
-        resolve_labels.Context.init(function);
+        resolve_labels.JSContext.init(function);
     try resolve_labels.run(&labels_ctx);
 
     // Propagate locals count so the VM frame can size its `locals`
@@ -732,7 +732,7 @@ fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype)
         }
         const fb_slice = try createFunctionBytecode(child, rt);
         const fb = &fb_slice[0];
-        const value = Value.functionBytecode(&fb.header);
+        const value = JSValue.functionBytecode(&fb.header);
         const idx: usize = @intCast(cpool_idx);
         const old_value = fd.cpool[idx];
         fd.cpool[idx] = value;
@@ -757,7 +757,7 @@ fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype)
     }
 }
 
-fn functionBytecodeFromValueMutable(value: Value) ?*bytecode_function.FunctionBytecode {
+fn functionBytecodeFromValueMutable(value: JSValue) ?*bytecode_function.FunctionBytecode {
     const header = value.objectHeader() orelse return null;
     if (header.kind != .function_bytecode) return null;
     return @fieldParentPtr("header", header);

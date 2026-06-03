@@ -864,7 +864,7 @@ fn hexValue(byte: u8) ?u21 {
     };
 }
 
-pub fn execOnString(compiled: Compiled, string_value: core.Value) ExecError!?Match {
+pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?Match {
     const header = string_value.refHeader() orelse return null;
     if (!string_value.isString()) return null;
     const string_object: *core.string.String = @fieldParentPtr("header", header);
@@ -879,7 +879,7 @@ pub fn execOnString(compiled: Compiled, string_value: core.Value) ExecError!?Mat
     };
 }
 
-pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.Value, start_index: usize) ExecError!ExecStatus {
+pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
     const header = string_value.refHeader() orelse return .{ .result = .not_available };
     if (!string_value.isString()) return .{ .result = .not_available };
     const string_object: *core.string.String = @fieldParentPtr("header", header);
@@ -890,7 +890,7 @@ pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.Value, start
     };
 }
 
-pub fn testOnStringFromIndex(compiled: Compiled, string_value: core.Value, start_index: usize) ExecError!?bool {
+pub fn testOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
     const header = string_value.refHeader() orelse return null;
     if (!string_value.isString()) return null;
     const string_object: *core.string.String = @fieldParentPtr("header", header);

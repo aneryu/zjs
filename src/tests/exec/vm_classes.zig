@@ -28,8 +28,8 @@ fn expectPrototypeInstallOOMCleanup(src: []const u8) !void {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
-        const ctx = try core.Context.create(rt);
+        const rt = try core.JSRuntime.create(failing.allocator());
+        const ctx = try core.JSContext.create(rt);
 
         const warm_name = try rt.internAtom("warmup");
         var warm_function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, warm_name);
@@ -76,8 +76,8 @@ fn expectPrototypeInstallOOMCleanup(src: []const u8) !void {
 }
 
 fn cleanupPrototypeInstallOOMIteration(
-    rt: *core.Runtime,
-    ctx: *core.Context,
+    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
     vm: *engine.exec.Vm,
     function: *engine.bytecode.Bytecode,
     state: *ParseState,
@@ -98,9 +98,9 @@ fn cleanupPrototypeInstallOOMIteration(
 }
 
 test "M3.1 F4: direct eval accessor captures caller locals" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var s1 = 5; var s2 = 1; var s3 = 9; var o; eval(\"o = { get foo(){ return s1; }, set foo(v){ return s2 = s3; } };\"); var a = o.foo; o.foo = 10; return a + s2; })()");
@@ -109,9 +109,9 @@ test "M3.1 F4: direct eval accessor captures caller locals" {
 }
 
 test "M3.1 F4: computed accessor unresolvable name throws ReferenceError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ assert.throws(ReferenceError, function(){ ({ get [test262unresolvable]() {} }); }); return 1; })()");
@@ -120,9 +120,9 @@ test "M3.1 F4: computed accessor unresolvable name throws ReferenceError" {
 }
 
 test "M3.1 F4: object literal permits non-data duplicate __proto__ forms" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "Object.getOwnPropertyDescriptor({ __proto__: null, ['__proto__']: null, __proto__() {}, * __proto__() {}, async __proto__() {}, async * __proto__() {}, get __proto__() { return 33; }, set __proto__(_) { return 44; } }, '__proto__').get()");
@@ -131,9 +131,9 @@ test "M3.1 F4: object literal permits non-data duplicate __proto__ forms" {
 }
 
 test "M3.1 F4: object literal __proto__ function value remains retained" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o = { __proto__: function NamedProto() {} }; return Object.getPrototypeOf(o).name === \"NamedProto\"; })()");
@@ -142,9 +142,9 @@ test "M3.1 F4: object literal __proto__ function value remains retained" {
 }
 
 test "M3.1 F4: Annex B escape and unescape observe ToPrimitive" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -162,9 +162,9 @@ test "M3.1 F4: Annex B escape and unescape observe ToPrimitive" {
 }
 
 test "M3.1 F4: ToPrimitive fallback probes well-known symbol once" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -190,9 +190,9 @@ test "M3.1 F4: ToPrimitive fallback probes well-known symbol once" {
 }
 
 test "M3.1 F4: computed accessor abrupt completion preserves thrown constructor" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var thrower = function(){ throw new Test262Error(); }; assert.throws(Test262Error, function(){ ({ get [thrower()]() {} }); }); assert.throws(Test262Error, function(){ ({ set [thrower()](_) {} }); }); return 1; })()");
@@ -201,9 +201,9 @@ test "M3.1 F4: computed accessor abrupt completion preserves thrown constructor"
 }
 
 test "M3.1 F4: object get/set method names allow destructuring before rest" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -224,9 +224,9 @@ test "M3.1 F4: object get/set method names allow destructuring before rest" {
 }
 
 test "M3.1 F4: object accessor syntax rejects rest parameters" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -247,9 +247,9 @@ test "M3.1 F4: object accessor syntax rejects rest parameters" {
 }
 
 test "M3.1 F4: async generator object method binds array parameters on next" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var callCount = 0; var obj = { async *method([x, y, z]) { callCount = x + y + z; } }; obj.method([1, 2, 3]).next().then(function(){ callCount = callCount + 10; }); return callCount; })()");
@@ -258,9 +258,9 @@ test "M3.1 F4: async generator object method binds array parameters on next" {
 }
 
 test "M3.1 F4: array parameter elision advances generator to yield" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var first = 0; var second = 0; function* g(){ first = 1; yield; second = 1; } var seen = 0; var obj = { async *method([,]) { seen = first * 10 + second; } }; obj.method(g()).next().then(function(){}); return seen; })()");
@@ -269,9 +269,9 @@ test "M3.1 F4: array parameter elision advances generator to yield" {
 }
 
 test "M3.1 F4: array parameter default initializes undefined values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([x = 23]) { seen = x; } }; obj.method([undefined]).next().then(function(){}); return seen; })()");
@@ -280,9 +280,9 @@ test "M3.1 F4: array parameter default initializes undefined values" {
 }
 
 test "M3.1 F4: array parameter default skips present values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var initCount = 0; function counter(){ initCount = initCount + 1; return 99; } var seen = 0; var obj = { async *method([w = counter(), x = counter()]) { seen = w + x + initCount; } }; obj.method([10, 20]).next().then(function(){}); return seen; })()");
@@ -291,9 +291,9 @@ test "M3.1 F4: array parameter default skips present values" {
 }
 
 test "M3.1 F4: array parameter rest identifier receives copied array" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var values = [1, 2, 3]; var seen = 0; var obj = { async *method([...x]) { seen = Array.isArray(x) && x !== values && x.length === 3 && x[0] === 1 && x[1] === 2 && x[2] === 3 ? 1 : 0; } }; obj.method(values).next().then(function(){}); return seen; })()");
@@ -302,9 +302,9 @@ test "M3.1 F4: array parameter rest identifier receives copied array" {
 }
 
 test "M3.1 F4: array parameter rest identifier skips elisions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([, , ...x]) { seen = x.length === 3 && x[0] === 3 && x[1] === 4 && x[2] === 5 ? 1 : 0; } }; obj.method([1, 2, 3, 4, 5]).next().then(function(){}); return seen; })()");
@@ -313,9 +313,9 @@ test "M3.1 F4: array parameter rest identifier skips elisions" {
 }
 
 test "M3.1 F4: array parameter rest identifier can be exhausted" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([, , ...x]) { seen = Array.isArray(x) && x.length === 0 ? 1 : 0; } }; obj.method([1, 2]).next().then(function(){}); return seen; })()");
@@ -324,9 +324,9 @@ test "M3.1 F4: array parameter rest identifier can be exhausted" {
 }
 
 test "M3.1 F4: array destructuring parameter has outer default" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([x, y, z] = [1, 2, 3]) { seen = x + y + z; } }; obj.method().next().then(function(){}); return seen; })()");
@@ -335,9 +335,9 @@ test "M3.1 F4: array destructuring parameter has outer default" {
 }
 
 test "M3.1 F4: nested array destructuring element has default" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([[x, y, z] = [4, 5, 6]]) { seen = x + y + z; } }; obj.method([]).next().then(function(){}); return seen; })()");
@@ -346,9 +346,9 @@ test "M3.1 F4: nested array destructuring element has default" {
 }
 
 test "M3.1 F4: nested object destructuring element has default" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([{x, y, z} = {x: 44, y: 55, z: 66}]) { seen = x + y + z; } }; obj.method([]).next().then(function(){}); return seen; })()");
@@ -357,9 +357,9 @@ test "M3.1 F4: nested object destructuring element has default" {
 }
 
 test "M3.1 F4: array rest can feed object binding pattern" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var seen = 0; var obj = { async *method([...{length}]) { seen = length; } }; obj.method([1, 2, 3]).next().then(function(){}); return seen; })()");
@@ -368,9 +368,9 @@ test "M3.1 F4: array rest can feed object binding pattern" {
 }
 
 test "M3.1 F4: top-level child function captures sibling declaration" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseStmtAndRunWithTopLevelChildren(rt, ctx, "function compareArray(){ return 41; } var assert = {}; assert.compareArray = function(){ return compareArray() + 1; }; assert.compareArray();");
@@ -379,9 +379,9 @@ test "M3.1 F4: top-level child function captures sibling declaration" {
 }
 
 test "M3.1 F4: duplicate sloppy block functions keep per-block lexical captures" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var total = 0; for (let x of [1]) { const a = 10; function f(){ return a + x; } total += f(); } for (let y of [2]) { const a = 20; function f(){ return a + y; } total += f(); } return total; })()");
@@ -390,9 +390,9 @@ test "M3.1 F4: duplicate sloppy block functions keep per-block lexical captures"
 }
 
 test "M3.1 F4: predeclaration scanners skip template regexp substitutions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ function format(propertyKey, objectName = \"\") { switch (typeof propertyKey) { case \"string\": return `${objectName}['${propertyKey.replace(/'/g, \"\\\\'\")}']`; default: return `${objectName}[${propertyKey}]`; } } return format(\"ab\", \"o\"); })()");
@@ -401,9 +401,9 @@ test "M3.1 F4: predeclaration scanners skip template regexp substitutions" {
 }
 
 test "M3.1 F4: predeclaration scanners rescan regexp literals in nested arrow bodies" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(
@@ -416,9 +416,9 @@ test "M3.1 F4: predeclaration scanners rescan regexp literals in nested arrow bo
 }
 
 test "M3.1 F4: try scanner skips regexp literals" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(
@@ -431,9 +431,9 @@ test "M3.1 F4: try scanner skips regexp literals" {
 }
 
 test "M3.1 F4: Object primitive wrappers use constructor prototypes" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -471,9 +471,9 @@ test "M3.1 F4: Object primitive wrappers use constructor prototypes" {
 }
 
 test "M3.1 F4: primitive wrapper internals do not consume public __primitive properties" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -508,9 +508,9 @@ test "M3.1 F4: primitive wrapper internals do not consume public __primitive pro
 }
 
 test "M3.1 F4: Object.assign copies string wrapper indices" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var out = Object.assign({}, 'ab'); return out[0] + out[1]; })()");
@@ -519,9 +519,9 @@ test "M3.1 F4: Object.assign copies string wrapper indices" {
 }
 
 test "M3.1 F4: Object.assign updates sealed data properties" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o = Object.seal({a: 1}); Object.assign(o, {a: 2}); return Object.isSealed(o) && o.a === 2; })()");

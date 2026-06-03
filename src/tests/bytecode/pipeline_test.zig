@@ -431,7 +431,7 @@ test "stack_size: for-of iterator close catch position is strict-computable" {
 }
 
 test "FunctionDef: init/deinit" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -453,7 +453,7 @@ test "FunctionDef: init/deinit" {
 }
 
 test "FunctionDef: cpool transfers refcounted owned values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-owned");
@@ -469,7 +469,7 @@ test "FunctionDef: cpool transfers refcounted owned values" {
 }
 
 test "FunctionDef: cpool retains unique symbol atoms until release" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-symbol");
@@ -480,7 +480,7 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
     defer if (fd_alive) fd.deinit(rt);
 
     const borrowed_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-symbol");
-    _ = try fd.appendCpool(core.Value.symbol(borrowed_symbol));
+    _ = try fd.appendCpool(core.JSValue.symbol(borrowed_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
@@ -493,7 +493,7 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
 }
 
 test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-owned-symbol");
@@ -504,7 +504,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
     defer if (fd_alive) fd.deinit(rt);
 
     const owned_symbol = try rt.atoms.newValueSymbol("gc-function-def-cpool-owned-symbol");
-    _ = try fd.appendCpoolOwned(core.Value.symbol(owned_symbol));
+    _ = try fd.appendCpoolOwned(core.JSValue.symbol(owned_symbol));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(owned_symbol) != null);
@@ -517,7 +517,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
 }
 
 test "FunctionDef: add var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("x");
@@ -542,7 +542,7 @@ test "FunctionDef: add var" {
 }
 
 test "FunctionDef: add scope" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -559,7 +559,7 @@ test "FunctionDef: add scope" {
 }
 
 test "FunctionDef: closure_var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -584,7 +584,7 @@ test "FunctionDef: closure_var" {
 }
 
 test "FunctionDef: LabelSlot and JumpSlot" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -619,7 +619,7 @@ test "FunctionDef: LabelSlot and JumpSlot" {
 }
 
 test "Bytecode IC allocation skips direct eval and with functions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("ic_bypass");
@@ -670,7 +670,7 @@ test "Bytecode IC allocation skips direct eval and with functions" {
 }
 
 test "resolve_variables: scope_get_var → get_var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -694,7 +694,7 @@ test "resolve_variables: scope_get_var → get_var" {
     try bc.retainAtomOperand(x_atom);
 
     // Run resolve_variables
-    var ctx = pipeline.resolve_variables.Context.init(&bc);
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
     try pipeline.resolve_variables.run(&ctx);
 
     // Expected: get_var <x> ; return_undef (5 + 1 = 6 bytes)
@@ -708,7 +708,7 @@ test "resolve_variables: scope_get_var → get_var" {
 }
 
 test "resolve_variables InvalidBytecode releases retained output atoms" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("resolveInvalidAtomOwner");
@@ -727,7 +727,7 @@ test "resolve_variables InvalidBytecode releases retained output atoms" {
     try bc.setCode(&input);
     try bc.retainAtomOperand(first_atom);
 
-    var ctx = pipeline.resolve_variables.Context.init(&bc);
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
     try std.testing.expectError(error.InvalidBytecode, pipeline.resolve_variables.run(&ctx));
 
     bc.deinit(rt);
@@ -745,7 +745,7 @@ test "resolve_variables OOM after code trim does not double-free output buffer" 
     var fail_offset: usize = 0;
     while (fail_offset < 24) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         const name = try rt.internAtom("resolveCodeTrimOwner");
         const global_atom = try rt.internAtom("resolveTrimGlobal");
@@ -757,7 +757,7 @@ test "resolve_variables OOM after code trim does not double-free output buffer" 
         try bc.setCode(&.{bytecode.opcode.op.return_undef});
 
         failing.fail_index = failing.alloc_index + fail_offset;
-        var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
         const result = pipeline.resolve_variables.run(&ctx);
         failing.fail_index = std.math.maxInt(usize);
 
@@ -789,7 +789,7 @@ test "resolve_variables OOM after code trim does not double-free output buffer" 
 }
 
 test "resolve_variables: scope_put_var → put_var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -813,7 +813,7 @@ test "resolve_variables: scope_put_var → put_var" {
     try bc.retainAtomOperand(y_atom);
 
     // Run resolve_variables
-    var ctx = pipeline.resolve_variables.Context.init(&bc);
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
     try pipeline.resolve_variables.run(&ctx);
 
     // Expected: put_var <y> ; return_undef (5 + 1 = 6 bytes)
@@ -827,7 +827,7 @@ test "resolve_variables: scope_put_var → put_var" {
 }
 
 test "resolve_variables: drops enter_scope/leave_scope" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -849,7 +849,7 @@ test "resolve_variables: drops enter_scope/leave_scope" {
     try bc.setCode(&input);
 
     // Run resolve_variables
-    var ctx = pipeline.resolve_variables.Context.init(&bc);
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
     try pipeline.resolve_variables.run(&ctx);
 
     // Expected: only return_undef (1 byte)
@@ -858,7 +858,7 @@ test "resolve_variables: drops enter_scope/leave_scope" {
 }
 
 test "resolve_variables: scope_get_var_undef → get_var_undef" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -882,7 +882,7 @@ test "resolve_variables: scope_get_var_undef → get_var_undef" {
     try bc.retainAtomOperand(z_atom);
 
     // Run resolve_variables
-    var ctx = pipeline.resolve_variables.Context.init(&bc);
+    var ctx = pipeline.resolve_variables.JSContext.init(&bc);
     try pipeline.resolve_variables.run(&ctx);
 
     // Expected: get_var_undef <z> ; return_undef (5 + 1 = 6 bytes)
@@ -896,7 +896,7 @@ test "resolve_variables: scope_get_var_undef → get_var_undef" {
 }
 
 test "resolve_labels: drops label opcodes" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -918,7 +918,7 @@ test "resolve_labels: drops label opcodes" {
     try bc.setCode(&input);
 
     // Run resolve_labels
-    var ctx = pipeline.resolve_labels.Context.init(&bc);
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
 
     // Expected: push_i32 42 ; return_undef (5 + 1 = 6 bytes, label dropped)
@@ -930,7 +930,7 @@ test "resolve_labels: drops label opcodes" {
 }
 
 test "resolve_labels: rewrites absolute goto target to relative offset" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -951,7 +951,7 @@ test "resolve_labels: rewrites absolute goto target to relative offset" {
     input[11] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.init(&bc);
+    var ctx = pipeline.resolve_labels.JSContext.init(&bc);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 12), bc.code.len);
@@ -960,7 +960,7 @@ test "resolve_labels: rewrites absolute goto target to relative offset" {
 }
 
 test "F10.2: resolve_labels selects goto8 for near relative target" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -982,7 +982,7 @@ test "F10.2: resolve_labels selects goto8 for near relative target" {
     input[10] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 4), bc.code.len);
@@ -993,7 +993,7 @@ test "F10.2: resolve_labels selects goto8 for near relative target" {
 }
 
 test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1012,7 +1012,7 @@ test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" 
     input[input.len - 1] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, input.len), bc.code.len);
@@ -1022,7 +1022,7 @@ test "F10.2: resolve_labels keeps conditional jump wide when target exceeds i8" 
 }
 
 test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1080,7 +1080,7 @@ test "finalize: runs full pipeline (resolve_variables + resolve_labels)" {
 // ---- F10.1b: FunctionDef-driven local-slot lowering ----
 
 test "resolve_variables: scope_get_var → get_loc when var is local" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1109,7 +1109,7 @@ test "resolve_variables: scope_get_var → get_loc when var is local" {
     try bc.setCode(&input);
     try bc.retainAtomOperand(x_atom);
 
-    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_variables.run(&ctx);
 
     // F10.2 short-form: idx 0 → 1-byte `get_loc0` (no operand).
@@ -1121,7 +1121,7 @@ test "resolve_variables: scope_get_var → get_loc when var is local" {
 }
 
 test "resolve_variables: scope_put_var → put_loc when var is local" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1153,7 +1153,7 @@ test "resolve_variables: scope_put_var → put_loc when var is local" {
     try bc.setCode(&input);
     try bc.retainAtomOperand(y_atom);
 
-    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_variables.run(&ctx);
 
     // F10.2 short-form: idx 1 → 1-byte `put_loc1` (no operand).
@@ -1163,7 +1163,7 @@ test "resolve_variables: scope_put_var → put_loc when var is local" {
 }
 
 test "resolve_variables: unknown atom falls back to global get_var" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1194,7 +1194,7 @@ test "resolve_variables: unknown atom falls back to global get_var" {
     try bc.setCode(&input);
     try bc.retainAtomOperand(z_atom);
 
-    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_variables.run(&ctx);
 
     // Expected: get_var <z> ; return_undef (5 + 1 = 6 bytes)
@@ -1209,7 +1209,7 @@ test "resolve_variables: unknown atom falls back to global get_var" {
 // ---- F10.2: short-form selection (`put_short_code` mirror) ----
 
 test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1241,7 +1241,7 @@ test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
         try bc.setCode(&input);
         try bc.retainAtomOperand(a);
 
-        var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_variables.run(&ctx);
 
         // Expected: short_form ; return_undef (1 + 1 = 2 bytes).
@@ -1251,7 +1251,7 @@ test "F10.2: idx<4 selects 1-byte short form (get_loc0..3)" {
 }
 
 test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1286,7 +1286,7 @@ test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
     try bc.setCode(&input);
     try bc.retainAtomOperand(target);
 
-    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_variables.run(&ctx);
 
     // Expected: get_loc8 4 ; return_undef (2 + 1 = 3 bytes).
@@ -1297,7 +1297,7 @@ test "F10.2: idx∈[4,256) selects 2-byte u8 form (get_loc8)" {
 }
 
 test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1316,7 +1316,7 @@ test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
     input[5] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 3), bc.code.len);
@@ -1326,7 +1326,7 @@ test "F10.2: resolve_labels selects push_i8 for signed 8-bit integer literals" {
 }
 
 test "F10.2: resolve_labels selects push_i16 outside signed 8-bit range" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1345,7 +1345,7 @@ test "F10.2: resolve_labels selects push_i16 outside signed 8-bit range" {
     input[5] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 4), bc.code.len);
@@ -1355,7 +1355,7 @@ test "F10.2: resolve_labels selects push_i16 outside signed 8-bit range" {
 }
 
 test "F10.2: resolve_labels selects push_const8 for small constant pool index" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1374,7 +1374,7 @@ test "F10.2: resolve_labels selects push_const8 for small constant pool index" {
     input[5] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 3), bc.code.len);
@@ -1384,7 +1384,7 @@ test "F10.2: resolve_labels selects push_const8 for small constant pool index" {
 }
 
 test "F10.2: resolve_labels coalesces get_loc0 get_loc1" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1400,7 +1400,7 @@ test "F10.2: resolve_labels coalesces get_loc0 get_loc1" {
     const input = [_]u8{ op.get_loc0, op.get_loc1, op.add, op.@"return" };
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 3), bc.code.len);
@@ -1410,7 +1410,7 @@ test "F10.2: resolve_labels coalesces get_loc0 get_loc1" {
 }
 
 test "F10.2: resolve_labels coalesces wide get_loc 0 and get_loc 1 after short selection" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1432,7 +1432,7 @@ test "F10.2: resolve_labels coalesces wide get_loc 0 and get_loc 1 after short s
     input[7] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 3), bc.code.len);
@@ -1442,7 +1442,7 @@ test "F10.2: resolve_labels coalesces wide get_loc 0 and get_loc 1 after short s
 }
 
 test "F10.2: resolve_labels shortens direct loc arg and var_ref slot ops" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1481,7 +1481,7 @@ test "F10.2: resolve_labels shortens direct loc arg and var_ref slot ops" {
     input[i] = op.@"return";
     try bc.setCode(&input);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     try std.testing.expectEqual(@as(usize, 13), bc.code.len);
@@ -1499,7 +1499,7 @@ test "F10.2: resolve_labels shortens direct loc arg and var_ref slot ops" {
 }
 
 test "M1.1: resolve_variables lowers private-field temp opcodes" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1537,7 +1537,7 @@ test "M1.1: resolve_variables lowers private-field temp opcodes" {
         try bc.setCode(&input);
         try bc.retainAtomOperand(private_atom);
 
-        var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_variables.run(&ctx);
 
         try std.testing.expectEqualSlices(u8, case.expected, bc.code);
@@ -1546,7 +1546,7 @@ test "M1.1: resolve_variables lowers private-field temp opcodes" {
 }
 
 test "M1.1: resolve_variables covers every ClosureType classification" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1592,7 +1592,7 @@ test "M1.1: resolve_variables covers every ClosureType classification" {
         try bc.setCode(&input);
         try bc.retainAtomOperand(var_atom);
 
-        var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+        var ctx = pipeline.resolve_variables.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_variables.run(&ctx);
 
         try std.testing.expectEqualSlices(u8, &.{ op.get_var_ref0, op.return_undef }, bc.code);
@@ -1601,7 +1601,7 @@ test "M1.1: resolve_variables covers every ClosureType classification" {
 }
 
 test "M1.2: resolve_labels emits FunctionDef special-object prologue" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("test");
     defer rt.atoms.free(name);
@@ -1621,7 +1621,7 @@ test "M1.2: resolve_labels emits FunctionDef special-object prologue" {
     var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer bc.deinit(rt);
 
-    var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+    var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
     try pipeline.resolve_labels.run(&ctx);
 
     const op = bytecode.opcode.op;
@@ -1640,7 +1640,7 @@ test "M1.2: resolve_labels emits FunctionDef special-object prologue" {
 }
 
 test "resolve_labels: base class constructor prologue does not duplicate class fields init" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("C");
     defer rt.atoms.free(name);
@@ -1658,7 +1658,7 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
         defer bc.deinit(rt);
         try bc.setCode(&.{op.return_undef});
 
-        var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_labels.run(&ctx);
 
         const expected = [_]u8{
@@ -1681,7 +1681,7 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
         defer bc.deinit(rt);
         try bc.setCode(&.{op.return_undef});
 
-        var ctx = pipeline.resolve_labels.Context.initWithFunctionDef(&bc, &fd);
+        var ctx = pipeline.resolve_labels.JSContext.initWithFunctionDef(&bc, &fd);
         try pipeline.resolve_labels.run(&ctx);
 
         const expected = [_]u8{
@@ -1695,7 +1695,7 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
 // ---- M1.3 task1: createFunctionBytecode produces a usable structure ----
 
 test "createFunctionBytecode: copies metadata + bytecode + closure_var from FunctionDef" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("inner");
@@ -1733,7 +1733,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try fd.appendByteCode(&body);
     try fd.appendSourceLoc(2, 8, 5);
     try fd.appendAtomOperand(name);
-    _ = try fd.appendCpool(core.Value.int32(99));
+    _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{
         .var_name = arg_name,
         .scope_level = 0,
@@ -1758,7 +1758,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
 
     const fb_slice = try pipeline.finalize.createFunctionBytecode(&fd, rt);
     const fb = &fb_slice[0];
-    defer core.Value.functionBytecode(&fb.header).free(rt);
+    defer core.JSValue.functionBytecode(&fb.header).free(rt);
 
     try std.testing.expect(fb.is_strict_mode);
     try std.testing.expect(fb.has_prototype);
@@ -1825,7 +1825,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqualSlices(atom_module.Atom, fb.var_ref_names, view.var_ref_names);
     try std.testing.expectEqualSlices(bool, fb.var_ref_is_const, view.var_ref_is_const);
     try std.testing.expectEqualSlices(atom_module.Atom, fb.private_bound_names, view.private_bound_names);
-    try std.testing.expectEqualSlices(core.Value, fb.cpool, view.constants.values);
+    try std.testing.expectEqualSlices(core.JSValue, fb.cpool, view.constants.values);
     try std.testing.expectEqual(fb.stack_size, view.stack_size);
 }
 
@@ -1836,7 +1836,7 @@ test "createFunctionBytecode unwinds registered bytecode on allocation failure" 
     var fail_offset: usize = 0;
     while (fail_offset < 96) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         const name = try rt.internAtom("oom_inner");
         const arg_name = try rt.internAtom("oom_arg");
@@ -1860,7 +1860,7 @@ test "createFunctionBytecode unwinds registered bytecode on allocation failure" 
         var observed_allocations = before_allocations;
         if (result) |fb_slice| {
             saw_success = true;
-            core.Value.functionBytecode(&fb_slice[0].header).free(rt);
+            core.JSValue.functionBytecode(&fb_slice[0].header).free(rt);
         } else |err| {
             switch (err) {
                 error.OutOfMemory => {
@@ -1902,7 +1902,7 @@ fn observedGcCapacityBytes(before_capacity: usize, after_capacity: usize) usize 
 }
 
 fn populateFunctionDefForFinalizeFailure(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     fd: *function_def.FunctionDef,
     name: atom_module.Atom,
     arg_name: atom_module.Atom,
@@ -1918,7 +1918,7 @@ fn populateFunctionDefForFinalizeFailure(
     try fd.appendByteCode(&body);
     try fd.appendSourceLoc(2, 8, 5);
     try fd.appendAtomOperand(name);
-    _ = try fd.appendCpool(core.Value.int32(99));
+    _ = try fd.appendCpool(core.JSValue.int32(99));
     _ = try fd.appendArg(.{ .var_name = arg_name, .scope_level = 0, .is_lexical = false });
     _ = try fd.appendVar(.{ .var_name = name, .scope_level = 0, .is_lexical = false, .is_const = true });
     _ = try fd.addClosureVar(.{

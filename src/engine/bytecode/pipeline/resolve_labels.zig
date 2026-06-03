@@ -26,8 +26,8 @@ pub const Error = error{
     InvalidBytecode,
 };
 
-/// Context for label resolution.
-pub const Context = struct {
+/// JSContext for label resolution.
+pub const JSContext = struct {
     function: *bytecode_function.Bytecode,
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
@@ -36,7 +36,7 @@ pub const Context = struct {
     /// variables (home_object, this_active_func, new_target, arguments, etc.).
     function_def: ?*const function_def_mod.FunctionDef = null,
 
-    pub fn init(function: *bytecode_function.Bytecode) Context {
+    pub fn init(function: *bytecode_function.Bytecode) JSContext {
         return .{
             .function = function,
             .memory = function.memory,
@@ -47,7 +47,7 @@ pub const Context = struct {
     pub fn initWithFunctionDef(
         function: *bytecode_function.Bytecode,
         fd: *const function_def_mod.FunctionDef,
-    ) Context {
+    ) JSContext {
         return .{
             .function = function,
             .memory = function.memory,
@@ -365,7 +365,7 @@ fn emitLoweredInstruction(code: []const u8, pc: usize, output: []u8, out_idx: *u
     out_idx.* += size;
 }
 
-fn computeLayout(ctx: *const Context, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
+fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_short_opcodes: bool, initial_pc: usize) !usize {
     const code = ctx.function.code;
     @memset(positions, 0);
     @memset(sizes, 0);
@@ -460,7 +460,7 @@ fn emitAtomLabelU8(code: []const u8, pc: usize, output: []u8, out_idx: *usize, p
 
 /// Emit the function prologue with OP_special_object sequences.
 /// Mirrors `quickjs.c:34232-34294`.
-fn emitFunctionPrologue(ctx: *const Context, output: []u8, out_idx: *usize) !void {
+fn emitFunctionPrologue(ctx: *const JSContext, output: []u8, out_idx: *usize) !void {
     const fd = ctx.function_def orelse return;
 
     // home_object
@@ -555,7 +555,7 @@ fn emitFunctionPrologue(ctx: *const Context, output: []u8, out_idx: *usize) !voi
     }
 }
 
-pub fn run(ctx: *Context) !void {
+pub fn run(ctx: *JSContext) !void {
     const func = ctx.function;
     const use_short_opcodes = if (ctx.function_def) |fd| fd.use_short_opcodes else false;
 

@@ -675,7 +675,7 @@ test "Promise.catch passes through settled fulfillment" {
 }
 
 test "Promise.all invokes constructor resolve for each iterated value" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const result = try js.eval(

@@ -19,7 +19,7 @@ pub fn raise(kind: ErrorKind) error{ Test262Error, EvalError, ReferenceError, Sy
     };
 }
 
-pub fn assertSameValue(actual: core.Value, expected: core.Value) !core.Value {
+pub fn assertSameValue(actual: core.JSValue, expected: core.JSValue) !core.JSValue {
     if (!builtins.object.sameValue(actual, expected)) return error.Test262Error;
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }

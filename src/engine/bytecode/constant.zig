@@ -1,18 +1,18 @@
 const memory = @import("../core/memory.zig");
 const atom = @import("../core/atom.zig");
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 
-fn dupOwnedValue(atoms: *atom.AtomTable, value: Value) Value {
-    if (value.asSymbolAtom()) |atom_id| return Value.symbol(atoms.dup(atom_id));
+fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
+    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
     return value.dup();
 }
 
-fn takeOwnedValue(atoms: *atom.AtomTable, value: Value) Value {
-    if (value.asSymbolAtom()) |atom_id| return Value.symbol(atoms.dup(atom_id));
+fn takeOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
+    if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
     return value;
 }
 
-fn freeOwnedValue(atoms: *atom.AtomTable, value: Value, rt: anytype) void {
+fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
     if (value.asSymbolAtom()) |atom_id| {
         atoms.free(atom_id);
         return;
@@ -23,7 +23,7 @@ fn freeOwnedValue(atoms: *atom.AtomTable, value: Value, rt: anytype) void {
 pub const Pool = struct {
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
-    values: []Value = &.{},
+    values: []JSValue = &.{},
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) Pool {
         return .{ .memory = account, .atoms = atoms };
@@ -34,35 +34,35 @@ pub const Pool = struct {
         self.values = &.{};
         for (values) |*slot| {
             const value = slot.*;
-            slot.* = Value.undefinedValue();
+            slot.* = JSValue.undefinedValue();
             freeOwnedValue(self.atoms, value, rt);
         }
-        if (values.len != 0) self.memory.free(Value, values);
+        if (values.len != 0) self.memory.free(JSValue, values);
     }
 
-    pub fn append(self: *Pool, value: Value) !u32 {
+    pub fn append(self: *Pool, value: JSValue) !u32 {
         const old_values = self.values;
-        const next = try self.memory.alloc(Value, self.values.len + 1);
-        errdefer self.memory.free(Value, next);
+        const next = try self.memory.alloc(JSValue, self.values.len + 1);
+        errdefer self.memory.free(JSValue, next);
         @memcpy(next[0..old_values.len], old_values);
         next[old_values.len] = dupOwnedValue(self.atoms, value);
         self.values = next;
-        if (old_values.len != 0) self.memory.free(Value, old_values);
+        if (old_values.len != 0) self.memory.free(JSValue, old_values);
         return @intCast(self.values.len - 1);
     }
 
-    pub fn appendOwned(self: *Pool, value: Value) !u32 {
+    pub fn appendOwned(self: *Pool, value: JSValue) !u32 {
         const old_values = self.values;
-        const next = try self.memory.alloc(Value, self.values.len + 1);
-        errdefer self.memory.free(Value, next);
+        const next = try self.memory.alloc(JSValue, self.values.len + 1);
+        errdefer self.memory.free(JSValue, next);
         @memcpy(next[0..old_values.len], old_values);
         next[old_values.len] = takeOwnedValue(self.atoms, value);
         self.values = next;
-        if (old_values.len != 0) self.memory.free(Value, old_values);
+        if (old_values.len != 0) self.memory.free(JSValue, old_values);
         return @intCast(self.values.len - 1);
     }
 
-    pub fn get(self: Pool, index: usize) ?Value {
+    pub fn get(self: Pool, index: usize) ?JSValue {
         if (index >= self.values.len) return null;
         return self.values[index].dup();
     }

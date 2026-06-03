@@ -43,7 +43,7 @@ const eval_ret_atom: core.Atom = 82;
 
 const SourceLocation = core.BacktraceLocation;
 
-fn reserveGeneratorStackAdditional(stack: *stack_mod.Stack, generator: *core.Object, additional: usize) !void {
+fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, generator: *core.Object, additional: usize) !void {
     const values = generator.generatorStack();
     const capacity = generator.generatorStackCapacity();
     if (values.len > stack.limit) return error.StackOverflow;
@@ -60,61 +60,62 @@ fn reserveGeneratorStackAdditional(stack: *stack_mod.Stack, generator: *core.Obj
         }
     }
 
-    const next = try stack.memory.alloc(core.Value, next_capacity);
-    errdefer stack.memory.free(core.Value, next);
+    const next = try stack.memory.alloc(core.JSValue, next_capacity);
+    errdefer stack.memory.free(core.JSValue, next);
     @memcpy(next[0..values.len], values);
+    try generator.writeValueSliceBarrier(rt, next[0..values.len]);
     generator.generatorStackSlot().* = next[0..values.len];
     generator.generatorStackCapacitySlot().* = next_capacity;
     if (capacity != 0) {
-        stack.memory.free(core.Value, values.ptr[0..capacity]);
+        stack.memory.free(core.JSValue, values.ptr[0..capacity]);
     } else if (values.len != 0) {
-        stack.memory.free(core.Value, values);
+        stack.memory.free(core.JSValue, values);
     }
 }
 
 /// Execute QuickJS-format bytecode.
 pub fn run(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
-) !core.Value {
+) !core.JSValue {
     return runWithOutput(ctx, stack, function, null);
 }
 
 pub fn runWithOutput(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     output: ?*std.Io.Writer,
-) !core.Value {
-    const global = try ensureContextGlobal(ctx);
-    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.Value.undefinedValue() else global.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{});
+) !core.JSValue {
+    const global_object = try contextGlobal(ctx);
+    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
+    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false, &.{}, &.{}, &.{}, &.{});
 }
 
 pub fn runWithOutputAndVarRefs(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     output: ?*std.Io.Writer,
-    var_refs: []const core.Value,
-) !core.Value {
-    const global = try ensureContextGlobal(ctx);
-    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.Value.undefinedValue() else global.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global, false, false, false, &.{}, &.{}, &.{}, &.{});
+    var_refs: []const core.JSValue,
+) !core.JSValue {
+    const global_object = try contextGlobal(ctx);
+    const this_value = if (function.flags.is_module or function.flags.runtime_strict) core.JSValue.undefinedValue() else global_object.value();
+    return runWithArgs(ctx, stack, function, this_value, &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{});
 }
 
 pub fn runModuleWithOutputAndVarRefsState(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     output: ?*std.Io.Writer,
-    var_refs: []const core.Value,
+    var_refs: []const core.JSValue,
     module_state: *core.Object,
-    resume_value: ?core.Value,
-) !core.Value {
-    const global = try ensureContextGlobal(ctx);
-    return runWithArgsState(ctx, stack, function, core.Value.undefinedValue(), &.{}, var_refs, output, global, false, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, module_state, resume_value, null, core.Value.undefinedValue(), core.Value.undefinedValue(), core.Value.undefinedValue(), false, false, core.Value.undefinedValue(), true, true);
+    resume_value: ?core.JSValue,
+) !core.JSValue {
+    const global_object = try contextGlobal(ctx);
+    return runWithArgsState(ctx, stack, function, core.JSValue.undefinedValue(), &.{}, var_refs, output, global_object, false, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, module_state, resume_value, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, true);
 }
 
 /// Lazily build and cache the per-context global object. Subsequent
@@ -125,77 +126,77 @@ pub fn runModuleWithOutputAndVarRefsState(
 /// methods) plus the host helpers (`print`, Test262 helpers,
 /// `console`, `assert`); keeping it cached avoids paying that cost
 /// on every eval call.
-pub fn ensureContextGlobal(ctx: *core.Context) !*core.Object {
-    if (ctx.cached_global) |existing| return existing;
-    const global = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer global.value().free(ctx.runtime);
-    global.is_global = true;
-    try call_mod.installHostGlobals(ctx.runtime, global);
-    const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global);
+pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
+    if (ctx.global) |existing| return existing;
+    const global_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    errdefer global_object.value().free(ctx.runtime);
+    global_object.is_global = true;
+    try call_mod.installHostGlobals(ctx.runtime, global_object);
+    const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     thrower.free(ctx.runtime);
-    const next_intrinsic_eval = global.getProperty(core.atom.predefinedId("eval", .string).?);
-    const old_intrinsic_eval = ctx.intrinsic_eval;
-    ctx.intrinsic_eval = next_intrinsic_eval;
-    ctx.cached_global = global;
-    old_intrinsic_eval.free(ctx.runtime);
-    return global;
+    const next_eval = global_object.getProperty(core.atom.predefinedId("eval", .string).?);
+    const old_eval = ctx.eval_function;
+    ctx.eval_function = next_eval;
+    ctx.global = global_object;
+    old_eval.free(ctx.runtime);
+    return global_object;
 }
 
 pub fn runWithArgs(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
-    initial_this_value: core.Value,
-    args: []const core.Value,
-    var_refs: []const core.Value,
+    initial_this_value: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const core.JSValue,
     output: ?*std.Io.Writer,
     global: *core.Object,
     break_var_ref_cycles_on_exit: bool,
     strict_unresolved_get_var: bool,
     stop_on_yield: bool,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
-) !core.Value {
-    return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.Value.undefinedValue(), core.Value.undefinedValue(), core.Value.undefinedValue(), false, false, core.Value.undefinedValue(), true, false) catch |err| {
+    input_eval_var_refs: []const core.JSValue,
+) !core.JSValue {
+    return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, input_eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
         if (!ctx.preserve_uncaught_exception and err != error.Test262Error and ctx.hasException()) ctx.clearException();
         return err;
     };
 }
 
 pub fn runWithArgsState(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
-    initial_this_value: core.Value,
-    args: []const core.Value,
-    var_refs: []const core.Value,
+    initial_this_value: core.JSValue,
+    args: []const core.JSValue,
+    var_refs: []const core.JSValue,
     output: ?*std.Io.Writer,
     global: *core.Object,
     break_var_ref_cycles_on_exit: bool,
     strict_unresolved_get_var: bool,
     stop_on_yield: bool,
     eval_local_names: []const core.Atom,
-    eval_local_slots: []core.Value,
+    eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
-    eval_var_refs: []const core.Value,
+    input_eval_var_refs: []const core.JSValue,
     inherited_eval_local_names: []const core.Atom,
-    inherited_eval_local_slots: []core.Value,
+    inherited_eval_local_slots: []core.JSValue,
     inherited_eval_var_ref_names: []const core.Atom,
-    inherited_eval_var_refs: []const core.Value,
+    inherited_eval_var_refs: []const core.JSValue,
     generator_state: ?*core.Object,
-    resume_value: ?core.Value,
+    resume_value: ?core.JSValue,
     stop_before_pc: ?usize,
-    current_function_value: core.Value,
-    new_target_value: core.Value,
-    constructor_this_value: core.Value,
+    current_function_value: core.JSValue,
+    new_target_value: core.JSValue,
+    constructor_this_value: core.JSValue,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
-    eval_with_object: core.Value,
+    eval_with_object: core.JSValue,
     sync_global_lexical_locals: bool,
     suspend_on_module_await: bool,
-) HostError!core.Value {
+) HostError!core.JSValue {
     if (ctx.call_depth >= maxJsCallDepth(ctx)) {
         return throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded");
     }
@@ -224,7 +225,11 @@ pub fn runWithArgsState(
     frame.eval_local_names = if (inherited_eval_local_names.len != 0) inherited_eval_local_names else eval_local_names;
     frame.eval_local_slots = if (inherited_eval_local_names.len != 0) inherited_eval_local_slots else eval_local_slots;
     frame.eval_var_ref_names = if (inherited_eval_var_ref_names.len != 0) inherited_eval_var_ref_names else eval_var_ref_names;
-    frame.eval_var_refs = if (inherited_eval_var_ref_names.len != 0) inherited_eval_var_refs else eval_var_refs;
+    const frame_eval_var_refs_source = if (inherited_eval_var_ref_names.len != 0) inherited_eval_var_refs else input_eval_var_refs;
+    var frame_eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, frame_eval_var_refs_source);
+    defer frame_eval_var_refs_buffer.deinit(ctx.runtime);
+    frame.eval_var_refs = frame_eval_var_refs_buffer.values;
+    const eval_var_refs = frame.eval_var_refs;
     defer {
         if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();
     }
@@ -243,7 +248,7 @@ pub fn runWithArgsState(
         .{ .mutable = &frame.original_args },
         .{ .mutable = &frame.var_refs },
         .{ .mutable = &frame.eval_local_slots },
-        .{ .constant = &frame.eval_var_refs },
+        frame_eval_var_refs_buffer.slice(),
     };
     var gc_root_frame = core.runtime.ValueRootFrame{
         .previous = ctx.runtime.active_value_roots,
@@ -261,8 +266,8 @@ pub fn runWithArgsState(
     // `put_loc_check_init` runs. `var` slots stay
     // `locals_uninit = false` (no TDZ).
     if (function.var_count > 0) {
-        const locals = try ctx.runtime.memory.alloc(core.Value, function.var_count);
-        @memset(locals, core.Value.undefinedValue());
+        const locals = try ctx.runtime.memory.alloc(core.JSValue, function.var_count);
+        @memset(locals, core.JSValue.undefinedValue());
         frame.locals = locals;
         const uninit = try ctx.runtime.memory.alloc(bool, function.var_count);
         @memset(uninit, false);
@@ -279,9 +284,9 @@ pub fn runWithArgsState(
             frame.inline_args[0..frame_arg_count]
         else blk: {
             frame.args_on_heap = true;
-            break :blk try ctx.runtime.memory.alloc(core.Value, frame_arg_count);
+            break :blk try ctx.runtime.memory.alloc(core.JSValue, frame_arg_count);
         };
-        @memset(owned_args, core.Value.undefinedValue());
+        @memset(owned_args, core.JSValue.undefinedValue());
         for (args, 0..) |arg, idx| owned_args[idx] = arg.dup();
         frame.args = owned_args;
     }
@@ -290,13 +295,13 @@ pub fn runWithArgsState(
             frame.inline_original_args[0..args.len]
         else blk: {
             frame.original_args_on_heap = true;
-            break :blk try ctx.runtime.memory.alloc(core.Value, args.len);
+            break :blk try ctx.runtime.memory.alloc(core.JSValue, args.len);
         };
         for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
         frame.original_args = original_args;
     }
     if (var_refs.len > 0) {
-        const owned_refs = try ctx.runtime.memory.alloc(core.Value, var_refs.len);
+        const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
         for (var_refs, 0..) |value, idx| owned_refs[idx] = value.dup();
         frame.var_refs = owned_refs;
     }
@@ -323,7 +328,7 @@ pub fn runWithArgsState(
             else
                 1;
             if (resume_needs_branch_false) resume_push_count += 1;
-            try reserveGeneratorStackAdditional(stack, generator, resume_push_count);
+            try reserveGeneratorStackAdditional(ctx.runtime, stack, generator, resume_push_count);
 
             generator.generatorJustYieldedSlot().* = false;
             frame.pc = resume_pc;
@@ -352,18 +357,18 @@ pub fn runWithArgsState(
                 if (was_yield_star_suspended) {
                     try setGeneratorYieldStarSuspended(ctx.runtime, generator, false);
                     try setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
-                    stack.pushAssumeCapacity(resume_value orelse core.Value.undefinedValue());
-                    stack.pushOwnedAssumeCapacity(core.Value.int32(completion_type));
+                    stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
+                    stack.pushOwnedAssumeCapacity(core.JSValue.int32(completion_type));
                 } else {
                     if (completion_type == 2) {
                         resume_throw_on_entry = true;
                     } else {
-                        stack.pushAssumeCapacity(resume_value orelse core.Value.undefinedValue());
+                        stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
                     }
                     if (completion_type != 0) try setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
                 }
                 if (resume_needs_branch_false) {
-                    stack.pushOwnedAssumeCapacity(core.Value.boolean(false));
+                    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
                 }
             }
         } else {
@@ -382,7 +387,7 @@ pub fn runWithArgsState(
         closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.var_refs);
     }
     if (resume_throw_on_entry) {
-        const thrown = resume_value orelse core.Value.undefinedValue();
+        const thrown = resume_value orelse core.JSValue.undefinedValue();
         _ = ctx.throwValue(thrown.dup());
         if (frame.pc < function.code.len and function.code[frame.pc] == op.iterator_get_value_done) {
             try closeForAwaitIteratorForPendingError(ctx, output, global, stack);
@@ -405,9 +410,9 @@ pub fn runWithArgsState(
         if (stop_before_pc) |stop_pc| {
             if (frame.pc == stop_pc) {
                 if (generator_state) |generator| {
-                    saveGeneratorExecutionState(ctx, stack, &frame, generator, stop_pc);
+                    try saveGeneratorExecutionState(ctx, stack, &frame, generator, stop_pc);
                 }
-                return core.Value.undefinedValue();
+                return core.JSValue.undefinedValue();
             }
         }
 
@@ -617,7 +622,7 @@ pub fn runWithArgsState(
                     if (try handleCatchableRuntimeError(ctx, stack, &frame, &catch_target, global, error.TypeError)) continue;
                     return error.TypeError;
                 }
-                setSlotValue(ctx, &frame.locals[idx], value);
+                try setSlotValue(ctx, &frame.locals[idx], value);
                 try syncTopLevelGlobalLexicalLocal(ctx, function, global, &frame, idx, sync_global_lexical_locals);
             },
             op.put_loc_check_init => {
@@ -638,11 +643,11 @@ pub fn runWithArgsState(
                     function.var_names[idx] == 8)
                     value.dup()
                 else
-                    core.Value.undefinedValue();
+                    core.JSValue.undefinedValue();
                 defer constructor_this.free(ctx.runtime);
-                setSlotValue(ctx, &frame.locals[idx], value);
+                try setSlotValue(ctx, &frame.locals[idx], value);
                 if (!constructor_this.isUndefined()) {
-                    setSlotValue(ctx, &frame.this_value, constructor_this.dup());
+                    try setSlotValue(ctx, &frame.this_value, constructor_this.dup());
                 }
                 frame.clearLocalUninitialized(idx);
                 try syncTopLevelGlobalLexicalLocal(ctx, function, global, &frame, idx, sync_global_lexical_locals);
@@ -1195,11 +1200,11 @@ pub fn runWithArgsState(
         }
     }
 
-    const value = stack.peek() orelse core.Value.undefinedValue();
+    const value = stack.peek() orelse core.JSValue.undefinedValue();
     return control_vm.finishFunctionReturn(ctx, &frame, value);
 }
 
-fn maxJsCallDepth(ctx: *const core.Context) usize {
+fn maxJsCallDepth(ctx: *const core.JSContext) usize {
     return @max(@as(usize, 16), ctx.stack_limit / 16384);
 }
 
@@ -2504,15 +2509,42 @@ fn tryFuseLocalInt32CompareBranch(function: *const bytecode.Bytecode, frame: *fr
             rhs_val = @intCast(@as(i8, @bitCast(code[pc + 1])));
             rhs_len = 2;
         },
-        op.push_minus1 => { rhs_val = -1; rhs_len = 1; },
-        op.push_0 => { rhs_val = 0; rhs_len = 1; },
-        op.push_1 => { rhs_val = 1; rhs_len = 1; },
-        op.push_2 => { rhs_val = 2; rhs_len = 1; },
-        op.push_3 => { rhs_val = 3; rhs_len = 1; },
-        op.push_4 => { rhs_val = 4; rhs_len = 1; },
-        op.push_5 => { rhs_val = 5; rhs_len = 1; },
-        op.push_6 => { rhs_val = 6; rhs_len = 1; },
-        op.push_7 => { rhs_val = 7; rhs_len = 1; },
+        op.push_minus1 => {
+            rhs_val = -1;
+            rhs_len = 1;
+        },
+        op.push_0 => {
+            rhs_val = 0;
+            rhs_len = 1;
+        },
+        op.push_1 => {
+            rhs_val = 1;
+            rhs_len = 1;
+        },
+        op.push_2 => {
+            rhs_val = 2;
+            rhs_len = 1;
+        },
+        op.push_3 => {
+            rhs_val = 3;
+            rhs_len = 1;
+        },
+        op.push_4 => {
+            rhs_val = 4;
+            rhs_len = 1;
+        },
+        op.push_5 => {
+            rhs_val = 5;
+            rhs_len = 1;
+        },
+        op.push_6 => {
+            rhs_val = 6;
+            rhs_len = 1;
+        },
+        op.push_7 => {
+            rhs_val = 7;
+            rhs_len = 1;
+        },
         else => return false,
     }
     if (pc + rhs_len >= code.len) return false;
@@ -2547,14 +2579,14 @@ fn tryFuseLocalInt32CompareBranch(function: *const bytecode.Bytecode, frame: *fr
             if (pc + rhs_len + cmp_len + 5 > code.len) return false;
             is_if_true = false;
             branch_operand_pc = pc + rhs_len + cmp_len + 1;
-            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            branch_offset = readInt(i32, code[branch_operand_pc..][0..4]);
             br_len = 5;
         },
         op.if_true => {
             if (pc + rhs_len + cmp_len + 5 > code.len) return false;
             is_if_true = true;
             branch_operand_pc = pc + rhs_len + cmp_len + 1;
-            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            branch_offset = readInt(i32, code[branch_operand_pc..][0..4]);
             br_len = 5;
         },
         else => return false,
@@ -2580,7 +2612,7 @@ fn tryFuseLocalInt32CompareBranch(function: *const bytecode.Bytecode, frame: *fr
 }
 
 fn tryFuseCheckedLocalEmptyInt32Range(
-    ctx: *core.Context,
+    ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
@@ -2597,7 +2629,7 @@ fn tryFuseCheckedLocalEmptyInt32Range(
     if (!decodeEmptyCheckedLocalPostIncLoopTail(function.code, condition.body_pc, condition.false_pc, condition_pc, @intCast(idx))) return false;
 
     if (current < condition.limit) {
-        setSlotValue(ctx, &frame.locals[idx], core.Value.int32(condition.limit));
+        try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(condition.limit));
         try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     }
     frame.pc = condition.false_pc;
@@ -2668,14 +2700,14 @@ fn tryFuseLocalShortBigIntCompareBranch(function: *const bytecode.Bytecode, fram
             if (pc + rhs_len + cmp_len + 5 > code.len) return false;
             is_if_true = false;
             branch_operand_pc = pc + rhs_len + cmp_len + 1;
-            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            branch_offset = readInt(i32, code[branch_operand_pc..][0..4]);
             br_len = 5;
         },
         op.if_true => {
             if (pc + rhs_len + cmp_len + 5 > code.len) return false;
             is_if_true = true;
             branch_operand_pc = pc + rhs_len + cmp_len + 1;
-            branch_offset = readInt(i32, code[branch_operand_pc ..][0..4]);
+            branch_offset = readInt(i32, code[branch_operand_pc..][0..4]);
             br_len = 5;
         },
         else => return false,
@@ -2700,7 +2732,7 @@ fn tryFuseLocalShortBigIntCompareBranch(function: *const bytecode.Bytecode, fram
     return true;
 }
 
-fn tryFuseGoto8RegExpLiteralAssignmentLoop(ctx: *core.Context, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
+fn tryFuseGoto8RegExpLiteralAssignmentLoop(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
     const operand_pc = frame.pc;
     if (operand_pc >= function.code.len) return false;
@@ -2713,9 +2745,14 @@ fn tryFuseGoto8RegExpLiteralAssignmentLoop(ctx: *core.Context, global: *core.Obj
     if (decodeLocalInt32LessThanLoopCondition(code, target_pc)) |condition| {
         if (condition.idx >= frame.locals.len or condition.idx >= frame.locals_uninit.len) return false;
         if (frame.localIsUninitialized(condition.idx)) return false;
+        if (varRefCellFromValue(frame.locals[condition.idx]) != null) return false;
         const current = frame.locals[condition.idx].asInt32() orelse return false;
         if (!decodeRegExpLiteralAssignmentLoopBody(code, condition.body_pc, operand_pc - 1, .{ .local = condition.idx })) return false;
-        if (current < condition.limit) setSlotValue(ctx, &frame.locals[condition.idx], core.Value.int32(condition.limit));
+        if (current < condition.limit) {
+            const old_value = frame.locals[condition.idx];
+            frame.locals[condition.idx] = core.JSValue.int32(condition.limit);
+            old_value.free(ctx.runtime);
+        }
         frame.pc = condition.false_pc;
         return true;
     }
@@ -2727,7 +2764,7 @@ fn tryFuseGoto8RegExpLiteralAssignmentLoop(ctx: *core.Context, global: *core.Obj
         const current = desc.value.asInt32() orelse return false;
         if (!decodeRegExpLiteralAssignmentLoopBody(code, condition.body_pc, operand_pc - 1, .{ .global = condition.atom })) return false;
         if (current < condition.limit) {
-            _ = global.setOwnWritableDataProperty(ctx.runtime, condition.atom, core.Value.int32(condition.limit)) catch return false;
+            _ = global.setOwnWritableDataProperty(ctx.runtime, condition.atom, core.JSValue.int32(condition.limit)) catch return false;
         }
         frame.pc = condition.false_pc;
         return true;
@@ -2935,7 +2972,7 @@ fn tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function: *const bytecode.Byt
     return true;
 }
 
-fn linkDerivedConstructorThisLocal(ctx: *core.Context, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
     if (!function.flags.is_derived_class_constructor) return;
     const count = @min(function.var_names.len, frame.locals.len);
     for (function.var_names[0..count], 0..) |atom_id, idx| {
@@ -2974,7 +3011,7 @@ fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.Back
     return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = function.line_num, .col_num = function.col_num };
 }
 
-fn backtraceFunctionNameAtom(ctx: *core.Context, fallback: core.Atom, current_function_value: core.Value) !core.Atom {
+fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
     const function_object = shared_vm.objectFromValue(current_function_value) orelse return ctx.runtime.atoms.dup(fallback);
     const name_desc = function_object.getOwnProperty(core.atom.ids.name) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
     defer name_desc.destroy(ctx.runtime);

@@ -267,12 +267,12 @@ pub const ArrayBuffer = struct {
 
 /// QuickJS source map: narrow ArrayBuffer constructor used by transitional
 /// `new_array_buffer` bytecode.
-pub fn arrayBufferConstruct(rt: *core.Runtime, length_value: core.Value) !core.Value {
+pub fn arrayBufferConstruct(rt: *core.JSRuntime, length_value: core.JSValue) !core.JSValue {
     const byte_length = try toIndexUsize(rt, length_value);
     return createArrayBuffer(rt, byte_length, null);
 }
 
-pub fn arrayBufferConstructArgs(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
+pub fn arrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const byte_length = if (args.len >= 1) try toIndexUsize(rt, args[0]) else @as(usize, 0);
     var max_byte_length: ?usize = null;
     if (args.len >= 2 and !args[1].isUndefined() and args[1].isObject()) {
@@ -290,11 +290,11 @@ pub fn arrayBufferConstructArgs(rt: *core.Runtime, args: []const core.Value, pro
     return createArrayBufferWithPrototype(rt, byte_length, max_byte_length, prototype);
 }
 
-pub fn arrayBufferConstructLength(rt: *core.Runtime, byte_length: usize, max_byte_length: ?usize, prototype: ?*core.Object) !core.Value {
+pub fn arrayBufferConstructLength(rt: *core.JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*core.Object) !core.JSValue {
     return createArrayBufferWithPrototype(rt, byte_length, max_byte_length, prototype);
 }
 
-pub fn sharedArrayBufferConstructArgs(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
+pub fn sharedArrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const byte_length = if (args.len >= 1) try toIndexUsize(rt, args[0]) else @as(usize, 0);
     var max_byte_length: ?usize = null;
     if (args.len >= 2 and !args[1].isUndefined() and args[1].isObject()) {
@@ -313,29 +313,29 @@ pub fn sharedArrayBufferConstructArgs(rt: *core.Runtime, args: []const core.Valu
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    const store = try core.object.SharedBufferStore.create(byte_length);
+    const store = try core.object.SharedBufferStore.create(rt, byte_length);
     object.installSharedByteStorage(rt, store);
     object.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return object.value();
 }
 
-pub fn sharedArrayBufferConstructLength(rt: *core.Runtime, byte_length: usize, max_byte_length: ?usize, prototype: ?*core.Object) !core.Value {
+pub fn sharedArrayBufferConstructLength(rt: *core.JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*core.Object) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.shared_array_buffer, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    const store = try core.object.SharedBufferStore.create(byte_length);
+    const store = try core.object.SharedBufferStore.create(rt, byte_length);
     object.installSharedByteStorage(rt, store);
     object.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return object.value();
 }
 
 pub fn sharedArrayBufferFromStore(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     store: *core.object.SharedBufferStore,
     max_byte_length: ?usize,
     prototype: ?*core.Object,
-) !core.Value {
+) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.shared_array_buffer, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     if (max_byte_length) |max| {
@@ -351,11 +351,11 @@ pub fn sharedArrayBufferFromStore(
 /// QuickJS source map: typed-array view construction helper. JS-visible
 /// element access, species, and prototype methods are handled by the VM
 /// builtins; this helper owns the internal slot shape used by those paths.
-pub fn typedArrayConstruct(rt: *core.Runtime, element_size: u32, buffer_value: core.Value) !core.Value {
+pub fn typedArrayConstruct(rt: *core.JSRuntime, element_size: u32, buffer_value: core.JSValue) !core.JSValue {
     return typedArrayConstructWithOptions(rt, element_size, 2, buffer_value, &.{buffer_value}, null);
 }
 
-pub fn typedArrayConstructWithOptions(rt: *core.Runtime, element_size: u32, kind: u8, buffer_value: core.Value, args: []const core.Value, prototype: ?*core.Object) !core.Value {
+pub fn typedArrayConstructWithOptions(rt: *core.JSRuntime, element_size: u32, kind: u8, buffer_value: core.JSValue, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     if (element_size == 0) return error.TypeError;
     const buffer = try expectArrayBufferObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
@@ -377,7 +377,7 @@ pub fn typedArrayConstructWithOptions(rt: *core.Runtime, element_size: u32, kind
     const object = try core.Object.create(rt, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try object.ensureTypedArrayPayload(rt);
-    object.typedArrayBufferSlot().* = buffer.value().dup();
+    try object.setOptionalValueSlot(rt, object.typedArrayBufferSlot(), buffer.value().dup());
     object.typedArrayByteOffsetSlot().* = byte_offset;
     object.typedArrayElementSizeSlot().* = element_size;
     object.typedArrayFixedLengthSlot().* = fixed_length;
@@ -385,12 +385,13 @@ pub fn typedArrayConstructWithOptions(rt: *core.Runtime, element_size: u32, kind
     return object.value();
 }
 
-pub fn typedArrayConstructFullBuffer(rt: *core.Runtime, element_size: u32, kind: u8, buffer_value: core.Value, buffer: *core.Object, prototype: ?*core.Object) !core.Value {
+pub fn typedArrayConstructFullBuffer(rt: *core.JSRuntime, element_size: u32, kind: u8, buffer_value: core.JSValue, buffer: *core.Object, prototype: ?*core.Object) !core.JSValue {
     return typedArrayConstructFullBufferOwned(rt, element_size, kind, buffer_value.dup(), buffer, prototype);
 }
 
-pub fn typedArrayConstructFullBufferOwned(rt: *core.Runtime, element_size: u32, kind: u8, buffer_value: core.Value, buffer: *core.Object, prototype: ?*core.Object) !core.Value {
-    errdefer buffer_value.free(rt);
+pub fn typedArrayConstructFullBufferOwned(rt: *core.JSRuntime, element_size: u32, kind: u8, buffer_value: core.JSValue, buffer: *core.Object, prototype: ?*core.Object) !core.JSValue {
+    var owned_buffer_value = buffer_value;
+    errdefer owned_buffer_value.free(rt);
     if (element_size == 0) return error.TypeError;
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (buffer.arrayBufferMaxByteLength() != null) return error.TypeError;
@@ -402,7 +403,8 @@ pub fn typedArrayConstructFullBufferOwned(rt: *core.Runtime, element_size: u32, 
     const object = try core.Object.create(rt, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try object.ensureTypedArrayPayload(rt);
-    object.typedArrayBufferSlot().* = buffer_value;
+    try object.setOptionalValueSlot(rt, object.typedArrayBufferSlot(), owned_buffer_value);
+    owned_buffer_value = core.JSValue.undefinedValue();
     object.typedArrayByteOffsetSlot().* = 0;
     object.typedArrayElementSizeSlot().* = element_size;
     object.typedArrayFixedLengthSlot().* = @intCast(length);
@@ -412,7 +414,7 @@ pub fn typedArrayConstructFullBufferOwned(rt: *core.Runtime, element_size: u32, 
 
 /// QuickJS source map: narrow DataView constructor used by transitional
 /// `new_dataview` bytecode.
-pub fn dataViewConstruct(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
+pub fn dataViewConstruct(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     if (args.len < 1) return error.TypeError;
     const buffer = try expectArrayBufferObject(args[0]);
     if (buffer.arrayBufferDetached()) return error.TypeError;
@@ -429,14 +431,14 @@ pub fn dataViewConstruct(rt: *core.Runtime, args: []const core.Value, prototype:
     const object = try core.Object.create(rt, core.class.ids.dataview, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     if (view_length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
-    object.typedArrayBufferSlot().* = buffer.value().dup();
+    try object.setOptionalValueSlot(rt, object.typedArrayBufferSlot(), buffer.value().dup());
     object.typedArrayByteOffsetSlot().* = byte_offset;
     object.typedArrayFixedLengthSlot().* = @intCast(view_length);
     object.typedArrayKindSlot().* = if (auto_length) 1 else 0;
     return object.value();
 }
 
-pub fn dataViewValidateConstructorRange(_: *core.Runtime, buffer_value: core.Value, byte_offset: usize, view_length: ?usize) !void {
+pub fn dataViewValidateConstructorRange(_: *core.JSRuntime, buffer_value: core.JSValue, byte_offset: usize, view_length: ?usize) !void {
     const buffer = try expectArrayBufferObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     const buffer_length = arrayBufferByteLength(buffer);
@@ -447,12 +449,12 @@ pub fn dataViewValidateConstructorRange(_: *core.Runtime, buffer_value: core.Val
     }
 }
 
-pub fn dataViewRequireArrayBuffer(buffer_value: core.Value) !void {
+pub fn dataViewRequireArrayBuffer(buffer_value: core.JSValue) !void {
     _ = try expectArrayBufferObject(buffer_value);
 }
 
 /// QuickJS source map: narrow ArrayBuffer.prototype.slice helper.
-pub fn arrayBufferSlice(rt: *core.Runtime, buffer_value: core.Value, start_value: core.Value, end_value: core.Value) !core.Value {
+pub fn arrayBufferSlice(rt: *core.JSRuntime, buffer_value: core.JSValue, start_value: core.JSValue, end_value: core.JSValue) !core.JSValue {
     const buffer = try expectArrayBufferObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -462,7 +464,7 @@ pub fn arrayBufferSlice(rt: *core.Runtime, buffer_value: core.Value, start_value
     return arrayBufferSliceRange(rt, buffer_value, start, end);
 }
 
-pub fn arrayBufferSliceRange(rt: *core.Runtime, buffer_value: core.Value, start: usize, end: usize) !core.Value {
+pub fn arrayBufferSliceRange(rt: *core.JSRuntime, buffer_value: core.JSValue, start: usize, end: usize) !core.JSValue {
     const buffer = try expectArrayBufferObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -474,7 +476,7 @@ pub fn arrayBufferSliceRange(rt: *core.Runtime, buffer_value: core.Value, start:
     return out;
 }
 
-pub fn arrayBufferSliceToImmutable(rt: *core.Runtime, buffer_value: core.Value, start_value: core.Value, end_value: core.Value) !core.Value {
+pub fn arrayBufferSliceToImmutable(rt: *core.JSRuntime, buffer_value: core.JSValue, start_value: core.JSValue, end_value: core.JSValue) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -484,7 +486,7 @@ pub fn arrayBufferSliceToImmutable(rt: *core.Runtime, buffer_value: core.Value, 
     return arrayBufferSliceToImmutableRange(rt, buffer_value, start, end);
 }
 
-pub fn arrayBufferSliceToImmutableRange(rt: *core.Runtime, buffer_value: core.Value, start: usize, end: usize) !core.Value {
+pub fn arrayBufferSliceToImmutableRange(rt: *core.JSRuntime, buffer_value: core.JSValue, start: usize, end: usize) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -498,13 +500,13 @@ pub fn arrayBufferSliceToImmutableRange(rt: *core.Runtime, buffer_value: core.Va
     return out;
 }
 
-pub fn arrayBufferTransfer(rt: *core.Runtime, buffer_value: core.Value, new_length_value: core.Value, fixed_length: bool) !core.Value {
+pub fn arrayBufferTransfer(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length_value: core.JSValue, fixed_length: bool) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     const new_length = if (new_length_value.isUndefined()) buffer.byteStorage().len else try toIndexUsize(rt, new_length_value);
     return arrayBufferTransferLength(rt, buffer_value, new_length, fixed_length);
 }
 
-pub fn arrayBufferTransferLength(rt: *core.Runtime, buffer_value: core.Value, new_length: usize, fixed_length: bool) !core.Value {
+pub fn arrayBufferTransferLength(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length: usize, fixed_length: bool) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -523,13 +525,13 @@ pub fn arrayBufferTransferLength(rt: *core.Runtime, buffer_value: core.Value, ne
     return out;
 }
 
-pub fn arrayBufferTransferToImmutable(rt: *core.Runtime, buffer_value: core.Value, new_length_value: core.Value) !core.Value {
+pub fn arrayBufferTransferToImmutable(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     const new_length = if (new_length_value.isUndefined()) buffer.byteStorage().len else try toIndexUsize(rt, new_length_value);
     return arrayBufferTransferToImmutableLength(rt, buffer_value, new_length);
 }
 
-pub fn arrayBufferTransferToImmutableLength(rt: *core.Runtime, buffer_value: core.Value, new_length: usize) !core.Value {
+pub fn arrayBufferTransferToImmutableLength(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length: usize) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -544,7 +546,7 @@ pub fn arrayBufferTransferToImmutableLength(rt: *core.Runtime, buffer_value: cor
     return out;
 }
 
-pub fn sharedArrayBufferSlice(rt: *core.Runtime, buffer_value: core.Value, start_value: core.Value, end_value: core.Value) !core.Value {
+pub fn sharedArrayBufferSlice(rt: *core.JSRuntime, buffer_value: core.JSValue, start_value: core.JSValue, end_value: core.JSValue) !core.JSValue {
     const buffer = try expectSharedArrayBufferObject(buffer_value);
     const source_length = buffer.byteStorage().len;
     const start = try relativeSliceIndex(rt, start_value, source_length, false);
@@ -552,36 +554,36 @@ pub fn sharedArrayBufferSlice(rt: *core.Runtime, buffer_value: core.Value, start
     return sharedArrayBufferSliceRange(rt, buffer_value, start, end);
 }
 
-pub fn sharedArrayBufferSliceRange(rt: *core.Runtime, buffer_value: core.Value, start: usize, end: usize) !core.Value {
+pub fn sharedArrayBufferSliceRange(rt: *core.JSRuntime, buffer_value: core.JSValue, start: usize, end: usize) !core.JSValue {
     const buffer = try expectSharedArrayBufferObject(buffer_value);
     const length = if (end > start) end - start else 0;
-    const out = try sharedArrayBufferConstructArgs(rt, &.{core.Value.int32(@intCast(length))}, buffer.prototype);
+    const out = try sharedArrayBufferConstructArgs(rt, &.{core.JSValue.int32(@intCast(length))}, buffer.prototype);
     errdefer out.free(rt);
     const out_object = try expectSharedArrayBufferObject(out);
     if (length != 0) @memcpy(out_object.byteStorage(), buffer.byteStorage()[start..end]);
     return out;
 }
 
-pub fn sharedArrayBufferGrow(rt: *core.Runtime, buffer_value: core.Value, new_length_value: core.Value) !core.Value {
+pub fn sharedArrayBufferGrow(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const new_length = try toIndexUsize(rt, new_length_value);
     return sharedArrayBufferGrowLength(rt, buffer_value, new_length);
 }
 
-pub fn sharedArrayBufferGrowLength(rt: *core.Runtime, buffer_value: core.Value, new_length: usize) !core.Value {
+pub fn sharedArrayBufferGrowLength(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length: usize) !core.JSValue {
     const buffer = try expectSharedArrayBufferObject(buffer_value);
     const max = buffer.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (new_length < buffer.byteStorage().len) return error.RangeError;
     if (new_length > max) return error.RangeError;
     const old = buffer.byteStorage();
-    const store = try core.object.SharedBufferStore.create(new_length);
+    const store = try core.object.SharedBufferStore.create(rt, new_length);
     errdefer store.release();
     if (old.len != 0) @memcpy(store.bytes[0..old.len], old);
     buffer.installSharedByteStorage(rt, store);
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
 /// QuickJS source map: narrow DataView.prototype getter helper.
-pub fn dataViewGet(rt: *core.Runtime, view_value: core.Value, kind: u32, args: []const core.Value) !core.Value {
+pub fn dataViewGet(rt: *core.JSRuntime, view_value: core.JSValue, kind: u32, args: []const core.JSValue) !core.JSValue {
     const view = try expectDataViewObject(view_value);
     const index = if (args.len >= 1) try toIndexUsize(rt, args[0]) else @as(usize, 0);
     const little_endian = args.len >= 2 and isTruthy(args[1]);
@@ -597,11 +599,11 @@ pub fn dataViewGet(rt: *core.Runtime, view_value: core.Value, kind: u32, args: [
 
     const endian: std.builtin.Endian = if (little_endian) .little else .big;
     return switch (kind) {
-        1 => core.Value.int32(@as(i8, @bitCast(bytes[0]))),
-        2 => core.Value.int32(bytes[0]),
-        3 => core.Value.int32(std.mem.readInt(i16, bytes[0..2], endian)),
-        4 => core.Value.int32(std.mem.readInt(u16, bytes[0..2], endian)),
-        5 => core.Value.int32(std.mem.readInt(i32, bytes[0..4], endian)),
+        1 => core.JSValue.int32(@as(i8, @bitCast(bytes[0]))),
+        2 => core.JSValue.int32(bytes[0]),
+        3 => core.JSValue.int32(std.mem.readInt(i16, bytes[0..2], endian)),
+        4 => core.JSValue.int32(std.mem.readInt(u16, bytes[0..2], endian)),
+        5 => core.JSValue.int32(std.mem.readInt(i32, bytes[0..4], endian)),
         6 => numberResult(@floatFromInt(std.mem.readInt(u32, bytes[0..4], endian))),
         7 => numberResult(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], endian))))),
         8 => numberResult(@bitCast(std.mem.readInt(u64, bytes[0..8], endian))),
@@ -613,13 +615,13 @@ pub fn dataViewGet(rt: *core.Runtime, view_value: core.Value, kind: u32, args: [
 }
 
 /// QuickJS source map: narrow DataView.prototype setter helper.
-pub fn dataViewSet(rt: *core.Runtime, view_value: core.Value, kind: u32, args: []const core.Value) !core.Value {
+pub fn dataViewSet(rt: *core.JSRuntime, view_value: core.JSValue, kind: u32, args: []const core.JSValue) !core.JSValue {
     const view = try expectDataViewObject(view_value);
     const buffer = try dataViewBuffer(view);
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
-    const index_arg = if (args.len >= 1) args[0] else core.Value.undefinedValue();
+    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const index = try toIndexUsize(rt, index_arg);
-    const value_arg = if (args.len >= 2) args[1] else core.Value.undefinedValue();
+    const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const little_endian = args.len >= 3 and isTruthy(args[2]);
     const width = dataViewKindWidth(kind);
 
@@ -642,29 +644,29 @@ pub fn dataViewSet(rt: *core.Runtime, view_value: core.Value, kind: u32, args: [
     const absolute = view.typedArrayByteOffset() + index;
     var i: usize = 0;
     while (i < width) : (i += 1) buffer.byteStorage()[absolute + i] = bytes[i];
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-pub fn dataViewRejectImmutable(rt: *core.Runtime, view_value: core.Value) !void {
+pub fn dataViewRejectImmutable(rt: *core.JSRuntime, view_value: core.JSValue) !void {
     const view = try expectDataViewObject(view_value);
     const buffer = try dataViewBuffer(view);
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
 }
 
-pub fn dataViewRequire(view_value: core.Value) !void {
+pub fn dataViewRequire(view_value: core.JSValue) !void {
     _ = try expectDataViewObject(view_value);
 }
 
-pub fn dataViewByteLength(rt: *core.Runtime, view: *core.Object) !usize {
+pub fn dataViewByteLength(rt: *core.JSRuntime, view: *core.Object) !usize {
     return dataViewEffectiveByteLength(rt, view);
 }
 
-pub fn dataViewByteOffset(rt: *core.Runtime, view: *core.Object) !usize {
+pub fn dataViewByteOffset(rt: *core.JSRuntime, view: *core.Object) !usize {
     _ = try dataViewEffectiveByteLength(rt, view);
     return view.typedArrayByteOffset();
 }
 
-pub fn arrayBufferResize(rt: *core.Runtime, buffer_value: core.Value, new_length_value: core.Value) !core.Value {
+pub fn arrayBufferResize(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length_value: core.JSValue) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     const new_length = try toIndexUsize(rt, new_length_value);
@@ -672,7 +674,7 @@ pub fn arrayBufferResize(rt: *core.Runtime, buffer_value: core.Value, new_length
     return arrayBufferResizeLength(rt, buffer_value, new_length);
 }
 
-pub fn arrayBufferResizeLength(rt: *core.Runtime, buffer_value: core.Value, new_length: usize) !core.Value {
+pub fn arrayBufferResizeLength(rt: *core.JSRuntime, buffer_value: core.JSValue, new_length: usize) !core.JSValue {
     const buffer = try expectArrayBufferOnlyObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
@@ -684,15 +686,14 @@ pub fn arrayBufferResizeLength(rt: *core.Runtime, buffer_value: core.Value, new_
     const copy_len = @min(old.len, new_length);
     if (copy_len != 0) @memcpy(next[0..copy_len], old[0..copy_len]);
     if (new_length > copy_len) @memset(next[copy_len..], 0);
-    if (old.len != 0) rt.memory.free(u8, old);
-    buffer.byteStorageSlot().* = next;
-    return core.Value.undefinedValue();
+    buffer.installByteStorage(rt, next);
+    return core.JSValue.undefinedValue();
 }
 
-pub fn detachArrayBuffer(_: *core.Runtime, buffer_value: core.Value) !core.Value {
-    const buffer = try expectArrayBufferObject(buffer_value);
-    buffer.arrayBufferDetachedSlot().* = true;
-    return core.Value.undefinedValue();
+pub fn detachArrayBuffer(rt: *core.JSRuntime, buffer_value: core.JSValue) !core.JSValue {
+    const buffer = try expectArrayBufferOnlyObject(buffer_value);
+    buffer.detachByteStorage(rt);
+    return core.JSValue.undefinedValue();
 }
 
 pub fn isTypedArrayObject(object: *const core.Object) bool {
@@ -714,7 +715,7 @@ pub fn typedArrayDetached(object: *core.Object) !bool {
     return buffer.arrayBufferDetached();
 }
 
-pub fn typedArrayLength(rt: *core.Runtime, object: *core.Object) !u32 {
+pub fn typedArrayLength(rt: *core.JSRuntime, object: *core.Object) !u32 {
     _ = rt;
     const buffer = try typedArrayBufferObject(object);
     if (buffer.arrayBufferDetached()) return 0;
@@ -727,7 +728,7 @@ pub fn typedArrayLength(rt: *core.Runtime, object: *core.Object) !u32 {
     return @intCast(@divTrunc(buffer.byteStorage().len - object.typedArrayByteOffset(), object.typedArrayElementSize()));
 }
 
-pub fn typedArrayByteLength(rt: *core.Runtime, object: *core.Object) !usize {
+pub fn typedArrayByteLength(rt: *core.JSRuntime, object: *core.Object) !usize {
     const length = try typedArrayLength(rt, object);
     return @as(usize, length) * object.typedArrayElementSize();
 }
@@ -738,25 +739,25 @@ pub fn typedArrayByteOffset(object: *core.Object) !usize {
     return object.typedArrayByteOffset();
 }
 
-pub fn typedArrayGetIndex(rt: *core.Runtime, object: *core.Object, index: u32) !core.Value {
+pub fn typedArrayGetIndex(rt: *core.JSRuntime, object: *core.Object, index: u32) !core.JSValue {
     const length = try typedArrayLength(rt, object);
-    if (index >= length) return core.Value.undefinedValue();
+    if (index >= length) return core.JSValue.undefinedValue();
     const buffer = try typedArrayBufferObject(object);
     const offset = object.typedArrayByteOffset() + @as(usize, index) * object.typedArrayElementSize();
     return readElement(rt, object.typedArrayKind(), buffer.byteStorage()[offset..][0..object.typedArrayElementSize()]);
 }
 
-pub fn typedArrayIndexValid(rt: *core.Runtime, object: *core.Object, index: u32) !bool {
+pub fn typedArrayIndexValid(rt: *core.JSRuntime, object: *core.Object, index: u32) !bool {
     const length = try typedArrayLength(rt, object);
     return index < length;
 }
 
-pub fn typedArrayCoerceElementValue(rt: *core.Runtime, object: *core.Object, value: core.Value) !void {
+pub fn typedArrayCoerceElementValue(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !void {
     var scratch: [8]u8 = undefined;
     try writeElement(rt, object.typedArrayKind(), scratch[0..object.typedArrayElementSize()], value);
 }
 
-pub fn typedArraySetElement(rt: *core.Runtime, object: *core.Object, index: u32, value: core.Value) !bool {
+pub fn typedArraySetElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !bool {
     if (try typedArrayImmutableBuffer(rt, object)) return false;
     var scratch: [8]u8 = undefined;
     const width = object.typedArrayElementSize();
@@ -768,7 +769,7 @@ pub fn typedArraySetElement(rt: *core.Runtime, object: *core.Object, index: u32,
     return true;
 }
 
-pub fn typedArraySetIndex(rt: *core.Runtime, object: *core.Object, index: u32, value: core.Value) !bool {
+pub fn typedArraySetIndex(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !bool {
     if (try typedArrayImmutableBuffer(rt, object)) return false;
     const length = try typedArrayLength(rt, object);
     if (index >= length) return true;
@@ -778,7 +779,7 @@ pub fn typedArraySetIndex(rt: *core.Runtime, object: *core.Object, index: u32, v
     return true;
 }
 
-pub fn typedArraySetInt32IndexFast(rt: *core.Runtime, object: *core.Object, index: u32, value: i32) !bool {
+pub fn typedArraySetInt32IndexFast(rt: *core.JSRuntime, object: *core.Object, index: u32, value: i32) !bool {
     if (object.typedArrayKind() != 6) return false;
     if (try typedArrayImmutableBuffer(rt, object)) return false;
     const length = try typedArrayLength(rt, object);
@@ -795,7 +796,7 @@ const TypedArrayCanonicalIndex = union(enum) {
     index: u32,
 };
 
-fn typedArrayCanonicalNumericIndex(rt: *core.Runtime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
+fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
     if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
     if (rt.atoms.kind(atom_id) != .string) return .none;
     const name = rt.atoms.name(atom_id) orelse return .none;
@@ -825,7 +826,7 @@ fn typedArrayCanonicalNumericIndex(rt: *core.Runtime, atom_id: core.Atom) !Typed
     return .{ .index = @intFromFloat(number) };
 }
 
-pub fn typedArrayDefineOwnProperty(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom, desc: core.Descriptor) !?bool {
+pub fn typedArrayDefineOwnProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, desc: core.Descriptor) !?bool {
     if (!isTypedArrayObject(object)) return null;
     switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
@@ -855,11 +856,11 @@ pub fn typedArrayBackedByResizableBuffer(object: *core.Object) bool {
     return buffer.arrayBufferMaxByteLength() != null;
 }
 
-fn createArrayBuffer(rt: *core.Runtime, byte_length: usize, max_byte_length: ?usize) !core.Value {
+fn createArrayBuffer(rt: *core.JSRuntime, byte_length: usize, max_byte_length: ?usize) !core.JSValue {
     return createArrayBufferWithPrototype(rt, byte_length, max_byte_length, null);
 }
 
-fn relativeSliceIndex(rt: *core.Runtime, value: core.Value, len: usize, undefined_is_len: bool) !usize {
+fn relativeSliceIndex(rt: *core.JSRuntime, value: core.JSValue, len: usize, undefined_is_len: bool) !usize {
     if (undefined_is_len and value.isUndefined()) return len;
 
     const relative = try value_ops.toIntegerOrInfinity(rt, value);
@@ -882,12 +883,13 @@ fn relativeSliceIndex(rt: *core.Runtime, value: core.Value, len: usize, undefine
     return @intFromFloat(truncated);
 }
 
-fn createArrayBufferWithPrototype(rt: *core.Runtime, byte_length: usize, max_byte_length: ?usize, prototype: ?*core.Object) !core.Value {
+fn createArrayBufferWithPrototype(rt: *core.JSRuntime, byte_length: usize, max_byte_length: ?usize, prototype: ?*core.Object) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.array_buffer, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    object.byteStorageSlot().* = try rt.memory.alloc(u8, byte_length);
+    const bytes = try rt.memory.alloc(u8, byte_length);
+    object.installByteStorage(rt, bytes);
     @memset(object.byteStorage(), 0);
     object.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return object.value();
@@ -917,120 +919,120 @@ fn typedArrayBufferObject(object: *core.Object) !*core.Object {
     return expectArrayBufferObject(value);
 }
 
-pub fn typedArrayRejectImmutableBuffer(rt: *core.Runtime, object: *core.Object) !void {
+pub fn typedArrayRejectImmutableBuffer(rt: *core.JSRuntime, object: *core.Object) !void {
     if (try typedArrayImmutableBuffer(rt, object)) return error.TypeError;
 }
 
-pub fn typedArrayImmutableBuffer(rt: *core.Runtime, object: *core.Object) !bool {
+pub fn typedArrayImmutableBuffer(rt: *core.JSRuntime, object: *core.Object) !bool {
     const buffer = try typedArrayBufferObject(object);
     return arrayBufferIsImmutable(rt, buffer);
 }
 
-fn expectObject(value: core.Value) !*core.Object {
+fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn expectArrayBufferObject(value: core.Value) !*core.Object {
+fn expectArrayBufferObject(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
     if (object.class_id != core.class.ids.array_buffer and object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
     return object;
 }
 
-fn expectArrayBufferOnlyObject(value: core.Value) !*core.Object {
+fn expectArrayBufferOnlyObject(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
     if (object.class_id != core.class.ids.array_buffer) return error.TypeError;
     return object;
 }
 
-fn expectSharedArrayBufferObject(value: core.Value) !*core.Object {
+fn expectSharedArrayBufferObject(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
     if (object.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
     return object;
 }
 
-fn expectDataViewObject(value: core.Value) !*core.Object {
+fn expectDataViewObject(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
     if (object.class_id != core.class.ids.dataview) return error.TypeError;
     return object;
 }
 
-fn defineIntPropertyChecked(rt: *core.Runtime, object: *core.Object, name: []const u8, value: usize) !void {
+fn defineIntPropertyChecked(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: usize) !void {
     try defineIntPropertyCheckedFlags(rt, object, name, value, true);
 }
 
-fn defineIntPropertyCheckedFlags(rt: *core.Runtime, object: *core.Object, name: []const u8, value: usize, enumerable: bool) !void {
+fn defineIntPropertyCheckedFlags(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: usize, enumerable: bool) !void {
     if (value > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
     try defineIntPropertyFlags(rt, object, name, @intCast(value), enumerable);
 }
 
-fn setIntPropertyChecked(rt: *core.Runtime, object: *core.Object, name: []const u8, value: usize) !void {
+fn setIntPropertyChecked(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: usize) !void {
     if (value > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    try object.setProperty(rt, key, core.Value.int32(@intCast(value)));
+    try object.setProperty(rt, key, core.JSValue.int32(@intCast(value)));
 }
 
-fn defineIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32) !void {
+fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     try defineIntPropertyFlags(rt, object, name, value, true);
 }
 
-fn defineIntPropertyFlags(rt: *core.Runtime, object: *core.Object, name: []const u8, value: i32, enumerable: bool) !void {
+fn defineIntPropertyFlags(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32, enumerable: bool) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.Value.int32(value), true, enumerable, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, enumerable, true));
 }
 
-fn defineValueProperty(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value) !void {
+fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     try defineValuePropertyFlags(rt, object, name, value, true);
 }
 
-fn defineValuePropertyFlags(rt: *core.Runtime, object: *core.Object, name: []const u8, value: core.Value, enumerable: bool) !void {
+fn defineValuePropertyFlags(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue, enumerable: bool) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, enumerable, true));
 }
 
-fn markArrayBufferImmutable(rt: *core.Runtime, object: *core.Object) !void {
+fn markArrayBufferImmutable(rt: *core.JSRuntime, object: *core.Object) !void {
     _ = rt;
     object.arrayBufferImmutableSlot().* = true;
 }
 
-pub fn arrayBufferIsImmutable(rt: *core.Runtime, object: *core.Object) bool {
+pub fn arrayBufferIsImmutable(rt: *core.JSRuntime, object: *core.Object) bool {
     _ = rt;
     return object.arrayBufferImmutable();
 }
 
-fn getNamedProperty(rt: *core.Runtime, object: *core.Object, name: []const u8) !core.Value {
+fn getNamedProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     return object.getProperty(key);
 }
 
-fn getIntProperty(rt: *core.Runtime, object: *core.Object, name: []const u8) !i32 {
+fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !i32 {
     const value = try getNamedProperty(rt, object, name);
     defer value.free(rt);
     return value.asInt32() orelse 0;
 }
 
-fn objectIntProperty(rt: *core.Runtime, object_value: core.Value, name: []const u8) !i32 {
+fn objectIntProperty(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u8) !i32 {
     const object = try expectObject(object_value);
     return getIntProperty(rt, object, name);
 }
 
-fn checkDataViewBounds(rt: *core.Runtime, view: *core.Object, index: usize, width: usize) !void {
+fn checkDataViewBounds(rt: *core.JSRuntime, view: *core.Object, index: usize, width: usize) !void {
     const length = try dataViewEffectiveByteLength(rt, view);
     if (index > length or width > length - index) return error.RangeError;
 }
 
-fn checkDataViewAttached(rt: *core.Runtime, view: *core.Object) !void {
+fn checkDataViewAttached(rt: *core.JSRuntime, view: *core.Object) !void {
     _ = rt;
     const buffer = try dataViewBuffer(view);
     if (buffer.arrayBufferDetached()) return error.TypeError;
 }
 
-fn dataViewEffectiveByteLength(rt: *core.Runtime, view: *core.Object) !usize {
+fn dataViewEffectiveByteLength(rt: *core.JSRuntime, view: *core.Object) !usize {
     _ = rt;
     const buffer = try dataViewBuffer(view);
     if (buffer.arrayBufferDetached()) return error.TypeError;
@@ -1050,29 +1052,29 @@ fn dataViewBuffer(view: *core.Object) !*core.Object {
     return expectArrayBufferObject(view.typedArrayBuffer() orelse return error.TypeError);
 }
 
-fn numberResult(value: f64) core.Value {
+fn numberResult(value: f64) core.JSValue {
     if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !isNegativeZero(value)) {
-        return core.Value.int32(@intFromFloat(value));
+        return core.JSValue.int32(@intFromFloat(value));
     }
-    return core.Value.float64(value);
+    return core.JSValue.float64(value);
 }
 
-fn bigIntResult(rt: *core.Runtime, value: i128) !core.Value {
+fn bigIntResult(rt: *core.JSRuntime, value: i128) !core.JSValue {
     const big = try core.bigint.BigInt.create(rt, value);
     return big.valueRef();
 }
 
-fn numberValue(value: core.Value) ?f64 {
+fn numberValue(value: core.JSValue) ?f64 {
     if (value.asInt32()) |int_value| return @floatFromInt(int_value);
     if (value.asFloat64()) |float_value| return float_value;
     return null;
 }
 
-fn valueToInt32(value: core.Value) i32 {
+fn valueToInt32(value: core.JSValue) i32 {
     return @bitCast(valueToUint32(value));
 }
 
-fn valueToUint32(value: core.Value) u32 {
+fn valueToUint32(value: core.JSValue) u32 {
     const number = if (numberValue(value)) |n|
         n
     else if (value.asBool()) |bool_value|
@@ -1108,7 +1110,7 @@ fn numberToUint8Clamp(number: f64) u8 {
     return @intCast(lower_int + 1);
 }
 
-fn coerceNumber(rt: *core.Runtime, value: core.Value) !f64 {
+fn coerceNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     const number_value = try value_ops.toNumberValue(rt, value);
     return numberValue(number_value) orelse std.math.nan(f64);
 }
@@ -1131,14 +1133,14 @@ fn f64ToFloat16(value: f64) u16 {
     return @bitCast(@as(f16, @floatCast(value)));
 }
 
-fn readElement(rt: *core.Runtime, kind: u8, bytes: []const u8) !core.Value {
+fn readElement(rt: *core.JSRuntime, kind: u8, bytes: []const u8) !core.JSValue {
     return switch (kind) {
-        1 => core.Value.int32(@as(i8, @bitCast(bytes[0]))),
-        2 => core.Value.int32(bytes[0]),
-        3 => core.Value.int32(bytes[0]),
-        4 => core.Value.int32(std.mem.readInt(i16, bytes[0..2], .little)),
-        5 => core.Value.int32(std.mem.readInt(u16, bytes[0..2], .little)),
-        6 => core.Value.int32(std.mem.readInt(i32, bytes[0..4], .little)),
+        1 => core.JSValue.int32(@as(i8, @bitCast(bytes[0]))),
+        2 => core.JSValue.int32(bytes[0]),
+        3 => core.JSValue.int32(bytes[0]),
+        4 => core.JSValue.int32(std.mem.readInt(i16, bytes[0..2], .little)),
+        5 => core.JSValue.int32(std.mem.readInt(u16, bytes[0..2], .little)),
+        6 => core.JSValue.int32(std.mem.readInt(i32, bytes[0..4], .little)),
         7 => numberResult(@floatFromInt(std.mem.readInt(u32, bytes[0..4], .little))),
         8 => numberResult(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
         9 => numberResult(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
@@ -1149,7 +1151,7 @@ fn readElement(rt: *core.Runtime, kind: u8, bytes: []const u8) !core.Value {
     };
 }
 
-fn writeElement(rt: *core.Runtime, kind: u8, bytes: []u8, value: core.Value) !void {
+fn writeElement(rt: *core.JSRuntime, kind: u8, bytes: []u8, value: core.JSValue) !void {
     switch (kind) {
         1, 2 => {
             if (value.isBigInt()) return error.TypeError;
@@ -1184,14 +1186,14 @@ fn writeElement(rt: *core.Runtime, kind: u8, bytes: []u8, value: core.Value) !vo
     }
 }
 
-fn valueToBigInt64Bits(rt: *core.Runtime, value: core.Value) !u64 {
+fn valueToBigInt64Bits(rt: *core.JSRuntime, value: core.JSValue) !u64 {
     var big = try toBigIntValue(rt, value);
     defer big.deinit();
     const low: u64 = if (big.limbs.len >= 1) big.limbs[0] else 0;
     return if (big.negative) 0 -% low else low;
 }
 
-fn toBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.isBigInt()) return cloneBigIntValue(rt, value);
     if (value.isNumber()) return error.TypeError;
     if (value.asBool()) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
@@ -1207,7 +1209,7 @@ fn toBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
     return error.TypeError;
 }
 
-fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
+fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
@@ -1217,7 +1219,7 @@ fn cloneBigIntValue(rt: *core.Runtime, value: core.Value) !bignum.BigInt {
     return error.TypeError;
 }
 
-fn toIntegerOrInfinity(rt: *core.Runtime, value: core.Value) !f64 {
+fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
@@ -1229,7 +1231,7 @@ fn toIntegerOrInfinity(rt: *core.Runtime, value: core.Value) !f64 {
     return parseJsNumber(buffer.items);
 }
 
-fn toIndexUsize(rt: *core.Runtime, value: core.Value) !usize {
+fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize {
     const number = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(number)) return 0;
     if (!std.math.isFinite(number)) return error.RangeError;
@@ -1247,7 +1249,7 @@ fn parseJsNumber(bytes: []const u8) f64 {
     return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
 }
 
-fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) AppendStringError!void {
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     if (value.asInt32()) |int_value| {
         var int_buf: [32]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{int_value});
@@ -1300,7 +1302,7 @@ fn appendValueString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.
     }
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -1319,7 +1321,7 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
+fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
     var index: u32 = 0;
     while (index < object.length) : (index += 1) {
         if (index != 0) try buffer.append(rt.memory.allocator, ',');
@@ -1329,7 +1331,7 @@ fn appendArrayString(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *cor
     }
 }
 
-fn isTruthy(value: core.Value) bool {
+fn isTruthy(value: core.JSValue) bool {
     if (value.isUndefined() or value.isNull()) return false;
     if (value.asBool()) |bool_value| return bool_value;
     if (value.asInt32()) |int_value| return int_value != 0;

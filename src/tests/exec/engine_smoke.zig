@@ -98,7 +98,7 @@ test "Engine defineScriptArgs OOM releases pending global array once" {
     while (fail_offset < samples.limit) : (fail_offset += 1) {
         if (!oom_helpers.shouldRunOffset(samples, fail_offset)) continue;
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        var js = try engine.Engine.init(failing.allocator());
+        var js = try engine.harness.Engine.init(failing.allocator());
 
         const warmup = try js.eval("Array.prototype;");
         warmup.free(js.runtime);
@@ -127,15 +127,15 @@ test "Engine defineScriptArgs OOM releases pending global array once" {
     try std.testing.expect(saw_success);
 }
 
-fn fillGlobalPropertyCapacity(js: *engine.Engine) !void {
-    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
+fn fillGlobalPropertyCapacity(js: *engine.harness.Engine) !void {
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     var index: usize = 0;
     while (global.properties.len < global.property_capacity) : (index += 1) {
         var name_buffer: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buffer, "__zjs_oom_fill_{d}", .{index});
         const key = try js.runtime.internAtom(name);
         defer js.runtime.atoms.free(key);
-        try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(core.Value.int32(@intCast(index)), true, true, true));
+        try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
     }
 }
 
@@ -521,21 +521,21 @@ test "Engine eval supports Annex B String HTML wrappers and trim aliases" {
 
 test "Engine eval TypeError with evaluated arguments does not double free constants" {
     {
-        var js = try engine.Engine.init(std.testing.allocator);
+        var js = try engine.harness.Engine.init(std.testing.allocator);
         defer js.deinit();
         try std.testing.expectError(error.TypeError, js.eval("const obj = {}; obj.missing(\"a\", \"a\");"));
     }
     {
-        var js = try engine.Engine.init(std.testing.allocator);
+        var js = try engine.harness.Engine.init(std.testing.allocator);
         defer js.deinit();
         try std.testing.expectError(error.TypeError, js.eval("RegExp.test(\"a\", \"a\");"));
     }
 }
 
 test "vm call handler accepts allocator-backed argument lists" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const name = try rt.internAtom("wide-call");
@@ -589,42 +589,42 @@ test "Engine API eval and job queue are wired" {
     try std.testing.expect(result.isUndefined());
 
     helpers.job_counter = 0;
-    try js.job_queue.enqueueFunc(js.context, countJob, &.{});
-    try js.job_queue.enqueueFunc(js.context, countJob, &.{});
+    try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
+    try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 2), helpers.job_counter);
 
     helpers.job_counter = 0;
     var i: usize = 0;
-    while (i < 16) : (i += 1) try js.job_queue.enqueueFunc(js.context, countJob, &.{});
+    while (i < 16) : (i += 1) try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 16), helpers.job_counter);
 
     helpers.job_counter = 0;
-    try js.job_queue.enqueueFunc(js.context, countJobArgs, &.{ core.Value.int32(2), core.Value.int32(3) });
+    try js.runtime.job_queue.enqueueFunc(js.context, countJobArgs, &.{ core.JSValue.int32(2), core.JSValue.int32(3) });
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 5), helpers.job_counter);
 
     helpers.job_counter = 0;
-    try js.job_queue.enqueueFunc(js.context, countJobArgs, &.{
-        core.Value.int32(1),
-        core.Value.int32(2),
-        core.Value.int32(3),
-        core.Value.int32(4),
-        core.Value.int32(5),
+    try js.runtime.job_queue.enqueueFunc(js.context, countJobArgs, &.{
+        core.JSValue.int32(1),
+        core.JSValue.int32(2),
+        core.JSValue.int32(3),
+        core.JSValue.int32(4),
+        core.JSValue.int32(5),
     });
     try js.runJobs();
     try std.testing.expectEqual(@as(usize, 15), helpers.job_counter);
 
-    try std.testing.expectError(error.TooManyJobArgs, js.job_queue.enqueueFunc(js.context, countJobArgs, &.{
-        core.Value.int32(1),
-        core.Value.int32(2),
-        core.Value.int32(3),
-        core.Value.int32(4),
-        core.Value.int32(5),
-        core.Value.int32(6),
+    try std.testing.expectError(error.TooManyJobArgs, js.runtime.job_queue.enqueueFunc(js.context, countJobArgs, &.{
+        core.JSValue.int32(1),
+        core.JSValue.int32(2),
+        core.JSValue.int32(3),
+        core.JSValue.int32(4),
+        core.JSValue.int32(5),
+        core.JSValue.int32(6),
     }));
-    try std.testing.expectEqual(@as(usize, 0), js.job_queue.jobs.len);
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.job_queue.jobs.len);
 }
 
 test "job queue enqueue propagates allocator failure" {
@@ -642,16 +642,16 @@ test "job queue enqueue propagates allocator failure" {
 }
 
 test "job queue keeps symbol arguments rooted until release" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     var queue = engine.exec.jobs.Queue.init(&rt.memory);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-symbol");
-    try queue.enqueueFunc(ctx, countJob, &.{core.Value.symbol(symbol_atom)});
+    try queue.enqueueFunc(ctx, countJob, &.{core.JSValue.symbol(symbol_atom)});
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -662,10 +662,10 @@ test "job queue keeps symbol arguments rooted until release" {
 }
 
 test "job queue symbol roots preserve weak map values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     var queue = engine.exec.jobs.Queue.init(&rt.memory);
@@ -675,10 +675,10 @@ test "job queue symbol roots preserve weak map values" {
 
     const value = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-job-queue-weak-key");
-    try engine.builtins.collection.setWeakMapEntry(rt, weak_map, core.Value.symbol(symbol_atom), value.value());
+    try engine.builtins.collection.setWeakMapEntry(rt, weak_map, core.JSValue.symbol(symbol_atom), value.value());
     value.value().free(rt);
 
-    try queue.enqueueFunc(ctx, countJob, &.{core.Value.symbol(symbol_atom)});
+    try queue.enqueueFunc(ctx, countJob, &.{core.JSValue.symbol(symbol_atom)});
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(@as(usize, 1), weak_map.weakCollectionEntries().len);
@@ -1057,7 +1057,7 @@ test "Engine eval Function.prototype.toString returns method and class source" {
 }
 
 test "Engine eval releases arrow destructuring iterator closures cleanly" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var output_buffer: [128]u8 = undefined;
@@ -1171,13 +1171,13 @@ test "Engine eval preserves one-shot object missing field host output semantics"
 }
 
 test "Engine runJobs preserves pending JS exceptions for callers" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
     js.context.preserve_uncaught_exception = true;
 
     const setup = try js.eval("var __zjs_timer_throw = function() { throw new Error('timer boom'); };");
     defer setup.free(js.runtime);
-    const global = try engine.exec.zjs_vm.ensureContextGlobal(js.context);
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
     const callback_key = try js.runtime.internAtom("__zjs_timer_throw");
     defer js.runtime.atoms.free(callback_key);
     const callback = global.getProperty(callback_key);
@@ -1191,12 +1191,12 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
     try js.runJobs();
     try std.testing.expect(js.context.hasException());
 
-    var exception = js.takeExceptionInfo();
+    var exception = try js.takeExceptionInfo();
     defer exception.deinit();
 }
 
 test "host module graph syntax diagnostics do not write to program output" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const modules = [_]HostFixtureModule{
@@ -1226,7 +1226,7 @@ test "host module graph syntax diagnostics do not write to program output" {
 }
 
 test "host commonjs wrapper passes directory dirname" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     const modules = [_]HostFixtureModule{
@@ -1266,7 +1266,7 @@ const HostFixtureModule = struct {
     specifier: []const u8,
     path: []const u8,
     source: []const u8,
-    kind: engine.Engine.HostHooks.ModuleKind,
+    kind: engine.harness.Engine.HostHooks.ModuleKind,
 };
 
 const HostFixture = struct {
@@ -1287,7 +1287,7 @@ const HostFixture = struct {
     }
 };
 
-fn hostHooks(host: *const HostFixture) engine.Engine.HostHooks {
+fn hostHooks(host: *const HostFixture) engine.harness.Engine.HostHooks {
     return .{
         .ptr = @constCast(host),
         .resolveModule = resolveFixtureModule,
@@ -1300,7 +1300,7 @@ fn resolveFixtureModule(
     specifier: []const u8,
     referrer: ?[]const u8,
     allocator: std.mem.Allocator,
-) anyerror!engine.Engine.HostHooks.ResolvedModule {
+) anyerror!engine.harness.Engine.HostHooks.ResolvedModule {
     _ = referrer;
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
     const module = host.findBySpecifierOrPath(specifier) orelse return error.ModuleNotFound;
@@ -1313,9 +1313,9 @@ fn resolveFixtureModule(
 
 fn loadFixtureModule(
     ptr: *anyopaque,
-    resolved: engine.Engine.HostHooks.ResolvedModule,
+    resolved: engine.harness.Engine.HostHooks.ResolvedModule,
     allocator: std.mem.Allocator,
-) anyerror!engine.Engine.HostHooks.LoadedModule {
+) anyerror!engine.harness.Engine.HostHooks.LoadedModule {
     const host: *const HostFixture = @ptrCast(@alignCast(ptr));
     const module = host.findByPath(resolved.path) orelse return error.ModuleNotFound;
     return .{

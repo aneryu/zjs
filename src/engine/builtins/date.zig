@@ -149,18 +149,18 @@ pub fn timeWithinDay(ms: i64) i64 {
 
 /// QuickJS source map: Date as a function. This is the current narrow Date
 /// subset used by transitional `date_call` bytecode.
-pub fn call(rt: *core.Runtime, args: []const core.Value) !core.Value {
+pub fn call(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     _ = args;
     return dateString(rt, currentTimeMs(), .local);
 }
 
 /// QuickJS source map: Date constructor. This preserves the current smoke/test
 /// compatible Date object payload while moving ownership out of the VM.
-pub fn construct(rt: *core.Runtime, args: []const core.Value) !core.Value {
+pub fn construct(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     return constructWithPrototype(rt, args, null);
 }
 
-pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, prototype: ?*core.Object) !core.Value {
+pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const object = try core.Object.create(rt, core.class.ids.date, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
 
@@ -182,28 +182,28 @@ pub fn constructWithPrototype(rt: *core.Runtime, args: []const core.Value, proto
     return object.value();
 }
 
-fn defineDateValue(rt: *core.Runtime, object: *core.Object, ms: f64) !void {
+fn defineDateValue(rt: *core.JSRuntime, object: *core.Object, ms: f64) !void {
     try setDateValue(rt, object, ms);
 }
 
 /// QuickJS source map: Date.UTC / Date.parse / Date.now. This is still a narrow
 /// builtin implementation; unsupported Date shapes stay on transitional paths.
-pub fn staticCall(rt: *core.Runtime, method: u32, args: []const core.Value) !core.Value {
+pub fn staticCall(rt: *core.JSRuntime, method: u32, args: []const core.JSValue) !core.JSValue {
     return switch (method) {
         1 => utc(args),
         2 => try parse(rt, args),
-        3 => core.Value.float64(currentTimeMs()),
+        3 => core.JSValue.float64(currentTimeMs()),
         else => error.TypeError,
     };
 }
 
 /// QuickJS source map: selected Date.prototype methods used by current smoke
 /// and targeted regression coverage.
-pub fn methodCall(rt: *core.Runtime, object_value: core.Value, method: u32) !core.Value {
+pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32) !core.JSValue {
     return methodCallArgs(rt, object_value, method, &.{});
 }
 
-pub fn methodCallArgs(rt: *core.Runtime, object_value: core.Value, method: u32, args: []const core.Value) !core.Value {
+pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
     const ms = try dateValue(object);
     return switch (method) {
@@ -230,14 +230,14 @@ pub fn methodCallArgs(rt: *core.Runtime, object_value: core.Value, method: u32, 
         29 => try setDateParts(rt, object, ms, args, .day),
         30 => try setDateParts(rt, object, ms, args, .month),
         31 => try setDateParts(rt, object, ms, args, .year),
-        32 => if (std.math.isFinite(ms)) core.Value.int32(0) else core.Value.float64(std.math.nan(f64)),
+        32 => if (std.math.isFinite(ms)) core.JSValue.int32(0) else core.JSValue.float64(std.math.nan(f64)),
         33 => try dateString(rt, ms, .date),
         34 => try dateString(rt, ms, .time),
         else => error.TypeError,
     };
 }
 
-pub fn methodCallArgsWithCapturedMs(rt: *core.Runtime, object_value: core.Value, method: u32, captured_ms: f64, args: []const core.Value) !core.Value {
+pub fn methodCallArgsWithCapturedMs(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
     return switch (method) {
         25 => try setDateParts(rt, object, captured_ms, args, .millis),
@@ -255,20 +255,20 @@ const DateSetField = enum { millis, second, minute, hour, day, month, year };
 const DateGetField = enum { millis, second, minute, hour, day, month };
 const DateStringKind = enum { local, utc, date, time };
 
-fn dateFullYear(ms: f64) core.Value {
-    if (!std.math.isFinite(ms)) return core.Value.float64(std.math.nan(f64));
+fn dateFullYear(ms: f64) core.JSValue {
+    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
     const parts = utcDateParts(@intFromFloat(ms));
-    return core.Value.int32(@intCast(parts.year));
+    return core.JSValue.int32(@intCast(parts.year));
 }
 
-fn dateYear(ms: f64) core.Value {
-    if (!std.math.isFinite(ms)) return core.Value.float64(std.math.nan(f64));
+fn dateYear(ms: f64) core.JSValue {
+    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
     const parts = utcDateParts(@intFromFloat(ms));
-    return core.Value.int32(@intCast(parts.year - 1900));
+    return core.JSValue.int32(@intCast(parts.year - 1900));
 }
 
-fn dateField(ms: f64, field: DateGetField) core.Value {
-    if (!std.math.isFinite(ms)) return core.Value.float64(std.math.nan(f64));
+fn dateField(ms: f64, field: DateGetField) core.JSValue {
+    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
     const parts = utcDateParts(@intFromFloat(ms));
     const out: i32 = switch (field) {
         .millis => @intCast(parts.millis),
@@ -278,27 +278,27 @@ fn dateField(ms: f64, field: DateGetField) core.Value {
         .day => @intCast(parts.day),
         .month => @intCast(parts.month - 1),
     };
-    return core.Value.int32(out);
+    return core.JSValue.int32(out);
 }
 
-fn setYear(rt: *core.Runtime, object: *core.Object, ms: f64, args: []const core.Value) !core.Value {
+fn setYear(rt: *core.JSRuntime, object: *core.Object, ms: f64, args: []const core.JSValue) !core.JSValue {
     const year_number = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
     return setYearNumberOnObject(rt, object, ms, year_number);
 }
 
-pub fn setYearNumber(rt: *core.Runtime, object_value: core.Value, captured_ms: f64, year_number: f64) !core.Value {
+pub fn setYearNumber(rt: *core.JSRuntime, object_value: core.JSValue, captured_ms: f64, year_number: f64) !core.JSValue {
     const object = try expectDateObject(object_value);
     return setYearNumberOnObject(rt, object, captured_ms, year_number);
 }
 
-fn setYearNumberOnObject(rt: *core.Runtime, object: *core.Object, ms: f64, year_number: f64) !core.Value {
+fn setYearNumberOnObject(rt: *core.JSRuntime, object: *core.Object, ms: f64, year_number: f64) !core.JSValue {
     if (std.math.isNan(year_number)) {
         try setDateValue(rt, object, std.math.nan(f64));
-        return core.Value.float64(std.math.nan(f64));
+        return core.JSValue.float64(std.math.nan(f64));
     }
     if (!std.math.isFinite(year_number)) {
         try setDateValue(rt, object, std.math.nan(f64));
-        return core.Value.float64(std.math.nan(f64));
+        return core.JSValue.float64(std.math.nan(f64));
     }
 
     const integer_year_float = toInteger(year_number);
@@ -312,14 +312,14 @@ fn setYearNumberOnObject(rt: *core.Runtime, object: *core.Object, ms: f64, year_
     return numberResult(next_ms);
 }
 
-fn setTime(rt: *core.Runtime, object: *core.Object, args: []const core.Value) !core.Value {
+fn setTime(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) !core.JSValue {
     const time_number = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
     const next_ms = timeClip(time_number);
     try setDateValue(rt, object, next_ms);
     return numberResult(next_ms);
 }
 
-fn setDateParts(rt: *core.Runtime, object: *core.Object, ms: f64, args: []const core.Value, field: DateSetField) !core.Value {
+fn setDateParts(rt: *core.JSRuntime, object: *core.Object, ms: f64, args: []const core.JSValue, field: DateSetField) !core.JSValue {
     const had_finite_time = std.math.isFinite(ms);
     const parts = if (had_finite_time) utcDateParts(@intFromFloat(ms)) else utcDateParts(0);
     const first = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
@@ -382,7 +382,7 @@ fn setDateParts(rt: *core.Runtime, object: *core.Object, ms: f64, args: []const 
         },
     }
 
-    if (!had_finite_time and field != .year) return core.Value.float64(std.math.nan(f64));
+    if (!had_finite_time and field != .year) return core.JSValue.float64(std.math.nan(f64));
     const next_ms = makeUtcMsFromNumbers(year, month, day, hour, minute, second, millis, false);
     try setDateValue(rt, object, next_ms);
     return numberResult(next_ms);
@@ -393,18 +393,18 @@ fn dateSetterInteger(value: f64) ?f64 {
     return toInteger(value);
 }
 
-fn providedNumber(args: []const core.Value, index: usize) !?f64 {
+fn providedNumber(args: []const core.JSValue, index: usize) !?f64 {
     if (args.len <= index) return null;
     return toNumber(args[index]) orelse return error.TypeError;
 }
 
-fn dateSetNaNResult(rt: *core.Runtime, object: *core.Object, had_finite_time: bool, field: DateSetField) !core.Value {
-    if (!had_finite_time and field != .year) return core.Value.float64(std.math.nan(f64));
+fn dateSetNaNResult(rt: *core.JSRuntime, object: *core.Object, had_finite_time: bool, field: DateSetField) !core.JSValue {
+    if (!had_finite_time and field != .year) return core.JSValue.float64(std.math.nan(f64));
     try setDateValue(rt, object, std.math.nan(f64));
-    return core.Value.float64(std.math.nan(f64));
+    return core.JSValue.float64(std.math.nan(f64));
 }
 
-fn utc(args: []const core.Value) !core.Value {
+fn utc(args: []const core.JSValue) !core.JSValue {
     const year_number = if (args.len >= 1) (toNumber(args[0]) orelse return error.TypeError) else std.math.nan(f64);
     const month_number = if (args.len >= 2) (toNumber(args[1]) orelse return error.TypeError) else 0;
     const day_number = if (args.len >= 3) (toNumber(args[2]) orelse return error.TypeError) else 1;
@@ -415,27 +415,27 @@ fn utc(args: []const core.Value) !core.Value {
     return numberResult(makeUtcMsFromNumbers(year_number, month_number, day_number, hour_number, minute_number, second_number, millis_number, true));
 }
 
-fn parse(rt: *core.Runtime, args: []const core.Value) !core.Value {
+fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     if (args.len != 1 or !args[0].isString()) return error.TypeError;
-    return core.Value.float64(try parseDateString(rt, args[0]));
+    return core.JSValue.float64(try parseDateString(rt, args[0]));
 }
 
-fn parseDateString(rt: *core.Runtime, value: core.Value) !f64 {
+fn parseDateString(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendRawString(rt, &bytes, value);
     return parseIsoDate(bytes.items) orelse parseLegacyDateString(bytes.items) orelse std.math.nan(f64);
 }
 
-fn jsonString(rt: *core.Runtime, ms: f64) !core.Value {
-    if (std.math.isNan(ms)) return core.Value.nullValue();
+fn jsonString(rt: *core.JSRuntime, ms: f64) !core.JSValue {
+    if (std.math.isNan(ms)) return core.JSValue.nullValue();
     return isoString(rt, ms, false);
 }
 
-fn isoString(rt: *core.Runtime, ms: f64, throw_on_nan: bool) !core.Value {
+fn isoString(rt: *core.JSRuntime, ms: f64, throw_on_nan: bool) !core.JSValue {
     if (!std.math.isFinite(ms)) {
         if (throw_on_nan) return error.RangeError;
-        return core.Value.nullValue();
+        return core.JSValue.nullValue();
     }
     if (ms == 0) {
         const str = try core.string.String.createUtf8(rt, "1970-01-01T00:00:00.000Z");
@@ -470,7 +470,7 @@ fn isoString(rt: *core.Runtime, ms: f64, throw_on_nan: bool) !core.Value {
     return str.value();
 }
 
-fn dateString(rt: *core.Runtime, ms: f64, kind: DateStringKind) !core.Value {
+fn dateString(rt: *core.JSRuntime, ms: f64, kind: DateStringKind) !core.JSValue {
     if (!std.math.isFinite(ms)) {
         const str = try core.string.String.createUtf8(rt, "Invalid Date");
         return str.value();
@@ -524,8 +524,8 @@ fn dateString(rt: *core.Runtime, ms: f64, kind: DateStringKind) !core.Value {
     return str.value();
 }
 
-fn utcDateField(ms: f64, method: u32) core.Value {
-    if (!std.math.isFinite(ms)) return core.Value.float64(std.math.nan(f64));
+fn utcDateField(ms: f64, method: u32) core.JSValue {
+    if (!std.math.isFinite(ms)) return core.JSValue.float64(std.math.nan(f64));
     const parts = utcDateParts(@intFromFloat(ms));
     const out: i32 = switch (method) {
         12 => @intCast(parts.year),
@@ -538,10 +538,10 @@ fn utcDateField(ms: f64, method: u32) core.Value {
         19 => @intCast(parts.weekday),
         else => 0,
     };
-    return core.Value.int32(out);
+    return core.JSValue.int32(out);
 }
 
-fn expectDateObject(value: core.Value) !*core.Object {
+fn expectDateObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -549,10 +549,10 @@ fn expectDateObject(value: core.Value) !*core.Object {
     return object;
 }
 
-fn setDateValue(rt: *core.Runtime, object: *core.Object, ms: f64) !void {
+fn setDateValue(rt: *core.JSRuntime, object: *core.Object, ms: f64) !void {
     const slot = object.objectDataSlot();
     const old_value = slot.*;
-    slot.* = core.Value.float64(ms);
+    slot.* = core.JSValue.float64(ms);
     if (old_value) |stored| stored.free(rt);
 }
 
@@ -561,7 +561,7 @@ fn dateValue(object: *const core.Object) !f64 {
     return numberValue(value) orelse error.TypeError;
 }
 
-fn dateObjectFromValue(value: core.Value) ?*core.Object {
+fn dateObjectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -569,7 +569,7 @@ fn dateObjectFromValue(value: core.Value) ?*core.Object {
     return object;
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -588,20 +588,20 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn numberValue(value: core.Value) ?f64 {
+fn numberValue(value: core.JSValue) ?f64 {
     if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
     if (value.tag == core.Tag.float64) return value.asFloat64().?;
     return null;
 }
 
-fn numberResult(value: f64) core.Value {
+fn numberResult(value: f64) core.JSValue {
     if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !isNegativeZero(value)) {
-        return core.Value.int32(@intFromFloat(value));
+        return core.JSValue.int32(@intFromFloat(value));
     }
-    return core.Value.float64(value);
+    return core.JSValue.float64(value);
 }
 
-fn valueToI64(value: core.Value) ?i64 {
+fn valueToI64(value: core.JSValue) ?i64 {
     if (toNumber(value)) |number| {
         if (!std.math.isFinite(number)) return null;
         return @intFromFloat(toInteger(number));
@@ -609,7 +609,7 @@ fn valueToI64(value: core.Value) ?i64 {
     return null;
 }
 
-fn toNumber(value: core.Value) ?f64 {
+fn toNumber(value: core.JSValue) ?f64 {
     if (value.isSymbol()) return null;
     if (numberValue(value)) |number| return number;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
@@ -627,7 +627,7 @@ fn toNumber(value: core.Value) ?f64 {
     return std.math.nan(f64);
 }
 
-fn appendStringValueAscii(writer: *std.Io.Writer, value: core.Value) !void {
+fn appendStringValueAscii(writer: *std.Io.Writer, value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
@@ -983,7 +983,7 @@ fn timeClip(value: f64) f64 {
     return toInteger(value) + 0.0;
 }
 
-fn constructDateFromParts(args: []const core.Value) !f64 {
+fn constructDateFromParts(args: []const core.JSValue) !f64 {
     const year_number = toNumber(args[0]) orelse return error.TypeError;
     const month_number = toNumber(args[1]) orelse return error.TypeError;
     const day_number = if (args.len >= 3) (toNumber(args[2]) orelse return error.TypeError) else 1;

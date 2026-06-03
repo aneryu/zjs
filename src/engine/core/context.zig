@@ -1,11 +1,14 @@
 const std = @import("std");
 
 const atom = @import("atom.zig");
+const bytecode = @import("../bytecode/root.zig");
+const exec = @import("../exec/root.zig");
+const parser = @import("../frontend/parser.zig");
 const Object = @import("object.zig").Object;
 const exception = @import("exception.zig");
 const runtime_mod = @import("runtime.zig");
-const Runtime = runtime_mod.Runtime;
-const Value = @import("value.zig").Value;
+const JSRuntime = runtime_mod.JSRuntime;
+const JSValue = @import("value.zig").JSValue;
 
 pub const BacktraceFrame = struct {
     function_name: atom.Atom,
@@ -156,22 +159,53 @@ pub const DynamicImportError = error{
 
 pub const DynamicImportCallback = *const fn (
     userdata: ?*anyopaque,
-    ctx: *Context,
+    ctx: *JSContext,
     output: ?*std.Io.Writer,
     global: *Object,
     referrer_path: []const u8,
     specifier: []const u8,
-) DynamicImportError!Value;
+) DynamicImportError!JSValue;
+
+pub const ContextOptions = struct {
+    stack_size: ?usize = null,
+    track_unhandled_rejections: bool = false,
+    dynamic_import_callback: ?DynamicImportCallback = null,
+    dynamic_import_userdata: ?*anyopaque = null,
+};
+
+pub const Options = ContextOptions;
+
+pub const ContextEvalTiming = struct {
+    parse_ns: u64 = 0,
+    vm_run_ns: u64 = 0,
+    promise_jobs_ns: u64 = 0,
+};
+
+pub const EvalTiming = ContextEvalTiming;
+
+pub const ContextEvalOptions = struct {
+    mode: parser.Mode = .script,
+    filename: []const u8 = "<eval>",
+    source_kind: parser.SourceKind = .auto,
+    output: ?*std.Io.Writer = null,
+    parse_strict: bool = false,
+    runtime_strict: bool = false,
+    return_completion: bool = true,
+    discard_script_result: bool = false,
+    timing: ?*ContextEvalTiming = null,
+};
+
+pub const EvalOptions = ContextEvalOptions;
 
 pub const OsTimer = struct {
     id: i64,
-    callback: Value,
+    callback: JSValue,
     timeout_ms: u64,
     delay_ms: u64,
     repeats: bool,
     callback_symbol_rooted: bool = false,
 
-    pub fn init(ctx: *Context, id: i64, callback: Value, timeout_ms: u64, delay_ms: u64, repeats: bool) !OsTimer {
+    pub fn init(ctx: *JSContext, id: i64, callback: JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) !OsTimer {
         var timer = OsTimer{
             .id = id,
             .callback = callback.dup(),
@@ -184,26 +218,30 @@ pub const OsTimer = struct {
         return timer;
     }
 
-    pub fn deinit(self: OsTimer, rt: *Runtime) void {
+    pub fn deinit(self: OsTimer, rt: *JSRuntime) void {
         if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
         self.callback.free(rt);
+    }
+
+    pub fn traceRoots(self: *OsTimer, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        try visitor.value(&self.callback);
     }
 };
 
 pub const OsRwHandler = struct {
     fd: i32,
-    read_callback: Value = Value.nullValue(),
-    write_callback: Value = Value.nullValue(),
+    read_callback: JSValue = JSValue.nullValue(),
+    write_callback: JSValue = JSValue.nullValue(),
     symbol_root_mask: u2 = 0,
 
-    pub fn deinit(self: OsRwHandler, rt: *Runtime) void {
+    pub fn deinit(self: OsRwHandler, rt: *JSRuntime) void {
         if ((self.symbol_root_mask & 0b01) != 0) rt.unregisterExternalValueSymbolRoot(self.read_callback);
         if ((self.symbol_root_mask & 0b10) != 0) rt.unregisterExternalValueSymbolRoot(self.write_callback);
         self.read_callback.free(rt);
         self.write_callback.free(rt);
     }
 
-    pub fn setCallback(self: *OsRwHandler, rt: *Runtime, write_handler: bool, callback: Value) !void {
+    pub fn setCallback(self: *OsRwHandler, rt: *JSRuntime, write_handler: bool, callback: JSValue) !void {
         const next_callback = callback.dup();
         var next_rooted = false;
         errdefer next_callback.free(rt);
@@ -224,29 +262,34 @@ pub const OsRwHandler = struct {
         old_callback.free(rt);
     }
 
-    pub fn clearCallback(self: *OsRwHandler, rt: *Runtime, write_handler: bool) void {
+    pub fn clearCallback(self: *OsRwHandler, rt: *JSRuntime, write_handler: bool) void {
         const bit: u2 = if (write_handler) 0b10 else 0b01;
         const slot = if (write_handler) &self.write_callback else &self.read_callback;
         const old_callback = slot.*;
         const old_rooted = (self.symbol_root_mask & bit) != 0;
-        slot.* = Value.nullValue();
+        slot.* = JSValue.nullValue();
         self.symbol_root_mask &= ~bit;
         if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
+    }
+
+    pub fn traceRoots(self: *OsRwHandler, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        try visitor.value(&self.read_callback);
+        try visitor.value(&self.write_callback);
     }
 };
 
 pub const OsSignalHandler = struct {
     sig: u32,
-    callback: Value,
+    callback: JSValue,
     callback_symbol_rooted: bool = false,
 
-    pub fn deinit(self: OsSignalHandler, rt: *Runtime) void {
+    pub fn deinit(self: OsSignalHandler, rt: *JSRuntime) void {
         if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
         self.callback.free(rt);
     }
 
-    pub fn init(ctx: *Context, sig: u32, callback: Value) !OsSignalHandler {
+    pub fn init(ctx: *JSContext, sig: u32, callback: JSValue) !OsSignalHandler {
         var handler = OsSignalHandler{
             .sig = sig,
             .callback = callback.dup(),
@@ -256,7 +299,7 @@ pub const OsSignalHandler = struct {
         return handler;
     }
 
-    pub fn setCallback(self: *OsSignalHandler, rt: *Runtime, callback: Value) !void {
+    pub fn setCallback(self: *OsSignalHandler, rt: *JSRuntime, callback: JSValue) !void {
         const next_callback = callback.dup();
         var next_rooted = false;
         errdefer next_callback.free(rt);
@@ -270,14 +313,18 @@ pub const OsSignalHandler = struct {
         if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
         old_callback.free(rt);
     }
+
+    pub fn traceRoots(self: *OsSignalHandler, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        try visitor.value(&self.callback);
+    }
 };
 
 pub const PendingPromiseJob = struct {
     sequence: u64 = 0,
-    value: Value = Value.undefinedValue(),
+    value: JSValue = JSValue.undefinedValue(),
     value_symbol_rooted: bool = false,
 
-    pub fn init(ctx: *Context, sequence: u64, value: Value) !PendingPromiseJob {
+    pub fn init(ctx: *JSContext, sequence: u64, value: JSValue) !PendingPromiseJob {
         var job = PendingPromiseJob{
             .sequence = sequence,
             .value = value.dup(),
@@ -287,20 +334,25 @@ pub const PendingPromiseJob = struct {
         return job;
     }
 
-    pub fn deinit(self: PendingPromiseJob, rt: *Runtime) void {
+    pub fn deinit(self: PendingPromiseJob, rt: *JSRuntime) void {
         if (self.value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.value);
         self.value.free(rt);
     }
+
+    pub fn traceRoots(self: *PendingPromiseJob, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        try visitor.value(&self.value);
+    }
 };
 
-pub const Context = struct {
-    runtime: *Runtime,
+pub const JSContext = struct {
+    pub const Options = ContextOptions;
+    pub const EvalOptions = ContextEvalOptions;
+    pub const EvalTiming = ContextEvalTiming;
+
+    runtime: *JSRuntime,
     exception_slot: exception.ExceptionSlot = .{},
     unhandled_rejection_slot: exception.ExceptionSlot = .{},
     unhandled_rejection_promise_slot: exception.ExceptionSlot = .{},
-    gc_root_values: [4]runtime_mod.ValueRootValue = undefined,
-    gc_root_slices: [1]runtime_mod.ValueRootSlice = undefined,
-    gc_root_frame: runtime_mod.ValueRootFrame = .{},
     stack_limit: usize = 0,
     call_depth: usize = 0,
     preserve_uncaught_exception: bool = false,
@@ -310,17 +362,20 @@ pub const Context = struct {
     formatting_error_stack: bool = false,
     backtrace_frames: []BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
-    class_prototypes: []Value = &.{},
-    /// Cached global object, populated lazily by the eval entry path.
+    class_prototypes: []JSValue = &.{},
+    /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
-    /// (`JS_Eval` reuses the per-context globals) and skips the ~300ms
-    /// per-eval rebuild of every standard constructor / prototype /
-    /// host helper. Owned by the context: freed in `destroy`.
-    cached_global: ?*Object = null,
+    /// (`JS_Eval` reuses the per-context globals) and skips rebuilding every
+    /// standard constructor / prototype / host helper on each eval call. Owned
+    /// by the context: freed in `destroy`.
+    global: ?*Object = null,
+    /// Top-level lexical environment for script `let` / `const` bindings.
+    /// `var` and function declarations still live on `global`.
+    lexicals: ?*Object = null,
     /// Original global `eval` object for QuickJS-style OP_eval dispatch.
     /// Direct-eval syntax only evaluates as direct eval when the resolved
     /// callee is this object; otherwise OP_eval falls back to an ordinary call.
-    intrinsic_eval: Value = Value.nullValue(),
+    eval_function: JSValue = JSValue.nullValue(),
     dynamic_import_callback: ?DynamicImportCallback = null,
     dynamic_import_userdata: ?*anyopaque = null,
     pending_promise_jobs: []PendingPromiseJob = &.{},
@@ -335,33 +390,55 @@ pub const Context = struct {
     exit_code: ?u8 = null,
 
     /// Returns an owned context. Caller must release it with `destroy`.
-    pub fn create(rt: *Runtime) !*Context {
-        const ctx = try rt.memory.create(Context);
-        errdefer rt.memory.destroy(Context, ctx);
-        const prototypes = try rt.memory.alloc(Value, rt.classes.records.len);
-        errdefer rt.memory.free(Value, prototypes);
-        ctx.* = .{
-            .runtime = rt,
-            .stack_limit = rt.stackSize(),
-            .class_prototypes = prototypes,
-        };
-        @memset(ctx.class_prototypes, Value.nullValue());
-        ctx.initGCRootFrame();
-        try rt.registerContextValueRoots(&ctx.gc_root_frame);
+    pub fn create(rt: *JSRuntime) !*JSContext {
+        return createWithOptions(rt, .{});
+    }
+
+    /// Returns an owned context. Caller must release it with `destroy`.
+    pub fn createWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+        const ctx = try rt.memory.create(JSContext);
+        errdefer rt.memory.destroy(JSContext, ctx);
+        try ctx.init(rt, options);
         return ctx;
     }
 
-    pub fn destroy(self: *Context) void {
+    pub fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+        const prototypes = try rt.memory.alloc(JSValue, rt.classes.records.len);
+        errdefer rt.memory.free(JSValue, prototypes);
+        self.* = .{
+            .runtime = rt,
+            .stack_limit = options.stack_size orelse rt.stackSize(),
+            .track_unhandled_rejections = options.track_unhandled_rejections,
+            .class_prototypes = prototypes,
+            .dynamic_import_callback = options.dynamic_import_callback,
+            .dynamic_import_userdata = options.dynamic_import_userdata,
+        };
+        @memset(self.class_prototypes, JSValue.nullValue());
+        var provider_registered = false;
+        errdefer {
+            if (provider_registered) rt.unregisterRootProvider(self.rootProvider());
+            rt.memory.free(JSValue, self.class_prototypes);
+            self.class_prototypes = &.{};
+        }
+        try rt.registerRootProvider(self.rootProvider());
+        provider_registered = true;
+    }
+
+    pub fn deinit(self: *JSContext) void {
         const rt = self.runtime;
+        rt.unregisterRootProvider(self.rootProvider());
         self.exception_slot.clear(rt);
         self.unhandled_rejection_slot.clear(rt);
         self.unhandled_rejection_promise_slot.clear(rt);
-        const old_intrinsic_eval = self.intrinsic_eval;
-        self.intrinsic_eval = Value.nullValue();
-        const old_cached_global = self.cached_global;
-        self.cached_global = null;
-        old_intrinsic_eval.free(rt);
-        if (old_cached_global) |global| global.value().free(rt);
+        const old_eval = self.eval_function;
+        self.eval_function = JSValue.nullValue();
+        const old_lexicals = self.lexicals;
+        self.lexicals = null;
+        const old_global = self.global;
+        self.global = null;
+        old_eval.free(rt);
+        if (old_lexicals) |lexicals| lexicals.value().free(rt);
+        if (old_global) |global| global.value().free(rt);
         const pending_promise_jobs = self.pending_promise_jobs;
         const pending_promise_jobs_capacity = self.pending_promise_jobs_capacity;
         self.pending_promise_jobs = &.{};
@@ -399,31 +476,211 @@ pub const Context = struct {
         self.class_prototypes = &.{};
         for (class_prototypes) |*slot| {
             const value = slot.*;
-            slot.* = Value.nullValue();
+            slot.* = JSValue.nullValue();
             value.free(rt);
         }
-        if (class_prototypes.len != 0) rt.memory.free(Value, class_prototypes);
-        rt.unregisterContextValueRoots(&self.gc_root_frame);
-        rt.memory.destroy(Context, self);
+        if (class_prototypes.len != 0) rt.memory.free(JSValue, class_prototypes);
     }
 
-    fn initGCRootFrame(self: *Context) void {
-        self.gc_root_values = .{
-            .{ .value = &self.exception_slot.value },
-            .{ .value = &self.unhandled_rejection_slot.value },
-            .{ .value = &self.unhandled_rejection_promise_slot.value },
-            .{ .value = &self.intrinsic_eval },
+    pub fn destroy(self: *JSContext) void {
+        const rt = self.runtime;
+        self.deinit();
+        rt.memory.destroy(JSContext, self);
+    }
+
+    pub fn dupValue(self: *JSContext, value: JSValue) JSValue {
+        return self.runtime.dupValue(value);
+    }
+
+    pub fn freeValue(self: *JSContext, value: JSValue) void {
+        self.runtime.freeValue(value);
+    }
+
+    pub fn createValueHandle(self: *JSContext, value: JSValue) !runtime_mod.JSValueHandle {
+        return self.runtime.createValueHandle(value);
+    }
+
+    pub fn takeValueHandle(self: *JSContext, value: JSValue) !runtime_mod.JSValueHandle {
+        return self.runtime.takeValueHandle(value);
+    }
+
+    pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        try visitor.value(&self.exception_slot.value);
+        try visitor.value(&self.unhandled_rejection_slot.value);
+        try visitor.value(&self.unhandled_rejection_promise_slot.value);
+        try visitor.value(&self.eval_function);
+        try visitor.values(self.class_prototypes);
+        try visitor.optionalObject(&self.global);
+        try visitor.optionalObject(&self.lexicals);
+        for (self.pending_promise_jobs) |*job| {
+            try job.traceRoots(visitor);
+        }
+        for (self.os_timers) |*timer| {
+            try timer.traceRoots(visitor);
+        }
+        for (self.os_rw_handlers) |*handler| {
+            try handler.traceRoots(visitor);
+        }
+        for (self.os_signal_handlers) |*handler| {
+            try handler.traceRoots(visitor);
+        }
+    }
+
+    pub fn globalObject(self: *JSContext) !*Object {
+        return exec.zjs_vm.contextGlobal(self);
+    }
+
+    pub fn eval(self: *JSContext, source_text: []const u8, options: ContextEvalOptions) !JSValue {
+        const rt = self.runtime;
+        const parse_start = monotonicNanos();
+        var compiled = try parser.parse(rt, source_text, .{
+            .mode = options.mode,
+            .filename = options.filename,
+            .source_kind = options.source_kind,
+            .strict = options.parse_strict,
+            .return_completion = options.mode == .script and options.return_completion,
+        });
+        if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
+        defer compiled.deinit();
+        if (compiled.syntax_error) |err| {
+            if (options.mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return JSValue.undefinedValue();
+            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ options.filename, err.position.line, err.position.column, err.message });
+            return error.SyntaxError;
+        }
+        if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(&compiled.function);
+
+        var module_name: atom.Atom = atom.null_atom;
+        var has_module_record = false;
+        defer if (has_module_record) rt.atoms.free(module_name);
+        if (options.mode == .module and compiled.function.module_record != null) {
+            var module_name_buf: [64]u8 = undefined;
+            const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
+                try std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{rt.modules.modules.len})
+            else
+                options.filename;
+            module_name = try rt.internAtom(module_name_bytes);
+            has_module_record = true;
+            const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
+            _ = try exec.module.instantiateParsedRecordWithReferrer(rt, module_name, &compiled.function, referrer_path);
+            if (rt.modules.find(module_name)) |record| record.import_meta_main = true;
+            rt.modules.linkModule(rt, module_name) catch |err| {
+                if (!@import("builtin").is_test) std.debug.print("LINK ERROR for module {s}: {s}\n", .{ options.filename, @errorName(err) });
+                return moduleResolutionError(err);
+            };
+            try self.initializeNativeSyntheticModules();
+        }
+
+        var module_var_refs: []JSValue = &.{};
+        if (has_module_record) {
+            module_var_refs = try exec.module.buildModuleVarRefs(self, module_name, &compiled.function);
+        }
+        defer exec.module.freeModuleVarRefs(rt, module_var_refs);
+
+        const result = if (has_module_record)
+            try self.runEvalModuleWithVarRefs(&compiled.function, options.output, module_var_refs, options.timing)
+        else blk: {
+            const vm_start = monotonicNanos();
+            const value = if (options.output) |writer| blk_output: {
+                var vm_instance = exec.Vm.initWithOutput(self, writer);
+                defer vm_instance.deinit();
+                break :blk_output try vm_instance.run(&compiled.function);
+            } else blk_no_output: {
+                var vm_instance = exec.Vm.init(self);
+                defer vm_instance.deinit();
+                break :blk_no_output try vm_instance.run(&compiled.function);
+            };
+            if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
+            break :blk value;
         };
-        self.gc_root_slices = .{
-            .{ .mutable = &self.class_prototypes },
+
+        const global_object = try exec.zjs_vm.contextGlobal(self);
+        const jobs_start = monotonicNanos();
+        try exec.zjs_vm.drainPendingPromiseJobs(self, options.output, global_object);
+        if (options.timing) |timing| timing.promise_jobs_ns += elapsedNanosSince(jobs_start);
+
+        if (options.mode == .script and options.discard_script_result) {
+            result.free(rt);
+            return JSValue.undefinedValue();
+        }
+        return result;
+    }
+
+    fn initializeNativeSyntheticModules(self: *JSContext) !void {
+        const global_object = try exec.zjs_vm.contextGlobal(self);
+        for (self.runtime.modules.modules) |record| {
+            if (record.synthetic_kind != .native_std and record.synthetic_kind != .native_os) continue;
+            _ = try exec.module.initializeSyntheticFileModule(self, global_object, record.module_name, "");
+        }
+    }
+
+    fn runEvalModuleWithVarRefs(
+        self: *JSContext,
+        function: *const bytecode.Bytecode,
+        output: ?*std.Io.Writer,
+        module_var_refs: []const JSValue,
+        timing: ?*ContextEvalTiming,
+    ) !JSValue {
+        const rt = self.runtime;
+        var continuation_value = (try Object.create(rt, @import("class.zig").ids.generator, null)).value();
+        defer continuation_value.free(rt);
+        const continuation = try exec.property_ops.expectObject(continuation_value);
+        var resume_value: ?JSValue = null;
+        var resume_value_symbol_rooted = false;
+        defer if (resume_value) |value| {
+            if (resume_value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(value);
+            value.free(rt);
         };
-        self.gc_root_frame = .{
-            .slices = &self.gc_root_slices,
-            .values = &self.gc_root_values,
+
+        while (true) {
+            var stack = exec.stack.Stack.init(&rt.memory, self.stack_limit);
+            defer stack.deinit(rt);
+            const vm_start = monotonicNanos();
+            const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(
+                self,
+                &stack,
+                function,
+                output,
+                module_var_refs,
+                continuation,
+                resume_value,
+            ) catch |err| return moduleResolutionError(err);
+            if (timing) |item| item.vm_run_ns += elapsedNanosSince(vm_start);
+            if (resume_value) |value| {
+                if (resume_value_symbol_rooted) {
+                    rt.unregisterExternalValueSymbolRoot(value);
+                    resume_value_symbol_rooted = false;
+                }
+                value.free(rt);
+                resume_value = null;
+            }
+
+            if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
+                resume_value = result;
+                resume_value_symbol_rooted = try rt.registerExternalValueSymbolRoot(result);
+                const global_object = try exec.zjs_vm.contextGlobal(self);
+                const jobs_start = monotonicNanos();
+                try exec.zjs_vm.drainPendingPromiseJobs(self, output, global_object);
+                if (timing) |item| item.promise_jobs_ns += elapsedNanosSince(jobs_start);
+                continue;
+            }
+
+            return result;
+        }
+    }
+
+    fn rootProvider(self: *JSContext) runtime_mod.RootProvider {
+        return .{
+            .context = self,
+            .trace = traceRootProvider,
         };
     }
 
-    pub fn ensurePendingPromiseJobCapacity(self: *Context, min_capacity: usize) !void {
+    fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        const self: *JSContext = @ptrCast(@alignCast(context));
+        try self.traceRoots(visitor);
+    }
+
+    pub fn ensurePendingPromiseJobCapacity(self: *JSContext, min_capacity: usize) !void {
         if (self.pending_promise_jobs_capacity >= min_capacity) return;
         var next_capacity = if (self.pending_promise_jobs_capacity == 0) @as(usize, 4) else self.pending_promise_jobs_capacity * 2;
         while (next_capacity < min_capacity) : (next_capacity *= 2) {}
@@ -439,12 +696,12 @@ pub const Context = struct {
         }
     }
 
-    pub fn peekPendingPromiseJobSequence(self: Context) ?u64 {
+    pub fn peekPendingPromiseJobSequence(self: JSContext) ?u64 {
         if (self.pending_promise_jobs.len == 0) return null;
         return self.pending_promise_jobs[0].sequence;
     }
 
-    pub fn takePendingPromiseJob(self: *Context) ?PendingPromiseJob {
+    pub fn takePendingPromiseJob(self: *JSContext) ?PendingPromiseJob {
         if (self.pending_promise_jobs.len == 0) return null;
         const job = self.pending_promise_jobs[0];
         const old_len = self.pending_promise_jobs.len;
@@ -460,7 +717,7 @@ pub const Context = struct {
         return job;
     }
 
-    pub fn ensureOsTimerCapacity(self: *Context, min_capacity: usize) !void {
+    pub fn ensureOsTimerCapacity(self: *JSContext, min_capacity: usize) !void {
         if (self.os_timers_capacity >= min_capacity) return;
         var next_capacity = if (self.os_timers_capacity == 0) @as(usize, 2) else self.os_timers_capacity * 2;
         while (next_capacity < min_capacity) : (next_capacity *= 2) {}
@@ -476,7 +733,7 @@ pub const Context = struct {
         }
     }
 
-    pub fn removeOsTimerAt(self: *Context, index: usize) void {
+    pub fn removeOsTimerAt(self: *JSContext, index: usize) void {
         std.debug.assert(index < self.os_timers.len);
         const old_len = self.os_timers.len;
         const removed = self.os_timers[index];
@@ -493,7 +750,7 @@ pub const Context = struct {
         removed.deinit(self.runtime);
     }
 
-    pub fn ensureOsRwHandlerCapacity(self: *Context, min_capacity: usize) !void {
+    pub fn ensureOsRwHandlerCapacity(self: *JSContext, min_capacity: usize) !void {
         if (self.os_rw_handlers_capacity >= min_capacity) return;
         var next_capacity = if (self.os_rw_handlers_capacity == 0) @as(usize, 2) else self.os_rw_handlers_capacity * 2;
         while (next_capacity < min_capacity) : (next_capacity *= 2) {}
@@ -509,7 +766,7 @@ pub const Context = struct {
         }
     }
 
-    pub fn removeOsRwHandlerAt(self: *Context, index: usize) void {
+    pub fn removeOsRwHandlerAt(self: *JSContext, index: usize) void {
         std.debug.assert(index < self.os_rw_handlers.len);
         const old_len = self.os_rw_handlers.len;
         const removed = self.os_rw_handlers[index];
@@ -526,7 +783,7 @@ pub const Context = struct {
         removed.deinit(self.runtime);
     }
 
-    pub fn ensureOsSignalHandlerCapacity(self: *Context, min_capacity: usize) !void {
+    pub fn ensureOsSignalHandlerCapacity(self: *JSContext, min_capacity: usize) !void {
         if (self.os_signal_handlers_capacity >= min_capacity) return;
         var next_capacity = if (self.os_signal_handlers_capacity == 0) @as(usize, 2) else self.os_signal_handlers_capacity * 2;
         while (next_capacity < min_capacity) : (next_capacity *= 2) {}
@@ -542,7 +799,7 @@ pub const Context = struct {
         }
     }
 
-    pub fn removeOsSignalHandlerAt(self: *Context, index: usize) void {
+    pub fn removeOsSignalHandlerAt(self: *JSContext, index: usize) void {
         std.debug.assert(index < self.os_signal_handlers.len);
         const old_len = self.os_signal_handlers.len;
         const removed = self.os_signal_handlers[index];
@@ -559,28 +816,28 @@ pub const Context = struct {
         removed.deinit(self.runtime);
     }
 
-    pub fn throwValue(self: *Context, value: Value) Value {
+    pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
         self.exception_slot.set(self.runtime, value);
-        return Value.exception();
+        return JSValue.exception();
     }
 
-    pub fn hasException(self: Context) bool {
+    pub fn hasException(self: JSContext) bool {
         return self.exception_slot.hasException();
     }
 
-    pub fn takeException(self: *Context) Value {
+    pub fn takeException(self: *JSContext) JSValue {
         return self.exception_slot.take();
     }
 
-    pub fn clearException(self: *Context) void {
+    pub fn clearException(self: *JSContext) void {
         self.exception_slot.clear(self.runtime);
     }
 
-    pub fn recordUnhandledRejection(self: *Context, value: Value) void {
+    pub fn recordUnhandledRejection(self: *JSContext, value: JSValue) void {
         self.recordUnhandledPromiseRejection(null, value);
     }
 
-    pub fn recordUnhandledPromiseRejection(self: *Context, promise: ?Value, value: Value) void {
+    pub fn recordUnhandledPromiseRejection(self: *JSContext, promise: ?JSValue, value: JSValue) void {
         self.unhandled_rejection_slot.set(self.runtime, value.dup());
         if (promise) |promise_value| {
             self.unhandled_rejection_promise_slot.set(self.runtime, promise_value.dup());
@@ -592,26 +849,26 @@ pub const Context = struct {
         }
     }
 
-    pub fn hasUnhandledRejection(self: Context) bool {
+    pub fn hasUnhandledRejection(self: JSContext) bool {
         return self.unhandled_rejection_slot.hasException();
     }
 
-    pub fn takeUnhandledRejection(self: *Context) Value {
+    pub fn takeUnhandledRejection(self: *JSContext) JSValue {
         self.unhandled_rejection_promise_slot.clear(self.runtime);
         return self.unhandled_rejection_slot.take();
     }
 
-    pub fn clearUnhandledRejection(self: *Context) void {
+    pub fn clearUnhandledRejection(self: *JSContext) void {
         self.unhandled_rejection_slot.clear(self.runtime);
         self.unhandled_rejection_promise_slot.clear(self.runtime);
     }
 
-    pub fn classPrototypeSlotCount(self: Context) usize {
+    pub fn classPrototypeSlotCount(self: JSContext) usize {
         return self.class_prototypes.len;
     }
 
     pub fn pushBacktraceFrame(
-        self: *Context,
+        self: *JSContext,
         function_name: atom.Atom,
         filename: atom.Atom,
         line_num: i32,
@@ -621,7 +878,7 @@ pub const Context = struct {
     }
 
     pub fn pushBacktraceFrameWithResolver(
-        self: *Context,
+        self: *JSContext,
         function_name: atom.Atom,
         filename: atom.Atom,
         line_num: i32,
@@ -651,7 +908,7 @@ pub const Context = struct {
         self.backtrace_frames = self.backtrace_frames.ptr[0 .. self.backtrace_frames.len + 1];
     }
 
-    pub fn popBacktraceFrame(self: *Context) void {
+    pub fn popBacktraceFrame(self: *JSContext) void {
         if (self.backtrace_frames.len == 0) return;
         const idx = self.backtrace_frames.len - 1;
         const entry = self.backtrace_frames[idx];
@@ -660,19 +917,19 @@ pub const Context = struct {
         self.runtime.atoms.free(entry.filename);
     }
 
-    pub fn updateBacktracePc(self: *Context, pc: usize) void {
+    pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
         if (self.backtrace_frames.len == 0) return;
         const idx = self.backtrace_frames.len - 1;
         self.backtrace_frames[idx].pc_source = null;
         self.backtrace_frames[idx].pc = pc;
     }
 
-    pub fn borrowBacktracePc(self: *Context, pc_source: *const usize) void {
+    pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void {
         if (self.backtrace_frames.len == 0) return;
         self.backtrace_frames[self.backtrace_frames.len - 1].pc_source = pc_source;
     }
 
-    pub fn updateBacktraceLocation(self: *Context, pc: usize, line_num: i32, col_num: i32) void {
+    pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void {
         if (self.backtrace_frames.len == 0) return;
         const idx = self.backtrace_frames.len - 1;
         self.backtrace_frames[idx].pc_source = null;
@@ -681,3 +938,50 @@ pub const Context = struct {
         self.backtrace_frames[idx].col_num = col_num;
     }
 };
+
+fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
+    return switch (err) {
+        error.MissingExport, error.AmbiguousExport => error.SyntaxError,
+        else => err,
+    };
+}
+
+fn forceRuntimeStrict(function: *bytecode.Bytecode) void {
+    function.flags.runtime_strict = true;
+    for (function.constants.values) |value| forceFunctionBytecodeRuntimeStrict(value);
+}
+
+fn forceFunctionBytecodeRuntimeStrict(value: JSValue) void {
+    if (!value.isFunctionBytecode()) return;
+    const header = value.objectHeader() orelse return;
+    const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", header);
+    function_bytecode.runtime_strict_mode = true;
+    for (function_bytecode.cpool) |child| forceFunctionBytecodeRuntimeStrict(child);
+}
+
+fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {
+    var saw_digit = false;
+    var saw_space_after_digit = false;
+    for (source_text) |ch| {
+        if (std.ascii.isDigit(ch)) {
+            if (saw_space_after_digit) return true;
+            saw_digit = true;
+        } else if (std.ascii.isWhitespace(ch)) {
+            if (saw_digit) saw_space_after_digit = true;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+fn elapsedNanosSince(start: u64) u64 {
+    const end = monotonicNanos();
+    return if (end > start) end - start else 0;
+}
+
+fn monotonicNanos() u64 {
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}

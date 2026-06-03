@@ -20,186 +20,186 @@ pub const Tag = struct {
     pub const float64: i32 = 8;
 };
 
-pub const Value = extern struct {
+pub const JSValue = extern struct {
     payload: u64,
     tag: i32,
     padding: i32 = 0,
 
-    pub fn int32(v: i32) Value {
+    pub fn int32(v: i32) JSValue {
         return .{ .payload = payloadFromI32(v), .tag = Tag.int };
     }
 
-    pub fn float64(v: f64) Value {
+    pub fn float64(v: f64) JSValue {
         return .{ .payload = @bitCast(v), .tag = Tag.float64 };
     }
 
-    pub fn boolean(v: bool) Value {
+    pub fn boolean(v: bool) JSValue {
         return .{ .payload = if (v) 1 else 0, .tag = Tag.boolean };
     }
 
-    pub fn shortBigInt(v: i64) Value {
+    pub fn shortBigInt(v: i64) JSValue {
         return .{ .payload = @bitCast(v), .tag = Tag.short_big_int };
     }
 
-    pub fn bigInt(header: *gc.Header) Value {
+    pub fn bigInt(header: *gc.Header) JSValue {
         return .{ .payload = @intFromPtr(header), .tag = Tag.big_int };
     }
 
-    pub fn string(header: *gc.Header) Value {
+    pub fn string(header: *gc.Header) JSValue {
         return .{ .payload = @intFromPtr(header), .tag = Tag.string };
     }
 
-    pub fn stringRope(header: *gc.Header) Value {
+    pub fn stringRope(header: *gc.Header) JSValue {
         return .{ .payload = @intFromPtr(header), .tag = Tag.string_rope };
     }
 
-    pub fn symbol(atom_id: u32) Value {
+    pub fn symbol(atom_id: u32) JSValue {
         return .{ .payload = atom_id, .tag = Tag.symbol };
     }
 
-    pub fn object(header: *gc.Header) Value {
+    pub fn object(header: *gc.Header) JSValue {
         return .{ .payload = @intFromPtr(header), .tag = Tag.object };
     }
 
-    pub fn module(header: *gc.Header) Value {
+    pub fn module(header: *gc.Header) JSValue {
         return .{ .payload = @intFromPtr(header), .tag = Tag.module };
     }
 
-    pub fn functionBytecode(header: *gc.GCObjectHeader) Value {
+    pub fn functionBytecode(header: *gc.GCObjectHeader) JSValue {
         return .{ .payload = @intFromPtr(header), .tag = Tag.function_bytecode };
     }
 
-    pub fn nullValue() Value {
+    pub fn nullValue() JSValue {
         return .{ .payload = 0, .tag = Tag.null_value };
     }
 
-    pub fn undefinedValue() Value {
+    pub fn undefinedValue() JSValue {
         return .{ .payload = 0, .tag = Tag.undefined_value };
     }
 
-    pub fn uninitialized() Value {
+    pub fn uninitialized() JSValue {
         return .{ .payload = 0, .tag = Tag.uninitialized };
     }
 
-    pub fn catchOffset(offset: i32) Value {
+    pub fn catchOffset(offset: i32) JSValue {
         return .{ .payload = payloadFromI32(offset), .tag = Tag.catch_offset };
     }
 
-    pub fn exception() Value {
+    pub fn exception() JSValue {
         return .{ .payload = 0, .tag = Tag.exception };
     }
 
-    pub fn isNumber(self: Value) bool {
+    pub fn isNumber(self: JSValue) bool {
         return self.tag == Tag.int or self.tag == Tag.float64;
     }
 
-    pub fn isBigInt(self: Value) bool {
+    pub fn isBigInt(self: JSValue) bool {
         return self.tag == Tag.big_int or self.tag == Tag.short_big_int;
     }
 
-    pub fn isBool(self: Value) bool {
+    pub fn isBool(self: JSValue) bool {
         return self.tag == Tag.boolean;
     }
 
-    pub fn isString(self: Value) bool {
+    pub fn isString(self: JSValue) bool {
         return self.tag == Tag.string or self.tag == Tag.string_rope;
     }
 
-    pub fn isSymbol(self: Value) bool {
+    pub fn isSymbol(self: JSValue) bool {
         return self.tag == Tag.symbol;
     }
 
-    pub fn isObject(self: Value) bool {
+    pub fn isObject(self: JSValue) bool {
         return self.tag == Tag.object;
     }
 
-    pub fn isNull(self: Value) bool {
+    pub fn isNull(self: JSValue) bool {
         return self.tag == Tag.null_value;
     }
 
-    pub fn isUndefined(self: Value) bool {
+    pub fn isUndefined(self: JSValue) bool {
         return self.tag == Tag.undefined_value;
     }
 
-    pub fn isUninitialized(self: Value) bool {
+    pub fn isUninitialized(self: JSValue) bool {
         return self.tag == Tag.uninitialized;
     }
 
-    pub fn isCatchOffset(self: Value) bool {
+    pub fn isCatchOffset(self: JSValue) bool {
         return self.tag == Tag.catch_offset;
     }
 
-    pub fn isException(self: Value) bool {
+    pub fn isException(self: JSValue) bool {
         return self.tag == Tag.exception;
     }
 
-    pub fn isModule(self: Value) bool {
+    pub fn isModule(self: JSValue) bool {
         return self.tag == Tag.module;
     }
 
-    pub fn isFunctionBytecode(self: Value) bool {
+    pub fn isFunctionBytecode(self: JSValue) bool {
         return self.tag == Tag.function_bytecode;
     }
 
-    pub inline fn requiresRefCount(self: Value) bool {
+    pub inline fn requiresRefCount(self: JSValue) bool {
         switch (self.tag) {
             Tag.big_int, Tag.string, Tag.string_rope, Tag.object, Tag.module, Tag.function_bytecode => return true,
             else => return false,
         }
     }
 
-    pub fn asInt32(self: Value) ?i32 {
+    pub fn asInt32(self: JSValue) ?i32 {
         if (self.tag == Tag.int) return payloadAsI32(self.payload);
         return null;
     }
 
-    pub fn asFloat64(self: Value) ?f64 {
+    pub fn asFloat64(self: JSValue) ?f64 {
         if (self.tag == Tag.float64) return @bitCast(self.payload);
         return null;
     }
 
-    pub fn asBool(self: Value) ?bool {
+    pub fn asBool(self: JSValue) ?bool {
         if (self.tag == Tag.boolean) return self.payload != 0;
         return null;
     }
 
-    pub fn asSymbolAtom(self: Value) ?u32 {
+    pub fn asSymbolAtom(self: JSValue) ?u32 {
         if (self.tag == Tag.symbol) return @truncate(self.payload);
         return null;
     }
 
-    pub fn asShortBigInt(self: Value) ?i64 {
+    pub fn asShortBigInt(self: JSValue) ?i64 {
         if (self.tag == Tag.short_big_int) return @bitCast(self.payload);
         return null;
     }
 
-    pub fn asCatchOffset(self: Value) ?i32 {
+    pub fn asCatchOffset(self: JSValue) ?i32 {
         if (self.tag == Tag.catch_offset) return payloadAsI32(self.payload);
         return null;
     }
 
-    pub fn refHeader(self: Value) ?*gc.Header {
+    pub fn refHeader(self: JSValue) ?*gc.Header {
         return switch (self.tag) {
             Tag.big_int, Tag.string, Tag.string_rope, Tag.object, Tag.module => ptrFromPayload(gc.Header, self.payload),
             else => null,
         };
     }
 
-    pub fn objectHeader(self: Value) ?*gc.GCObjectHeader {
+    pub fn objectHeader(self: JSValue) ?*gc.GCObjectHeader {
         return switch (self.tag) {
             Tag.function_bytecode => ptrFromPayload(gc.GCObjectHeader, self.payload),
             else => null,
         };
     }
 
-    pub fn dup(self: Value) Value {
+    pub fn dup(self: JSValue) JSValue {
         if (!self.requiresRefCount()) return self;
         if (self.refHeader()) |header| gc.retain(header);
         if (self.objectHeader()) |header| header.retain();
         return self;
     }
 
-    pub fn free(self: Value, rt: anytype) void {
+    pub fn free(self: JSValue, rt: anytype) void {
         if (!self.requiresRefCount()) return;
         if (rt.gc.phase == .deinit) {
             switch (self.tag) {
@@ -212,7 +212,7 @@ pub const Value = extern struct {
         if (self.objectHeader()) |header| gc.release(rt, header);
     }
 
-    pub fn same(self: Value, other: Value) bool {
+    pub fn same(self: JSValue, other: JSValue) bool {
         if (self.tag != other.tag) return false;
         return switch (self.tag) {
             Tag.null_value, Tag.undefined_value, Tag.uninitialized, Tag.exception => true,

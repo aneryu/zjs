@@ -1,5 +1,5 @@
 const core = @import("../core/root.zig");
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 const std = @import("std");
 
 pub const BuiltinFunction = struct {
@@ -11,7 +11,7 @@ pub const PrototypeMethod = enum(u32) {
     to_string = 1,
 };
 
-pub fn applyReturnThis(this_value: Value) Value {
+pub fn applyReturnThis(this_value: JSValue) JSValue {
     return this_value.dup();
 }
 
@@ -27,7 +27,7 @@ fn isAsciiBuiltinName(bytes: []const u8) bool {
     return true;
 }
 
-pub fn nativeFunction(rt: *core.Runtime, name: []const u8, length: i32) !core.Value {
+pub fn nativeFunction(rt: *core.JSRuntime, name: []const u8, length: i32) !core.JSValue {
     const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
     errdefer function_object.value().free(rt);
 
@@ -45,7 +45,7 @@ pub fn nativeFunction(rt: *core.Runtime, name: []const u8, length: i32) !core.Va
     //    property scan (the function object is fresh and the two
     //    visible keys are mutually distinct).
     const length_key = core.atom.predefinedId("length", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, length_key, core.Descriptor.data(core.Value.int32(length), false, false, true));
+    try function_object.defineOwnPropertyAssumingNew(rt, length_key, core.Descriptor.data(core.JSValue.int32(length), false, false, true));
 
     // ASCII fast path: every standard-globals / host-helpers entry
     // passes plain ASCII (`hasOwnProperty`, `toLocaleString`,
@@ -71,10 +71,10 @@ pub fn nativeFunction(rt: *core.Runtime, name: []const u8, length: i32) !core.Va
     return function_object.value();
 }
 
-pub fn sourceFunction(rt: *core.Runtime, name: []const u8, source: []const u8) !core.Value {
+pub fn sourceFunction(rt: *core.JSRuntime, name: []const u8, source: []const u8) !core.JSValue {
     const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
     var function_value = function_object.value();
-    var source_value = core.Value.undefinedValue();
+    var source_value = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &function_value },
         .{ .value = &source_value },
@@ -88,31 +88,31 @@ pub fn sourceFunction(rt: *core.Runtime, name: []const u8, source: []const u8) !
 
     errdefer {
         const failed_function = function_value;
-        function_value = core.Value.undefinedValue();
+        function_value = core.JSValue.undefinedValue();
         failed_function.free(rt);
     }
 
     try defineFunctionName(rt, function_object, name);
     const source_string = try core.string.String.createUtf8(rt, source);
     source_value = source_string.value();
-    function_object.functionSourceSlot().* = source_value.dup();
+    try function_object.setOptionalValueSlot(rt, function_object.functionSourceSlot(), source_value.dup());
     source_value.free(rt);
-    source_value = core.Value.undefinedValue();
+    source_value = core.JSValue.undefinedValue();
 
     return function_value;
 }
 
-pub fn defineNativeMethod(rt: *core.Runtime, target: *core.Object, name: []const u8, length: i32) !void {
+pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, name: []const u8, length: i32) !void {
     const method = try nativeFunction(rt, name, length);
     defer method.free(rt);
     try defineData(rt, target, name, method, true, false, true);
 }
 
 fn defineData(
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     target: *core.Object,
     name: []const u8,
-    value: core.Value,
+    value: core.JSValue,
     writable: bool,
     enumerable: bool,
     configurable: bool,
@@ -135,7 +135,7 @@ fn defineData(
     try target.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, writable, enumerable, configurable));
 }
 
-fn defineFunctionName(rt: *core.Runtime, function_object: *core.Object, name: []const u8) !void {
+fn defineFunctionName(rt: *core.JSRuntime, function_object: *core.Object, name: []const u8) !void {
     const name_string = try core.string.String.createUtf8(rt, name);
     const name_value = name_string.value();
     defer name_value.free(rt);
@@ -143,7 +143,7 @@ fn defineFunctionName(rt: *core.Runtime, function_object: *core.Object, name: []
 }
 
 test "sourceFunction roots function and source while attaching source text" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const old_threshold = rt.gcThreshold();
@@ -158,13 +158,13 @@ test "sourceFunction roots function and source while attaching source text" {
     try std.testing.expect(source_string.eqlBytes("function namedSource() { return 1; }"));
 }
 
-fn expectObject(value: core.Value) !*core.Object {
+fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
 }
 
-fn expectString(value: core.Value) !*core.string.String {
+fn expectString(value: core.JSValue) !*core.string.String {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isString()) return error.TypeError;
     return @fieldParentPtr("header", header);

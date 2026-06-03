@@ -5,31 +5,31 @@ const atom = @import("../core/atom.zig");
 const Atom = atom.Atom;
 const memory = @import("../core/memory.zig");
 const Object = @import("../core/object.zig").Object;
-const Value = @import("../core/value.zig").Value;
+const JSValue = @import("../core/value.zig").JSValue;
 
 pub const no_global_lexical_sync_index: usize = std.math.maxInt(usize);
 
 pub const Frame = struct {
     function: *const bytecode.Bytecode,
     pc: usize = 0,
-    this_value: Value = Value.undefinedValue(),
-    constructor_this_value: Value = Value.undefinedValue(),
-    current_function: Value = Value.undefinedValue(),
-    new_target: Value = Value.undefinedValue(),
-    arguments_object: ?Value = null,
+    this_value: JSValue = JSValue.undefinedValue(),
+    constructor_this_value: JSValue = JSValue.undefinedValue(),
+    current_function: JSValue = JSValue.undefinedValue(),
+    new_target: JSValue = JSValue.undefinedValue(),
+    arguments_object: ?JSValue = null,
     actual_arg_count: usize = 0,
-    locals: []Value = &.{},
-    args: []Value = &.{},
-    original_args: []Value = &.{},
-    inline_args: [4]Value = undefined,
-    inline_original_args: [4]Value = undefined,
+    locals: []JSValue = &.{},
+    args: []JSValue = &.{},
+    original_args: []JSValue = &.{},
+    inline_args: [4]JSValue = undefined,
+    inline_original_args: [4]JSValue = undefined,
     args_on_heap: bool = false,
     original_args_on_heap: bool = false,
-    var_refs: []Value = &.{},
+    var_refs: []JSValue = &.{},
     eval_local_names: []const Atom = &.{},
-    eval_local_slots: []Value = &.{},
+    eval_local_slots: []JSValue = &.{},
     eval_var_ref_names: []const Atom = &.{},
-    eval_var_refs: []const Value = &.{},
+    eval_var_refs: []JSValue = &.{},
     /// Per-slot TDZ flag mirroring QuickJS's `JS_UNINITIALIZED`
     /// sentinel: `true` means the slot is in the temporal dead
     /// zone; reads via `get_loc_check` / `put_loc_check` throw
@@ -53,10 +53,10 @@ pub const Frame = struct {
         const current_function = self.current_function;
         const new_target = self.new_target;
         const arguments_object = self.arguments_object;
-        self.this_value = Value.undefinedValue();
-        self.constructor_this_value = Value.undefinedValue();
-        self.current_function = Value.undefinedValue();
-        self.new_target = Value.undefinedValue();
+        self.this_value = JSValue.undefinedValue();
+        self.constructor_this_value = JSValue.undefinedValue();
+        self.current_function = JSValue.undefinedValue();
+        self.new_target = JSValue.undefinedValue();
         self.arguments_object = null;
 
         this_value.free(rt);
@@ -101,10 +101,10 @@ pub const Frame = struct {
         releaseValueSlice(rt, original_args);
         releaseValueSlice(rt, var_refs);
 
-        if (locals.len != 0) account.free(Value, locals);
-        if (args.len != 0 and args_on_heap) account.free(Value, args);
-        if (original_args.len != 0 and original_args_on_heap) account.free(Value, original_args);
-        if (var_refs.len != 0) account.free(Value, var_refs);
+        if (locals.len != 0) account.free(JSValue, locals);
+        if (args.len != 0 and args_on_heap) account.free(JSValue, args);
+        if (original_args.len != 0 and original_args_on_heap) account.free(JSValue, original_args);
+        if (var_refs.len != 0) account.free(JSValue, var_refs);
         if (locals_uninit.len != 0) account.free(bool, locals_uninit);
         if (global_lexical_sync_slots.len != 0) account.free(bool, global_lexical_sync_slots);
         if (global_lexical_sync_indices.len != 0) account.free(usize, global_lexical_sync_indices);
@@ -136,16 +136,16 @@ pub const Frame = struct {
         self.locals_uninit_count = count;
     }
 
-    pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: Value) !void {
+    pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
         if (index >= self.locals.len) {
-            const next = try account.alloc(Value, index + 1);
-            errdefer account.free(Value, next);
-            @memset(next, Value.undefinedValue());
+            const next = try account.alloc(JSValue, index + 1);
+            errdefer account.free(JSValue, next);
+            @memset(next, JSValue.undefinedValue());
             if (self.locals.len != 0) {
                 const old_locals = self.locals;
                 @memcpy(next[0..self.locals.len], self.locals);
                 self.locals = next;
-                account.free(Value, old_locals);
+                account.free(JSValue, old_locals);
             } else {
                 self.locals = next;
             }
@@ -159,10 +159,10 @@ pub const Frame = struct {
         self.locals[index] = value.dup();
     }
 
-    fn releaseValueSlice(rt: anytype, values: []Value) void {
+    fn releaseValueSlice(rt: anytype, values: []JSValue) void {
         for (values) |*slot| {
             const value = slot.*;
-            slot.* = Value.undefinedValue();
+            slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
     }

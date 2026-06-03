@@ -16,9 +16,9 @@ const expectSingleCodeUnit = helpers.expectSingleCodeUnit;
 const objectFromValue = @import("exec_helpers.zig").objectFromValue;
 
 test "M2.4: qjs_vm executes array for-of iterator protocol" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var sum = 0; for (let x of [1, 2, 3]) { sum = sum + x; } return sum; })()");
@@ -27,9 +27,9 @@ test "M2.4: qjs_vm executes array for-of iterator protocol" {
 }
 
 test "for-of does not expose cached iterator next state" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -69,9 +69,9 @@ test "for-of does not expose cached iterator next state" {
 }
 
 test "array destructuring keeps iterator state internal" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -118,9 +118,9 @@ test "array destructuring keeps iterator state internal" {
 }
 
 test "G1/P0: qjs_vm scopes for-in lexical head and simple array binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ let outer = 1; var tdz = false; try { for (const outer in { outer }) {} } catch (e) { tdz = e instanceof ReferenceError; } var obj = Object.create(null); obj.key = 1; var value; for (let [x] in obj) { value = x; } return tdz && typeof x === 'undefined' && value === 'k'; })()");
@@ -129,9 +129,9 @@ test "G1/P0: qjs_vm scopes for-in lexical head and simple array binding" {
 }
 
 test "G1/P0: qjs_vm for-in array head supports defaults" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var probe; for (let [_ = probe = function(){ return 3; }] in { '': 1 }) {} return probe(); })()");
@@ -140,18 +140,18 @@ test "G1/P0: qjs_vm for-in array head supports defaults" {
 }
 
 test "G1/P0: qjs_vm rejects duplicate for-in array head bindings" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.UnexpectedToken, parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ for (let [x, x] in {}) {} })()"));
 }
 
 test "F4: qjs_vm accepts of as an ordinary binding name" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var instance = 60; var of = 6; var g = 2; return instance / of / g; })()");
@@ -160,9 +160,9 @@ test "F4: qjs_vm accepts of as an ordinary binding name" {
 }
 
 test "M2.4: qjs_vm collection constructors call bytecode adders" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var key = {}; var value = {}; var seen = 0; var original = WeakMap.prototype.set; WeakMap.prototype.set = function(k, v) { seen = (k === key && v === value) ? 1 : 0; return original.call(this, k, v); }; var wm = new WeakMap([[key, value]]); return seen && wm.get(key) === value; })()");
@@ -171,9 +171,9 @@ test "M2.4: qjs_vm collection constructors call bytecode adders" {
 }
 
 test "M2.4: qjs_vm WeakMap getOrInsertComputed calls bytecode callback once" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var wm = new WeakMap(); var key = {}; var calls = 0; var first = wm.getOrInsertComputed(key, function(k) { calls = calls + (k === key ? 1 : 100); return 42; }); var second = wm.getOrInsertComputed(key, function() { calls = calls + 10; return 1; }); return first === 42 && second === 42 && wm.get(key) === 42 && calls === 1; })()");
@@ -182,9 +182,9 @@ test "M2.4: qjs_vm WeakMap getOrInsertComputed calls bytecode callback once" {
 }
 
 test "M2.4: qjs_vm WeakMap getOrInsertComputed rejects primitive keys before callback" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var wm = new WeakMap(); var called = 0; for (let key of [1, false, undefined, \"x\", null]) { assert.throws(TypeError, function(){ wm.getOrInsertComputed(key, function(){ called = 1; return 0; }); }); } return called === 0; })()");
@@ -193,9 +193,9 @@ test "M2.4: qjs_vm WeakMap getOrInsertComputed rejects primitive keys before cal
 }
 
 test "M2.4: qjs_vm constructs member Function and uses constructor realm prototype" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var other = $262.createRealm().global; var C = new other.Function(); C.prototype = null; var wm = Reflect.construct(WeakMap, [], C); return Object.getPrototypeOf(wm) === other.WeakMap.prototype; })()");
@@ -204,9 +204,9 @@ test "M2.4: qjs_vm constructs member Function and uses constructor realm prototy
 }
 
 test "G1/P4: qjs_vm dynamic constructor falls back to realm Object prototype" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var other = $262.createRealm().global; other.shared = null; var C = new other.Function('shared = this;'); C.prototype = null; new C(); return Object.getPrototypeOf(other.shared) === other.Object.prototype; })()");
@@ -215,9 +215,9 @@ test "G1/P4: qjs_vm dynamic constructor falls back to realm Object prototype" {
 }
 
 test "G1/P0: qjs_vm indirect eval uses escaped realm global" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var x = 'outside'; var result; var eval = $262.createRealm().global.eval; eval('var x = \"inside\";'); result = x; return result === 'outside'; })()");
@@ -226,9 +226,9 @@ test "G1/P0: qjs_vm indirect eval uses escaped realm global" {
 }
 
 test "G1/P0: qjs_vm cross-realm eval keeps lexical const in the eval realm" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -255,9 +255,9 @@ test "G1/P0: qjs_vm cross-realm eval keeps lexical const in the eval realm" {
 }
 
 test "G1/P0: qjs_vm cross-realm eval for-await uses target realm promise" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -294,15 +294,15 @@ test "G1/P0: qjs_vm cross-realm eval for-await uses target realm promise" {
     defer result.free(rt);
     const promise = objectFromValue(result);
     try std.testing.expectEqual(core.class.ids.promise, promise.class_id);
-    try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, ctx.cached_global.?);
+    try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, ctx.global.?);
     const settled = promise.promiseResult().?;
     try std.testing.expectEqual(true, settled.asBool().?);
 }
 
 test "G1/P0: qjs_vm cross-realm async generator yield-star uses target realm promise" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx,
@@ -349,15 +349,15 @@ test "G1/P0: qjs_vm cross-realm async generator yield-star uses target realm pro
     defer result.free(rt);
     const promise = objectFromValue(result);
     try std.testing.expectEqual(core.class.ids.promise, promise.class_id);
-    try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, ctx.cached_global.?);
+    try engine.exec.zjs_vm.drainPendingPromiseJobs(ctx, null, ctx.global.?);
     const settled = promise.promiseResult().?;
     try std.testing.expectEqual(true, settled.asBool().?);
 }
 
 test "G1/P0: qjs_vm scopes class declarations in switch case block" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ try { switch (0) { default: class X {} } X; return false; } catch (e) { return e instanceof ReferenceError; } })()");
@@ -366,9 +366,9 @@ test "G1/P0: qjs_vm scopes class declarations in switch case block" {
 }
 
 test "G1/P0: qjs_vm scopes function declarations in switch case block" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ try { switch (0) { default: async function *x() {} } x; return false; } catch (e) { return e instanceof ReferenceError; } })()");
@@ -377,9 +377,9 @@ test "G1/P0: qjs_vm scopes function declarations in switch case block" {
 }
 
 test "M3.1 F4: qjs_vm ignores non-object __proto__ initializer values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var obj = { __proto__: 1 }; return !obj.hasOwnProperty(\"__proto__\") && Object.getPrototypeOf(obj) === Object.prototype; })()");
@@ -388,9 +388,9 @@ test "M3.1 F4: qjs_vm ignores non-object __proto__ initializer values" {
 }
 
 test "M3.1 F4: qjs_vm object literal defines own property over inherited readonly" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ Object.defineProperty(Object.prototype, \"prop\", { value: 100, writable: false, configurable: true }); var obj = { prop: 12 }; return obj.hasOwnProperty(\"prop\") && obj.prop === 12; })()");
@@ -399,9 +399,9 @@ test "M3.1 F4: qjs_vm object literal defines own property over inherited readonl
 }
 
 test "M3.1 F4: qjs_vm preserves computed property evaluation order" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var counter = 0; var obj = { [++counter]: ++counter, [++counter]: ++counter, [++counter]: ++counter }; var keys = Object.getOwnPropertyNames(obj); return keys[0] === \"1\" && obj[1] === 2 && keys[1] === \"3\" && obj[3] === 4 && keys[2] === \"5\" && obj[5] === 6; })()");
@@ -410,9 +410,9 @@ test "M3.1 F4: qjs_vm preserves computed property evaluation order" {
 }
 
 test "M3.1 F4: qjs_vm stringifies non-canonical numeric accessor names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var value; var obj = { get [0.0000001]() { return 7; }, set [0.0000001](v) { value = v; } }; obj[\"1e-7\"] = 9; return obj[\"1e-7\"] === 7 && value === 9; })()");
@@ -421,27 +421,27 @@ test "M3.1 F4: qjs_vm stringifies non-canonical numeric accessor names" {
 }
 
 test "M3.1 F4: qjs_vm throws when computed accessor key cannot convert to property key" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.TypeError, parseAndRunWithTopLevelChildren(rt, ctx, "({ get [Object.create(null)]() { return 1; } })"));
 }
 
 test "M3.1 F4: qjs_vm propagates constructed Test262Error" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.Test262Error, parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ throw new Test262Error(); })()"));
 }
 
 test "M3.1 F4: qjs_vm assert.throws executes bytecode callbacks" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var thrower = function(){ throw new Test262Error(); }; assert.throws(Test262Error, function(){ ({ get [thrower()]() {} }); }); return 1; })()");
@@ -450,9 +450,9 @@ test "M3.1 F4: qjs_vm assert.throws executes bytecode callbacks" {
 }
 
 test "M3.1 F4: bytecode function prototype exposes constructor" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ function Test262Error(message) { this.message = message || \"\"; } var err = new Test262Error(); return err.constructor === Test262Error && err.constructor.name === \"Test262Error\"; })()");
@@ -461,9 +461,9 @@ test "M3.1 F4: bytecode function prototype exposes constructor" {
 }
 
 test "M3.1 F4: bitwise operators use ToPrimitive number order" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var trace = \"\"; var lhs = { valueOf: function(){ trace += \"l\"; return Symbol(\"x\"); } }; var rhs = { valueOf: function(){ trace += \"r\"; return 1; } }; try { lhs & rhs; } catch (e) { return trace === \"l\" && e instanceof TypeError && (~-5.4321 === ~-5) && (~new Number(-0.1) === -1); } return false; })()");
@@ -472,7 +472,7 @@ test "M3.1 F4: bitwise operators use ToPrimitive number order" {
 }
 
 test "M3.1 F4: script label resolution converges for large shift if chains" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var source = std.ArrayList(u8).empty;
@@ -488,9 +488,9 @@ test "M3.1 F4: script label resolution converges for large shift if chains" {
 }
 
 test "M3.1 F4: qjs_vm assert.throws runs callback before matching TypeError" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var called = 0; var badKey = Object.create(null); assert.throws(TypeError, function(){ called = 1; ({ get [badKey]() {} }); }); return called; })()");
@@ -499,9 +499,9 @@ test "M3.1 F4: qjs_vm assert.throws runs callback before matching TypeError" {
 }
 
 test "M3.1 F4: direct eval writes caller local object binding" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.Context.create(rt);
+    const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
     const result = try parseAndRunWithTopLevelChildren(rt, ctx, "(function(){ var o; eval(\"o = {x: 7};\"); return o.x; })()");

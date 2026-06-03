@@ -15,10 +15,10 @@ const ParseState = zjs_parser.ParseState;
 const op = engine.bytecode.opcode.op;
 
 const TestEnv = struct {
-    rt: *engine.core.runtime.Runtime,
+    rt: *engine.core.runtime.JSRuntime,
 
     fn init() !TestEnv {
-        return .{ .rt = try engine.core.runtime.Runtime.create(std.testing.allocator) };
+        return .{ .rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator) };
     }
     fn deinit(self: *TestEnv) void {
         self.rt.destroy();
@@ -159,7 +159,7 @@ fn expectAtomName(env: *TestEnv, atom_id: engine.core.Atom, expected: []const u8
     try std.testing.expectEqualStrings(expected, name);
 }
 
-fn functionBytecodeFromValue(value: engine.core.Value) ?*const engine.bytecode.FunctionBytecode {
+fn functionBytecodeFromValue(value: engine.core.JSValue) ?*const engine.bytecode.FunctionBytecode {
     if (!value.isFunctionBytecode()) return null;
     const header = value.objectHeader() orelse return null;
     return @fieldParentPtr("header", header);

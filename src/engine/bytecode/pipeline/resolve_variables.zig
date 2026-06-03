@@ -28,8 +28,8 @@ pub const Error = error{
     ClosureVarNotFound,
 };
 
-/// Context for variable resolution.
-pub const Context = struct {
+/// JSContext for variable resolution.
+pub const JSContext = struct {
     function: *bytecode_function.Bytecode,
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
@@ -42,7 +42,7 @@ pub const Context = struct {
     /// (`quickjs.c:32377`) when `JSClosureType.GLOBAL` is selected.
     function_def: ?*const function_def_mod.FunctionDef = null,
 
-    pub fn init(function: *bytecode_function.Bytecode) Context {
+    pub fn init(function: *bytecode_function.Bytecode) JSContext {
         return .{
             .function = function,
             .memory = function.memory,
@@ -53,7 +53,7 @@ pub const Context = struct {
     pub fn initWithFunctionDef(
         function: *bytecode_function.Bytecode,
         fd: *const function_def_mod.FunctionDef,
-    ) Context {
+    ) JSContext {
         return .{
             .function = function,
             .memory = function.memory,
@@ -207,12 +207,12 @@ fn selectShortLoc(base_op: u8, idx: u16) ShortLocForm {
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
 
-fn shortOpcodesEnabled(ctx: *const Context) bool {
+fn shortOpcodesEnabled(ctx: *const JSContext) bool {
     const fd = ctx.function_def orelse return false;
     return fd.use_short_opcodes;
 }
 
-fn selectLocForm(ctx: *const Context, base_op: u8, idx: u16) ShortLocForm {
+fn selectLocForm(ctx: *const JSContext, base_op: u8, idx: u16) ShortLocForm {
     if (shortOpcodesEnabled(ctx)) return selectShortLoc(base_op, idx);
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
@@ -226,7 +226,7 @@ fn scopeChainContains(fd: *const function_def_mod.FunctionDef, start_scope: i32,
     return false;
 }
 
-fn lookupClosureVar(ctx: *const Context, atom_id: u32) ?u16 {
+fn lookupClosureVar(ctx: *const JSContext, atom_id: u32) ?u16 {
     const fd = ctx.function_def orelse return null;
     for (fd.closure_var, 0..) |cv, idx| {
         if (cv.var_name == atom_id) return @intCast(idx);
@@ -248,7 +248,7 @@ fn lookupClosureVar(ctx: *const Context, atom_id: u32) ?u16 {
     return null;
 }
 
-fn lookupTopLevelModuleLexicalClosureVar(ctx: *const Context, atom_id: u32, scope_level: i32) ?u16 {
+fn lookupTopLevelModuleLexicalClosureVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
     if (scope_level != 0) return null;
     const fd = ctx.function_def orelse return null;
     for (fd.closure_var, 0..) |cv, idx| {
@@ -257,7 +257,7 @@ fn lookupTopLevelModuleLexicalClosureVar(ctx: *const Context, atom_id: u32, scop
     return null;
 }
 
-fn preferTopLevelModuleClassBinding(ctx: *const Context, atom_id: u32, loc_idx: u16) ?u16 {
+fn preferTopLevelModuleClassBinding(ctx: *const JSContext, atom_id: u32, loc_idx: u16) ?u16 {
     const fd = ctx.function_def orelse return null;
     if (loc_idx >= fd.vars.len) return null;
     const vd = fd.vars[loc_idx];
@@ -268,13 +268,13 @@ fn preferTopLevelModuleClassBinding(ctx: *const Context, atom_id: u32, loc_idx: 
     return null;
 }
 
-fn closureVarKind(ctx: *const Context, idx: u16) function_def_mod.VarKind {
+fn closureVarKind(ctx: *const JSContext, idx: u16) function_def_mod.VarKind {
     const fd = ctx.function_def orelse return .normal;
     if (idx >= fd.closure_var.len) return .normal;
     return fd.closure_var[idx].var_kind;
 }
 
-fn closureVarKindForAtom(ctx: *const Context, atom_id: u32) function_def_mod.VarKind {
+fn closureVarKindForAtom(ctx: *const JSContext, atom_id: u32) function_def_mod.VarKind {
     const fd = ctx.function_def orelse return .normal;
     for (fd.closure_var) |cv| {
         if (cv.var_name == atom_id) return cv.var_kind;
@@ -294,7 +294,7 @@ fn closureVarKindForAtom(ctx: *const Context, atom_id: u32) function_def_mod.Var
     return .normal;
 }
 
-fn closureVarIsLexicalForAtom(ctx: *const Context, atom_id: u32) bool {
+fn closureVarIsLexicalForAtom(ctx: *const JSContext, atom_id: u32) bool {
     const fd = ctx.function_def orelse return true;
     for (fd.closure_var) |cv| {
         if (cv.var_name == atom_id) return cv.is_lexical;
@@ -309,7 +309,7 @@ fn closureVarIsLexicalForAtom(ctx: *const Context, atom_id: u32) bool {
     return true;
 }
 
-fn lowerScopeVarOpForClosure(ctx: *const Context, atom_id: u32, ref_idx: u16, op_id: u8) u8 {
+fn lowerScopeVarOpForClosure(ctx: *const JSContext, atom_id: u32, ref_idx: u16, op_id: u8) u8 {
     var ref_op = lowerScopeVarOpClosure(op_id);
     if (op_id == opcode.op.scope_get_var and (closureVarKind(ctx, ref_idx) == .function_decl or closureVarKindForAtom(ctx, atom_id) == .function_decl or !closureVarIsLexicalForAtom(ctx, atom_id))) {
         ref_op = opcode.op.get_var_ref;
@@ -337,7 +337,7 @@ const PrivateFieldResolution = struct {
     var_kind: function_def_mod.VarKind,
 };
 
-fn resolvePrivateField(ctx: *const Context, atom_id: u32, scope_level: i32) ?PrivateFieldResolution {
+fn resolvePrivateField(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?PrivateFieldResolution {
     const fd = ctx.function_def orelse return null;
 
     var scope_idx = scope_level;
@@ -374,11 +374,11 @@ fn isPrivateVarKind(kind: function_def_mod.VarKind) bool {
     };
 }
 
-fn privateAccessorSize(ctx: *const Context, res: PrivateFieldResolution) usize {
+fn privateAccessorSize(ctx: *const JSContext, res: PrivateFieldResolution) usize {
     return if (res.is_ref) selectVarRefForm(ctx, opcode.op.get_var_ref, res.idx).size else selectLocForm(ctx, opcode.op.get_loc, res.idx).size;
 }
 
-fn writePrivateAccessor(ctx: *const Context, output: []u8, out_idx: *usize, res: PrivateFieldResolution) void {
+fn writePrivateAccessor(ctx: *const JSContext, output: []u8, out_idx: *usize, res: PrivateFieldResolution) void {
     if (res.is_ref) {
         const form = selectVarRefForm(ctx, opcode.op.get_var_ref, res.idx);
         output[out_idx.*] = form.op_id;
@@ -402,7 +402,7 @@ fn writePrivateAccessor(ctx: *const Context, output: []u8, out_idx: *usize, res:
     out_idx.* += form.size;
 }
 
-fn loweredPrivateFieldSize(ctx: *const Context, op_id: u8, res: PrivateFieldResolution) !usize {
+fn loweredPrivateFieldSize(ctx: *const JSContext, op_id: u8, res: PrivateFieldResolution) !usize {
     if (res.var_kind != .private_field and op_id != opcode.op.scope_in_private_field) return error.ClosureVarNotFound;
     const accessor_size = privateAccessorSize(ctx, res);
     return switch (op_id) {
@@ -414,7 +414,7 @@ fn loweredPrivateFieldSize(ctx: *const Context, op_id: u8, res: PrivateFieldReso
     };
 }
 
-fn writeLoweredPrivateField(ctx: *const Context, output: []u8, out_idx: *usize, op_id: u8, res: PrivateFieldResolution) !void {
+fn writeLoweredPrivateField(ctx: *const JSContext, output: []u8, out_idx: *usize, op_id: u8, res: PrivateFieldResolution) !void {
     if (res.var_kind != .private_field and op_id != opcode.op.scope_in_private_field) return error.ClosureVarNotFound;
     if (op_id == opcode.op.scope_get_private_field2) {
         output[out_idx.*] = opcode.op.dup;
@@ -425,7 +425,7 @@ fn writeLoweredPrivateField(ctx: *const Context, output: []u8, out_idx: *usize, 
     out_idx.* += 1;
 }
 
-fn isAncestorLocalOrArg(ctx: *const Context, atom_id: u32) bool {
+fn isAncestorLocalOrArg(ctx: *const JSContext, atom_id: u32) bool {
     const fd = ctx.function_def orelse return false;
     var maybe_parent = fd.parent;
     var depth: usize = 1;
@@ -465,7 +465,7 @@ fn selectShortVarRef(base_op: u8, idx: u16) ShortLocForm {
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
 
-fn selectVarRefForm(ctx: *const Context, base_op: u8, idx: u16) ShortLocForm {
+fn selectVarRefForm(ctx: *const JSContext, base_op: u8, idx: u16) ShortLocForm {
     if (shortOpcodesEnabled(ctx)) return selectShortVarRef(base_op, idx);
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
@@ -486,19 +486,19 @@ fn selectShortArg(base_op: u8, idx: u16) ShortLocForm {
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
 
-fn selectArgForm(ctx: *const Context, base_op: u8, idx: u16) ShortLocForm {
+fn selectArgForm(ctx: *const JSContext, base_op: u8, idx: u16) ShortLocForm {
     if (shortOpcodesEnabled(ctx)) return selectShortArg(base_op, idx);
     return .{ .op_id = base_op, .size = 3, .operand_size = 2 };
 }
 
-fn lookupArg(ctx: *const Context, atom_id: u32) ?u16 {
+fn lookupArg(ctx: *const JSContext, atom_id: u32) ?u16 {
     const fd = ctx.function_def orelse return null;
     const idx = fd.findArg(atom_id);
     if (idx < 0) return null;
     return @intCast(idx);
 }
 
-fn scopedLocalShadowsArg(ctx: *const Context, loc_idx: u16) bool {
+fn scopedLocalShadowsArg(ctx: *const JSContext, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (loc_idx >= fd.vars.len) return false;
     const vd = fd.vars[loc_idx];
@@ -517,7 +517,7 @@ fn lowerScopeVarOpArg(op_id: u8) ?u8 {
 /// index. Mirrors a simplified `find_var` (`quickjs.c:23378`) — this
 /// scan ignores arg vs var split. Full scope-chain walking with closure
 /// classification remains tied to the eval / closure residual tests.
-fn lookupLocal(ctx: *const Context, atom_id: u32) ?u16 {
+fn lookupLocal(ctx: *const JSContext, atom_id: u32) ?u16 {
     const fd = ctx.function_def orelse return null;
     const idx = fd.findVar(atom_id);
     if (idx < 0) return null;
@@ -532,7 +532,7 @@ fn lookupLocal(ctx: *const Context, atom_id: u32) ?u16 {
 /// NOTE: parent-scope traversal + `get_closure_var` synthesis is still
 /// incomplete for the remaining eval / arguments interaction debts. We keep
 /// this fallback local-only where the caller has not provided closure metadata.
-fn resolveScopeVar(ctx: *const Context, atom_id: u32, scope_level: i32) ?u16 {
+fn resolveScopeVar(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?u16 {
     const fd = ctx.function_def orelse return null;
 
     // Check the current scope level chain.
@@ -570,7 +570,7 @@ const LocalOrArg = union(enum) {
     arg: u16,
 };
 
-fn resolveLocalOrArg(ctx: *const Context, atom_id: u32, scope_level: i32) ?LocalOrArg {
+fn resolveLocalOrArg(ctx: *const JSContext, atom_id: u32, scope_level: i32) ?LocalOrArg {
     const local_idx = resolveScopeVar(ctx, atom_id, scope_level);
     if (local_idx) |idx| {
         if (scopedLocalShadowsArg(ctx, idx)) return .{ .local = idx };
@@ -583,37 +583,37 @@ fn resolveLocalOrArg(ctx: *const Context, atom_id: u32, scope_level: i32) ?Local
 /// True iff the local at `loc_idx` is a lexical (`let`/`const`) var
 /// — these need TDZ check variants. `var` slots return false (var
 /// is hoisted and starts as `undefined`, no TDZ).
-fn isLexicalLocal(ctx: *const Context, loc_idx: u16) bool {
+fn isLexicalLocal(ctx: *const JSContext, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (loc_idx >= fd.vars.len) return false;
     return fd.vars[loc_idx].is_lexical;
 }
 
-fn isEvalNonLexicalLocal(ctx: *const Context, loc_idx: u16) bool {
+fn isEvalNonLexicalLocal(ctx: *const JSContext, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (!fd.is_eval and !bytecodeFunctionIsEval(ctx)) return false;
     if (loc_idx >= fd.vars.len) return false;
     return !fd.vars[loc_idx].is_lexical;
 }
 
-fn bytecodeFunctionIsEval(ctx: *const Context) bool {
+fn bytecodeFunctionIsEval(ctx: *const JSContext) bool {
     const name = ctx.atoms.name(ctx.function.name) orelse return false;
     return std.mem.eql(u8, name, "<eval>");
 }
 
-fn isConstLocal(ctx: *const Context, loc_idx: u16) bool {
+fn isConstLocal(ctx: *const JSContext, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (loc_idx >= fd.vars.len) return false;
     return fd.vars[loc_idx].is_const;
 }
 
-fn localTdzEmittedAtDecl(ctx: *const Context, loc_idx: u16) bool {
+fn localTdzEmittedAtDecl(ctx: *const JSContext, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (loc_idx >= fd.vars.len) return false;
     return fd.vars[loc_idx].tdz_emitted_at_decl;
 }
 
-fn isTopLevelGlobalLexical(ctx: *const Context, atom_id: u32, loc_idx: u16) bool {
+fn isTopLevelGlobalLexical(ctx: *const JSContext, atom_id: u32, loc_idx: u16) bool {
     const fd = ctx.function_def orelse return false;
     if (!fd.persist_global_lexical) return false;
     if (loc_idx >= fd.vars.len) return false;
@@ -625,7 +625,7 @@ fn isTopLevelGlobalLexical(ctx: *const Context, atom_id: u32, loc_idx: u16) bool
     return false;
 }
 
-fn useUncheckedLexicalLocals(ctx: *const Context) bool {
+fn useUncheckedLexicalLocals(ctx: *const JSContext) bool {
     const fd = ctx.function_def orelse return false;
     return fd.use_short_opcodes;
 }
@@ -687,7 +687,7 @@ fn labelOperandOffset(op_id: u8) ?usize {
     };
 }
 
-pub fn run(ctx: *Context) !void {
+pub fn run(ctx: *JSContext) !void {
     const func = ctx.function;
 
     // First pass: compute output size (in bytes) and atom count.

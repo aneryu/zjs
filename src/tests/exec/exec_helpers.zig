@@ -3,7 +3,7 @@ const engine = @import("quickjs_zig_engine");
 
 const core = engine.core;
 
-pub fn makeFunction(rt: *core.Runtime, code: []const u8) !engine.bytecode.Bytecode {
+pub fn makeFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
     const name = try rt.internAtom("exec");
     defer rt.atoms.free(name);
     var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
@@ -12,14 +12,14 @@ pub fn makeFunction(rt: *core.Runtime, code: []const u8) !engine.bytecode.Byteco
     return function;
 }
 
-pub fn runFunction(rt: *core.Runtime, ctx: *core.Context, function: *const engine.bytecode.Bytecode) !core.Value {
+pub fn runFunction(rt: *core.JSRuntime, ctx: *core.JSContext, function: *const engine.bytecode.Bytecode) !core.JSValue {
     _ = rt;
     var vm_instance = engine.exec.Vm.init(ctx);
     defer vm_instance.deinit();
     return vm_instance.run(function);
 }
 
-pub fn objectFromValue(value: core.Value) *core.Object {
+pub fn objectFromValue(value: core.JSValue) *core.Object {
     const header = value.refHeader().?;
     return @fieldParentPtr("header", header);
 }
@@ -35,7 +35,7 @@ pub fn expectActiveSetStrings(object: *core.Object, comptime expected: []const [
     try std.testing.expectEqual(expected.len, active_index);
 }
 
-pub fn expectStringValueBytes(value: core.Value, expected: []const u8) !void {
+pub fn expectStringValueBytes(value: core.JSValue, expected: []const u8) !void {
     try std.testing.expect(value.isString());
     const header = value.refHeader().?;
     const string: *core.string.String = @fieldParentPtr("header", header);
@@ -52,15 +52,15 @@ pub fn expectStringValueBytes(value: core.Value, expected: []const u8) !void {
 
 pub var job_counter: usize = 0;
 
-pub fn countJob(_: *core.Context, _: []const core.Value) core.Value {
+pub fn countJob(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
     job_counter += 1;
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-pub fn countJobArgs(ctx: *core.Context, args: []const core.Value) core.Value {
+pub fn countJobArgs(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue {
     _ = ctx;
     for (args) |arg| job_counter += @intCast(arg.asInt32().?);
-    return core.Value.int32(@intCast(args.len));
+    return core.JSValue.int32(@intCast(args.len));
 }
 
 // -----------------------------------------------------------------
@@ -69,7 +69,7 @@ pub fn countJobArgs(ctx: *core.Context, args: []const core.Value) core.Value {
 //
 // Each `test "X" {}` block traditionally does:
 //
-//     var js = try engine.Engine.init(std.testing.allocator);
+//     var js = try engine.harness.Engine.init(std.testing.allocator);
 //     defer js.deinit();
 //     ...
 //
@@ -93,7 +93,7 @@ pub fn countJobArgs(ctx: *core.Context, args: []const core.Value) core.Value {
 // `installHostGlobals`. Tests that mutate built-in objects (e.g.
 // `Promise.resolve = ...`) or rely on freshly built closures
 // referencing the previous test's eval scope still need a fresh
-// `engine.Engine.init` per call; the shared-engine pattern is
+// `engine.harness.Engine.init` per call; the shared-engine pattern is
 // safe for tests that only declare new locals / vars / functions
 // and read the standard globals.
 //
@@ -105,15 +105,15 @@ pub fn countJobArgs(ctx: *core.Context, args: []const core.Value) core.Value {
 // `std.testing.allocator`; those are independent of the engine and
 // continue to be leak-checked the usual way.
 
-var shared_engine_storage: ?engine.Engine = null;
+var shared_engine_storage: ?engine.harness.Engine = null;
 var shared_engine_baseline_property_count: usize = 0;
 var shared_engine_baseline_shape_prop_count: usize = 0;
 var shared_engine_baseline_shape_hash: u32 = 0;
 var shared_engine_baseline_shape_deleted_count: usize = 0;
 
-pub fn sharedTestEngine() *engine.Engine {
+pub fn sharedTestEngine() *engine.harness.Engine {
     if (shared_engine_storage == null) {
-        shared_engine_storage = engine.Engine.init(std.heap.page_allocator) catch unreachable;
+        shared_engine_storage = engine.harness.Engine.init(std.heap.page_allocator) catch unreachable;
         const eng = &shared_engine_storage.?;
         // Force the global object build (`installHostGlobals`) by
         // running an empty eval. This lets us snapshot the post-install
@@ -131,7 +131,7 @@ pub fn sharedTestEngine() *engine.Engine {
             const thrown = eng.context.takeUnhandledRejection();
             thrown.free(eng.runtime);
         }
-        if (eng.context.cached_global) |g| {
+        if (eng.context.global) |g| {
             shared_engine_baseline_property_count = g.properties.len;
             shared_engine_baseline_shape_prop_count = g.shape_ref.prop_count;
             shared_engine_baseline_shape_hash = g.shape_ref.hash;
@@ -157,7 +157,7 @@ pub fn endSharedTest() void {
     // tests that schedule a promise via `Promise.resolve(...)` and
     // return without awaiting would otherwise leak the job into the
     // next test.
-    eng.job_queue.runAll();
+    eng.runtime.job_queue.runAll();
     if (eng.context.hasException()) {
         const thrown = eng.context.takeException();
         thrown.free(eng.runtime);
@@ -167,12 +167,12 @@ pub fn endSharedTest() void {
         thrown.free(eng.runtime);
     }
     engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(eng.context);
-    if (eng.context.cached_global) |global| {
+    if (eng.context.global) |global| {
         // Reset global lexical bindings (let / const) so the next
         // test can re-declare any name without triggering a
         // redeclaration SyntaxError.
-        if (global.global_lexical_env) |env| {
-            global.global_lexical_env = null;
+        if (eng.context.lexicals) |env| {
+            eng.context.lexicals = null;
             env.value().free(eng.runtime);
         }
         // Remove any user-added properties (`var x = ...`,

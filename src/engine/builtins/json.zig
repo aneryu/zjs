@@ -41,7 +41,7 @@ pub fn methodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn stringify(rt: *core.Runtime, value: core.Value, replacer: core.Value, space: core.Value) !core.Value {
+pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValue, space: core.JSValue) !core.JSValue {
     var rooted_value = value;
     var rooted_replacer = replacer;
     var rooted_space = space;
@@ -57,7 +57,7 @@ pub fn stringify(rt: *core.Runtime, value: core.Value, replacer: core.Value, spa
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    if (rooted_value.isUndefined()) return core.Value.undefinedValue();
+    if (rooted_value.isUndefined()) return core.JSValue.undefinedValue();
 
     const property_list = try stringifyPropertyList(rt, rooted_replacer);
     defer freePropertyList(rt, property_list);
@@ -70,12 +70,12 @@ pub fn stringify(rt: *core.Runtime, value: core.Value, replacer: core.Value, spa
     var stack = std.ArrayList(*core.Object).empty;
     defer stack.deinit(rt.memory.allocator);
     try appendJsonValue(rt, &buffer, rooted_value, false, &stack, options, 0);
-    if (buffer.items.len == 0) return core.Value.undefinedValue();
+    if (buffer.items.len == 0) return core.JSValue.undefinedValue();
 
     return try createJsonStringValue(rt, buffer.items);
 }
 
-pub fn parse(rt: *core.Runtime, global: ?*core.Object, value: core.Value) !core.Value {
+pub fn parse(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -98,10 +98,10 @@ pub fn parse(rt: *core.Runtime, global: ?*core.Object, value: core.Value) !core.
     return try valueFromStdJson(rt, global, parsed.value);
 }
 
-pub fn rawJSON(rt: *core.Runtime, value: core.Value) !core.Value {
+pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
-    var object_value = core.Value.undefinedValue();
-    var text = core.Value.undefinedValue();
+    var object_value = core.JSValue.undefinedValue();
+    var text = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
         .{ .value = &object_value },
@@ -136,13 +136,13 @@ pub fn rawJSON(rt: *core.Runtime, value: core.Value) !core.Value {
     object_value = object.value();
     errdefer {
         const failed_object = object_value;
-        object_value = core.Value.undefinedValue();
+        object_value = core.JSValue.undefinedValue();
         failed_object.free(rt);
     }
     text = try createJsonStringValue(rt, bytes.items);
     defer {
         const owned_text = text;
-        text = core.Value.undefinedValue();
+        text = core.JSValue.undefinedValue();
         owned_text.free(rt);
     }
     try defineData(rt, object, core.atom.ids.rawJSON, text, true);
@@ -153,7 +153,7 @@ fn isRawJsonEdgeWhitespace(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r';
 }
 
-pub fn isRawJSON(value: core.Value) bool {
+pub fn isRawJSON(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -168,7 +168,7 @@ pub fn parseInt(bytes: []const u8) !i32 {
     return std.fmt.parseInt(i32, bytes, 10);
 }
 
-pub fn createJsonStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+pub fn createJsonStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     const str = if (jsonBytesAreAscii(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
@@ -183,14 +183,14 @@ fn jsonBytesAreAscii(bytes: []const u8) bool {
     return true;
 }
 
-fn createSimpleJsonAsciiStringValue(rt: *core.Runtime, bytes: []const u8) !core.Value {
+fn createSimpleJsonAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
     return (try core.string.String.createAscii(rt, bytes)).value();
 }
 
-fn appendJsonValue(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value, array_slot: bool, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
+fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue, array_slot: bool, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     var rooted_value = value;
-    var raw = core.Value.undefinedValue();
-    var primitive = core.Value.undefinedValue();
+    var raw = core.JSValue.undefinedValue();
+    var primitive = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
         .{ .value = &raw },
@@ -239,7 +239,7 @@ fn appendJsonValue(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
         } else if (isCallableJsonOmittedObject(object_value)) {
             try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
         } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.string or object_value.class_id == core.class.ids.boolean) {
-            primitive = try primitiveValue(rt, object_value) orelse core.Value.undefinedValue();
+            primitive = try primitiveValue(rt, object_value) orelse core.JSValue.undefinedValue();
             defer primitive.free(rt);
             try appendJsonValue(rt, buffer, primitive, array_slot, stack, options, depth);
         } else if (object_value.is_array) {
@@ -252,7 +252,7 @@ fn appendJsonValue(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendJsonArray(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
+fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     if (objectInStack(stack.items, object)) return error.TypeError;
     try stack.append(rt.memory.allocator, object);
     defer _ = stack.pop();
@@ -286,7 +286,7 @@ fn appendJsonArray(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.
     try buffer.append(rt.memory.allocator, ']');
 }
 
-fn appendJsonObject(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
+fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     if (objectInStack(stack.items, object)) return error.TypeError;
     try stack.append(rt.memory.allocator, object);
     defer _ = stack.pop();
@@ -334,12 +334,12 @@ fn appendJsonObject(rt: *core.Runtime, buffer: *std.ArrayList(u8), object: *core
 }
 
 const SimpleJsonParser = struct {
-    rt: *core.Runtime,
+    rt: *core.JSRuntime,
     global: ?*core.Object,
     bytes: []const u8,
     index: usize = 0,
 
-    fn parse(self: *SimpleJsonParser) !?core.Value {
+    fn parse(self: *SimpleJsonParser) !?core.JSValue {
         self.skipWhitespace();
         const value = self.parseValue() catch |err| switch (err) {
             error.UnsupportedSimpleJson => return null,
@@ -354,7 +354,7 @@ const SimpleJsonParser = struct {
         return value;
     }
 
-    fn parseValue(self: *SimpleJsonParser) SimpleJsonError!core.Value {
+    fn parseValue(self: *SimpleJsonParser) SimpleJsonError!core.JSValue {
         self.skipWhitespace();
         const byte = self.peek() orelse return error.UnsupportedSimpleJson;
         return switch (byte) {
@@ -364,15 +364,15 @@ const SimpleJsonParser = struct {
                 const text = try self.parseSimpleStringBytes();
                 break :blk try createSimpleJsonAsciiStringValue(self.rt, text);
             },
-            't' => if (self.consumeLiteral("true")) core.Value.boolean(true) else error.UnsupportedSimpleJson,
-            'f' => if (self.consumeLiteral("false")) core.Value.boolean(false) else error.UnsupportedSimpleJson,
-            'n' => if (self.consumeLiteral("null")) core.Value.nullValue() else error.UnsupportedSimpleJson,
+            't' => if (self.consumeLiteral("true")) core.JSValue.boolean(true) else error.UnsupportedSimpleJson,
+            'f' => if (self.consumeLiteral("false")) core.JSValue.boolean(false) else error.UnsupportedSimpleJson,
+            'n' => if (self.consumeLiteral("null")) core.JSValue.nullValue() else error.UnsupportedSimpleJson,
             '-', '0'...'9' => self.parseInt32Number(),
             else => error.UnsupportedSimpleJson,
         };
     }
 
-    fn parseObject(self: *SimpleJsonParser) !core.Value {
+    fn parseObject(self: *SimpleJsonParser) !core.JSValue {
         self.expectByte('{') catch return error.UnsupportedSimpleJson;
         const object = try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global));
         var object_value = object.value();
@@ -387,7 +387,7 @@ const SimpleJsonParser = struct {
         defer self.rt.active_value_roots = root_frame.previous;
         errdefer {
             const failed_object = object_value;
-            object_value = core.Value.undefinedValue();
+            object_value = core.JSValue.undefinedValue();
             failed_object.free(self.rt);
         }
         self.skipWhitespace();
@@ -420,7 +420,7 @@ const SimpleJsonParser = struct {
         }
     }
 
-    fn parseArray(self: *SimpleJsonParser) !core.Value {
+    fn parseArray(self: *SimpleJsonParser) !core.JSValue {
         self.expectByte('[') catch return error.UnsupportedSimpleJson;
         const object = try core.Object.createArray(self.rt, arrayPrototypeFromGlobal(self.rt, self.global));
         var object_value = object.value();
@@ -435,7 +435,7 @@ const SimpleJsonParser = struct {
         defer self.rt.active_value_roots = root_frame.previous;
         errdefer {
             const failed_object = object_value;
-            object_value = core.Value.undefinedValue();
+            object_value = core.JSValue.undefinedValue();
             failed_object.free(self.rt);
         }
         self.skipWhitespace();
@@ -480,7 +480,7 @@ const SimpleJsonParser = struct {
         return error.UnsupportedSimpleJson;
     }
 
-    fn parseInt32Number(self: *SimpleJsonParser) !core.Value {
+    fn parseInt32Number(self: *SimpleJsonParser) !core.JSValue {
         const start = self.index;
         if (self.consumeByte('-') and self.peek() == null) return error.UnsupportedSimpleJson;
         if (self.consumeByte('0')) {
@@ -496,9 +496,9 @@ const SimpleJsonParser = struct {
         if (self.peek()) |byte| {
             if (byte == '.' or byte == 'e' or byte == 'E') return error.UnsupportedSimpleJson;
         }
-        if (std.mem.eql(u8, self.bytes[start..self.index], "-0")) return core.Value.float64(-0.0);
+        if (std.mem.eql(u8, self.bytes[start..self.index], "-0")) return core.JSValue.float64(-0.0);
         const parsed = std.fmt.parseInt(i32, self.bytes[start..self.index], 10) catch return error.UnsupportedSimpleJson;
-        return core.Value.int32(parsed);
+        return core.JSValue.int32(parsed);
     }
 
     fn skipWhitespace(self: *SimpleJsonParser) void {
@@ -533,21 +533,21 @@ const SimpleJsonParser = struct {
     }
 };
 
-fn parseSimpleJsonValue(rt: *core.Runtime, global: ?*core.Object, bytes: []const u8) !?core.Value {
+fn parseSimpleJsonValue(rt: *core.JSRuntime, global: ?*core.Object, bytes: []const u8) !?core.JSValue {
     var parser = SimpleJsonParser{ .rt = rt, .global = global, .bytes = bytes };
     return try parser.parse();
 }
 
-fn valueFromStdJson(rt: *core.Runtime, global: ?*core.Object, value: std.json.Value) !core.Value {
+fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.Value) !core.JSValue {
     return switch (value) {
-        .null => core.Value.nullValue(),
-        .bool => |bool_value| core.Value.boolean(bool_value),
+        .null => core.JSValue.nullValue(),
+        .bool => |bool_value| core.JSValue.boolean(bool_value),
         .integer => |int_value| if (int_value >= std.math.minInt(i32) and int_value <= std.math.maxInt(i32))
-            core.Value.int32(@intCast(int_value))
+            core.JSValue.int32(@intCast(int_value))
         else
-            core.Value.float64(@floatFromInt(int_value)),
-        .float => |float_value| core.Value.float64(float_value),
-        .number_string => |text| core.Value.float64(std.fmt.parseFloat(f64, text) catch std.math.nan(f64)),
+            core.JSValue.float64(@floatFromInt(int_value)),
+        .float => |float_value| core.JSValue.float64(float_value),
+        .number_string => |text| core.JSValue.float64(std.fmt.parseFloat(f64, text) catch std.math.nan(f64)),
         .string => |text| try createJsonStringValue(rt, text),
         .array => |array| blk: {
             const object = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
@@ -563,7 +563,7 @@ fn valueFromStdJson(rt: *core.Runtime, global: ?*core.Object, value: std.json.Va
             defer rt.active_value_roots = root_frame.previous;
             errdefer {
                 const failed_object = object_value;
-                object_value = core.Value.undefinedValue();
+                object_value = core.JSValue.undefinedValue();
                 failed_object.free(rt);
             }
             try object.reserveDenseArrayElements(rt, @intCast(array.items.len));
@@ -599,7 +599,7 @@ fn valueFromStdJson(rt: *core.Runtime, global: ?*core.Object, value: std.json.Va
             defer rt.active_value_roots = root_frame.previous;
             errdefer {
                 const failed_object = object_value;
-                object_value = core.Value.undefinedValue();
+                object_value = core.JSValue.undefinedValue();
                 failed_object.free(rt);
             }
             try object.reserveOwnPropertyCapacityAssumingPlain(rt, object_map.count());
@@ -626,15 +626,15 @@ fn valueFromStdJson(rt: *core.Runtime, global: ?*core.Object, value: std.json.Va
     };
 }
 
-fn objectPrototypeFromGlobal(rt: *core.Runtime, global: ?*core.Object) ?*core.Object {
+fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
     return constructorPrototypeFromGlobal(rt, global, "Object");
 }
 
-fn arrayPrototypeFromGlobal(rt: *core.Runtime, global: ?*core.Object) ?*core.Object {
+fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
     return constructorPrototypeFromGlobal(rt, global, "Array");
 }
 
-fn constructorPrototypeFromGlobal(rt: *core.Runtime, global: ?*core.Object, name: []const u8) ?*core.Object {
+fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8) ?*core.Object {
     const global_object = global orelse return null;
     const key = core.atom.predefinedId(name, .string) orelse return null;
     if (global_object.getOwnDataObjectBorrowed(key)) |ctor_object| {
@@ -667,14 +667,14 @@ fn isCallableJsonOmittedObject(object: *core.Object) bool {
         object.class_id == core.class.ids.bound_function;
 }
 
-fn isArrayObject(value: core.Value) bool {
+fn isArrayObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
     const object: *core.Object = @fieldParentPtr("header", header);
     return object.is_array;
 }
 
-fn stringifyPropertyList(rt: *core.Runtime, replacer: core.Value) ![]core.Atom {
+fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.Atom {
     var rooted_replacer = replacer;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_replacer },
@@ -721,9 +721,9 @@ fn stringifyPropertyList(rt: *core.Runtime, replacer: core.Value) ![]core.Atom {
     return try list.toOwnedSlice(rt.memory.allocator);
 }
 
-fn stringifyPropertyListAtom(rt: *core.Runtime, value: core.Value) !?core.Atom {
+fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.Atom {
     var rooted_value = value;
-    var primitive = core.Value.undefinedValue();
+    var primitive = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
         .{ .value = &primitive },
@@ -769,9 +769,9 @@ fn stringifyPropertyListAtom(rt: *core.Runtime, value: core.Value) !?core.Atom {
     return try stringifyPropertyListAtom(rt, primitive);
 }
 
-fn stringifyGap(rt: *core.Runtime, space: core.Value) !std.ArrayList(u8) {
+fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
     var rooted_space = space;
-    var primitive = core.Value.undefinedValue();
+    var primitive = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_space },
         .{ .value = &primitive },
@@ -820,7 +820,7 @@ fn stringifyGap(rt: *core.Runtime, space: core.Value) !std.ArrayList(u8) {
     return out;
 }
 
-fn primitiveValue(rt: *core.Runtime, object: *core.Object) !?core.Value {
+fn primitiveValue(rt: *core.JSRuntime, object: *core.Object) !?core.JSValue {
     _ = rt;
     if (object.class_id == core.class.ids.string) {
         if (object.objectData()) |value| return value.dup();
@@ -842,17 +842,17 @@ fn atomListContains(list: []const core.Atom, atom: core.Atom) bool {
     return false;
 }
 
-fn freePropertyList(rt: *core.Runtime, list: []core.Atom) void {
+fn freePropertyList(rt: *core.JSRuntime, list: []core.Atom) void {
     for (list) |atom| rt.atoms.free(atom);
     if (list.len != 0) rt.memory.allocator.free(list);
 }
 
-fn appendIndent(rt: *core.Runtime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
+fn appendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
     var index: usize = 0;
     while (index < depth) : (index += 1) try buffer.appendSlice(rt.memory.allocator, gap);
 }
 
-fn defineData(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom, value: core.Value, enumerable: bool) !void {
+fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, enumerable: bool) !void {
     var object_value = object.value();
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -869,9 +869,9 @@ fn defineData(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom, value
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, false, enumerable, false));
 }
 
-fn appendJsonInputString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     var rooted_value = value;
-    var primitive = core.Value.undefinedValue();
+    var primitive = core.JSValue.undefinedValue();
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
         .{ .value = &primitive },
@@ -910,7 +910,7 @@ fn appendJsonInputString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: c
     return error.TypeError;
 }
 
-pub fn appendJsonStringValue(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -933,7 +933,7 @@ pub fn appendJsonStringValue(rt: *core.Runtime, buffer: *std.ArrayList(u8), valu
     }
 }
 
-pub fn appendJsonAtomName(rt: *core.Runtime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void {
+pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_id: core.Atom) !void {
     if (core.atom.isTaggedInt(atom_id)) {
         var int_buf: [10]u8 = undefined;
         const printed = try std.fmt.bufPrint(&int_buf, "{d}", .{core.atom.atomToUInt32(atom_id)});
@@ -943,7 +943,7 @@ pub fn appendJsonAtomName(rt: *core.Runtime, buffer: *std.ArrayList(u8), atom_id
     return appendEscapedJsonString(rt, buffer, name);
 }
 
-pub fn appendEscapedJsonString(rt: *core.Runtime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
+pub fn appendEscapedJsonString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
     try buffer.append(rt.memory.allocator, '"');
     for (bytes) |byte| {
         try appendEscapedJsonByte(rt, buffer, byte);
@@ -951,7 +951,7 @@ pub fn appendEscapedJsonString(rt: *core.Runtime, buffer: *std.ArrayList(u8), by
     try buffer.append(rt.memory.allocator, '"');
 }
 
-fn appendEscapedJsonLatin1String(rt: *core.Runtime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
+fn appendEscapedJsonLatin1String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
     try buffer.append(rt.memory.allocator, '"');
     for (bytes) |byte| {
         if (byte <= 0x7f) {
@@ -963,7 +963,7 @@ fn appendEscapedJsonLatin1String(rt: *core.Runtime, buffer: *std.ArrayList(u8), 
     try buffer.append(rt.memory.allocator, '"');
 }
 
-fn appendEscapedJsonUtf16String(rt: *core.Runtime, buffer: *std.ArrayList(u8), units: []const u16) !void {
+fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
     try buffer.append(rt.memory.allocator, '"');
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
@@ -991,7 +991,7 @@ fn appendEscapedJsonUtf16String(rt: *core.Runtime, buffer: *std.ArrayList(u8), u
     try buffer.append(rt.memory.allocator, '"');
 }
 
-fn appendEscapedJsonByte(rt: *core.Runtime, buffer: *std.ArrayList(u8), byte: u8) !void {
+fn appendEscapedJsonByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
     switch (byte) {
         '"' => try buffer.appendSlice(rt.memory.allocator, "\\\""),
         '\\' => try buffer.appendSlice(rt.memory.allocator, "\\\\"),
@@ -1005,13 +1005,13 @@ fn appendEscapedJsonByte(rt: *core.Runtime, buffer: *std.ArrayList(u8), byte: u8
     }
 }
 
-fn appendEscapedJsonUnit(rt: *core.Runtime, buffer: *std.ArrayList(u8), unit: anytype) !void {
+fn appendEscapedJsonUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: anytype) !void {
     var escaped: [6]u8 = undefined;
     const text = try std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{unit});
     try buffer.appendSlice(rt.memory.allocator, text);
 }
 
-fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Value) !void {
+fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     var rooted_value = value;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -1047,7 +1047,7 @@ fn appendRawString(rt: *core.Runtime, buffer: *std.ArrayList(u8), value: core.Va
     }
 }
 
-fn appendUtf8CodePoint(rt: *core.Runtime, buffer: *std.ArrayList(u8), cp: u32) !void {
+fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
     if (cp <= 0x7f) {
         try buffer.append(rt.memory.allocator, @intCast(cp));
     } else if (cp <= 0x7ff) {

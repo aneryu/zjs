@@ -14,7 +14,7 @@ fn countOpcode(code: []const u8, opcode: u8) usize {
     return count;
 }
 
-fn functionBytecodeFromValue(value: core.Value) ?*const engine.bytecode.FunctionBytecode {
+fn functionBytecodeFromValue(value: core.JSValue) ?*const engine.bytecode.FunctionBytecode {
     if (!value.isFunctionBytecode()) return null;
     const header = value.objectHeader() orelse return null;
     return @fieldParentPtr("header", header);
@@ -88,7 +88,7 @@ fn expectFunctionKindRecursive(function: *const engine.bytecode.Bytecode, kind: 
     try std.testing.expect(functionHasKind(function, kind));
 }
 
-fn expectAtomOperandName(rt: *core.Runtime, function: *const engine.bytecode.Bytecode, expected: []const u8) !void {
+fn expectAtomOperandName(rt: *core.JSRuntime, function: *const engine.bytecode.Bytecode, expected: []const u8) !void {
     for (function.atom_operands) |atom_id| {
         if (rt.atoms.name(atom_id)) |name| {
             if (std.mem.eql(u8, name, expected)) return;
@@ -97,7 +97,7 @@ fn expectAtomOperandName(rt: *core.Runtime, function: *const engine.bytecode.Byt
     return error.TestExpectedEqual;
 }
 
-fn expectNoLiveDynamicAtom(rt: *core.Runtime, kind: core.atom.AtomKind, bytes: []const u8) !void {
+fn expectNoLiveDynamicAtom(rt: *core.JSRuntime, kind: core.atom.AtomKind, bytes: []const u8) !void {
     for (rt.atoms.entries) |entry| {
         if (!entry.isLive() or entry.kind != kind) continue;
         if (std.mem.eql(u8, entry.bytes, bytes)) {
@@ -109,7 +109,7 @@ fn expectNoLiveDynamicAtom(rt: *core.Runtime, kind: core.atom.AtomKind, bytes: [
 
 test "parser eval private bound names release retained atom on append failure" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.Runtime.create(failing.allocator());
+    const rt = try core.JSRuntime.create(failing.allocator());
     defer rt.destroy();
 
     const private_name = try rt.internAtom("#oom-private");
@@ -132,7 +132,7 @@ test "parser BigInt literal OOM releases owned constant" {
     var fail_offset: usize = 0;
     while (fail_offset < 120) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "bigint-oom.js" });
@@ -168,7 +168,7 @@ test "parser class synthetic child OOM releases initialized function def" {
     var fail_offset: usize = 0;
     while (fail_offset < 180) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "class-child-oom.js" });
@@ -210,7 +210,7 @@ test "parser nested function stack pop does not allocate on OOM path" {
     var fail_offset: usize = 0;
     while (fail_offset < 260) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "nested-function-pop-oom.js" });
@@ -250,7 +250,7 @@ test "direct qjs parser OOM discard stack does not allocate" {
     var fail_offset: usize = 0;
     while (fail_offset < 320) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
         const name = try rt.internAtom("direct-qjs-parser-oom.js");
         var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
 
@@ -302,7 +302,7 @@ test "direct qjs parser OOM discard stack does not allocate" {
 
     try std.testing.expect(saw_oom);
 
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
     const name = try rt.internAtom("direct-qjs-parser-success.js");
     defer rt.atoms.free(name);
@@ -327,7 +327,7 @@ test "parser class private element OOM releases retained atom" {
     var fail_offset: usize = 0;
     while (fail_offset < 300) : (fail_offset += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        const rt = try core.Runtime.create(failing.allocator());
+        const rt = try core.JSRuntime.create(failing.allocator());
 
         failing.fail_index = failing.alloc_index + fail_offset;
         const result = frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "class-private-oom.js" });
@@ -372,7 +372,7 @@ test "syntax error deinit balances empty message allocation" {
 }
 
 test "source positions and syntax errors carry filename line and column" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "let x = (\n1", .{ .mode = .script, .filename = "bad.js" });
@@ -386,7 +386,7 @@ test "source positions and syntax errors carry filename line and column" {
 }
 
 test "script parse mode emits bytecode metadata without AST execution" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "var x = 1; x + 2;", .{ .mode = .script, .filename = "script.js" });
@@ -402,7 +402,7 @@ test "script parse mode emits bytecode metadata without AST execution" {
 }
 
 test "assignment target scan ignores atom operand bytes" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var held_atoms = std.ArrayList(core.Atom).empty;
@@ -428,7 +428,7 @@ test "assignment target scan ignores atom operand bytes" {
 }
 
 test "print calls emit global lookup generic call and receiver-preserving property call bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
@@ -464,7 +464,7 @@ test "print calls emit global lookup generic call and receiver-preserving proper
 }
 
 test "simple variable assignments emit var bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "let value = 5; value = value + 7; print(value);", .{ .mode = .script, .filename = "vars.js" });
@@ -483,7 +483,7 @@ test "simple variable assignments emit var bytecode" {
 }
 
 test "quick parser emits compound assignment and update statements" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "let x = 1; x += 2; x++; print(x);", .{ .mode = .script, .filename = "quick-compound-update.js" });
@@ -498,7 +498,7 @@ test "quick parser emits compound assignment and update statements" {
 }
 
 test "quick parser emits arithmetic compound assignment operators" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "let x = 10; x -= 3; x *= 2; x /= 7; x %= 2; print(x);", .{ .mode = .script, .filename = "quick-compound-arithmetic.js" });
@@ -512,7 +512,7 @@ test "quick parser emits arithmetic compound assignment operators" {
 }
 
 test "quick parser does not claim update expression values" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "let x = 1; print(x++);", .{ .mode = .script, .filename = "quick-update-expression-fallback.js" });
@@ -522,7 +522,7 @@ test "quick parser does not claim update expression values" {
 }
 
 test "quick parser emits basic array and object literals" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; const obj = { a: arr[0], b: 2 }; print(obj.a + obj.b);", .{ .mode = .script, .filename = "quick-literals.js" });
@@ -539,7 +539,7 @@ test "quick parser emits basic array and object literals" {
 }
 
 test "quick parser emits object property assignment" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", .{ .mode = .script, .filename = "quick-property-assignment.js" });
@@ -554,7 +554,7 @@ test "quick parser emits object property assignment" {
 }
 
 test "quick parser emits optional property access for object and nullish bases" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const obj = { a: { b: 42 } }; print(obj?.a?.b); print(obj?.x?.y); print(undefined?.a);", .{ .mode = .script, .filename = "quick-optional-property.js" });
@@ -567,7 +567,7 @@ test "quick parser emits optional property access for object and nullish bases" 
 }
 
 test "quick parser preserves parenthesized postfix bases" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; print((obj).x); print(({ y: obj.x + 2 }).y); print(([3, 4])[1]); print(({ n: null })?.n);", .{ .mode = .script, .filename = "quick-parenthesized-postfix.js" });
@@ -584,7 +584,7 @@ test "quick parser preserves parenthesized postfix bases" {
 }
 
 test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const text = JSON.stringify({ a: 1 }); print(JSON.parse(text).a);", .{ .mode = .script, .filename = "quick-json-domain.js" });
@@ -595,7 +595,7 @@ test "quick parser lowers JSON stringify and parse to transitional JSON bytecode
 }
 
 test "quick parser lowers Math calls to transitional Math bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "print(Math.abs(-5)); print(Math.pow(2, 3)); print(Math.min(1, 2, 3));", .{ .mode = .script, .filename = "quick-math-domain.js" });
@@ -606,7 +606,7 @@ test "quick parser lowers Math calls to transitional Math bytecode" {
 }
 
 test "quick parser lowers URI calls to transitional URI bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "console.log(encodeURI(\"a b?x=1&y=2#z\")); print(decodeURIComponent(\"a%20b%3Fx%3D1\"));", .{ .mode = .script, .filename = "quick-uri-domain.js" });
@@ -617,7 +617,7 @@ test "quick parser lowers URI calls to transitional URI bytecode" {
 }
 
 test "quick parser lowers Number parse helpers to transitional number bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -632,7 +632,7 @@ test "quick parser lowers Number parse helpers to transitional number bytecode" 
 }
 
 test "quick parser lowers supported Date helpers to receiver-preserving property calls" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -649,7 +649,7 @@ test "quick parser lowers supported Date helpers to receiver-preserving property
 }
 
 test "quick parser lowers supported RegExp helpers to receiver-preserving property calls" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -665,7 +665,7 @@ test "quick parser lowers supported RegExp helpers to receiver-preserving proper
 }
 
 test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -689,7 +689,7 @@ test "quick parser lowers supported Promise helpers to receiver-preserving prope
 }
 
 test "quick parser lowers supported collection helpers to receiver-preserving property calls" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -727,7 +727,7 @@ test "quick parser lowers supported collection helpers to receiver-preserving pr
 }
 
 test "template interpolation emits string concatenation" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", .{ .mode = .script, .filename = "template.js" });
@@ -741,7 +741,7 @@ test "template interpolation emits string concatenation" {
 }
 
 test "simple arrays emit receiver-preserving property calls" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", .{ .mode = .script, .filename = "array.js" });
@@ -758,7 +758,7 @@ test "simple arrays emit receiver-preserving property calls" {
 }
 
 test "simple functions and arrows emit inline helper bytecode" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "function add(a, b) { return a + b; } print(add(2, 3)); const double = x => x * 2; print(double(21)); function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } print(fact(6));", .{ .mode = .script, .filename = "functions.js" });
@@ -781,7 +781,7 @@ test "simple functions and arrows emit inline helper bytecode" {
 }
 
 test "unsupported spread call reports syntax guard" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
@@ -791,7 +791,7 @@ test "unsupported spread call reports syntax guard" {
 }
 
 test "test262 frontmatter does not affect quick parser behavior" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const source =
@@ -813,7 +813,7 @@ test "test262 frontmatter does not affect quick parser behavior" {
 }
 
 test "arrow early errors reject non-simple strict and invalid rest parameters" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -834,7 +834,7 @@ test "arrow early errors reject non-simple strict and invalid rest parameters" {
 }
 
 test "arrow early error checks do not reject valid nested rest destructuring" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "var f; f = ([...[...x]]) => {};", .{ .mode = .script, .filename = "arrow-valid-rest.js" });
@@ -850,7 +850,7 @@ test "arrow early error checks do not reject valid nested rest destructuring" {
 }
 
 test "assignment destructuring early errors reject invalid rest forms" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -885,7 +885,7 @@ test "assignment destructuring early errors reject invalid rest forms" {
 }
 
 test "assignment destructuring early errors allow reserved property names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -908,7 +908,7 @@ test "assignment destructuring early errors allow reserved property names" {
 }
 
 test "assignment early errors reject invalid assignment target types" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -926,7 +926,7 @@ test "assignment early errors reject invalid assignment target types" {
 }
 
 test "async arrow early errors reject await-context parse negatives" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -943,7 +943,7 @@ test "async arrow early errors reject await-context parse negatives" {
 }
 
 test "object computed property names parse async arrow and module await expressions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var async_arrow = try frontend.parser.parse(rt, "let o = { [async () => {}]: 1 };", .{ .mode = .script, .filename = "computed-async-arrow.js" });
@@ -972,7 +972,7 @@ test "object computed property names parse async arrow and module await expressi
 }
 
 test "class early errors reject class parse negatives" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const source =
@@ -993,7 +993,7 @@ test "class early errors reject class parse negatives" {
 }
 
 test "module parse mode records import export metadata and strict flag" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -1019,7 +1019,7 @@ test "module parse mode records import export metadata and strict flag" {
 }
 
 test "module import local names are compiled as module var refs" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -1045,7 +1045,7 @@ test "module import local names are compiled as module var refs" {
 }
 
 test "module parser rejects duplicate exported names across export forms" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -1062,7 +1062,7 @@ test "module parser rejects duplicate exported names across export forms" {
 }
 
 test "module parser validates local export bindings after full body parse" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const valid_cases = [_][]const u8{
@@ -1088,7 +1088,7 @@ test "module parser validates local export bindings after full body parse" {
 }
 
 test "module parser rejects duplicate import attribute keys per with clause" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const invalid_cases = [_][]const u8{
@@ -1112,7 +1112,7 @@ test "module parser rejects duplicate import attribute keys per with clause" {
 }
 
 test "module parser accepts empty side-effect import attributes" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "import './dep.js' with {};", .{ .mode = .module, .filename = "side-effect-import-attr.js" });
@@ -1123,7 +1123,7 @@ test "module parser accepts empty side-effect import attributes" {
 }
 
 test "module parser validates string module export names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const invalid_cases = [_][]const u8{
@@ -1144,7 +1144,7 @@ test "module parser validates string module export names" {
 }
 
 test "module parser rejects comma expression as default export expression" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var invalid = try frontend.parser.parse(rt, "export default null, null;", .{ .mode = .module, .filename = "invalid-default-export.js" });
@@ -1157,7 +1157,7 @@ test "module parser rejects comma expression as default export expression" {
 }
 
 test "module parser accepts keyword module export and import names" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -1173,7 +1173,7 @@ test "module parser accepts keyword module export and import names" {
 }
 
 test "module parser allows duplicate top-level var declarations" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "var test262; var test262; for (var other; false;) {} for (var other; false;) {}", .{ .mode = .module, .filename = "dup-module-var.js" });
@@ -1183,7 +1183,7 @@ test "module parser allows duplicate top-level var declarations" {
 }
 
 test "parser accepts dynamic import call expressions" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var module_parsed = try frontend.parser.parse(rt, "try { await import('dep', { with: {} }); } catch (e) {}", .{ .mode = .module, .filename = "dynamic-import.mjs" });
@@ -1204,7 +1204,7 @@ test "parser accepts dynamic import call expressions" {
 }
 
 test "parser rejects invalid dynamic import call syntax" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var new_import = try frontend.parser.parse(rt, "new import('dep');", .{ .mode = .script, .filename = "bad-dynamic-import.js" });
@@ -1217,7 +1217,7 @@ test "parser rejects invalid dynamic import call syntax" {
 }
 
 test "module parser accepts default as explicit namespace export name" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(rt, "export * as default from './dep.js';", .{ .mode = .module, .filename = "default-star.js" });
@@ -1228,7 +1228,7 @@ test "module parser accepts default as explicit namespace export name" {
 }
 
 test "eval function class private destructuring spread async generator features are recorded" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     var parsed = try frontend.parser.parse(
@@ -1264,7 +1264,7 @@ test "eval function class private destructuring spread async generator features 
 }
 
 test "bytecode constants retain values through Phase 4 structures" {
-    const rt = try core.Runtime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
     const name = try rt.internAtom("emit");

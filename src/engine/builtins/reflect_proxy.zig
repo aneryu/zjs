@@ -34,7 +34,7 @@ pub fn methodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub fn ownKeys(rt: *core.Runtime, object: *core.Object) ![]core.Atom {
+pub fn ownKeys(rt: *core.JSRuntime, object: *core.Object) ![]core.Atom {
     return object.ownKeys(rt);
 }
 

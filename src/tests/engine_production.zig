@@ -4,15 +4,37 @@ const engine = @import("quickjs_zig_engine");
 const InterruptState = struct {
     hits: usize = 0,
 
-    fn stop(_: *engine.core.Runtime, ctx: ?*anyopaque) bool {
+    fn stop(_: *engine.core.JSRuntime, ctx: ?*anyopaque) bool {
         const self: *InterruptState = @ptrCast(@alignCast(ctx.?));
         self.hits += 1;
         return true;
     }
 };
 
+test "production embedding can own JSRuntime and JSContext directly" {
+    var rt: engine.JSRuntime = undefined;
+    try rt.init(std.testing.allocator, .{});
+    defer rt.deinit();
+
+    var ctx: engine.JSContext = undefined;
+    try ctx.init(&rt, .{});
+    defer ctx.deinit();
+
+    const value = try ctx.eval("1 + 1", .{});
+    defer ctx.freeValue(value);
+    try std.testing.expectEqual(@as(?i32, 2), value.asInt32());
+
+    const object = try ctx.eval("({ answer: 42 })", .{});
+    var handle = try ctx.takeValueHandle(object);
+    defer handle.deinit();
+    try std.testing.expect(handle.get().isObject());
+
+    const global = try ctx.globalObject();
+    try std.testing.expect(global.is_global);
+}
+
 test "production embedding API applies limits and releases eval handles" {
-    var js = try engine.Engine.initWithOptions(.{
+    var js = try engine.harness.Engine.initWithOptions(.{
         .allocator = std.testing.allocator,
         .limits = .{
             .stack_bytes = 128 * 1024,
@@ -29,14 +51,14 @@ test "production embedding API applies limits and releases eval handles" {
     var result = try js.evalHandleWithOptions("print(1 + 2);", .{ .output = &output });
     defer result.deinit();
 
-    try std.testing.expect(result.value.isUndefined());
+    try std.testing.expect(result.get().isUndefined());
     try std.testing.expectEqualStrings("3\n", output.buffered());
 }
 
 test "production embedding lifecycle deinitializes repeated script and module evals" {
     var index: usize = 0;
     while (index < 4) : (index += 1) {
-        var js = try engine.Engine.init(std.testing.allocator);
+        var js = try engine.harness.Engine.init(std.testing.allocator);
         defer js.deinit();
 
         var script_result = try js.evalHandle(
@@ -45,7 +67,7 @@ test "production embedding lifecycle deinitializes repeated script and module ev
             \\values.map(v => v.i).join(",");
         );
         defer script_result.deinit();
-        try std.testing.expect(script_result.value.isUndefined());
+        try std.testing.expect(script_result.get().isUndefined());
 
         var module_result = try js.evalModuleHandle(
             \\const value = await Promise.resolve(42);
@@ -56,7 +78,7 @@ test "production embedding lifecycle deinitializes repeated script and module ev
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
@@ -66,7 +88,7 @@ test "production embedding memory limit reports allocation failure without leaki
 }
 
 test "production embedding interrupt handler aborts unbounded execution" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var state = InterruptState{};
@@ -78,13 +100,13 @@ test "production embedding interrupt handler aborts unbounded execution" {
 }
 
 test "production embedding takeExceptionInfo captures exception snapshot without leaking" {
-    var js = try engine.Engine.init(std.testing.allocator);
+    var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     _ = js.eval("throw new Error('test exception snapshot');") catch |err| {
         try std.testing.expectEqual(error.Test262Error, err);
-        var info = js.takeExceptionInfo();
+        var info = try js.takeExceptionInfo();
         defer info.deinit();
-        try std.testing.expect(info.value.value.isObject());
+        try std.testing.expect(info.value.get().isObject());
     };
 }

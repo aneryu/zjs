@@ -2,69 +2,69 @@ const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
 
-pub fn getProperty(object: *core.Object, atom_id: core.Atom) core.Value {
+pub fn getProperty(object: *core.Object, atom_id: core.Atom) core.JSValue {
     return object.getProperty(atom_id);
 }
 
-pub fn setProperty(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom, value: core.Value) !void {
+pub fn setProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
     try object.setProperty(rt, atom_id, value);
 }
 
-pub fn defineDataProperty(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom, value: core.Value) !void {
+pub fn defineDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
 }
 
-pub fn deleteProperty(rt: *core.Runtime, object: *core.Object, atom_id: core.Atom) bool {
+pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     return object.deleteProperty(rt, atom_id);
 }
 
-pub fn getPropertyValue(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) !core.Value {
+pub fn getPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const object_value = try expectObject(value);
     if (object_value.is_global and value_ops.atomNameEql(rt, atom_id, "globalThis")) return object_value.value().dup();
     return object_value.getProperty(atom_id);
 }
 
-pub fn setPropertyValue(rt: *core.Runtime, object_value: core.Value, atom_id: core.Atom, value: core.Value) !core.Value {
+pub fn setPropertyValue(rt: *core.JSRuntime, object_value: core.JSValue, atom_id: core.Atom, value: core.JSValue) !core.JSValue {
     const object = try expectObject(object_value);
     try object.setProperty(rt, atom_id, value);
-    return core.Value.undefinedValue();
+    return core.JSValue.undefinedValue();
 }
 
-pub fn optionalGetPropertyValue(rt: *core.Runtime, value: core.Value, atom_id: core.Atom) !core.Value {
+pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     _ = rt;
-    if (value.isNull() or value.isUndefined()) return core.Value.undefinedValue();
+    if (value.isNull() or value.isUndefined()) return core.JSValue.undefinedValue();
     const object_value = try expectObject(value);
     return object_value.getProperty(atom_id);
 }
 
-pub fn getIndexValue(value: core.Value, index: u32) !core.Value {
+pub fn getIndexValue(value: core.JSValue, index: u32) !core.JSValue {
     const object_value = try expectObject(value);
     return object_value.getProperty(core.atom.atomFromUInt32(index));
 }
 
-pub fn propertyIn(rt: *core.Runtime, object_value: core.Value, key_value: core.Value) !core.Value {
+pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: core.JSValue) !core.JSValue {
     const object = try expectObject(object_value);
     const key = try propertyKeyAtom(rt, key_value);
     defer rt.atoms.free(key);
     var found = object.hasProperty(key);
     if (!found and value_ops.atomNameEql(rt, key, "toString")) found = true;
-    return core.Value.boolean(found);
+    return core.JSValue.boolean(found);
 }
 
-pub fn instanceOfObject(value: core.Value) core.Value {
-    return core.Value.boolean(value.isObject());
+pub fn instanceOfObject(value: core.JSValue) core.JSValue {
+    return core.JSValue.boolean(value.isObject());
 }
 
-pub fn instanceOfArray(value: core.Value) core.Value {
-    const header = value.refHeader() orelse return core.Value.boolean(false);
-    if (!value.isObject()) return core.Value.boolean(false);
+pub fn instanceOfArray(value: core.JSValue) core.JSValue {
+    const header = value.refHeader() orelse return core.JSValue.boolean(false);
+    if (!value.isObject()) return core.JSValue.boolean(false);
     const object: *core.Object = @fieldParentPtr("header", header);
-    return core.Value.boolean(object.is_array);
+    return core.JSValue.boolean(object.is_array);
 }
 
-pub fn instanceOf(rt: *core.Runtime, value: core.Value, constructor_value: core.Value) !core.Value {
-    const header = value.refHeader() orelse return core.Value.boolean(false);
-    if (!value.isObject()) return core.Value.boolean(false);
+pub fn instanceOf(rt: *core.JSRuntime, value: core.JSValue, constructor_value: core.JSValue) !core.JSValue {
+    const header = value.refHeader() orelse return core.JSValue.boolean(false);
+    if (!value.isObject()) return core.JSValue.boolean(false);
     const object: *core.Object = @fieldParentPtr("header", header);
 
     const constructor_header = constructor_value.refHeader() orelse return error.TypeError;
@@ -80,13 +80,13 @@ pub fn instanceOf(rt: *core.Runtime, value: core.Value, constructor_value: core.
 
     var cursor = object.getPrototype();
     while (cursor) |candidate| {
-        if (candidate == prototype) return core.Value.boolean(true);
+        if (candidate == prototype) return core.JSValue.boolean(true);
         cursor = candidate.getPrototype();
     }
-    return core.Value.boolean(false);
+    return core.JSValue.boolean(false);
 }
 
-pub fn propertyKeyAtom(rt: *core.Runtime, value: core.Value) !core.Atom {
+pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
     if (value.asSymbolAtom()) |atom_id| return rt.atoms.dup(atom_id);
     if (value.isString()) {
         var bytes = std.ArrayList(u8).empty;
@@ -103,7 +103,7 @@ pub fn propertyKeyAtom(rt: *core.Runtime, value: core.Value) !core.Atom {
     return rt.internAtom(bytes.items);
 }
 
-pub fn expectObject(value: core.Value) !*core.Object {
+pub fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
