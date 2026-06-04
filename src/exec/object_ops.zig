@@ -1,26 +1,28 @@
 const std = @import("std");
-const bytecode = @import("../../bytecode/root.zig");
-const builtins = @import("../../builtins/root.zig");
-const core = @import("../../core/root.zig");
-const call_mod = @import("../call.zig");
-const construct_mod = @import("../construct.zig");
-const date_vm = @import("date.zig");
-const frame_mod = @import("../frame.zig");
-const iter_vm = @import("iter.zig");
-const property_ops = @import("../property_ops.zig");
-const zjs_vm = @import("../zjs_vm.zig");
-const value_ops = @import("../value_ops.zig");
-const value_vm = @import("value.zig");
+const bytecode = @import("../bytecode/root.zig");
+const builtins = @import("../builtins/root.zig");
+const core = @import("../core/root.zig");
+const call_mod = @import("call.zig");
+const construct_mod = @import("construct.zig");
+const date_vm = @import("date_ops.zig");
+const frame_mod = @import("frame.zig");
+const iter_vm = @import("iterator_ops.zig");
+const property_ops = @import("property_ops.zig");
+const zjs_vm = @import("zjs_vm.zig");
+const value_ops = @import("value_ops.zig");
+const value_vm = @import("vm_value.zig");
+const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
 pub const createNamedError = exception_ops.createNamedError;
 const op = bytecode.opcode.op;
 const atom_buffer = core.atom.predefinedId("buffer", .string).?;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
-const exceptions = @import("../exceptions.zig");
-const exception_ops = @import("exception_ops.zig");
+const exceptions = @import("exceptions.zig");
+const exception_ops = @import("vm/exception_ops.zig");
+const shared_vm = @import("vm/shared.zig");
 
-const shared_vm = @import("shared.zig");
+// --- Dynamically gathered shared_vm aliases (excluding local definitions) ---
 const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;
 const DataViewConstructorArgs = shared_vm.DataViewConstructorArgs;
 const DynamicFunctionKind = shared_vm.DynamicFunctionKind;
@@ -50,6 +52,8 @@ const callValueOrBytecode = shared_vm.callValueOrBytecode;
 const captureErrorStack = shared_vm.captureErrorStack;
 const closeIteratorForFromEntriesAbrupt = shared_vm.closeIteratorForFromEntriesAbrupt;
 const coerceOptionalNumberMethodArgument = shared_vm.coerceOptionalNumberMethodArgument;
+const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
+const createArrayFromArgs = shared_vm.createArrayFromArgs;
 const createIteratorResult = shared_vm.createIteratorResult;
 const createRegExpIndexPair = shared_vm.createRegExpIndexPair;
 const createRegExpMatchArrayFromValue = shared_vm.createRegExpMatchArrayFromValue;
@@ -67,7 +71,6 @@ const exactScriptExtensionsAliasTarget = shared_vm.exactScriptExtensionsAliasTar
 const findPropertyEscapeMatch = shared_vm.findPropertyEscapeMatch;
 const findStringPropertyEscapeMatch = shared_vm.findStringPropertyEscapeMatch;
 const findUnicodePropertyOnlyClassMatch = shared_vm.findUnicodePropertyOnlyClassMatch;
-const firstProxyInPrototypeSetPath = shared_vm.firstProxyInPrototypeSetPath;
 const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
 const functionBytecodeHasClosureVarName = shared_vm.functionBytecodeHasClosureVarName;
 const functionBytecodeHasDirectEval = shared_vm.functionBytecodeHasDirectEval;
@@ -78,15 +81,14 @@ const functionNameValueFromAtom = shared_vm.functionNameValueFromAtom;
 const functionRealmGlobal = shared_vm.functionRealmGlobal;
 const functionRuntimeStrict = shared_vm.functionRuntimeStrict;
 const getFastStringPrimitiveDataProperty = shared_vm.getFastStringPrimitiveDataProperty;
-const getProxyProperty = shared_vm.getProxyProperty;
 const getStringIndexValue = shared_vm.getStringIndexValue;
 const importMetaUrlValue = shared_vm.importMetaUrlValue;
 const installLexicalPrivateNameRemap = shared_vm.installLexicalPrivateNameRemap;
 const isAnchoredRgiEmojiSource = shared_vm.isAnchoredRgiEmojiSource;
 const isBlockedByUnscopables = shared_vm.isBlockedByUnscopables;
 const isCallableValue = shared_vm.isCallableValue;
+const isConstructorLike = shared_vm.isConstructorLike;
 const isFunctionLikeClass = shared_vm.isFunctionLikeClass;
-const isRevokedProxy = shared_vm.isRevokedProxy;
 const isUnknownScriptName = shared_vm.isUnknownScriptName;
 const iteratorForValue = shared_vm.iteratorForValue;
 const iteratorStepValue = shared_vm.iteratorStepValue;
@@ -96,14 +98,6 @@ const lookupNamedSlotValue = shared_vm.lookupNamedSlotValue;
 const lookupNamedVarRef = shared_vm.lookupNamedVarRef;
 const mappedArgumentsValue = shared_vm.mappedArgumentsValue;
 const ordinarySetWithReceiver = shared_vm.ordinarySetWithReceiver;
-const proxyAwareIsExtensible = shared_vm.proxyAwareIsExtensible;
-const proxyAwareOwnPropertyDescriptor = shared_vm.proxyAwareOwnPropertyDescriptor;
-const proxyAwarePreventExtensions = shared_vm.proxyAwarePreventExtensions;
-const proxyAwareSetPrototypeOf = shared_vm.proxyAwareSetPrototypeOf;
-const proxyCreateDataPropertyOrThrow = shared_vm.proxyCreateDataPropertyOrThrow;
-const proxyDefineOwnProperty = shared_vm.proxyDefineOwnProperty;
-const proxySetValueProperty = shared_vm.proxySetValueProperty;
-const proxyTrapKeyValue = shared_vm.proxyTrapKeyValue;
 const qjsBigIntPrototypeToString = shared_vm.qjsBigIntPrototypeToString;
 const qjsCreateArrayDataOrTypedArrayElement = shared_vm.qjsCreateArrayDataOrTypedArrayElement;
 const qjsDefinePropertiesCall = shared_vm.qjsDefinePropertiesCall;
@@ -114,6 +108,7 @@ const qjsIteratorClose = shared_vm.qjsIteratorClose;
 const qjsObjectEntryArrayValue = shared_vm.qjsObjectEntryArrayValue;
 const qjsObjectToLocaleStringCall = shared_vm.qjsObjectToLocaleStringCall;
 const qjsObjectToStringCall = shared_vm.qjsObjectToStringCall;
+const qjsReflectConstructGenericCallable = shared_vm.qjsReflectConstructGenericCallable;
 const qjsRegExpAutoInitBuiltinMatches = shared_vm.qjsRegExpAutoInitBuiltinMatches;
 const qjsRegExpExecAnchoredRgiEmojiFallback = shared_vm.qjsRegExpExecAnchoredRgiEmojiFallback;
 const qjsRegExpNativeBuiltinMatches = shared_vm.qjsRegExpNativeBuiltinMatches;
@@ -144,15 +139,16 @@ const toPrimitiveForString = shared_vm.toPrimitiveForString;
 const toStringForAnnexB = shared_vm.toStringForAnnexB;
 const typedArrayCanonicalGet = shared_vm.typedArrayCanonicalGet;
 const typedArrayCanonicalHas = shared_vm.typedArrayCanonicalHas;
+const typedArrayCanonicalOwnDescriptor = shared_vm.typedArrayCanonicalOwnDescriptor;
 const typedArrayCanonicalSet = shared_vm.typedArrayCanonicalSet;
 const typedArrayDefineOwnPropertyVm = shared_vm.typedArrayDefineOwnPropertyVm;
 const typedArrayOwnKeys = shared_vm.typedArrayOwnKeys;
 const typedArrayPrototypeSet = shared_vm.typedArrayPrototypeSet;
 const unicodePropertyRunCodePointMatches = shared_vm.unicodePropertyRunCodePointMatches;
-const validateProxyHasResult = shared_vm.validateProxyHasResult;
-const validateProxyOwnKeysResult = shared_vm.validateProxyOwnKeysResult;
 const valueTruthy = shared_vm.valueTruthy;
 const varRefCellFromValue = shared_vm.varRefCellFromValue;
+
+
 
 
 pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
@@ -6440,4 +6436,1261 @@ pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
     }
     const name = rt.atoms.name(atom_id) orelse "";
     return try rt.memory.allocator.dupe(u8, name);
+}
+
+// --- Combined from class.zig ---
+
+
+
+
+pub fn getSuper(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+) !void {
+    const source_from_stack = stack.len() != 0;
+    const source = if (source_from_stack) try stack.pop() else frame.current_function.dup();
+    defer source.free(ctx.runtime);
+    const function_object = property_ops.expectObject(source) catch {
+        try stack.pushOwned(core.JSValue.undefinedValue());
+        return;
+    };
+    if (function_object.functionSuperConstructor()) |super_constructor| {
+        if (function_object.functionLexicalThisSlot().* != null) {
+            try stack.push(super_constructor);
+        } else if (function_object.getPrototype()) |prototype| {
+            try stack.push(prototype.value());
+        } else {
+            try stack.pushOwned(core.JSValue.nullValue());
+        }
+        return;
+    }
+    if (source_from_stack) {
+        if (function_object.getPrototype()) |prototype| {
+            try stack.push(prototype.value());
+        } else {
+            try stack.pushOwned(core.JSValue.nullValue());
+        }
+        return;
+    }
+    const home_object = function_object.functionHomeObjectSlot().* orelse {
+        if (function_object.getPrototype()) |prototype| {
+            try stack.push(prototype.value());
+        } else {
+            try stack.pushOwned(core.JSValue.nullValue());
+        }
+        return;
+    };
+    if (home_object.getPrototype()) |prototype| {
+        try stack.push(prototype.value());
+    } else {
+        try stack.pushOwned(core.JSValue.nullValue());
+    }
+}
+
+pub fn getSuperValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime varRefSlotIsUninitialized: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+    comptime slotValueDup_: anytype,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime sameObjectIdentity_: anytype,
+    comptime getSuperPropertyValue_: anytype,
+) !void {
+    _ = slotValueDup_;
+    const prop_value = try stack.pop();
+    defer prop_value.free(ctx.runtime);
+    const obj = try stack.pop();
+    defer obj.free(ctx.runtime);
+    const receiver = try stack.pop();
+    defer receiver.free(ctx.runtime);
+    if (varRefSlotIsUninitialized(receiver)) {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+        return error.ReferenceError;
+    }
+    const atom_id = toPropertyKeyAtom_(ctx, output, global, prop_value, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        return err;
+    };
+    defer ctx.runtime.atoms.free(atom_id);
+    if (obj.isUndefined() or obj.isNull()) {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+        return error.TypeError;
+    }
+
+    var prototype = try property_ops.expectObject(obj);
+    if (property_ops.expectObject(frame.current_function)) |function_object| {
+        if (function_object.functionSuperConstructor()) |super_constructor| {
+            if (sameObjectIdentity_(super_constructor, obj)) {
+                if (function_object.functionHomeObjectSlot().*) |home_object| {
+                    prototype = home_object.getPrototype() orelse {
+                        try stack.pushOwned(core.JSValue.undefinedValue());
+                        return;
+                    };
+                }
+            }
+        }
+    } else |_| {}
+    const value = getSuperPropertyValue_(ctx, output, global, receiver, prototype, atom_id, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        return err;
+    };
+    defer value.free(ctx.runtime);
+    try stack.push(value);
+}
+
+pub fn putSuperValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime varRefSlotIsUninitialized: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+    comptime slotValueDup_: anytype,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime sameObjectIdentity_: anytype,
+    comptime setSuperPropertyValue_: anytype,
+) !void {
+    _ = slotValueDup_;
+    const value = try stack.pop();
+    defer value.free(ctx.runtime);
+    const prop_value = try stack.pop();
+    defer prop_value.free(ctx.runtime);
+    const obj = try stack.pop();
+    defer obj.free(ctx.runtime);
+    const receiver = try stack.pop();
+    defer receiver.free(ctx.runtime);
+    if (varRefSlotIsUninitialized(receiver)) {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+        return error.ReferenceError;
+    }
+    if (obj.isUndefined() or obj.isNull()) {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+        return error.TypeError;
+    }
+    const atom_id = toPropertyKeyAtom_(ctx, output, global, prop_value, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        return err;
+    };
+    defer ctx.runtime.atoms.free(atom_id);
+    var prototype = try property_ops.expectObject(obj);
+    if (property_ops.expectObject(frame.current_function)) |function_object| {
+        if (function_object.functionSuperConstructor()) |super_constructor| {
+            if (sameObjectIdentity_(super_constructor, obj)) {
+                if (function_object.functionHomeObjectSlot().*) |home_object| {
+                    prototype = home_object.getPrototype() orelse {
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                        return error.TypeError;
+                    };
+                }
+            }
+        }
+    } else |_| {}
+    setSuperPropertyValue_(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        return err;
+    };
+}
+
+pub fn setHomeObject(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    comptime functionBytecodeFromValue_: anytype,
+) !void {
+    const func_value = try stackValueFromTop(stack, 0);
+    defer func_value.free(ctx.runtime);
+    const home_value = try stackValueFromTop(stack, 1);
+    defer home_value.free(ctx.runtime);
+    if (func_value.isObject() and home_value.isObject()) {
+        const func_object = try property_ops.expectObject(func_value);
+        var can_set_home_object = true;
+        var is_arrow_function = false;
+        if (func_object.functionBytecodeSlot().*) |function_bytecode_value| {
+            if (functionBytecodeFromValue_(function_bytecode_value)) |fb| {
+                can_set_home_object = !fb.is_class_constructor;
+                is_arrow_function = fb.is_arrow_function;
+            }
+        }
+        if (can_set_home_object) {
+            try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
+            if (is_arrow_function) {
+                const slot = func_object.functionLexicalThisSlot();
+                try func_object.setOptionalValueSlot(ctx.runtime, slot, home_value.dup());
+            }
+        }
+    }
+}
+
+pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
+    if (stack.values.len < 2) return error.StackUnderflow;
+    const obj = stack.values[stack.values.len - 2].dup();
+    defer obj.free(ctx.runtime);
+    const func = stack.values[stack.values.len - 1].dup();
+    defer func.free(ctx.runtime);
+    if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
+}
+
+pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
+    const home_value = try stack.pop();
+    var rooted_home = home_value;
+    defer home_value.free(ctx.runtime);
+    const obj = try stack.pop();
+    var rooted_obj = obj;
+    defer obj.free(ctx.runtime);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_home },
+        .{ .value = &rooted_obj },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    const home = try property_ops.expectObject(rooted_home);
+    const brand_atom = try ensureHomeObjectBrand(ctx.runtime, home);
+    if (rooted_obj.isObject()) {
+        const object = try property_ops.expectObject(rooted_obj);
+        if (object.hasOwnProperty(brand_atom)) return error.TypeError;
+        object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true)) catch |err| switch (err) {
+            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+            else => return err,
+        };
+    }
+}
+
+pub fn privateIn(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime throwTypeErrorMessage_: anytype,
+) !void {
+    const key = try stack.pop();
+    defer key.free(ctx.runtime);
+    const obj = try stack.pop();
+    defer obj.free(ctx.runtime);
+    if (!obj.isObject()) {
+        _ = try throwTypeErrorMessage_(ctx, global, "invalid 'in' operand");
+        return;
+    }
+    const found = if (key.isObject())
+        try hasPrivateBrand(ctx.runtime, obj, key)
+    else blk: {
+        const atom_id = try toPropertyKeyAtom_(ctx, output, global, key, function, frame);
+        defer ctx.runtime.atoms.free(atom_id);
+        const object = try property_ops.expectObject(obj);
+        break :blk object.hasOwnProperty(atom_id);
+    };
+    try stack.pushOwned(core.JSValue.boolean(found));
+}
+
+pub fn defineClass(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    eval_local_names: []const core.Atom,
+    eval_local_slots: []core.JSValue,
+    eval_var_ref_names: []const core.Atom,
+    eval_var_refs: []const core.JSValue,
+    comptime handleCatchableRuntimeError: anytype,
+    comptime createBytecodeFunctionObject_: anytype,
+    comptime objectPrototypeFromGlobal_: anytype,
+    comptime isConstructorLike_: anytype,
+    comptime getValueProperty_: anytype,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime functionBytecodeFromValue_: anytype,
+    comptime clearPrivateNameRemap: anytype,
+    comptime installLexicalPrivateNameRemap_: anytype,
+    comptime installFreshPrivateNameRemap: anytype,
+    comptime copyPrivateNameRemap: anytype,
+    comptime objectFromValue_: anytype,
+    comptime functionNameValueFromAtom_: anytype,
+    comptime defineFunctionNameProperty_: anytype,
+    is_computed_name: bool,
+) !void {
+    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    const flags = function.code[frame.pc + 4];
+    frame.pc += 5;
+    var ctor_source = try stack.pop();
+    defer ctor_source.free(ctx.runtime);
+    var parent_value = try stack.pop();
+    defer parent_value.free(ctx.runtime);
+    var saved_class_binding = core.JSValue.undefinedValue();
+    var saved_class_binding_active = false;
+    defer if (saved_class_binding_active) saved_class_binding.free(ctx.runtime);
+    var superclass_value = core.JSValue.undefinedValue();
+    var superclass_value_active = false;
+    defer if (superclass_value_active) superclass_value.free(ctx.runtime);
+    var ctor = core.JSValue.undefinedValue();
+    defer ctor.free(ctx.runtime);
+    var computed_key = core.JSValue.undefinedValue();
+    defer computed_key.free(ctx.runtime);
+    var name_value = core.JSValue.undefinedValue();
+    defer name_value.free(ctx.runtime);
+    var superclass_proto = core.JSValue.undefinedValue();
+    defer superclass_proto.free(ctx.runtime);
+    var proto_value = core.JSValue.undefinedValue();
+    defer proto_value.free(ctx.runtime);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &ctor_source },
+        .{ .value = &parent_value },
+        .{ .value = &saved_class_binding },
+        .{ .value = &superclass_value },
+        .{ .value = &ctor },
+        .{ .value = &computed_key },
+        .{ .value = &name_value },
+        .{ .value = &superclass_proto },
+        .{ .value = &proto_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    if ((flags & 1) != 0) {
+        superclass_value = parent_value;
+        superclass_value_active = true;
+        parent_value = core.JSValue.undefinedValue();
+        if (superclass_value.isUndefined() and stack.len() > 0) {
+            saved_class_binding = superclass_value;
+            saved_class_binding_active = true;
+            superclass_value = try stack.pop();
+        }
+        if (!(superclass_value.isObject() or superclass_value.isNull())) {
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+            return error.TypeError;
+        }
+    }
+    ctor = try createBytecodeFunctionObject_(ctx, frame, function, global, ctor_source, atom_id, op.define_class, false, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, &.{});
+    const ctor_object = try property_ops.expectObject(ctor);
+    if (is_computed_name) {
+        computed_key = try stackValueFromTop(stack, 0);
+        const name_atom = toPropertyKeyAtom_(ctx, output, global, computed_key, function, frame) catch |err| {
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+            return err;
+        };
+        defer ctx.runtime.atoms.free(name_atom);
+        name_value = try functionNameValueFromAtom_(ctx.runtime, name_atom, null);
+        try defineFunctionNameProperty_(ctx.runtime, ctor_object, name_value);
+        name_value.free(ctx.runtime);
+        name_value = core.JSValue.undefinedValue();
+        computed_key.free(ctx.runtime);
+        computed_key = core.JSValue.undefinedValue();
+    }
+    var proto_parent: ?*core.Object = objectPrototypeFromGlobal_(ctx.runtime, global);
+    if (superclass_value_active) {
+        if (superclass_value.isObject()) {
+            if (!isConstructorLike_(ctx, superclass_value)) {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                return error.TypeError;
+            }
+            const superclass_object = try property_ops.expectObject(superclass_value);
+            try ctor_object.setPrototype(ctx.runtime, superclass_object);
+            try ctor_object.setOptionalValueSlot(ctx.runtime, ctor_object.functionSuperConstructorSlot(), superclass_value.dup());
+            superclass_proto = getValueProperty_(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+                return err;
+            };
+            if (superclass_proto.isObject()) {
+                proto_parent = try property_ops.expectObject(superclass_proto);
+            } else if (!superclass_proto.isNull()) {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                return error.TypeError;
+            }
+        } else {
+            proto_parent = null;
+        }
+    }
+    const proto = try core.Object.create(ctx.runtime, core.class.ids.object, proto_parent);
+    proto_value = proto.value();
+    try proto.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(ctor_object.value(), true, false, true));
+    try ctor_object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(proto_value, false, false, false));
+    if (functionBytecodeFromValue_(ctor_source)) |ctor_fb| {
+        if (ctor_fb.private_bound_names.len != 0 or ctor_fb.class_private_names.len != 0) {
+            clearPrivateNameRemap(ctx.runtime, proto);
+            try installLexicalPrivateNameRemap_(ctx.runtime, proto, frame, ctor_fb.private_bound_names);
+            try installFreshPrivateNameRemap(ctx.runtime, proto, ctor_fb.class_private_names);
+            try copyPrivateNameRemap(ctx.runtime, ctor_object, proto);
+        }
+    }
+    try ctor_object.setFunctionHomeObject(ctx.runtime, proto);
+    if (ctor_object.functionClassFieldsInitSlot().*) |init_value| {
+        if (objectFromValue_(init_value)) |init_object| {
+            try init_object.setFunctionHomeObject(ctx.runtime, proto);
+        }
+    }
+    if (saved_class_binding_active) {
+        try stack.push(saved_class_binding);
+    }
+    try stack.push(ctor);
+    try stack.push(proto_value);
+}
+
+pub fn defineMethod(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime remapPrivateAtomFromObject_: anytype,
+    comptime functionBytecodeFromValue_: anytype,
+    comptime installLexicalPrivateNameRemap_: anytype,
+    comptime functionNameValueFromAtom_: anytype,
+    comptime defineFunctionNameProperty_: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !void {
+    const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
+    frame.pc += 4;
+    const flags = function.code[frame.pc];
+    frame.pc += 1;
+    defineObjectMethod(ctx.runtime, stack, atom_id, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        return err;
+    };
+}
+
+pub fn defineMethodComputed(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime remapPrivateAtomFromObject_: anytype,
+    comptime functionBytecodeFromValue_: anytype,
+    comptime installLexicalPrivateNameRemap_: anytype,
+    comptime functionNameValueFromAtom_: anytype,
+    comptime defineFunctionNameProperty_: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !void {
+    const flags = function.code[frame.pc];
+    frame.pc += 1;
+    const value = try stack.pop();
+    defer value.free(ctx.runtime);
+    const key_value = try stack.pop();
+    defer key_value.free(ctx.runtime);
+    const atom_id = try toPropertyKeyAtom_(ctx, output, global, key_value, function, frame);
+    defer ctx.runtime.atoms.free(atom_id);
+    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        return err;
+    };
+}
+
+fn defineObjectMethod(
+    rt: *core.JSRuntime,
+    stack: *stack_mod.Stack,
+    atom_id: core.Atom,
+    flags: u8,
+    caller_frame: ?*frame_mod.Frame,
+    comptime remapPrivateAtomFromObject_: anytype,
+    comptime functionBytecodeFromValue_: anytype,
+    comptime installLexicalPrivateNameRemap_: anytype,
+    comptime functionNameValueFromAtom_: anytype,
+    comptime defineFunctionNameProperty_: anytype,
+) !void {
+    if (stack.values.len < 2) {
+        const maybe_object = stack.peek() orelse return error.StackUnderflow;
+        defer maybe_object.free(rt);
+        _ = property_ops.expectObject(maybe_object) catch return error.StackUnderflow;
+        return;
+    }
+    const value = try stack.pop();
+    defer value.free(rt);
+    try defineObjectMethodValue(rt, stack, atom_id, value, flags, caller_frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_);
+}
+
+fn defineObjectMethodValue(
+    rt: *core.JSRuntime,
+    stack: *stack_mod.Stack,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    flags: u8,
+    caller_frame: ?*frame_mod.Frame,
+    comptime remapPrivateAtomFromObject_: anytype,
+    comptime functionBytecodeFromValue_: anytype,
+    comptime installLexicalPrivateNameRemap_: anytype,
+    comptime functionNameValueFromAtom_: anytype,
+    comptime defineFunctionNameProperty_: anytype,
+) !void {
+    const obj = stack.peek() orelse return error.StackUnderflow;
+    var rooted_obj = obj;
+    defer obj.free(rt);
+    var rooted_value = value;
+    var name_value = core.JSValue.undefinedValue();
+    defer name_value.free(rt);
+    var getter = core.JSValue.undefinedValue();
+    defer getter.free(rt);
+    var setter = core.JSValue.undefinedValue();
+    defer setter.free(rt);
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_obj },
+        .{ .value = &rooted_value },
+        .{ .value = &name_value },
+        .{ .value = &getter },
+        .{ .value = &setter },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
+
+    const object = try property_ops.expectObject(obj);
+    const effective_atom = remapPrivateAtomFromObject_(rt, object, atom_id);
+    if (rooted_value.isObject()) {
+        const function_object = try property_ops.expectObject(rooted_value);
+        try function_object.setFunctionHomeObject(rt, object);
+        if (function_object.functionBytecodeSlot().*) |function_bytecode_value| {
+            if (functionBytecodeFromValue_(function_bytecode_value)) |fb| {
+                try installLexicalPrivateNameRemap_(rt, object, caller_frame, fb.private_bound_names);
+            }
+        }
+        const prefix: ?[]const u8 = switch (flags & 3) {
+            1 => "get",
+            2 => "set",
+            else => null,
+        };
+        name_value = try functionNameValueFromAtom_(rt, effective_atom, prefix);
+        try defineFunctionNameProperty_(rt, function_object, name_value);
+        name_value.free(rt);
+        name_value = core.JSValue.undefinedValue();
+    }
+    const enumerable = (flags & 4) != 0;
+    if ((flags & 3) == 1 or (flags & 3) == 2) {
+        if (object.getOwnProperty(effective_atom)) |existing| {
+            defer existing.destroy(rt);
+            if (existing.kind == .accessor) {
+                getter = existing.getter.dup();
+                setter = existing.setter.dup();
+            }
+        }
+        const desc = if ((flags & 3) == 1)
+            core.Descriptor.accessor(rooted_value, setter, enumerable, true)
+        else
+            core.Descriptor.accessor(getter, rooted_value, enumerable, true);
+        object.defineOwnProperty(rt, effective_atom, desc) catch |err| switch (err) {
+            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+            else => return err,
+        };
+        getter.free(rt);
+        getter = core.JSValue.undefinedValue();
+        setter.free(rt);
+        setter = core.JSValue.undefinedValue();
+        return;
+    }
+    const writable = rt.atoms.kind(atom_id) != .private;
+    object.defineOwnProperty(rt, effective_atom, core.Descriptor.data(rooted_value, writable, enumerable, true)) catch |err| switch (err) {
+        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+        else => return err,
+    };
+}
+
+fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
+    const index_from_top: usize = offset;
+    if (index_from_top >= stack.values.len) return error.StackUnderflow;
+    return stack.values[stack.values.len - 1 - index_from_top].dup();
+}
+
+fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
+    if (home.getOwnProperty(core.atom.ids.Private_brand)) |desc| {
+        defer desc.destroy(rt);
+        if (desc.value.asSymbolAtom()) |brand_atom| return brand_atom;
+        return error.TypeError;
+    }
+    const name = rt.atoms.name(core.atom.ids.Private_brand) orelse "<brand>";
+    if (!home.isExtensible()) return error.NotExtensible;
+    const brand_atom = try rt.atoms.newSymbol(name, .private);
+    defer rt.atoms.free(brand_atom);
+    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(core.JSValue.symbol(brand_atom), true, true, true));
+    return brand_atom;
+}
+
+fn hasPrivateBrand(rt: *core.JSRuntime, obj: core.JSValue, func: core.JSValue) !bool {
+    const object = try property_ops.expectObject(obj);
+    const func_object = try property_ops.expectObject(func);
+    const home = func_object.functionHomeObjectSlot().* orelse return error.TypeError;
+    const desc = home.getOwnProperty(core.atom.ids.Private_brand) orelse return error.TypeError;
+    defer desc.destroy(rt);
+    const brand_atom = desc.value.asSymbolAtom() orelse return error.TypeError;
+    return object.hasOwnProperty(brand_atom);
+}
+
+fn readInt(comptime T: type, bytes: []const u8) T {
+    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
+}
+
+test "private brand atom is released with home object" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const home = try core.Object.create(rt, core.class.ids.object, null);
+    const brand_atom = try ensureHomeObjectBrand(rt, home);
+    try std.testing.expectEqual(core.atom.AtomKind.private, rt.atoms.kind(brand_atom).?);
+
+    home.value().free(rt);
+    try std.testing.expect(rt.atoms.name(brand_atom) == null);
+}
+
+test "private brand creation does not allocate atom for non-extensible home object" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const home = try core.Object.create(rt, core.class.ids.object, null);
+    defer home.value().free(rt);
+    home.preventExtensions();
+    const before_entries = rt.atoms.entries.len;
+
+    try std.testing.expectError(error.NotExtensible, ensureHomeObjectBrand(rt, home));
+    try std.testing.expectEqual(before_entries, rt.atoms.entries.len);
+}
+
+
+// --- Combined from proxy_ops.zig ---
+
+
+
+
+pub fn proxySetTrapForErrorStackSetter(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    receiver: *core.Object,
+    stack_key: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    const target_value = receiver.proxyTarget() orelse return false;
+    const handler_value = receiver.proxyHandler() orelse return error.TypeError;
+    const set_atom = try ctx.runtime.internAtom("set");
+    defer ctx.runtime.atoms.free(set_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) return false;
+    if (!isCallableValue(trap)) return error.TypeError;
+
+    const key_value = try proxyTrapKeyValue(ctx.runtime, stack_key);
+    defer key_value.free(ctx.runtime);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
+    try validateProxySetResult(ctx, output, global, target, stack_key, value, caller_function, caller_frame);
+    return true;
+}
+
+pub fn isRevokedProxy(object: *core.Object) bool {
+    return object.is_proxy and object.proxyHandler() == null;
+}
+
+pub fn proxyCreateDataPropertyOrThrow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    const target = property_ops.expectObject(target_value) catch return error.TypeError;
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const trap_atom = try ctx.runtime.internAtom("defineProperty");
+    defer ctx.runtime.atoms.free(trap_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) {
+        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true)) catch |err| switch (err) {
+            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
+            else => return err,
+        };
+        return;
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+
+    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    defer key_value.free(ctx.runtime);
+    const desc_object = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
+    const desc_value = desc_object.value();
+    defer desc_value.free(ctx.runtime);
+    try defineValueProperty(ctx.runtime, desc_object, "value", value);
+    try defineValueProperty(ctx.runtime, desc_object, "writable", core.JSValue.boolean(true));
+    try defineValueProperty(ctx.runtime, desc_object, "enumerable", core.JSValue.boolean(true));
+    try defineValueProperty(ctx.runtime, desc_object, "configurable", core.JSValue.boolean(true));
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!value_ops.isTruthy(result)) return error.TypeError;
+    _ = receiver_value;
+}
+
+pub fn validateProxyOwnKeysResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target_value: core.JSValue,
+    result_keys: []const core.Atom,
+) HostError!void {
+    const rt = ctx.runtime;
+    const target = try property_ops.expectObject(target_value);
+    const target_keys = try objectRestOwnKeys(ctx, output, global, target);
+    defer core.Object.freeKeys(rt, target_keys);
+    const target_extensible = target.isExtensible();
+
+    for (target_keys) |target_key| {
+        const desc = target.getOwnProperty(target_key) orelse continue;
+        defer desc.destroy(rt);
+        if (desc.configurable == false or !target_extensible) {
+            if (!atomListContains(result_keys, target_key)) return error.TypeError;
+        }
+    }
+    if (!target_extensible) {
+        for (result_keys) |result_key| {
+            if (!atomListContains(target_keys, result_key)) return error.TypeError;
+        }
+    }
+}
+
+pub fn proxyAwareOwnPropertyDescriptor(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source: *core.Object,
+    key: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.Descriptor {
+    if (source.proxyTarget() == null) {
+        if (try typedArrayCanonicalOwnDescriptor(ctx.runtime, source, key)) |desc| return desc;
+        if (source.moduleNamespaceOwnBindingValue(key)) |binding_value| {
+            defer binding_value.free(ctx.runtime);
+            if (binding_value.isUninitialized()) return error.ReferenceError;
+        }
+        return source.getOwnProperty(key);
+    }
+    const target_value = source.proxyTarget() orelse return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
+    const handler_value = source.proxyHandler() orelse return error.TypeError;
+    const trap_atom = try ctx.runtime.internAtom("getOwnPropertyDescriptor");
+    defer ctx.runtime.atoms.free(trap_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) {
+        return try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const key_value = try proxyTrapKeyValue(ctx.runtime, key);
+    defer key_value.free(ctx.runtime);
+    const desc_value = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
+    defer desc_value.free(ctx.runtime);
+    const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, key, caller_function, caller_frame);
+    defer if (target_desc) |item| item.destroy(ctx.runtime);
+    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    if (desc_value.isUndefined()) {
+        if (target_desc) |item| {
+            if (item.configurable == false or !target_extensible) return error.TypeError;
+        }
+        return null;
+    }
+    const desc_object = property_ops.expectObject(desc_value) catch return error.TypeError;
+    var result_desc = try qjsDescriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
+    errdefer result_desc.destroy(ctx.runtime);
+    var complete_desc = try completeProxyDescriptor(ctx.runtime, result_desc);
+    errdefer complete_desc.destroy(ctx.runtime);
+    if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, complete_desc)) return error.TypeError;
+    if (complete_desc.configurable == false) {
+        if (target_desc) |item| {
+            if (item.configurable != false) return error.TypeError;
+            if (complete_desc.kind == .data and complete_desc.writable == false and item.kind == .data and item.writable == true) return error.TypeError;
+        } else {
+            return error.TypeError;
+        }
+    }
+    result_desc.destroy(ctx.runtime);
+    return complete_desc;
+}
+
+pub fn proxyAwareIsExtensible(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    if (object.proxyTarget() == null) return object.isExtensible();
+    const target_value = object.proxyTarget() orelse return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
+    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    const trap_atom = try ctx.runtime.internAtom("isExtensible");
+    defer ctx.runtime.atoms.free(trap_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) return try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    if (!isCallableValue(trap)) return error.TypeError;
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    const extensible = valueTruthy(result);
+    if (extensible != try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
+    return extensible;
+}
+
+pub fn proxyAwarePreventExtensions(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    const target_value = object.proxyTarget() orelse {
+        object.preventExtensions();
+        return true;
+    };
+    const target = try property_ops.expectObject(target_value);
+    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    const trap_atom = try ctx.runtime.internAtom("preventExtensions");
+    defer ctx.runtime.atoms.free(trap_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) return proxyAwarePreventExtensions(ctx, output, global, target, caller_function, caller_frame);
+    if (!isCallableValue(trap)) return error.TypeError;
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return false;
+    if (try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) return error.TypeError;
+    return true;
+}
+
+pub fn proxyAwareSetPrototypeOf(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    prototype: ?*core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    const target_value = object.proxyTarget() orelse {
+        object.setPrototype(ctx.runtime, prototype) catch |err| switch (err) {
+            error.PrototypeCycle, error.NotExtensible => return false,
+            else => return err,
+        };
+        return true;
+    };
+    const target = try property_ops.expectObject(target_value);
+    const handler_value = object.proxyHandler() orelse return error.TypeError;
+    const trap_atom = try ctx.runtime.internAtom("setPrototypeOf");
+    defer ctx.runtime.atoms.free(trap_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    const proto_value = if (prototype) |proto| proto.value() else core.JSValue.nullValue();
+    if (trap.isUndefined() or trap.isNull()) return proxyAwareSetPrototypeOf(ctx, output, global, target, prototype, caller_function, caller_frame);
+    if (!isCallableValue(trap)) return error.TypeError;
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, proto_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return false;
+    if (!try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame)) {
+        const target_proto = try qjsObjectGetPrototypeOfStep(ctx, output, global, target, caller_function, caller_frame);
+        if (target_proto != prototype) return error.TypeError;
+    }
+    return true;
+}
+
+pub fn completeProxyDescriptor(rt: *core.JSRuntime, desc: core.Descriptor) !core.Descriptor {
+    _ = rt;
+    return switch (desc.kind) {
+        .generic, .data => core.Descriptor.data(
+            if (desc.value_present) desc.value.dup() else core.JSValue.undefinedValue(),
+            desc.writable orelse false,
+            desc.enumerable orelse false,
+            desc.configurable orelse false,
+        ),
+        .accessor => core.Descriptor.accessor(
+            if (desc.getter_present) desc.getter.dup() else core.JSValue.undefinedValue(),
+            if (desc.setter_present) desc.setter.dup() else core.JSValue.undefinedValue(),
+            desc.enumerable orelse false,
+            desc.configurable orelse false,
+        ),
+    };
+}
+
+pub fn isCompatibleProxyDescriptor(extensible: bool, current: ?core.Descriptor, desc: core.Descriptor) !bool {
+    const current_desc = current orelse return extensible;
+    if (current_desc.configurable orelse false) return true;
+    if (desc.configurable orelse false) return false;
+    if (desc.enumerable) |enumerable| {
+        if (enumerable != (current_desc.enumerable orelse false)) return false;
+    }
+    if (desc.kind == .generic) return true;
+
+    const current_is_accessor = current_desc.kind == .accessor;
+    if ((desc.kind == .accessor) != current_is_accessor) return false;
+    if (!current_is_accessor and !(current_desc.writable orelse false)) {
+        if (desc.writable orelse false) return false;
+        if (desc.kind == .data and desc.value_present and !builtins.object.sameValue(current_desc.value, desc.value)) return false;
+    }
+    if (current_is_accessor and desc.kind == .accessor) {
+        if (desc.getter_present and !builtins.object.sameValue(current_desc.getter, desc.getter)) return false;
+        if (desc.setter_present and !builtins.object.sameValue(current_desc.setter, desc.setter)) return false;
+    }
+    return true;
+}
+
+pub fn proxyTargetIsCallable(value: core.JSValue) bool {
+    const object = objectFromValue(value) orelse return false;
+    const target = object.proxyTarget() orelse return false;
+    return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
+}
+
+pub fn proxyTargetIsConstructor(ctx: *core.JSContext, value: core.JSValue) bool {
+    const object = objectFromValue(value) orelse return false;
+    const target = object.proxyTarget() orelse return false;
+    return isConstructorLike(ctx, target);
+}
+
+pub fn callProxyApply(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    proxy_value: core.JSValue,
+    proxy: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    _ = proxy_value;
+    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const apply_atom = try ctx.runtime.internAtom("apply");
+    defer ctx.runtime.atoms.free(apply_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, apply_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) {
+        return callValueOrBytecode(ctx, output, global, this_value, target_value, args, caller_function, caller_frame);
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
+    defer arg_array.free(ctx.runtime);
+    return callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, this_value, arg_array }, caller_function, caller_frame);
+}
+
+pub fn constructProxy(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    proxy_value: core.JSValue,
+    proxy: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target_value: core.JSValue,
+) !core.JSValue {
+    if (!proxyTargetIsConstructor(ctx, proxy_value)) return error.TypeError;
+    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const construct_atom = try ctx.runtime.internAtom("construct");
+    defer ctx.runtime.atoms.free(construct_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, construct_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) {
+        if (try qjsReflectConstructGenericCallable(ctx, output, global, target_value, new_target_value, args, caller_function, caller_frame)) |value| return value;
+        return constructValueOrBytecode(ctx, output, global, target_value, args, caller_function, caller_frame);
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const arg_array = try createArrayFromArgs(ctx.runtime, global, args);
+    defer arg_array.free(ctx.runtime);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, arg_array, new_target_value }, caller_function, caller_frame);
+    if (!result.isObject()) {
+        result.free(ctx.runtime);
+        return error.TypeError;
+    }
+    return result;
+}
+
+pub fn getProxyProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!core.JSValue {
+    const target_value = (proxy.proxyTarget() orelse return error.TypeError).dup();
+    defer target_value.free(ctx.runtime);
+    const handler_value = (proxy.proxyHandler() orelse return error.TypeError).dup();
+    defer handler_value.free(ctx.runtime);
+    const get_atom = try ctx.runtime.internAtom("get");
+    defer ctx.runtime.atoms.free(get_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, get_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    const target = try property_ops.expectObject(target_value);
+    if (trap.isUndefined() or trap.isNull()) return getValuePropertyWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, caller_function, caller_frame);
+    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    defer key_value.free(ctx.runtime);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, receiver_value }, caller_function, caller_frame);
+    errdefer result.free(ctx.runtime);
+    try validateProxyGetResult(ctx, output, global, target, atom_id, result, caller_function, caller_frame);
+    return result;
+}
+
+pub fn validateProxyGetResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target: *core.Object,
+    atom_id: core.Atom,
+    result: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame) orelse return;
+    defer target_desc.destroy(ctx.runtime);
+    if (target_desc.configurable != false) return;
+    switch (target_desc.kind) {
+        .data => {
+            if (target_desc.writable == false and !builtins.object.sameValue(result, target_desc.value)) return error.TypeError;
+        },
+        .accessor => {
+            if (target_desc.getter.isUndefined() and !result.isUndefined()) return error.TypeError;
+        },
+        .generic => {},
+    }
+}
+
+pub fn firstProxyInPrototypeSetPath(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?*core.Object {
+    var current = object.getPrototype();
+    while (current) |prototype| : (current = prototype.getPrototype()) {
+        if (prototype.proxyTarget() != null) return prototype;
+        if (prototype.getOwnProperty(atom_id)) |desc| {
+            desc.destroy(rt);
+            return null;
+        }
+    }
+    return null;
+}
+
+pub fn proxySetValueProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!bool {
+    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const set_atom = try ctx.runtime.internAtom("set");
+    defer ctx.runtime.atoms.free(set_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, set_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) {
+        const target = try property_ops.expectObject(target_value);
+        return ordinarySetWithReceiver(ctx, output, global, target_value, target, receiver_value, atom_id, value, caller_function, caller_frame);
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    defer key_value.free(ctx.runtime);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, value, receiver_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return false;
+    const target = try property_ops.expectObject(target_value);
+    try validateProxySetResult(ctx, output, global, target, atom_id, value, caller_function, caller_frame);
+    return true;
+}
+
+pub fn validateProxySetResult(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    target: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame) orelse return;
+    defer target_desc.destroy(ctx.runtime);
+    if (target_desc.configurable != false) return;
+    switch (target_desc.kind) {
+        .data => {
+            if (target_desc.writable == false and !builtins.object.sameValue(value, target_desc.value)) return error.TypeError;
+        },
+        .accessor => {
+            if (target_desc.setter.isUndefined()) return error.TypeError;
+        },
+        .generic => {},
+    }
+}
+
+pub fn proxyDefineValueForReflectSet(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !void {
+    var rooted_value = value;
+    var key_value = core.JSValue.undefinedValue();
+    var desc_value = core.JSValue.undefinedValue();
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_value },
+        .{ .value = &key_value },
+        .{ .value = &desc_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    defer key_value.free(ctx.runtime);
+
+    const get_desc_atom = try ctx.runtime.internAtom("getOwnPropertyDescriptor");
+    defer ctx.runtime.atoms.free(get_desc_atom);
+    const get_desc = try getValueProperty(ctx, output, global, handler_value, get_desc_atom, caller_function, caller_frame);
+    defer get_desc.free(ctx.runtime);
+    if (!get_desc.isUndefined() and !get_desc.isNull()) {
+        if (!isCallableValue(get_desc)) return error.TypeError;
+        const result = try callValueOrBytecode(ctx, output, global, handler_value, get_desc, &.{ target_value, key_value }, caller_function, caller_frame);
+        result.free(ctx.runtime);
+    }
+
+    const define_atom = try ctx.runtime.internAtom("defineProperty");
+    defer ctx.runtime.atoms.free(define_atom);
+    const define = try getValueProperty(ctx, output, global, handler_value, define_atom, caller_function, caller_frame);
+    defer define.free(ctx.runtime);
+    if (define.isUndefined() or define.isNull()) {
+        const target = try property_ops.expectObject(target_value);
+        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, true, true, true)) catch |err| switch (err) {
+            error.InvalidLength => return error.RangeError,
+            error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
+            else => return err,
+        };
+        return;
+    }
+    if (!isCallableValue(define)) return error.TypeError;
+    const desc_object = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
+    desc_value = desc_object.value();
+    defer desc_value.free(ctx.runtime);
+    try defineValueProperty(ctx.runtime, desc_object, "value", rooted_value);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, define, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return error.TypeError;
+    _ = receiver_value;
+}
+
+pub fn proxyTargetIsCallableObject(object: *core.Object) bool {
+    if (isFunctionLikeClass(object.class_id)) return true;
+    if (!object.is_proxy) return false;
+    const target = object.proxyTarget() orelse return false;
+    return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
+}
+
+pub fn proxyDefineOwnProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    proxy: *core.Object,
+    atom_id: core.Atom,
+    desc: core.Descriptor,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !bool {
+    const target_value = proxy.proxyTarget() orelse return error.TypeError;
+    const target = property_ops.expectObject(target_value) catch return error.TypeError;
+    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const trap_atom = try ctx.runtime.internAtom("defineProperty");
+    defer ctx.runtime.atoms.free(trap_atom);
+    const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
+    defer trap.free(ctx.runtime);
+    if (trap.isUndefined() or trap.isNull()) {
+        if (target.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, target, atom_id, desc, caller_function, caller_frame);
+        target.defineOwnProperty(ctx.runtime, atom_id, desc) catch |err| switch (err) {
+            error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return false,
+            error.InvalidLength => return error.RangeError,
+            else => return err,
+        };
+        return true;
+    }
+    if (!isCallableValue(trap)) return error.TypeError;
+    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    defer key_value.free(ctx.runtime);
+    const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
+    defer desc_value.free(ctx.runtime);
+    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
+    defer result.free(ctx.runtime);
+    if (!valueTruthy(result)) return false;
+    const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame);
+    defer if (target_desc) |item| item.destroy(ctx.runtime);
+    const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, caller_function, caller_frame);
+    if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, desc)) return error.TypeError;
+    const setting_config_false = desc.configurable == false;
+    if (setting_config_false) {
+        if (target_desc) |item| {
+            if (item.configurable != false) return error.TypeError;
+        } else {
+            return error.TypeError;
+        }
+    }
+    if (target_desc) |item| {
+        if (item.configurable == false and item.kind == .data and item.writable == true and desc.kind == .data and desc.writable == false) return error.TypeError;
+    }
+    return true;
+}
+
+pub fn validateProxyHasResult(rt: *core.JSRuntime, target: *core.Object, atom_id: core.Atom, result: bool) !bool {
+    if (result) return true;
+    if (target.getOwnProperty(atom_id)) |desc| {
+        defer desc.destroy(rt);
+        if (desc.configurable == false) return error.TypeError;
+        if (!target.isExtensible()) return error.TypeError;
+    }
+    return false;
+}
+
+pub fn proxyTrapKeyValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
+    if (rt.atoms.kind(atom_id) == .symbol) return core.JSValue.symbol(atom_id);
+    return rt.atoms.toStringValue(rt, atom_id);
 }

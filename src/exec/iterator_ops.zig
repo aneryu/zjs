@@ -1,13 +1,13 @@
 const std = @import("std");
 
-const bytecode = @import("../../bytecode/root.zig");
-const builtins = @import("../../builtins/root.zig");
-const core = @import("../../core/root.zig");
-const exceptions = @import("../exceptions.zig");
-const frame_mod = @import("../frame.zig");
-const property_ops = @import("../property_ops.zig");
-const stack_mod = @import("../stack.zig");
-const value_ops = @import("../value_ops.zig");
+const bytecode = @import("../bytecode/root.zig");
+const builtins = @import("../builtins/root.zig");
+const core = @import("../core/root.zig");
+const exceptions = @import("exceptions.zig");
+const frame_mod = @import("frame.zig");
+const property_ops = @import("property_ops.zig");
+const stack_mod = @import("stack.zig");
+const value_ops = @import("value_ops.zig");
 
 const IteratorZipError = exceptions.HostError;
 const for_await_record_marker: i32 = -0x7fff0001;

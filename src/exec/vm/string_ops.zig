@@ -9,7 +9,7 @@ const unicode_lib = @import("../../libs/unicode.zig");
 const emoji = @import("../../libs/emoji.zig");
 const call_mod = @import("../call.zig");
 const frame_mod = @import("../frame.zig");
-const iter_vm = @import("iter.zig");
+const iter_vm = @import("../iterator_ops.zig");
 const property_ops = @import("../property_ops.zig");
 const value_ops = @import("../value_ops.zig");
 

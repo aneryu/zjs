@@ -19,21 +19,21 @@ const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
-const arith_vm = @import("vm/arith.zig");
+const arith_vm = @import("vm_arith.zig");
 const call_vm = @import("vm/call.zig");
-const class_vm = @import("vm/class.zig");
+const class_vm = @import("object_ops.zig");
 const control_vm = @import("vm/control.zig");
-const date_vm = @import("vm/date.zig");
+const date_vm = @import("date_ops.zig");
 const eval_module_vm = @import("vm/eval_module.zig");
 const exceptions = @import("exceptions.zig");
 const gen_async_vm = @import("vm/gen_async.zig");
-const iter_vm = @import("vm/iter.zig");
-const json_vm = @import("vm/json.zig");
+const iter_vm = @import("iterator_ops.zig");
+const json_vm = @import("json_ops.zig");
 const literal_vm = @import("vm/literal.zig");
-const property_vm = @import("vm/property.zig");
+const property_vm = @import("property_ops.zig");
 const regexp_vm = @import("vm/regexp.zig");
 const shared_vm = @import("vm/shared.zig");
-const value_vm = @import("vm/value.zig");
+const value_vm = @import("vm_value.zig");
 const HostError = exceptions.HostError;
 
 const op = bytecode.opcode.op;
@@ -1084,7 +1084,7 @@ pub fn runWithArgsState(
 
             // ---- Delete ----
             op.delete_var => try property_vm.deleteVar(ctx, global, stack, function, &frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, deleteEvalBinding),
-            op.delete => switch (try property_vm.deleteProperty(ctx, output, global, stack, function, &frame, &catch_target, deleteValueProperty, functionHasFrameBinding, typedArrayCanonicalDelete, handleCatchableRuntimeError)) {
+            op.delete => switch (try property_vm.deletePropertyVm(ctx, output, global, stack, function, &frame, &catch_target, deleteValueProperty, functionHasFrameBinding, typedArrayCanonicalDelete, handleCatchableRuntimeError)) {
                 .done => {},
                 .continue_loop => continue,
             },
