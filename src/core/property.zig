@@ -53,7 +53,6 @@ pub const AutoInitKind = enum(u8) {
     performance,
     test262_namespace,
     array_unscopables,
-    cli_global,
     number_constant,
     int32_constant,
 };

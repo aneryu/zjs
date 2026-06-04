@@ -1,18 +1,19 @@
 const std = @import("std");
-const engine = @import("quickjs_zig_engine");
+const zjs = @import("zjs");
+const engine = zjs;
 
-const core = engine.core;
-const frontend = engine.frontend;
-const function_def = engine.bytecode.function_def;
-const qop = engine.bytecode.opcode.op;
-const op = engine.bytecode.opcode.op;
+const core = zjs.core;
+const frontend = zjs.frontend;
+const function_def = zjs.bytecode.function_def;
+const qop = zjs.bytecode.opcode.op;
+const op = zjs.bytecode.opcode.op;
 
-const t = engine.frontend.zjs_token;
-const QjsLexer = engine.frontend.zjs_lexer.Lexer;
-const QjsParser = engine.frontend.zjs_parser.Parser;
-const zjs_parser = engine.frontend.zjs_parser;
-const atom = engine.core.atom;
-const function_def_mod = engine.bytecode.function_def;
+const t = zjs.frontend.zjs_token;
+const QjsLexer = zjs.frontend.zjs_lexer.Lexer;
+const QjsParser = zjs.frontend.zjs_parser.Parser;
+const zjs_parser = zjs.frontend.zjs_parser;
+const atom = zjs.core.atom;
+const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.frontend.zjs_parser.ParseState;
 
 // ================== LEXER TESTS ==================

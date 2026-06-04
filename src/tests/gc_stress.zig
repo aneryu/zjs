@@ -1,9 +1,10 @@
 //! zjs engine test layer; governed by docs/README.md testing policy and zjs embedding contract.
 
 const std = @import("std");
-const engine = @import("quickjs_zig_engine");
-const bytecode = engine.bytecode;
-const core = engine.core;
+const zjs = @import("zjs");
+const engine = zjs;
+const bytecode = zjs.bytecode;
+const core = zjs.core;
 
 const Rng = std.Random.DefaultPrng;
 

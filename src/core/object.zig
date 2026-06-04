@@ -2016,7 +2016,7 @@ pub const Object = struct {
             if (index < last_idx) {
                 entries.*[index] = entries.*[last_idx];
             }
-            entries.* = entries.*.ptr[0 .. last_idx];
+            entries.* = entries.*.ptr[0..last_idx];
             removed = true;
             removed_cell.destroy(rt);
         }
@@ -6211,7 +6211,7 @@ pub const Object = struct {
                     if (index < last_idx) {
                         payload.weak_entries[index] = payload.weak_entries[last_idx];
                     }
-                    payload.weak_entries = payload.weak_entries.ptr[0 .. last_idx];
+                    payload.weak_entries = payload.weak_entries.ptr[0..last_idx];
                     removed_weak_entry = true;
                 }
                 if (removed_weak_entry) current.clearCollectionIndex(rt);
@@ -6247,7 +6247,7 @@ pub const Object = struct {
                 if (index < last_idx) {
                     finalization_payload.cells[index] = finalization_payload.cells[last_idx];
                 }
-                finalization_payload.cells = finalization_payload.cells.ptr[0 .. last_idx];
+                finalization_payload.cells = finalization_payload.cells.ptr[0..last_idx];
             }
             current.pruneBorrowedReferenceHolderIfEmpty(rt);
         }
@@ -6955,10 +6955,6 @@ pub const Object = struct {
             const materialized = materializeArrayUnscopablesAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
-        if (info.kind == .cli_global) {
-            const materialized = materializeCliGlobalAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
         if (info.kind == .number_constant) {
             const materialized = materializeNumberConstantAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
@@ -7051,42 +7047,6 @@ pub const Object = struct {
         self.properties[index].slot = .{ .data = materialized };
     }
 
-    fn materializeCliGlobalAutoInit(info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        if (std.mem.eql(u8, info.name, "argv0")) {
-            return @import("../exec/value_ops.zig").createStringValue(rt, rt.cli_argv0) catch null;
-        }
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            return null;
-        const items = if (std.mem.eql(u8, info.name, "execArgv"))
-            rt.cli_exec_argv
-        else if (std.mem.eql(u8, info.name, "scriptArgs"))
-            rt.cli_script_args
-        else
-            return null;
-        const array_prototype = arrayPrototypeFromGlobalForCli(rt, global) orelse return null;
-        const cli_array = Object.createArray(rt, array_prototype) catch return null;
-        for (items, 0..) |item, index| {
-            const string_value = @import("../exec/value_ops.zig").createStringValue(rt, item) catch {
-                cli_array.value().free(rt);
-                return null;
-            };
-            defer string_value.free(rt);
-            cli_array.defineOwnProperty(
-                rt,
-                atom.atomFromUInt32(@intCast(index)),
-                descriptor.Descriptor.data(string_value, true, true, true),
-            ) catch {
-                cli_array.value().free(rt);
-                return null;
-            };
-        }
-        cli_array.length = @intCast(items.len);
-        return cli_array.value();
-    }
-
     fn materializeNumberConstantAutoInit(info: property.AutoInit) ?JSValue {
         const value_ops = @import("../exec/value_ops.zig");
         if (std.mem.eql(u8, info.name, "NaN")) return value_ops.numberToValue(std.math.nan(f64));
@@ -7098,22 +7058,6 @@ pub const Object = struct {
         if (std.mem.eql(u8, info.name, "MIN_SAFE_INTEGER")) return value_ops.numberToValue(-9007199254740991.0);
         if (std.mem.eql(u8, info.name, "EPSILON")) return value_ops.numberToValue(2.220446049250313e-16);
         return null;
-    }
-
-    fn arrayPrototypeFromGlobalForCli(rt: *JSRuntime, global: *Object) ?*Object {
-        const array_atom = atom.predefinedId("Array", .string).?;
-        const prototype_atom = atom.ids.prototype;
-        if (global.getOwnDataObjectBorrowed(array_atom)) |array_ctor| {
-            if (array_ctor.getOwnDataObjectBorrowed(prototype_atom)) |prototype| return prototype;
-        }
-        const array_value = global.getProperty(array_atom);
-        defer array_value.free(rt);
-        if (!array_value.isObject()) return null;
-        const array_ctor = objectFromValue(array_value) orelse return null;
-        if (array_ctor.getOwnDataObjectBorrowed(prototype_atom)) |prototype| return prototype;
-        const prototype_value = array_ctor.getProperty(prototype_atom);
-        defer prototype_value.free(rt);
-        return objectFromValue(prototype_value);
     }
 
     fn functionPrototypeForAutoInit(self: *Object, info: property.AutoInit) ?*Object {
@@ -7440,8 +7384,6 @@ pub const Object = struct {
         defer prototype_value.free(rt);
         return objectFromValue(prototype_value);
     }
-
-
 
     pub fn getOwnDataPropertyValue(self: *const Object, atom_id: atom.Atom) ?JSValue {
         if (self.getOwnDataPropertyLookup(atom_id)) |lookup| return lookup.value;
@@ -7836,7 +7778,6 @@ pub const Object = struct {
         });
     }
 
-
     pub fn definePerformanceAutoInitProperty(
         self: *Object,
         rt: *JSRuntime,
@@ -7909,32 +7850,6 @@ pub const Object = struct {
                 .length = 0,
                 .rt = rt,
                 .kind = .array_unscopables,
-            } },
-        });
-    }
-
-    pub fn defineCliGlobalAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        name: []const u8,
-        flags: property.Flags,
-        realm_global: *Object,
-    ) !void {
-        std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
-        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = 0,
-                .rt = rt,
-                .kind = .cli_global,
-                .host_function_realm_global = @intFromPtr(realm_global),
             } },
         });
     }

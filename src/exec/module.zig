@@ -75,12 +75,6 @@ pub fn instantiateParsedRecordWithReferrer(
     for (parsed.star_exports) |entry| _ = try requestName(parsed, entry.request_index);
     for (parsed.import_attributes) |entry| _ = try requestName(parsed, entry.request_index);
 
-    for (parsed.requests, 0..) |request, request_index| {
-        const resolved = try resolvedRequestAtomForParsed(runtime, &parsed, request.module_name, @intCast(request_index), referrer_path);
-        defer runtime.atoms.free(resolved);
-        if (nativeModuleKindForAtom(runtime, resolved)) |kind| _ = try preloadNativeModule(runtime, kind);
-    }
-
     const record = try runtime.modules.createFresh(runtime, module_name);
     for (parsed.requests, 0..) |request, request_index| {
         const resolved = try resolvedRequestAtomForParsed(runtime, &parsed, request.module_name, @intCast(request_index), referrer_path);
@@ -170,7 +164,6 @@ pub fn preloadMissingFileModuleGraphWithOrder(
 }
 
 pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {
-    if (nativeModuleKindForSpecifier(specifier)) |kind| return allocator.dupe(u8, nativeModuleName(kind));
     if (std.mem.startsWith(u8, specifier, "node:")) return allocator.dupe(u8, specifier);
     if (std.fs.path.isAbsolute(specifier)) return std.fs.path.resolve(allocator, &.{specifier});
     if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
@@ -333,7 +326,7 @@ fn resolvedRequestAtomForParsed(
     const resolved = try resolvedRequestAtom(runtime, request_atom, referrer_path);
     errdefer runtime.atoms.free(resolved);
     const kind = syntheticKindForRequestIndex(runtime, parsed, request_index) orelse return resolved;
-    if (kind == .none or kind == .native_std or kind == .native_os) return resolved;
+    if (kind == .none) return resolved;
     const resolved_name = runtime.atoms.name(resolved) orelse return error.InvalidAtom;
     const tagged_name = try syntheticModuleRegistryName(runtime.memory.allocator, resolved_name, kind);
     defer runtime.memory.allocator.free(tagged_name);
@@ -772,10 +765,6 @@ fn preloadFileModuleGraphInnerMode(
     const record = parsed.function.module_record orelse return;
     for (record.requests, 0..) |request, request_index| {
         const specifier = runtime.atoms.name(request.module_name) orelse return error.InvalidAtom;
-        if (nativeModuleKindForSpecifier(specifier)) |kind| {
-            _ = try preloadNativeModule(runtime, kind);
-            continue;
-        }
         const dep_path_base = try resolveModuleSpecifier(allocator, path, specifier);
         defer allocator.free(dep_path_base);
         const synthetic_kind = syntheticKindForRequestIndex(runtime, &record, @intCast(request_index));
@@ -823,25 +812,6 @@ fn syntheticKindForRequestIndex(
     return null;
 }
 
-fn nativeModuleKindForSpecifier(specifier: []const u8) ?core.module.SyntheticKind {
-    if (std.mem.eql(u8, specifier, "std") or std.mem.eql(u8, specifier, "qjs:std")) return .native_std;
-    if (std.mem.eql(u8, specifier, "os") or std.mem.eql(u8, specifier, "qjs:os")) return .native_os;
-    return null;
-}
-
-fn nativeModuleKindForAtom(runtime: *core.JSRuntime, module_name: core.Atom) ?core.module.SyntheticKind {
-    const specifier = runtime.atoms.name(module_name) orelse return null;
-    return nativeModuleKindForSpecifier(specifier);
-}
-
-fn nativeModuleName(kind: core.module.SyntheticKind) []const u8 {
-    return switch (kind) {
-        .native_std => "std",
-        .native_os => "os",
-        else => unreachable,
-    };
-}
-
 fn syntheticModuleKindName(kind: core.module.SyntheticKind) []const u8 {
     return switch (kind) {
         .json => "json",
@@ -862,31 +832,6 @@ fn syntheticModuleSourcePath(path: []const u8) []const u8 {
 
 pub fn syntheticModuleFilePath(path: []const u8) []const u8 {
     return syntheticModuleSourcePath(path);
-}
-
-pub fn preloadNativeModule(
-    runtime: *core.JSRuntime,
-    kind: core.module.SyntheticKind,
-) !*core.module.ModuleRecord {
-    const module_name = try runtime.internAtom(nativeModuleName(kind));
-    defer runtime.atoms.free(module_name);
-    if (runtime.modules.find(module_name)) |existing| return existing;
-    const record = try runtime.modules.createFresh(runtime, module_name);
-    record.synthetic_kind = kind;
-    switch (kind) {
-        .native_std => try addNativeExports(runtime, record, &.{ "loadFile", "writeFile", "exists", "exit", "getenv", "setenv", "unsetenv", "getenviron", "gc", "evalScript", "loadScript", "open", "fdopen", "tmpfile", "popen", "puts", "printf", "sprintf", "strerror", "urlGet", "SEEK_SET", "SEEK_CUR", "SEEK_END", "Error", "in", "out", "err" }),
-        .native_os => try addNativeExports(runtime, record, &.{ "getenv", "getcwd", "chdir", "remove", "rename", "open", "close", "read", "write", "seek", "O_RDONLY", "O_WRONLY", "O_RDWR", "O_APPEND", "O_CREAT", "O_EXCL", "O_TRUNC", "mkdir", "readdir", "stat", "lstat", "realpath", "symlink", "readlink", "utimes", "S_IFMT", "S_IFIFO", "S_IFCHR", "S_IFDIR", "S_IFBLK", "S_IFREG", "S_IFSOCK", "S_IFLNK", "S_ISGID", "S_ISUID", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "exec", "waitpid", "getpid", "pipe", "kill", "dup", "dup2", "WNOHANG", "SIGINT", "SIGABRT", "SIGFPE", "SIGILL", "SIGSEGV", "SIGTERM", "SIGQUIT", "SIGPIPE", "SIGALRM", "SIGUSR1", "SIGUSR2", "SIGCHLD", "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "isatty", "ttyGetWinSize", "ttySetRaw", "setReadHandler", "setWriteHandler", "signal", "cputime", "exePath", "now", "sleepAsync", "platform", "mkdtemp", "mkstemp", "Worker", "poll", "sleep" }),
-        else => return error.InvalidBytecode,
-    }
-    return record;
-}
-
-fn addNativeExports(runtime: *core.JSRuntime, record: *core.module.ModuleRecord, names: []const []const u8) !void {
-    for (names) |name| {
-        const atom = try runtime.internAtom(name);
-        defer runtime.atoms.free(atom);
-        try record.addExport(atom, atom);
-    }
 }
 
 fn preloadSyntheticFileModule(
@@ -913,8 +858,6 @@ pub fn initializeSyntheticFileModule(
     if (record.synthetic_kind == .none) return false;
     switch (record.synthetic_kind) {
         .none => unreachable,
-        .native_std => return try initializeNativeStdModule(ctx, record),
-        .native_os => return try initializeNativeOsModule(ctx, record),
         .json, .text, .bytes => {},
     }
     if (moduleBindingInitialized(record, atom_default)) {
@@ -930,165 +873,10 @@ pub fn initializeSyntheticFileModule(
         },
         .text => (try core.string.String.createUtf8(ctx.runtime, source_text)).value(),
         .bytes => try syntheticBytesModuleValue(ctx, global, source_text),
-        .native_std, .native_os => unreachable,
     };
     errdefer value.free(ctx.runtime);
     try setModuleBinding(ctx, record, atom_default, value);
     return true;
-}
-
-fn initializeNativeStdModule(ctx: *core.JSContext, record: *core.module.ModuleRecord) !bool {
-    try initializeNativeModule(ctx, record, &.{ "loadFile", "writeFile", "exists", "exit", "getenv", "setenv", "unsetenv", "getenviron", "gc", "evalScript", "loadScript", "open", "fdopen", "tmpfile", "popen", "puts", "printf", "sprintf", "strerror", "urlGet" });
-    try initializeNativeStdIntValue(ctx, record, "SEEK_SET", std.c.SEEK.SET);
-    try initializeNativeStdIntValue(ctx, record, "SEEK_CUR", std.c.SEEK.CUR);
-    try initializeNativeStdIntValue(ctx, record, "SEEK_END", std.c.SEEK.END);
-    try initializeNativeStdErrorValue(ctx, record);
-    try initializeNativeStdFileValue(ctx, record, "in", call_mod.stdin(), false, true);
-    try initializeNativeStdFileValue(ctx, record, "out", call_mod.stdout(), false, true);
-    try initializeNativeStdFileValue(ctx, record, "err", call_mod.stderr(), false, true);
-    return true;
-}
-
-fn initializeNativeStdIntValue(
-    ctx: *core.JSContext,
-    record: *core.module.ModuleRecord,
-    name: []const u8,
-    value: i32,
-) !void {
-    const atom = try ctx.runtime.internAtom(name);
-    defer ctx.runtime.atoms.free(atom);
-    if (moduleBindingInitialized(record, atom)) return;
-    try setModuleBinding(ctx, record, atom, core.JSValue.int32(value));
-}
-
-fn initializeNativeStringValue(
-    ctx: *core.JSContext,
-    record: *core.module.ModuleRecord,
-    name: []const u8,
-    value: []const u8,
-) !void {
-    const atom = try ctx.runtime.internAtom(name);
-    defer ctx.runtime.atoms.free(atom);
-    if (moduleBindingInitialized(record, atom)) return;
-    const string_value = try value_ops.createStringValue(ctx.runtime, value);
-    errdefer string_value.free(ctx.runtime);
-    try setModuleBinding(ctx, record, atom, string_value);
-}
-
-fn builtinPlatformName() []const u8 {
-    return switch (@import("builtin").os.tag) {
-        .linux => "linux",
-        .macos => "darwin",
-        .windows => "win32",
-        .freebsd => "freebsd",
-        .openbsd => "openbsd",
-        .netbsd => "netbsd",
-        else => "unknown",
-    };
-}
-
-fn initializeNativeStdErrorValue(ctx: *core.JSContext, record: *core.module.ModuleRecord) !void {
-    const atom = try ctx.runtime.internAtom("Error");
-    defer ctx.runtime.atoms.free(atom);
-    if (moduleBindingInitialized(record, atom)) return;
-    const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer object.value().free(ctx.runtime);
-
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EINVAL", @intFromEnum(std.posix.E.INVAL));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EIO", @intFromEnum(std.posix.E.IO));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EACCES", @intFromEnum(std.posix.E.ACCES));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EEXIST", @intFromEnum(std.posix.E.EXIST));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "ENOSPC", @intFromEnum(std.posix.E.NOSPC));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "ENOSYS", @intFromEnum(std.posix.E.NOSYS));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EBUSY", @intFromEnum(std.posix.E.BUSY));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "ENOENT", @intFromEnum(std.posix.E.NOENT));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EPERM", @intFromEnum(std.posix.E.PERM));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EPIPE", @intFromEnum(std.posix.E.PIPE));
-    try defineNativeStdErrorConstant(ctx.runtime, object, "EBADF", @intFromEnum(std.posix.E.BADF));
-
-    try setModuleBinding(ctx, record, atom, object.value());
-}
-
-fn defineNativeStdErrorConstant(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
-    const atom = try rt.internAtom(name);
-    defer rt.atoms.free(atom);
-    try object.defineOwnProperty(rt, atom, core.Descriptor.data(core.JSValue.int32(value), false, false, true));
-}
-
-fn initializeNativeStdFileValue(
-    ctx: *core.JSContext,
-    record: *core.module.ModuleRecord,
-    name: []const u8,
-    file: *std.c.FILE,
-    is_popen: bool,
-    is_stdio: bool,
-) !void {
-    const atom = try ctx.runtime.internAtom(name);
-    defer ctx.runtime.atoms.free(atom);
-    if (moduleBindingInitialized(record, atom)) return;
-    const value = try call_mod.createStdFileValue(ctx.runtime, ctx.global, file, is_popen, is_stdio);
-    errdefer value.free(ctx.runtime);
-    try setModuleBinding(ctx, record, atom, value);
-}
-
-fn initializeNativeOsModule(ctx: *core.JSContext, record: *core.module.ModuleRecord) !bool {
-    try initializeNativeModule(ctx, record, &.{ "getenv", "getcwd", "chdir", "remove", "rename", "open", "close", "read", "write", "seek", "mkdir", "readdir", "stat", "lstat", "realpath", "symlink", "readlink", "utimes", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "exec", "waitpid", "getpid", "pipe", "kill", "dup", "dup2", "isatty", "ttyGetWinSize", "ttySetRaw", "setReadHandler", "setWriteHandler", "signal", "cputime", "exePath", "now", "sleepAsync", "mkdtemp", "mkstemp", "Worker", "poll", "sleep" });
-    try initializeNativeStringValue(ctx, record, "platform", builtinPlatformName());
-    try initializeNativeStdIntValue(ctx, record, "O_RDONLY", osFlagValue(.{ .ACCMODE = .RDONLY }));
-    try initializeNativeStdIntValue(ctx, record, "O_WRONLY", osFlagValue(.{ .ACCMODE = .WRONLY }));
-    try initializeNativeStdIntValue(ctx, record, "O_RDWR", osFlagValue(.{ .ACCMODE = .RDWR }));
-    try initializeNativeStdIntValue(ctx, record, "O_APPEND", osFlagValue(.{ .APPEND = true }));
-    try initializeNativeStdIntValue(ctx, record, "O_CREAT", osFlagValue(.{ .CREAT = true }));
-    try initializeNativeStdIntValue(ctx, record, "O_EXCL", osFlagValue(.{ .EXCL = true }));
-    try initializeNativeStdIntValue(ctx, record, "O_TRUNC", osFlagValue(.{ .TRUNC = true }));
-    try initializeNativeStdIntValue(ctx, record, "S_IFMT", std.c.S.IFMT);
-    try initializeNativeStdIntValue(ctx, record, "S_IFIFO", std.c.S.IFIFO);
-    try initializeNativeStdIntValue(ctx, record, "S_IFCHR", std.c.S.IFCHR);
-    try initializeNativeStdIntValue(ctx, record, "S_IFDIR", std.c.S.IFDIR);
-    try initializeNativeStdIntValue(ctx, record, "S_IFBLK", std.c.S.IFBLK);
-    try initializeNativeStdIntValue(ctx, record, "S_IFREG", std.c.S.IFREG);
-    try initializeNativeStdIntValue(ctx, record, "S_IFSOCK", std.c.S.IFSOCK);
-    try initializeNativeStdIntValue(ctx, record, "S_IFLNK", std.c.S.IFLNK);
-    try initializeNativeStdIntValue(ctx, record, "S_ISGID", std.c.S.ISGID);
-    try initializeNativeStdIntValue(ctx, record, "S_ISUID", std.c.S.ISUID);
-    try initializeNativeStdIntValue(ctx, record, "WNOHANG", std.c.W.NOHANG);
-    try initializeNativeStdIntValue(ctx, record, "SIGINT", @intFromEnum(std.c.SIG.INT));
-    try initializeNativeStdIntValue(ctx, record, "SIGABRT", @intFromEnum(std.c.SIG.ABRT));
-    try initializeNativeStdIntValue(ctx, record, "SIGFPE", @intFromEnum(std.c.SIG.FPE));
-    try initializeNativeStdIntValue(ctx, record, "SIGILL", @intFromEnum(std.c.SIG.ILL));
-    try initializeNativeStdIntValue(ctx, record, "SIGSEGV", @intFromEnum(std.c.SIG.SEGV));
-    try initializeNativeStdIntValue(ctx, record, "SIGTERM", @intFromEnum(std.c.SIG.TERM));
-    try initializeNativeStdIntValue(ctx, record, "SIGQUIT", @intFromEnum(std.c.SIG.QUIT));
-    try initializeNativeStdIntValue(ctx, record, "SIGPIPE", @intFromEnum(std.c.SIG.PIPE));
-    try initializeNativeStdIntValue(ctx, record, "SIGALRM", @intFromEnum(std.c.SIG.ALRM));
-    try initializeNativeStdIntValue(ctx, record, "SIGUSR1", @intFromEnum(std.c.SIG.USR1));
-    try initializeNativeStdIntValue(ctx, record, "SIGUSR2", @intFromEnum(std.c.SIG.USR2));
-    try initializeNativeStdIntValue(ctx, record, "SIGCHLD", @intFromEnum(std.c.SIG.CHLD));
-    try initializeNativeStdIntValue(ctx, record, "SIGCONT", @intFromEnum(std.c.SIG.CONT));
-    try initializeNativeStdIntValue(ctx, record, "SIGSTOP", @intFromEnum(std.c.SIG.STOP));
-    try initializeNativeStdIntValue(ctx, record, "SIGTSTP", @intFromEnum(std.c.SIG.TSTP));
-    try initializeNativeStdIntValue(ctx, record, "SIGTTIN", @intFromEnum(std.c.SIG.TTIN));
-    try initializeNativeStdIntValue(ctx, record, "SIGTTOU", @intFromEnum(std.c.SIG.TTOU));
-    return true;
-}
-
-fn osFlagValue(value: std.c.O) i32 {
-    return @intCast(@as(u32, @bitCast(value)));
-}
-
-fn initializeNativeModule(ctx: *core.JSContext, record: *core.module.ModuleRecord, names: []const []const u8) !void {
-    for (names) |name| {
-        const atom = try ctx.runtime.internAtom(name);
-        defer ctx.runtime.atoms.free(atom);
-        if (moduleBindingInitialized(record, atom)) continue;
-        const value = switch (record.synthetic_kind) {
-            .native_std => try call_mod.createStdModuleFunction(ctx.runtime, name),
-            .native_os => try call_mod.createOsModuleFunction(ctx.runtime, name),
-            else => unreachable,
-        };
-        errdefer value.free(ctx.runtime);
-        try setModuleBinding(ctx, record, atom, value);
-    }
 }
 
 fn moduleBindingInitialized(record: *const core.module.ModuleRecord, name: core.Atom) bool {
@@ -1134,7 +922,6 @@ fn markImmutableArrayBuffer(rt: *core.JSRuntime, object: *core.Object) !void {
 fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
     const referrer = referrer_path orelse return runtime.atoms.dup(request_atom);
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
-    if (nativeModuleKindForSpecifier(specifier)) |kind| return runtime.internAtom(nativeModuleName(kind));
     if (std.mem.startsWith(u8, specifier, "node:")) return runtime.atoms.dup(request_atom);
     if (std.fs.path.isAbsolute(specifier)) {
         const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{specifier});

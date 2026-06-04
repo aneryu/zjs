@@ -1,10 +1,10 @@
 const std = @import("std");
-const engine = @import("quickjs_zig_engine");
+const zjs = @import("zjs");
 
 const InterruptState = struct {
     hits: usize = 0,
 
-    fn stop(_: *engine.core.JSRuntime, ctx: ?*anyopaque) bool {
+    fn stop(_: *zjs.JSRuntime, ctx: ?*anyopaque) bool {
         const self: *InterruptState = @ptrCast(@alignCast(ctx.?));
         self.hits += 1;
         return true;
@@ -12,101 +12,112 @@ const InterruptState = struct {
 };
 
 test "production embedding can own JSRuntime and JSContext directly" {
-    var rt: engine.JSRuntime = undefined;
+    var rt: zjs.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    var ctx: engine.JSContext = undefined;
+    var ctx: zjs.JSContext = undefined;
     try ctx.init(&rt, .{});
     defer ctx.deinit();
 
     const value = try ctx.eval("1 + 1", .{});
-    defer ctx.freeValue(value);
+    defer value.free(&rt);
     try std.testing.expectEqual(@as(?i32, 2), value.asInt32());
 
     const object = try ctx.eval("({ answer: 42 })", .{});
-    var handle = try ctx.takeValueHandle(object);
-    defer handle.deinit();
-    try std.testing.expect(handle.get().isObject());
+    defer object.free(&rt);
+    try std.testing.expect(object.isObject());
 
     const global = try ctx.globalObject();
     try std.testing.expect(global.is_global);
 }
 
 test "production embedding API applies limits and releases eval handles" {
-    var js = try engine.Engine.initWithOptions(.{
-        .allocator = std.testing.allocator,
-        .limits = .{
-            .stack_bytes = 128 * 1024,
-            .gc_threshold_bytes = 32 * 1024,
-        },
+    const rt = try zjs.JSRuntime.createWithOptions(std.testing.allocator, .{
+        .stack_size = 128 * 1024,
+        .gc_threshold = 32 * 1024,
     });
-    defer js.deinit();
+    defer rt.destroy();
 
-    try std.testing.expectEqual(@as(usize, 128 * 1024), js.runtime.stackSize());
-    try std.testing.expectEqual(@as(usize, 32 * 1024), js.runtime.gcThreshold());
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try std.testing.expectEqual(@as(usize, 128 * 1024), rt.stackSize());
+    try std.testing.expectEqual(@as(usize, 32 * 1024), rt.gcThreshold());
 
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
-    var result = try js.evalHandleWithOptions("print(1 + 2);", .{ .output = &output });
-    defer result.deinit();
+    const result = try ctx.eval("print(1 + 2);", .{ .output = &output });
+    defer result.free(rt);
 
-    try std.testing.expect(result.get().isUndefined());
+    try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("3\n", output.buffered());
 }
 
 test "production embedding lifecycle deinitializes repeated script and module evals" {
     var index: usize = 0;
     while (index < 4) : (index += 1) {
-        var js = try engine.Engine.init(std.testing.allocator);
-        defer js.deinit();
+        const rt = try zjs.JSRuntime.create(std.testing.allocator);
+        defer rt.destroy();
 
-        var script_result = try js.evalHandle(
+        const ctx = try zjs.JSContext.create(rt);
+        defer ctx.destroy();
+
+        const script_result = try ctx.eval(
             \\let values = [];
             \\for (let i = 0; i < 8; i++) values.push({ i });
             \\values.map(v => v.i).join(",");
-        );
-        defer script_result.deinit();
-        try std.testing.expect(script_result.get().isUndefined());
+        , .{ .discard_script_result = true });
+        defer script_result.free(rt);
+        try std.testing.expect(script_result.isUndefined());
 
-        var module_result = try js.evalModuleHandle(
+        const module_result = try ctx.eval(
             \\const value = await Promise.resolve(42);
             \\export { value };
-        );
-        defer module_result.deinit();
+        , .{ .mode = .module });
+        defer module_result.free(rt);
     }
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {
-    var js = try engine.Engine.init(std.testing.allocator);
-    defer js.deinit();
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
 
-    js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
-    defer js.runtime.setMemoryLimit(null);
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
 
-    try std.testing.expectError(error.OutOfMemory, js.eval("({ payload: new Array(32).fill('x') });"));
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    defer rt.setMemoryLimit(null);
+
+    try std.testing.expectError(error.OutOfMemory, ctx.eval("({ payload: new Array(32).fill('x') });", .{}));
 }
 
 test "production embedding interrupt handler aborts unbounded execution" {
-    var js = try engine.Engine.init(std.testing.allocator);
-    defer js.deinit();
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
 
     var state = InterruptState{};
-    js.runtime.setInterruptHandler(InterruptState.stop, &state);
-    defer js.runtime.setInterruptHandler(null, null);
+    rt.setInterruptHandler(InterruptState.stop, &state);
+    defer rt.setInterruptHandler(null, null);
 
-    try std.testing.expectError(error.Interrupted, js.eval("while (true) {}"));
+    try std.testing.expectError(error.Interrupted, ctx.eval("while (true) {}", .{}));
     try std.testing.expect(state.hits > 0);
 }
 
-test "production embedding takeExceptionInfo captures exception snapshot without leaking" {
-    var js = try engine.Engine.init(std.testing.allocator);
-    defer js.deinit();
+test "production embedding takeException captures exception snapshot without leaking" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
 
-    _ = js.eval("throw new Error('test exception snapshot');") catch |err| {
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    _ = ctx.eval("throw new Error('test exception snapshot');", .{}) catch |err| {
         try std.testing.expectEqual(error.Test262Error, err);
-        var info = try js.takeExceptionInfo();
-        defer info.deinit();
-        try std.testing.expect(info.value.get().isObject());
+        const thrown = ctx.takePendingException();
+        defer thrown.free(rt);
+        try std.testing.expect(thrown.isObject());
     };
 }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const zjs = @import("../root.zig");
+const zjs = @import("zjs");
 const builtins = zjs.internal.builtins;
 const core = zjs.internal.core;
 const frontend = zjs.internal.frontend;

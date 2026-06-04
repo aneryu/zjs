@@ -1,8 +1,9 @@
 const std = @import("std");
-const engine = @import("quickjs_zig_engine");
+const zjs = @import("zjs");
+const engine = zjs;
 
-const core = engine.core;
-const op = engine.bytecode.opcode.op;
+const core = zjs.core;
+const op = zjs.bytecode.opcode.op;
 
 const exec_test = @import("exec.zig");
 const helpers = exec_test.helpers;

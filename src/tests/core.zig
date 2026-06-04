@@ -1,8 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const engine = @import("quickjs_zig_engine");
+const zjs = @import("zjs");
+const engine = zjs;
 
-const core = engine.core;
+const core = zjs.core;
 
 extern "c" fn tmpfile() ?*std.c.FILE;
 
@@ -318,8 +319,8 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 381), core.atom.ids.zjs_last_global_setup_name);
     try std.testing.expectEqual(@as(core.Atom, 419), core.atom.ids.zjs_last_global_extra_name);
     try std.testing.expectEqual(@as(core.Atom, 586), core.atom.ids.zjs_last_registry_extra_name);
-    try std.testing.expectEqual(@as(core.Atom, 637), core.atom.ids.zjs_last_startup_name);
-    try std.testing.expectEqual(@as(usize, 637), core.atom.predefined_count);
+    try std.testing.expectEqual(@as(core.Atom, 634), core.atom.ids.zjs_last_startup_name);
+    try std.testing.expectEqual(@as(usize, 634), core.atom.predefined_count);
 
     const brand = core.atom.predefinedById(core.atom.ids.Private_brand).?;
     try std.testing.expectEqual(core.atom.AtomKind.private, brand.kind);
@@ -442,7 +443,6 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     atoms.deinit();
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
-
 
 test "GC sweeps unrooted unique symbol atoms" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -2009,7 +2009,6 @@ test "regexp state uses payload storage" {
     try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.asInt32());
     try std.testing.expect(!regexp.regexpLastIndexWritable());
 }
-
 
 test "bound function state uses payload storage" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -5579,8 +5578,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     defer performance_holder.value().free(rt);
     const namespace_holder = try core.Object.create(rt, core.class.ids.object, null);
     defer namespace_holder.value().free(rt);
-    const cli_holder = try core.Object.create(rt, core.class.ids.object, null);
-    defer cli_holder.value().free(rt);
     const host_holder = try core.Object.create(rt, core.class.ids.object, null);
     defer host_holder.value().free(rt);
     const replace_holder = try core.Object.create(rt, core.class.ids.object, null);
@@ -5592,8 +5589,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     defer rt.atoms.free(performance_key);
     const namespace_key = try rt.internAtom("Math");
     defer rt.atoms.free(namespace_key);
-    const cli_key = try rt.internAtom("scriptArgs");
-    defer rt.atoms.free(cli_key);
     const host_key = try rt.internAtom("gc");
     defer rt.atoms.free(host_key);
     const replace_key = try rt.internAtom("replace");
@@ -5603,7 +5598,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     try navigator_holder.defineNavigatorAutoInitProperty(rt, navigator_key, flags, global);
     try performance_holder.definePerformanceAutoInitProperty(rt, performance_key, flags, global);
     try namespace_holder.defineBuiltinNamespaceAutoInitProperty(rt, namespace_key, "Math", flags, global, .math_namespace);
-    try cli_holder.defineCliGlobalAutoInitProperty(rt, cli_key, "scriptArgs", flags, global);
     try host_holder.defineHostAutoInitProperty(rt, host_key, "gc", 0, flags, core.host_function.ids.std_gc, false, global);
     try replace_holder.defineAutoInitProperty(rt, replace_key, "replace", 0, flags);
     try replace_holder.replaceAutoInitPropertyWithRealmNativeAndCache(rt, replace_key, "replace", 0, flags, global, 0, 0);
@@ -5612,7 +5606,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
         navigator_holder,
         performance_holder,
         namespace_holder,
-        cli_holder,
         host_holder,
         replace_holder,
     };
@@ -6144,8 +6137,6 @@ test "finalization registry live target preserves held value" {
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().weak_ref_count);
 }
 
-
-
 test "finalization registry unregister preserves pending cleanup cell" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6498,7 +6489,6 @@ test "function records skip zero-length payload allocations" {
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
 }
-
 
 test "module records retain import export metadata and status" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -6867,7 +6857,6 @@ test "ordinary objects define own data properties and descriptors" {
     const updated = obj.getProperty(key);
     try std.testing.expectEqual(@as(?i32, 7), updated.asInt32());
 }
-
 
 test "define property enforces non-configurable and non-writable invariants" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

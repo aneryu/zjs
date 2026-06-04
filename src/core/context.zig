@@ -579,7 +579,6 @@ pub const JSContext = struct {
                 _ = self.throwValue(error_val);
                 return moduleResolutionError(err);
             };
-            try self.initializeNativeSyntheticModules();
         }
 
         var module_var_refs: []JSValue = &.{};
@@ -615,14 +614,6 @@ pub const JSContext = struct {
             return JSValue.undefinedValue();
         }
         return result;
-    }
-
-    fn initializeNativeSyntheticModules(self: *JSContext) !void {
-        const global_object = try exec.zjs_vm.contextGlobal(self);
-        for (self.runtime.modules.modules) |record| {
-            if (record.synthetic_kind != .native_std and record.synthetic_kind != .native_os) continue;
-            _ = try exec.module.initializeSyntheticFileModule(self, global_object, record.module_name, "");
-        }
     }
 
     fn runEvalModuleWithVarRefs(
@@ -949,7 +940,105 @@ pub const JSContext = struct {
         self.backtrace_frames[idx].line_num = line_num;
         self.backtrace_frames[idx].col_num = col_num;
     }
+
+    pub fn runJobs(self: *JSContext, output: ?*std.Io.Writer) !void {
+        self.runtime.job_queue.runAll();
+        const global_object = try self.globalObject();
+        exec.zjs_vm.drainPendingPromiseJobs(self, output, global_object) catch |err| {
+            if (self.hasException() or self.hasUnhandledRejection()) return;
+            return err;
+        };
+    }
+
+    pub fn takePendingException(self: *JSContext) JSValue {
+        if (self.hasUnhandledRejection()) {
+            const rejection = self.takeUnhandledRejection();
+            if (self.hasException()) self.clearException();
+            return rejection;
+        }
+        return self.takeException();
+    }
+
+    pub fn defineGlobalFunction(
+        self: *JSContext,
+        name: []const u8,
+        length: i32,
+        ptr: *anyopaque,
+        call: @import("host_function.zig").ExternalCallFn,
+        finalizer: ?@import("host_function.zig").ExternalFinalizer,
+    ) !void {
+        const rt = self.runtime;
+        const global_object = try self.globalObject();
+
+        const id = try rt.registerExternalHostFunction(.{
+            .ptr = ptr,
+            .call = call,
+            .finalizer = finalizer,
+        });
+
+        const function_value = try @import("../builtins/function.zig").nativeFunction(rt, name, length);
+        errdefer function_value.free(rt);
+
+        const function_object = try exec.property_ops.expectObject(function_value);
+        function_object.hostFunctionKindSlot().* = @import("host_function.zig").ids.external_host;
+        function_object.externalHostFunctionIdSlot().* = id;
+        try function_object.setFunctionRealmGlobalPtr(rt, global_object);
+
+        const property_name = try rt.internAtom(name);
+        defer rt.atoms.free(property_name);
+        try global_object.defineOwnProperty(rt, property_name, @import("descriptor.zig").Descriptor.data(function_value, true, false, true));
+    }
+
+    pub fn formatException(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) ![]const u8 {
+        const rt = self.runtime;
+        if (exc.isObject()) {
+            const header = exc.refHeader() orelse return error.InvalidEngineState;
+            const object: *Object = @fieldParentPtr("header", header);
+
+            const name_opt = try getPropertyString(rt, object, "name", allocator);
+            errdefer if (name_opt) |n| allocator.free(n);
+            const msg_opt = try getPropertyString(rt, object, "message", allocator);
+            errdefer if (msg_opt) |m| allocator.free(m);
+
+            if (name_opt) |name| {
+                if (msg_opt) |msg| {
+                    defer allocator.free(name);
+                    defer allocator.free(msg);
+                    return try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, msg });
+                }
+                return name;
+            } else if (msg_opt) |msg| {
+                return msg;
+            }
+        }
+
+        var temp_list = std.ArrayList(u8).empty;
+        defer temp_list.deinit(rt.memory.allocator);
+        try exec.value_ops.appendValueString(rt, &temp_list, exc);
+        return try allocator.dupe(u8, temp_list.items);
+    }
+
+    pub fn formatExceptionStack(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) !?[]const u8 {
+        const rt = self.runtime;
+        if (!exc.isObject()) return null;
+        const header = exc.refHeader() orelse return null;
+        const object: *Object = @fieldParentPtr("header", header);
+        return try getPropertyString(rt, object, "stack", allocator);
+    }
 };
+
+fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8 {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    const val = obj.getProperty(key);
+    defer val.free(rt);
+    if (!val.isString()) return null;
+
+    var temp_list = std.ArrayList(u8).empty;
+    defer temp_list.deinit(rt.memory.allocator);
+    try exec.value_ops.appendRawString(rt, &temp_list, val);
+    return try allocator.dupe(u8, temp_list.items);
+}
 
 fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
     return switch (err) {

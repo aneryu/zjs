@@ -59,7 +59,7 @@ pub const ids = struct {
     pub const zjs_last_global_setup_name: Atom = 381;
     pub const zjs_last_global_extra_name: Atom = 419;
     pub const zjs_last_registry_extra_name: Atom = 586;
-    pub const zjs_last_startup_name: Atom = 637;
+    pub const zjs_last_startup_name: Atom = 634;
 };
 
 pub const last_keyword = ids.await;
@@ -702,9 +702,6 @@ pub const predefined_atoms = [_]PredefinedAtom{
     .{ .id = 632, .name = "assert" },
     .{ .id = 633, .name = "__zjs_throw_type_error_function_proto" },
     .{ .id = 634, .name = "__zjs_throw_type_error_intrinsic" },
-    .{ .id = 635, .name = "argv0" },
-    .{ .id = 636, .name = "execArgv" },
-    .{ .id = 637, .name = "scriptArgs" },
 };
 
 const PredefinedMapEntry = struct { []const u8, Atom };

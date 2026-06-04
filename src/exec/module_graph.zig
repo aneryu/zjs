@@ -1,17 +1,28 @@
 const std = @import("std");
-const zjs = @import("../root.zig");
-const core = zjs.internal.core;
-const frontend = zjs.internal.frontend;
-const bytecode = zjs.internal.bytecode;
-const builtins = zjs.internal.builtins;
-const exec = zjs.internal.exec;
+const core = @import("../core/root.zig");
+const frontend = @import("../frontend/root.zig");
+const exec = @import("root.zig");
 
-pub const RuntimeError = exec.exceptions.RuntimeError;
-pub const HostError = exec.exceptions.HostError;
+pub const HostHooks = struct {
+    ptr: *anyopaque,
+    resolveModule: *const fn (*anyopaque, []const u8, ?[]const u8, std.mem.Allocator) anyerror!ResolvedModule,
+    loadModule: *const fn (*anyopaque, ResolvedModule, std.mem.Allocator) anyerror!LoadedModule,
 
-pub const Limits = zjs.Limits;
-pub const ExceptionInfo = zjs.ExceptionInfo;
-pub const HostHooks = zjs.HostHooks;
+    pub const ModuleKind = enum { esm, commonjs, json, wasm, builtin };
+
+    pub const ResolvedModule = struct {
+        specifier: []const u8,
+        path: []const u8,
+        kind: ModuleKind,
+    };
+
+    pub const LoadedModule = struct {
+        source: []const u8,
+        path: []const u8,
+        kind: ModuleKind,
+        owned: bool = false,
+    };
+};
 
 pub const ModuleEvalStep = union(enum) {
     completed: core.JSValue,
@@ -76,112 +87,9 @@ pub const DynamicImportState = struct {
     }
 };
 
-pub fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
-    runtime.job_queue.runAll();
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    exec.zjs_vm.drainPendingPromiseJobs(context, output, global_object) catch |err| {
-        if (context.hasException() or context.hasUnhandledRejection()) return;
-        return err;
-    };
-}
-
-pub fn takeException(context: *core.JSContext) core.JSValue {
-    if (context.hasUnhandledRejection()) {
-        const rejection = context.takeUnhandledRejection();
-        if (context.hasException()) context.clearException();
-        return rejection;
-    }
-    return context.takeException();
-}
-
-pub fn takeExceptionInfo(runtime: *core.JSRuntime, context: *core.JSContext) !ExceptionInfo {
-    return .{
-        .value = try core.JSValueHandle.init(runtime, takeException(context)),
-    };
-}
-
-pub fn exposeStdOsGlobals(runtime: *core.JSRuntime, context: *core.JSContext) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    try exposeNativeModuleGlobal(runtime, context, global_object, "std", .native_std);
-    try exposeNativeModuleGlobal(runtime, context, global_object, "os", .native_os);
-}
-
-pub fn defineScriptArgs(runtime: *core.JSRuntime, context: *core.JSContext, args: []const []const u8) !void {
-    try defineStringArrayGlobal(runtime, context, "scriptArgs", args);
-}
-
-pub fn createExternalHostFunctionValue(
-    runtime: *core.JSRuntime,
-    context: *core.JSContext,
-    name: []const u8,
-    length: i32,
-    ptr: *anyopaque,
-    call: core.host_function.ExternalCallFn,
-    finalizer: ?core.host_function.ExternalFinalizer,
-) !core.JSValue {
-    const id = try runtime.registerExternalHostFunction(.{
-        .ptr = ptr,
-        .call = call,
-        .finalizer = finalizer,
-    });
-    const function_value = try builtins.function.nativeFunction(runtime, name, length);
-    errdefer function_value.free(runtime);
-
-    const function_object = try exec.property_ops.expectObject(function_value);
-    function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
-    function_object.externalHostFunctionIdSlot().* = id;
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    try function_object.setFunctionRealmGlobalPtr(runtime, global_object);
-    return function_value;
-}
-
-pub fn defineGlobalExternalHostFunction(
-    runtime: *core.JSRuntime,
-    context: *core.JSContext,
-    name: []const u8,
-    length: i32,
-    ptr: *anyopaque,
-    call: core.host_function.ExternalCallFn,
-    finalizer: ?core.host_function.ExternalFinalizer,
-) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    const function_value = try createExternalHostFunctionValue(runtime, context, name, length, ptr, call, finalizer);
-    defer function_value.free(runtime);
-
-    const property_name = try runtime.internAtom(name);
-    defer runtime.atoms.free(property_name);
-    try global_object.defineOwnProperty(runtime, property_name, core.Descriptor.data(function_value, true, false, true));
-}
-
-pub fn defineArgvGlobals(runtime: *core.JSRuntime, context: *core.JSContext, argv0: []const u8, exec_argv: []const []const u8) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    const argv0_value = try exec.value_ops.createStringValue(runtime, argv0);
-    defer argv0_value.free(runtime);
-    const argv0_key = try runtime.internAtom("argv0");
-    defer runtime.atoms.free(argv0_key);
-    try global_object.defineOwnProperty(runtime, argv0_key, core.Descriptor.data(argv0_value, true, true, true));
-    try defineStringArrayGlobal(runtime, context, "execArgv", exec_argv);
-}
-
-pub fn defineCliArgvGlobalsLazy(runtime: *core.JSRuntime, context: *core.JSContext, argv0: []const u8, exec_argv: []const []const u8) !void {
-    runtime.cli_argv0 = argv0;
-    runtime.cli_exec_argv = exec_argv;
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    const flags = core.property.Flags.data(true, true, true);
-    try global_object.defineCliGlobalAutoInitProperty(runtime, core.atom.predefinedId("argv0", .string).?, "argv0", flags, global_object);
-    try global_object.defineCliGlobalAutoInitProperty(runtime, core.atom.predefinedId("execArgv", .string).?, "execArgv", flags, global_object);
-}
-
-pub fn defineCliScriptArgsLazy(runtime: *core.JSRuntime, context: *core.JSContext, args: []const []const u8) !void {
-    runtime.cli_script_args = args;
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    try global_object.defineCliGlobalAutoInitProperty(
-        runtime,
-        core.atom.predefinedId("scriptArgs", .string).?,
-        "scriptArgs",
-        core.property.Flags.data(true, true, true),
-        global_object,
-    );
+fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
+    _ = runtime;
+    try context.runJobs(output);
 }
 
 pub fn evalFileModuleGraphWithOutput(
@@ -292,7 +200,7 @@ pub fn evalFileModuleGraphWithHostHooks(
         if (loaded_owned) allocator.free(raw_module_source);
         defer compiled.deinit();
         if (compiled.syntax_error) |err| {
-            const exception_ops = @import("../exec/vm_exception_ops.zig");
+            const exception_ops = exec.exception_ops;
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
             try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
@@ -336,63 +244,6 @@ pub fn evalFileModuleGraphWithHostHooks(
     return try drainModuleContinuations(runtime, context, output, allocator, &continuations);
 }
 
-fn arrayPrototypeFromGlobal(runtime: *core.JSRuntime, global_object: *core.Object) !*core.Object {
-    const array_ctor_value = global_object.getProperty(core.atom.ids.Array);
-    defer array_ctor_value.free(runtime);
-    const array_ctor = try exec.property_ops.expectObject(array_ctor_value);
-    const prototype_value = array_ctor.getProperty(core.atom.ids.prototype);
-    defer prototype_value.free(runtime);
-    return try exec.property_ops.expectObject(prototype_value);
-}
-
-fn defineStringArrayGlobal(runtime: *core.JSRuntime, context: *core.JSContext, name: []const u8, items: []const []const u8) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    const values = try runtime.memory.alloc(core.JSValue, items.len);
-    defer runtime.memory.free(core.JSValue, values);
-    var initialized: usize = 0;
-    defer {
-        for (values[0..initialized]) |value| value.free(runtime);
-    }
-    for (items, 0..) |item, index| {
-        values[index] = try exec.value_ops.createStringValue(runtime, item);
-        initialized += 1;
-    }
-
-    const array_prototype = try arrayPrototypeFromGlobal(runtime, global_object);
-    const array = try core.Object.createArray(runtime, array_prototype);
-    var array_raw_owned = true;
-    errdefer if (array_raw_owned) core.Object.destroyFromHeader(runtime, &array.header);
-    for (values, 0..) |value, index| {
-        try array.defineOwnProperty(runtime, core.atom.atomFromUInt32(@intCast(index)), core.Descriptor.data(value, true, true, true));
-    }
-    array.length = @intCast(items.len);
-    const property_name = try runtime.internAtom(name);
-    defer runtime.atoms.free(property_name);
-    const array_value = array.value();
-    array_raw_owned = false;
-    defer array_value.free(runtime);
-    try global_object.defineOwnProperty(runtime, property_name, core.Descriptor.data(array_value, true, true, true));
-}
-
-fn exposeNativeModuleGlobal(
-    runtime: *core.JSRuntime,
-    context: *core.JSContext,
-    global_object: *core.Object,
-    name: []const u8,
-    kind: core.module.SyntheticKind,
-) !void {
-    _ = try exec.module.preloadNativeModule(runtime, kind);
-    const module_name = try runtime.internAtom(name);
-    defer runtime.atoms.free(module_name);
-    runtime.modules.linkModule(runtime, module_name) catch |err| return moduleResolutionError(err);
-    _ = try exec.module.initializeSyntheticFileModule(context, global_object, module_name, "");
-    const namespace = try exec.module.moduleNamespaceValue(context, module_name);
-    defer namespace.free(runtime);
-    const property_name = try runtime.internAtom(name);
-    defer runtime.atoms.free(property_name);
-    try global_object.defineOwnProperty(runtime, property_name, core.Descriptor.data(namespace, true, false, true));
-}
-
 fn initializeSyntheticFileModules(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
@@ -403,23 +254,11 @@ fn initializeSyntheticFileModules(
     const global_object = try exec.zjs_vm.contextGlobal(context);
     for (runtime.modules.modules) |record| {
         if (record.synthetic_kind == .none) continue;
-        if (record.synthetic_kind == .native_std or record.synthetic_kind == .native_os) {
-            _ = try exec.module.initializeSyntheticFileModule(context, global_object, record.module_name, "");
-            continue;
-        }
         const path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
         const source_path = exec.module.syntheticModuleFilePath(path);
         const module_source = try std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size));
         defer allocator.free(module_source);
         _ = try exec.module.initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
-    }
-}
-
-fn initializeNativeSyntheticModules(runtime: *core.JSRuntime, context: *core.JSContext) !void {
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    for (runtime.modules.modules) |record| {
-        if (record.synthetic_kind != .native_std and record.synthetic_kind != .native_os) continue;
-        _ = try exec.module.initializeSyntheticFileModule(context, global_object, record.module_name, "");
     }
 }
 
@@ -467,7 +306,7 @@ fn evalPreloadedFileModuleStep(
     var compiled = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = filename });
     defer compiled.deinit();
     if (compiled.syntax_error) |err| {
-        const exception_ops = @import("../exec/vm_exception_ops.zig");
+        const exception_ops = exec.exception_ops;
         const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
@@ -481,7 +320,7 @@ fn evalPreloadedFileModuleStep(
     defer runtime.atoms.free(module_name);
     if (runtime.modules.find(module_name) == null) return error.ModuleNotFound;
     runtime.modules.linkModule(runtime, module_name) catch |err| {
-        const exception_ops = @import("../exec/vm_exception_ops.zig");
+        const exception_ops = exec.exception_ops;
         const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
@@ -725,17 +564,6 @@ fn evalDynamicImportModule(
     if (referrer_path.len == 0) return error.ModuleNotFound;
     const target_path = try exec.module.resolveModuleSpecifier(allocator, referrer_path, specifier);
     defer allocator.free(target_path);
-    if (std.mem.eql(u8, target_path, "std") or std.mem.eql(u8, target_path, "os")) {
-        const is_std = std.mem.eql(u8, target_path, "std");
-        const kind: core.module.SyntheticKind = if (is_std) .native_std else .native_os;
-        _ = try exec.module.preloadNativeModule(runtime, kind);
-        const module_name = try runtime.internAtom(target_path);
-        defer runtime.atoms.free(module_name);
-        runtime.modules.linkModule(runtime, module_name) catch |err| return moduleResolutionError(err);
-        const global_obj = try exec.zjs_vm.contextGlobal(context);
-        _ = try exec.module.initializeSyntheticFileModule(context, global_obj, module_name, "");
-        return exec.module.moduleNamespaceValue(context, module_name);
-    }
     const resolved_atom = try runtime.internAtom(target_path);
     defer runtime.atoms.free(resolved_atom);
     if (runtime.modules.find(resolved_atom) == null) {
@@ -748,7 +576,6 @@ fn evalDynamicImportModule(
         }
         _ = try exec.module.preloadFileModuleGraphWithOrder(io, allocator, runtime, context, source, target_path, max_source_size, &postorder);
         try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
-        try initializeNativeSyntheticModules(runtime, context);
     }
     const module_name = try runtime.internAtom(target_path);
     defer runtime.atoms.free(module_name);
@@ -805,7 +632,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
     var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
-        const exception_ops = @import("../exec/vm_exception_ops.zig");
+        const exception_ops = exec.exception_ops;
         const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);

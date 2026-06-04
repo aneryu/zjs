@@ -1823,10 +1823,6 @@ pub fn functionBytecodeHasClosureVarName(fb: *const bytecode.FunctionBytecode, a
     return false;
 }
 
-
-
-
-
 pub fn shouldSkipDirectEvalScopeCaptureName(
     rt: *core.JSRuntime,
     captures_direct_eval_scope: bool,
@@ -2321,7 +2317,6 @@ pub fn handleCatchableRuntimeError(
     return true;
 }
 
-
 pub fn callValueOrBytecode(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2402,7 +2397,6 @@ pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, er
     if (ctx.hasException()) ctx.clearException();
     _ = ctx.throwValue(error_value);
 }
-
 
 pub fn callValueOrBytecodeClassMode(
     ctx: *core.JSContext,
@@ -7012,7 +7006,6 @@ pub fn isUnknownScriptName(name: []const u8) bool {
 }
 pub const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
 
-
 pub fn isAsciiDigitUnit(unit: u16) bool {
     return unit >= '0' and unit <= '9';
 }
@@ -8021,7 +8014,6 @@ pub fn qjsCreateBuiltinFunction(rt: *core.JSRuntime, global: *core.Object, name:
     }
     return function;
 }
-
 
 pub fn constructCollectionFromVm(
     ctx: *core.JSContext,
@@ -10420,7 +10412,6 @@ test "eval function declaration names release preserves memory account" {
     try std.testing.expectEqual(before_allocations, rt.memory.allocation_count);
 }
 
-
 pub fn directEvalPrivateBoundNames(
     rt: *core.JSRuntime,
     caller_function: ?*const bytecode.Bytecode,
@@ -11139,7 +11130,6 @@ pub fn directEvalGlobalDataVarNeedsTemporaryRef(rt: *core.JSRuntime, global: *co
     return desc.kind == .data and desc.writable != true;
 }
 
-
 pub const WorkerMessage = union(enum) {
     undefined,
     null,
@@ -11191,13 +11181,9 @@ pub var qjs_workers = QjsWorkerCoordinator{};
 pub threadlocal var current_qjs_worker: ?*QjsWorker = null;
 pub threadlocal var current_qjs_worker_parent: ?core.JSValue = null;
 
-
-
 pub fn qjsWorkerIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
-
-
 
 pub fn createOsModuleNativeFunction(rt: *core.JSRuntime, name: []const u8) ?core.JSValue {
     if (std.mem.eql(u8, name, "Worker")) return qjsWorkerNativeFunction(rt, "Worker", 1, null) catch null;
@@ -11560,10 +11546,6 @@ pub fn qjsWorkerInitializeSyntheticFileModules(
 ) !void {
     for (ctx.runtime.modules.modules) |record| {
         if (record.synthetic_kind == .none) continue;
-        if (record.synthetic_kind == .native_std or record.synthetic_kind == .native_os) {
-            _ = try module_mod.initializeSyntheticFileModule(ctx, global, record.module_name, "");
-            continue;
-        }
         const path = ctx.runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
         const source_path = module_mod.syntheticModuleFilePath(path);
         const module_source = try std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size));
@@ -13974,8 +13956,6 @@ pub fn hostTimerIo() std.Io {
 pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !void {
     try enqueuePendingPromiseJob(ctx, callback);
 }
-
-
 
 test "runNextOsTimer roots one-shot function bytecode callback after dequeue" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

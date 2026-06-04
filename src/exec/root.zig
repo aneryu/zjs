@@ -14,16 +14,17 @@ pub const call = @import("call.zig");
 pub const construct = @import("construct.zig");
 pub const property_ops = @import("property_ops.zig");
 pub const exceptions = @import("exceptions.zig");
+pub const exception_ops = @import("vm_exception_ops.zig");
 pub const iterator = @import("iterator.zig");
 pub const eval = @import("eval.zig");
 pub const module = @import("module.zig");
+pub const module_graph = @import("module_graph.zig");
 pub const promise = @import("promise.zig");
 pub const jobs = @import("jobs.zig");
 pub const value_ops = @import("value_ops.zig");
 pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
 pub const shared = @import("shared.zig");
-
 
 pub const Vm = struct {
     ctx: *core.JSContext,

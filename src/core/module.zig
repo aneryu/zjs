@@ -21,8 +21,6 @@ pub const SyntheticKind = enum {
     json,
     text,
     bytes,
-    native_std,
-    native_os,
 };
 
 pub const ImportEntry = struct {

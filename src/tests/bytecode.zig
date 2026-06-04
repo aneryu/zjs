@@ -1,8 +1,9 @@
 const std = @import("std");
-const engine = @import("quickjs_zig_engine");
+const zjs = @import("zjs");
+const engine = zjs;
 
-const bytecode = engine.bytecode;
-const core = engine.core;
+const bytecode = zjs.bytecode;
+const core = zjs.core;
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

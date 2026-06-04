@@ -829,140 +829,6 @@ fn internalDestructuringHelperForSubtype(subtype: u8) ?struct { slot: usize, kin
     };
 }
 
-pub fn createStdModuleFunction(rt: *core.JSRuntime, name: []const u8) !core.JSValue {
-    const kind: HostFunction = if (std.mem.eql(u8, name, "loadFile"))
-        .std_load_file
-    else if (std.mem.eql(u8, name, "writeFile"))
-        .std_write_file
-    else if (std.mem.eql(u8, name, "exists"))
-        .std_exists
-    else if (std.mem.eql(u8, name, "exit"))
-        .std_exit
-    else if (std.mem.eql(u8, name, "getenv"))
-        .std_getenv
-    else if (std.mem.eql(u8, name, "setenv"))
-        .std_setenv
-    else if (std.mem.eql(u8, name, "unsetenv"))
-        .std_unsetenv
-    else if (std.mem.eql(u8, name, "getenviron"))
-        .std_getenviron
-    else if (std.mem.eql(u8, name, "gc"))
-        .std_gc
-    else if (std.mem.eql(u8, name, "evalScript"))
-        .std_eval_script
-    else if (std.mem.eql(u8, name, "loadScript"))
-        .std_load_script
-    else if (std.mem.eql(u8, name, "open"))
-        .std_open
-    else if (std.mem.eql(u8, name, "fdopen"))
-        .std_fdopen
-    else if (std.mem.eql(u8, name, "tmpfile"))
-        .std_tmpfile
-    else if (std.mem.eql(u8, name, "popen"))
-        .std_popen
-    else if (std.mem.eql(u8, name, "strerror"))
-        .std_strerror
-    else if (std.mem.eql(u8, name, "puts"))
-        .std_puts
-    else if (std.mem.eql(u8, name, "printf"))
-        .std_printf
-    else if (std.mem.eql(u8, name, "sprintf"))
-        .std_sprintf
-    else if (std.mem.eql(u8, name, "urlGet"))
-        .std_url_get
-    else
-        return error.TypeError;
-    return createNamedHostFunctionValue(rt, name, kind);
-}
-
-pub fn createOsModuleFunction(rt: *core.JSRuntime, name: []const u8) !core.JSValue {
-    const kind: HostFunction = if (std.mem.eql(u8, name, "getenv"))
-        .os_getenv
-    else if (std.mem.eql(u8, name, "getcwd"))
-        .os_getcwd
-    else if (std.mem.eql(u8, name, "chdir"))
-        .os_chdir
-    else if (std.mem.eql(u8, name, "remove"))
-        .os_remove
-    else if (std.mem.eql(u8, name, "rename"))
-        .os_rename
-    else if (std.mem.eql(u8, name, "open"))
-        .os_open
-    else if (std.mem.eql(u8, name, "close"))
-        .os_close
-    else if (std.mem.eql(u8, name, "seek"))
-        .os_seek
-    else if (std.mem.eql(u8, name, "read"))
-        .os_read
-    else if (std.mem.eql(u8, name, "write"))
-        .os_write
-    else if (std.mem.eql(u8, name, "mkdir"))
-        .os_mkdir
-    else if (std.mem.eql(u8, name, "readdir"))
-        .os_readdir
-    else if (std.mem.eql(u8, name, "stat"))
-        .os_stat
-    else if (std.mem.eql(u8, name, "lstat"))
-        .os_lstat
-    else if (std.mem.eql(u8, name, "realpath"))
-        .os_realpath
-    else if (std.mem.eql(u8, name, "symlink"))
-        .os_symlink
-    else if (std.mem.eql(u8, name, "readlink"))
-        .os_readlink
-    else if (std.mem.eql(u8, name, "utimes"))
-        .os_utimes
-    else if (std.mem.eql(u8, name, "setTimeout"))
-        .os_set_timeout
-    else if (std.mem.eql(u8, name, "setInterval"))
-        .os_set_interval
-    else if (std.mem.eql(u8, name, "clearTimeout"))
-        .os_clear_timeout
-    else if (std.mem.eql(u8, name, "clearInterval"))
-        .os_clear_interval
-    else if (std.mem.eql(u8, name, "exec"))
-        .os_exec
-    else if (std.mem.eql(u8, name, "waitpid"))
-        .os_waitpid
-    else if (std.mem.eql(u8, name, "getpid"))
-        .os_getpid
-    else if (std.mem.eql(u8, name, "pipe"))
-        .os_pipe
-    else if (std.mem.eql(u8, name, "kill"))
-        .os_kill
-    else if (std.mem.eql(u8, name, "dup"))
-        .os_dup
-    else if (std.mem.eql(u8, name, "dup2"))
-        .os_dup2
-    else if (std.mem.eql(u8, name, "isatty"))
-        .os_isatty
-    else if (std.mem.eql(u8, name, "ttyGetWinSize"))
-        .os_tty_get_win_size
-    else if (std.mem.eql(u8, name, "ttySetRaw"))
-        .os_tty_set_raw
-    else if (std.mem.eql(u8, name, "setReadHandler"))
-        .os_set_read_handler
-    else if (std.mem.eql(u8, name, "setWriteHandler"))
-        .os_set_write_handler
-    else if (std.mem.eql(u8, name, "signal"))
-        .os_signal
-    else if (std.mem.eql(u8, name, "cputime"))
-        .os_cputime
-    else if (std.mem.eql(u8, name, "exePath"))
-        .os_exe_path
-    else if (std.mem.eql(u8, name, "now"))
-        .os_now
-    else if (std.mem.eql(u8, name, "sleepAsync"))
-        .os_sleep_async
-    else if (std.mem.eql(u8, name, "mkdtemp"))
-        .os_mkdtemp
-    else if (std.mem.eql(u8, name, "mkstemp"))
-        .os_mkstemp
-    else
-        return shared_vm.createOsModuleNativeFunction(rt, name) orelse return error.TypeError;
-    return createNamedHostFunctionValue(rt, name, kind);
-}
-
 fn createNamedHostFunctionValue(rt: *core.JSRuntime, name: []const u8, kind: HostFunction) !core.JSValue {
     const function_object = try createHostFunction(rt, kind);
     errdefer function_object.value().free(rt);
@@ -3982,7 +3848,6 @@ fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core
     return object.value();
 }
 
-
 fn reflectHas(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -6655,8 +6520,6 @@ test "makeOsResultPair roots direct symbol value while creating result array" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-
-
 fn makeOsStringResultPair(rt: *core.JSRuntime, value: []const u8, err: i32) !core.JSValue {
     const string_value = try value_ops.createStringValue(rt, value);
     defer string_value.free(rt);
@@ -6857,8 +6720,6 @@ fn osOptionalGroupsOption(rt: *core.JSRuntime, options: *core.Object, name: []co
     return @intCast(count);
 }
 
-
-
 fn hostCallTest262AgentSetTimeout(call: HostCall) HostError!core.JSValue {
     return hostCallOsSetTimer(call, false);
 }
@@ -6894,7 +6755,6 @@ pub fn createStdFileValue(rt: *core.JSRuntime, global: ?*core.Object, file: *std
     file_owned = false;
     return object.value();
 }
-
 
 fn stdFileObject(call: HostCall) HostError!*core.Object {
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
@@ -7305,7 +7165,6 @@ fn stdFilePrototype(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     proto_owned = false;
     return proto;
 }
-
 
 fn setStdErrorObject(rt: *core.JSRuntime, args: []const core.JSValue, err: c_int) !void {
     if (args.len < 3) return;
@@ -8134,4 +7993,3 @@ test "host global bootstrap installs and tears down builtin plus host domains" {
 
     try installHostGlobals(rt, global);
 }
-

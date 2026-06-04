@@ -1,12 +1,8 @@
 const std = @import("std");
-const engine_mod = @import("quickjs_zig_engine");
-const cli_helpers = engine_mod.internal.cli_helpers;
-
-const engine = struct {
-    pub const core = engine_mod.internal.core;
-    pub const exec = engine_mod.internal.exec;
-    pub const internal = engine_mod.internal;
-};
+const zjs = @import("zjs");
+const core = zjs.internal.core;
+const exec = zjs.internal.exec;
+const test262_helpers = @import("test262_helpers.zig");
 
 extern "c" fn getpid() c_int;
 
@@ -1674,18 +1670,17 @@ fn runEmbeddedEngine(
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
-    const rt = try engine.core.JSRuntime.createWithOptions(allocator, .{});
+    const rt = try core.JSRuntime.createWithOptions(allocator, .{});
     errdefer rt.destroy();
-    const ctx = try engine.core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt);
     errdefer ctx.destroy();
-    const global_obj = try engine.exec.zjs_vm.contextGlobal(ctx);
-    try engine.exec.call.installTest262Globals(rt, global_obj);
-    const test262_helpers = engine.internal.test262_helpers;
+    const global_obj = try exec.zjs_vm.contextGlobal(ctx);
+    try exec.call.installTest262Globals(rt, global_obj);
     try test262_helpers.installTest262AgentGlobals(rt, ctx, global_obj);
     defer {
-        engine.exec.zjs_vm.cleanupWorkersForRuntime(rt);
+        exec.zjs_vm.cleanupWorkersForRuntime(rt);
         _ = test262_helpers.cleanupTest262Agents(rt);
-        engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx);
+        exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx);
         ctx.destroy();
         rt.destroy();
     }
@@ -1693,7 +1688,7 @@ fn runEmbeddedEngine(
     var output_buffer: [64 * 1024]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var value = (if (run_as_module)
-        cli_helpers.evalFileModuleGraphWithOutput(rt, ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
+        exec.module_graph.evalFileModuleGraphWithOutput(rt, ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
         ctx.eval(source, .{
             .mode = .script,
@@ -1703,19 +1698,19 @@ fn runEmbeddedEngine(
         if (err == error.Test262Error) {
             if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
                 stderr_out.* = name;
-                break :failed engine.core.JSValue.exception();
+                break :failed core.JSValue.exception();
             }
         }
         stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
-        break :failed engine.core.JSValue.exception();
+        break :failed core.JSValue.exception();
     };
     defer value.free(rt);
 
     if (!value.isException()) {
-        try cli_helpers.runJobs(rt, ctx, &output);
+        try ctx.runJobs(&output);
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
-            const async_exception = cli_helpers.takeException(ctx);
+            const async_exception = ctx.takePendingException();
             async_exception.free(rt);
             return false;
         }
@@ -1723,12 +1718,12 @@ fn runEmbeddedEngine(
     return !value.isException();
 }
 
-fn formatPendingExceptionName(rt: *engine.core.JSRuntime, ctx: *engine.core.JSContext, storage: *[stderr_storage_len]u8) !?[]const u8 {
+fn formatPendingExceptionName(rt: *core.JSRuntime, ctx: *core.JSContext, storage: *[stderr_storage_len]u8) !?[]const u8 {
     if (!ctx.hasException()) return null;
-    const thrown = cli_helpers.takeException(ctx);
+    const thrown = ctx.takePendingException();
     defer thrown.free(rt);
     const object = objectFromValue(thrown) orelse return null;
-    const name_value = object.getProperty(engine.core.atom.ids.name);
+    const name_value = object.getProperty(core.atom.ids.name);
     defer name_value.free(rt);
     const name_string = stringFromValue(name_value) orelse return null;
     return switch (name_string.resolveData()) {
@@ -1746,13 +1741,13 @@ fn formatPendingExceptionName(rt: *engine.core.JSRuntime, ctx: *engine.core.JSCo
     };
 }
 
-fn objectFromValue(value: engine.core.JSValue) ?*engine.core.Object {
+fn objectFromValue(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (header.kind != .object) return null;
     return @fieldParentPtr("header", header);
 }
 
-fn stringFromValue(value: engine.core.JSValue) ?*engine.core.string.String {
+fn stringFromValue(value: core.JSValue) ?*core.string.String {
     const header = value.refHeader() orelse return null;
     if (header.kind != .string) return null;
     return @fieldParentPtr("header", header);
@@ -2909,4 +2904,3 @@ test "test262 checkRegressions returns zero when all dirs hold or improve" {
     try std.testing.expectEqual(@as(usize, 0), result.count);
     try std.testing.expectEqual(@as(usize, 1), result.matched);
 }
-

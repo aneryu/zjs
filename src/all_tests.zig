@@ -23,16 +23,14 @@ pub const WeakPersistentValue = engine.WeakPersistentValue;
 pub const NativePin = engine.NativePin;
 pub const GCPolicy = engine.GCPolicy;
 pub const GCStats = engine.GCStats;
-pub const harness = engine.harness;
-pub const Limits = engine.Limits;
-pub const EngineOptions = engine.EngineOptions;
+pub const harness = struct {
+    pub const Engine = @import("tests/exec.zig").helpers.TestEngine;
+};
 pub const EvalOptions = engine.EvalOptions;
 pub const EvalTiming = engine.EvalTiming;
 pub const ExternalHostCall = engine.ExternalHostCall;
 pub const ExternalHostCallFn = engine.ExternalHostCallFn;
 pub const ExternalHostFinalizer = engine.ExternalHostFinalizer;
-pub const ExceptionInfo = engine.ExceptionInfo;
-pub const Engine = engine.Engine;
 
 fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) void {
     @setEvalBranchQuota(200000);
@@ -74,7 +72,6 @@ test {
     std.testing.refAllDecls(@import("tests/frontend.zig"));
     std.testing.refAllDecls(@import("tests/exec.zig"));
     std.testing.refAllDecls(@import("tests/builtins.zig"));
-
 
     // Relative imports for files that are not module roots
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
