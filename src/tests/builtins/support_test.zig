@@ -48,26 +48,26 @@ test "support libraries cover unicode dtoa bignum and regexp basics" {
     try std.testing.expect(rangesContain(greek_ranges, 0x03c0));
     try std.testing.expect(!rangesContain(greek_ranges, 'A'));
 
-    try std.testing.expect(libs.unicode_tables.isEmojiCodePoint(0x01f600));
-    try std.testing.expect(libs.unicode_tables.isEmojiPresentationCodePoint(0x01f600));
-    try std.testing.expect(!libs.unicode_tables.isEmojiPresentationCodePoint(0x260e));
+    try std.testing.expect(libs.emoji.isEmojiCodePoint(0x01f600));
+    try std.testing.expect(libs.emoji.isEmojiPresentationCodePoint(0x01f600));
+    try std.testing.expect(!libs.emoji.isEmojiPresentationCodePoint(0x260e));
 
     const flag = [_]u16{ 0xd83c, 0xdde8, 0xd83c, 0xddf6 };
-    const flag_match = libs.unicode_tables.findRgiEmojiMatch(.{ .utf16 = &flag }, 0, false).?;
+    const flag_match = libs.emoji.findRgiEmojiMatch(.{ .utf16 = &flag }, 0, false).?;
     try std.testing.expectEqual(@as(usize, 0), flag_match.index);
     try std.testing.expectEqual(@as(usize, flag.len), flag_match.len);
-    try std.testing.expect(libs.unicode_tables.rgiEmojiSequencesCover(.{ .utf16 = &flag }));
+    try std.testing.expect(libs.emoji.rgiEmojiSequencesCover(.{ .utf16 = &flag }));
 
     const phone_text = [_]u16{0x260e};
-    try std.testing.expect(!libs.unicode_tables.rgiEmojiSequencesCover(.{ .utf16 = &phone_text }));
+    try std.testing.expect(!libs.emoji.rgiEmojiSequencesCover(.{ .utf16 = &phone_text }));
     const phone_emoji = [_]u16{ 0x260e, 0xfe0f };
-    try std.testing.expect(libs.unicode_tables.rgiEmojiSequencesCover(.{ .utf16 = &phone_emoji }));
+    try std.testing.expect(libs.emoji.rgiEmojiSequencesCover(.{ .utf16 = &phone_emoji }));
 
     const prefixed = [_]u16{ 'a', 0xd83c, 0xdde8, 0xd83c, 0xddf6 };
-    const prefixed_match = libs.unicode_tables.findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, false).?;
+    const prefixed_match = libs.emoji.findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, false).?;
     try std.testing.expectEqual(@as(usize, 1), prefixed_match.index);
     try std.testing.expectEqual(@as(usize, 4), prefixed_match.len);
-    try std.testing.expect(libs.unicode_tables.findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, true) == null);
+    try std.testing.expect(libs.emoji.findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, true) == null);
 
     const n = try libs.dtoa.parseNumber("12.5");
     var buf: [32]u8 = undefined;

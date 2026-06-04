@@ -1,7 +1,23 @@
 const std = @import("std");
 
 const data = @import("unicode_data.zig");
-const tables = @import("unicode_tables.zig");
+
+pub const Category = enum {
+    uppercase_letter,
+    lowercase_letter,
+    decimal_number,
+    identifier_start,
+    identifier_continue,
+    other,
+};
+
+pub fn asciiCategory(c: u21) Category {
+    if (c >= 'A' and c <= 'Z') return .uppercase_letter;
+    if (c >= 'a' and c <= 'z') return .lowercase_letter;
+    if (c >= '0' and c <= '9') return .decimal_number;
+    if (c == '_' or c == '$') return .identifier_start;
+    return .other;
+}
 
 pub const case_mapping_max_len = 3;
 const unicode_limit: u21 = 0x110000;
@@ -28,14 +44,14 @@ const UnicodeError = std.mem.Allocator.Error || error{InvalidProperty};
 
 pub fn isIdentifierStart(c: u21) bool {
     if (c == 0x200c or c == 0x200d) return false;
-    return switch (tables.asciiCategory(c)) {
+    return switch (asciiCategory(c)) {
         .uppercase_letter, .lowercase_letter, .identifier_start => true,
         else => if (c < 0x80) false else isInTable(c, data.unicode_prop_ID_Start_table[0..], data.unicode_prop_ID_Start_index[0..]),
     };
 }
 
 pub fn isIdentifierContinue(c: u21) bool {
-    return switch (tables.asciiCategory(c)) {
+    return switch (asciiCategory(c)) {
         .uppercase_letter, .lowercase_letter, .identifier_start, .decimal_number => true,
         else => if (c < 0x80) false else isIdentifierStart(c) or
             isInTable(c, data.unicode_prop_ID_Continue1_table[0..], data.unicode_prop_ID_Continue1_index[0..]) or
