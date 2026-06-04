@@ -1,0 +1,3 @@
+test262/test/staging/sm/Function/function-name-binding.js	TypeError	TypeError
+test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js	SyntaxError	SyntaxError
+test262/test/staging/sm/class/newTargetDefaults.js	TypeError	TypeError

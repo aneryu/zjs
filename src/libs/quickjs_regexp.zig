@@ -1,6 +1,7 @@
 const core = @import("../core/root.zig");
-const regexp_bytecode = @import("regexp_bytecode.zig");
-const regexp_compile = @import("regexp_compile.zig");
+const regexp = @import("regexp.zig");
+const regexp_bytecode = regexp;
+const regexp_compile = regexp;
 const std = @import("std");
 
 pub const max_captures = regexp_bytecode.max_captures;

@@ -1,7 +1,6 @@
 const core = @import("../core/root.zig");
 const bignum = @import("../libs/bignum.zig");
 const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
-const regexp_lib = @import("../libs/regexp.zig");
 const value_ops = @import("../exec/value_ops.zig");
 const std = @import("std");
 
@@ -160,10 +159,6 @@ pub fn legacyCaptureIndex(method: LegacyAccessorMethod) ?usize {
         .get_capture_9 => 8,
         else => null,
     };
-}
-
-pub fn matches(program: regexp_lib.Program, input: []const u8) bool {
-    return program.exec(input) != null;
 }
 
 /// QuickJS source map: narrow RegExp constructor payload used by transitional

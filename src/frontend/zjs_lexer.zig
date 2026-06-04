@@ -2582,3 +2582,49 @@ fn tsIsIdentStart(c: u8) bool {
 fn tsIsIdentContinue(c: u8) bool {
     return tsIsIdentStart(c) or std.ascii.isDigit(c);
 }
+
+pub const RegExpLiteral = struct {
+    pattern: []const u8,
+    flags: []const u8,
+    end_offset: usize,
+};
+
+pub fn scanRegExpLiteral(source: []const u8, slash_offset: usize) !RegExpLiteral {
+    if (slash_offset >= source.len or source[slash_offset] != '/') return error.NotRegExpLiteral;
+    var i = slash_offset + 1;
+    var in_class = false;
+    var escaped = false;
+
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (c == '\n' or c == '\r') return error.UnterminatedRegExp;
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '[') {
+            in_class = true;
+            continue;
+        }
+        if (c == ']') {
+            in_class = false;
+            continue;
+        }
+        if (c == '/' and !in_class) break;
+    }
+    if (i >= source.len) return error.UnterminatedRegExp;
+
+    const pattern = source[slash_offset + 1 .. i];
+    i += 1;
+    const flags_start = i;
+    while (i < source.len and (std.ascii.isAlphabetic(source[i]) or std.ascii.isDigit(source[i]) or source[i] == '_' or source[i] == '$')) : (i += 1) {}
+    return .{
+        .pattern = pattern,
+        .flags = source[flags_start..i],
+        .end_offset = i,
+    };
+}

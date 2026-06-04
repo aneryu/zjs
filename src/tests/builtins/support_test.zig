@@ -117,9 +117,10 @@ test "support libraries cover unicode dtoa bignum and regexp basics" {
     defer std.testing.allocator.free(neg_r_text);
     try std.testing.expectEqualStrings("-2", neg_q_text);
     try std.testing.expectEqualStrings("-1", neg_r_text);
-
-    const program = try libs.regexp.compile("abc", .{ .ignore_case = true });
-    const match = program.exec("xxAbCy").?;
-    try std.testing.expectEqual(@as(usize, 2), match.start);
-    try std.testing.expectEqual(@as(usize, 5), match.end);
+    var compiled = try libs.quickjs_regexp.compile(std.testing.allocator, "abc", "i");
+    defer compiled.deinit(std.testing.allocator);
+    const status = try libs.regexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
+    try std.testing.expect(status.result == .match);
+    try std.testing.expectEqual(@as(usize, 2), status.match.start);
+    try std.testing.expectEqual(@as(usize, 5), status.match.end);
 }
