@@ -8,7 +8,8 @@ const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         zjs.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
-        _ = zjs.exec.zjs_vm.cleanupTest262Agents(self.runtime);
+        const test262_helpers = @import("test262_helpers.zig");
+        _ = test262_helpers.cleanupTest262Agents(self.runtime);
         zjs.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();
         self.runtime.destroy();

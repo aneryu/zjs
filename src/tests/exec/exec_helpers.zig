@@ -144,7 +144,8 @@ pub const TestEngine = struct {
     pub fn deinit(self: *TestEngine) void {
         cli_helpers.runJobs(self.runtime, self.context, null) catch {};
         engine.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
-        _ = engine.exec.zjs_vm.cleanupTest262Agents(self.runtime);
+        const test262_helpers = @import("../../cli/test262_helpers.zig");
+        _ = test262_helpers.cleanupTest262Agents(self.runtime);
         engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();
         self.runtime.destroy();
@@ -170,9 +171,19 @@ pub const TestEngine = struct {
         return self.evalWithOptions(source_text, .{ .mode = mode });
     }
 
+    pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void {
+        if (self.context.global == null) {
+            const global_obj = try engine.exec.zjs_vm.contextGlobal(self.context);
+            try engine.exec.call.installTest262Globals(self.runtime, global_obj);
+            const test262_helpers = @import("../../cli/test262_helpers.zig");
+            try test262_helpers.installTest262AgentGlobals(self.runtime, self.context, global_obj);
+        }
+    }
+
     pub fn evalWithOptions(self: *TestEngine, source_text: []const u8, options: EvalOptions) cli_helpers.RuntimeError!core.JSValue {
         const filename = options.filename;
         const mode = options.mode;
+        self.ensureTest262GlobalsInstalled() catch |err| return @errorCast(err);
         return self.context.eval(source_text, .{
             .mode = mode,
             .filename = filename,
@@ -223,6 +234,7 @@ pub const TestEngine = struct {
         host_hooks: cli_helpers.HostHooks,
         allocator: std.mem.Allocator,
     ) !core.JSValue {
+        try self.ensureTest262GlobalsInstalled();
         return cli_helpers.evalFileModuleGraphWithHostHooks(self.runtime, self.context, source_text, output, filename, host_hooks, allocator);
     }
 
@@ -235,6 +247,7 @@ pub const TestEngine = struct {
         allocator: std.mem.Allocator,
         max_source_size: usize,
     ) !core.JSValue {
+        try self.ensureTest262GlobalsInstalled();
         return cli_helpers.evalFileModuleGraphWithOutput(self.runtime, self.context, source_text, output, filename, io, allocator, max_source_size);
     }
 

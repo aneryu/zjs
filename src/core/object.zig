@@ -6950,10 +6950,7 @@ pub const Object = struct {
             const materialized = materializePerformanceAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
-        if (info.kind == .test262_namespace) {
-            const materialized = materializeTest262NamespaceAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
+
         if (info.kind == .array_unscopables) {
             const materialized = materializeArrayUnscopablesAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
@@ -7444,112 +7441,7 @@ pub const Object = struct {
         return objectFromValue(prototype_value);
     }
 
-    fn materializeTest262NamespaceAutoInit(info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        const global: *Object = if (info.host_function_realm_global != 0)
-            @ptrFromInt(info.host_function_realm_global)
-        else
-            return null;
-        const namespace = Object.create(rt, class.ids.object, null) catch return null;
-        const namespace_value = namespace.value();
-        namespace.reserveOwnPropertyCapacityAssumingPlain(rt, 6) catch {
-            namespace_value.free(rt);
-            return null;
-        };
 
-        defineHostAutoInitDataPropertyByName(rt, namespace, "createRealm", 0, host_function.ids.test262_create_realm, null) catch {
-            namespace_value.free(rt);
-            return null;
-        };
-        defineHostAutoInitDataPropertyByName(rt, namespace, "evalScript", 1, host_function.ids.test262_eval_script, global) catch {
-            namespace_value.free(rt);
-            return null;
-        };
-        defineHostAutoInitDataPropertyByName(rt, namespace, "detachArrayBuffer", 1, host_function.ids.test262_detach_array_buffer, null) catch {
-            namespace_value.free(rt);
-            return null;
-        };
-        defineHostAutoInitDataPropertyByName(rt, namespace, "gc", 0, host_function.ids.std_gc, null) catch {
-            namespace_value.free(rt);
-            return null;
-        };
-
-        const agent = Object.create(rt, class.ids.object, null) catch {
-            namespace_value.free(rt);
-            return null;
-        };
-        const agent_value = agent.value();
-        agent.reserveOwnPropertyCapacityAssumingPlain(rt, 9) catch {
-            agent_value.free(rt);
-            namespace_value.free(rt);
-            return null;
-        };
-        const agent_methods = [_]struct {
-            name: []const u8,
-            length: i32,
-            kind: i32,
-        }{
-            .{ .name = "start", .length = 1, .kind = host_function.ids.test262_agent_start },
-            .{ .name = "broadcast", .length = 1, .kind = host_function.ids.test262_agent_broadcast },
-            .{ .name = "receiveBroadcast", .length = 1, .kind = host_function.ids.test262_agent_receive_broadcast },
-            .{ .name = "report", .length = 1, .kind = host_function.ids.test262_agent_report },
-            .{ .name = "getReport", .length = 0, .kind = host_function.ids.test262_agent_get_report },
-            .{ .name = "leaving", .length = 0, .kind = host_function.ids.test262_agent_leaving },
-            .{ .name = "sleep", .length = 1, .kind = host_function.ids.test262_agent_sleep },
-            .{ .name = "monotonicNow", .length = 0, .kind = host_function.ids.test262_agent_monotonic_now },
-            .{ .name = "setTimeout", .length = 2, .kind = host_function.ids.test262_agent_set_timeout },
-        };
-        for (agent_methods) |method| {
-            defineHostAutoInitDataPropertyByName(rt, agent, method.name, method.length, method.kind, null) catch {
-                agent_value.free(rt);
-                namespace_value.free(rt);
-                return null;
-            };
-        }
-        const agent_key = rt.internAtom("agent") catch {
-            agent_value.free(rt);
-            namespace_value.free(rt);
-            return null;
-        };
-        defer rt.atoms.free(agent_key);
-        namespace.defineOwnPropertyAssumingNew(rt, agent_key, descriptor.Descriptor.data(agent_value, true, true, true)) catch {
-            agent_value.free(rt);
-            namespace_value.free(rt);
-            return null;
-        };
-        agent_value.free(rt);
-
-        const is_html_dda_info: property.AutoInit = .{
-            .name = "IsHTMLDDA",
-            .length = 0,
-            .rt = rt,
-            .host_function_kind = host_function.ids.test262_is_html_dda,
-        };
-        const is_html_dda_value = materializeHostFunctionAutoInit(is_html_dda_info) orelse {
-            namespace_value.free(rt);
-            return null;
-        };
-        const is_html_dda = objectFromValue(is_html_dda_value) orelse {
-            is_html_dda_value.free(rt);
-            namespace_value.free(rt);
-            return null;
-        };
-        is_html_dda.is_html_dda = true;
-        const is_html_dda_key = rt.internAtom("IsHTMLDDA") catch {
-            is_html_dda_value.free(rt);
-            namespace_value.free(rt);
-            return null;
-        };
-        defer rt.atoms.free(is_html_dda_key);
-        namespace.defineOwnPropertyAssumingNew(rt, is_html_dda_key, descriptor.Descriptor.data(is_html_dda_value, true, true, true)) catch {
-            is_html_dda_value.free(rt);
-            namespace_value.free(rt);
-            return null;
-        };
-        is_html_dda_value.free(rt);
-
-        return namespace_value;
-    }
 
     pub fn getOwnDataPropertyValue(self: *const Object, atom_id: atom.Atom) ?JSValue {
         if (self.getOwnDataPropertyLookup(atom_id)) |lookup| return lookup.value;
@@ -7944,30 +7836,6 @@ pub const Object = struct {
         });
     }
 
-    pub fn defineTest262NamespaceAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        flags: property.Flags,
-        realm_global: *Object,
-    ) !void {
-        std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
-        const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
-        errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "$262",
-                .length = 0,
-                .rt = rt,
-                .kind = .test262_namespace,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
-    }
 
     pub fn definePerformanceAutoInitProperty(
         self: *Object,

@@ -5575,8 +5575,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
 
     const navigator_holder = try core.Object.create(rt, core.class.ids.object, null);
     defer navigator_holder.value().free(rt);
-    const test262_holder = try core.Object.create(rt, core.class.ids.object, null);
-    defer test262_holder.value().free(rt);
     const performance_holder = try core.Object.create(rt, core.class.ids.object, null);
     defer performance_holder.value().free(rt);
     const namespace_holder = try core.Object.create(rt, core.class.ids.object, null);
@@ -5590,8 +5588,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
 
     const navigator_key = try rt.internAtom("navigator");
     defer rt.atoms.free(navigator_key);
-    const test262_key = try rt.internAtom("$262");
-    defer rt.atoms.free(test262_key);
     const performance_key = try rt.internAtom("performance");
     defer rt.atoms.free(performance_key);
     const namespace_key = try rt.internAtom("Math");
@@ -5605,7 +5601,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
 
     const flags = core.property.Flags.data(true, false, true);
     try navigator_holder.defineNavigatorAutoInitProperty(rt, navigator_key, flags, global);
-    try test262_holder.defineTest262NamespaceAutoInitProperty(rt, test262_key, flags, global);
     try performance_holder.definePerformanceAutoInitProperty(rt, performance_key, flags, global);
     try namespace_holder.defineBuiltinNamespaceAutoInitProperty(rt, namespace_key, "Math", flags, global, .math_namespace);
     try cli_holder.defineCliGlobalAutoInitProperty(rt, cli_key, "scriptArgs", flags, global);
@@ -5615,7 +5610,6 @@ test "specialized auto-init realm metadata registers borrowed holders" {
 
     const holders = [_]*core.Object{
         navigator_holder,
-        test262_holder,
         performance_holder,
         namespace_holder,
         cli_holder,

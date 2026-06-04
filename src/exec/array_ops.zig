@@ -102,7 +102,7 @@ const simpleNumericArg0Callback = shared_vm.simpleNumericArg0Callback;
 const simpleNumericBinary = shared_vm.simpleNumericBinary;
 const slotValueBorrow = shared_vm.slotValueBorrow;
 const stringSliceValue = shared_vm.stringSliceValue;
-const test262PageAllocator = shared_vm.test262PageAllocator;
+const workerPageAllocator = shared_vm.workerPageAllocator;
 const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
 const toLengthIndex = shared_vm.toLengthIndex;
 const toNumberForDateMethod = shared_vm.toNumberForDateMethod;
@@ -4894,7 +4894,7 @@ pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
 }
 
 pub fn qjsWorkerPopMessage(id: i32, endpoint: WorkerPostTarget) ?WorkerMessage {
-    const allocator = test262PageAllocator();
+    const allocator = workerPageAllocator();
     const io = qjsWorkerIo();
     shared_vm.qjs_workers.mutex.lockUncancelable(io);
     defer shared_vm.qjs_workers.mutex.unlock(io);

@@ -351,7 +351,7 @@ const simpleUnicodeLiteralAt = shared_vm.simpleUnicodeLiteralAt;
 const singleLowSurrogateLiteralSource = shared_vm.singleLowSurrogateLiteralSource;
 const standaloneCharacterClassSource = shared_vm.standaloneCharacterClassSource;
 const surrogatePairClassAt = shared_vm.surrogatePairClassAt;
-const test262PageAllocator = shared_vm.test262PageAllocator;
+
 const throwRangeErrorMessage = shared_vm.throwRangeErrorMessage;
 const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
 const toLengthIndex = shared_vm.toLengthIndex;
@@ -4696,18 +4696,7 @@ pub const KeywordMatch = struct {
     keyword: []const u8,
 };
 
-pub fn test262AgentStringArg(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
-    var bytes = std.ArrayList(u8).empty;
-    errdefer bytes.deinit(rt.memory.allocator);
-    try value_ops.appendValueString(rt, &bytes, value);
-    return bytes.toOwnedSlice(rt.memory.allocator);
-}
 
-pub fn test262AgentStringValue(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
-    const local = try test262AgentStringArg(rt, value);
-    defer rt.memory.allocator.free(local);
-    return try test262PageAllocator().dupe(u8, local);
-}
 
 pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) void {
     const count = @min(frame.function.var_ref_names.len, frame.var_refs.len);

@@ -157,6 +157,16 @@ pub fn returnThis(this_value: core.JSValue) core.JSValue {
 pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, 99);
     try definePredefinedHostFunction(rt, global, "print", .output);
+    try installStandardGlobals(rt, global);
+    try defineGlobalThisProperty(rt, global);
+    try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
+    try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
+    try defineConstantPropertyAssumingNew(rt, global, "undefined", core.JSValue.undefinedValue());
+
+    try defineConsoleObject(rt, global);
+}
+
+pub fn installTest262Globals(rt: *core.JSRuntime, global: *core.Object) !void {
     try definePredefinedHostConstructorFunction(rt, global, "Test262Error", .test262_error);
     try definePredefinedHostFunction(rt, global, "verifyProperty", .test262_verify_property);
     try definePredefinedHostFunction(rt, global, "verifyCallableProperty", .test262_verify_callable_property);
@@ -165,14 +175,6 @@ pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try definePredefinedHostFunction(rt, global, "verifyConfigurable", .test262_verify_configurable);
     try definePredefinedHostFunction(rt, global, "isConstructor", .test262_is_constructor);
     try defineHostFunction(rt, global, "setTimeout", .test262_agent_set_timeout);
-    try installStandardGlobals(rt, global);
-    try defineGlobalThisProperty(rt, global);
-    try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
-    try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
-    try defineConstantPropertyAssumingNew(rt, global, "undefined", core.JSValue.undefinedValue());
-    try installTest262Namespace(rt, global);
-
-    try defineConsoleObject(rt, global);
     try defineAssertObject(rt, global);
 }
 
@@ -622,14 +624,7 @@ const host_function_records: [max_host_function_id + 1]?HostFunctionRecord = rec
     records[@intFromEnum(HostFunction.os_chdir)] = .{ .length = 1, .call = hostCallOsChdir };
     records[@intFromEnum(HostFunction.os_remove)] = .{ .length = 1, .call = hostCallOsRemove };
     records[@intFromEnum(HostFunction.os_rename)] = .{ .length = 2, .call = hostCallOsRename };
-    records[@intFromEnum(HostFunction.test262_agent_start)] = .{ .length = 1, .call = hostCallTest262AgentStart };
-    records[@intFromEnum(HostFunction.test262_agent_broadcast)] = .{ .length = 1, .call = hostCallTest262AgentBroadcast };
-    records[@intFromEnum(HostFunction.test262_agent_receive_broadcast)] = .{ .length = 1, .call = hostCallTest262AgentReceiveBroadcast };
-    records[@intFromEnum(HostFunction.test262_agent_report)] = .{ .length = 1, .call = hostCallTest262AgentReport };
-    records[@intFromEnum(HostFunction.test262_agent_get_report)] = .{ .length = 0, .call = hostCallTest262AgentGetReport };
-    records[@intFromEnum(HostFunction.test262_agent_leaving)] = .{ .length = 0, .call = hostCallTest262AgentLeaving };
-    records[@intFromEnum(HostFunction.test262_agent_sleep)] = .{ .length = 1, .call = hostCallTest262AgentSleep };
-    records[@intFromEnum(HostFunction.test262_agent_monotonic_now)] = .{ .length = 0, .call = hostCallTest262AgentMonotonicNow };
+    // test262 agent functions are dynamically registered
     records[@intFromEnum(HostFunction.test262_agent_set_timeout)] = .{ .length = 2, .call = hostCallTest262AgentSetTimeout };
     records[@intFromEnum(HostFunction.dstr_get)] = .{ .length = 2, .call = hostCallDstrGet };
     records[@intFromEnum(HostFunction.dstr_elide)] = .{ .length = 2, .call = hostCallDstrElide };
@@ -3004,7 +2999,7 @@ fn callBufferNativeFunctionRecord(
     return error.TypeError;
 }
 
-fn hostCreateRealm(rt: *core.JSRuntime) HostError!core.JSValue {
+pub fn hostCreateRealm(rt: *core.JSRuntime) HostError!core.JSValue {
     const realm = try core.Object.create(rt, core.class.ids.object, null);
     errdefer realm.value().free(rt);
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
@@ -5657,7 +5652,7 @@ fn hostCallStdEvalScript(call: HostCall) HostError!core.JSValue {
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
     const source = try hostStringArgOrUndefined(call.ctx.runtime, call.args, 0);
     defer call.ctx.runtime.memory.allocator.free(source);
-    return try hostResult(shared_vm.qjsEvalGlobalScriptSource(call.ctx, call.output, active_global, source, "<evalScript>"));
+    return try hostResult(qjsEvalGlobalScriptSource(call.ctx, call.output, active_global, source, "<evalScript>"));
 }
 
 fn hostCallStdLoadScript(call: HostCall) HostError!core.JSValue {
@@ -5673,7 +5668,7 @@ fn hostCallStdLoadScript(call: HostCall) HostError!core.JSValue {
         else => |e| return e,
     };
     defer call.ctx.runtime.memory.allocator.free(source);
-    return try hostResult(shared_vm.qjsEvalGlobalScriptSource(call.ctx, call.output, active_global, source, path));
+    return try hostResult(qjsEvalGlobalScriptSource(call.ctx, call.output, active_global, source, path));
 }
 
 fn hostCallStdOpen(call: HostCall) HostError!core.JSValue {
@@ -6862,37 +6857,7 @@ fn osOptionalGroupsOption(rt: *core.JSRuntime, options: *core.Object, name: []co
     return @intCast(count);
 }
 
-fn hostCallTest262AgentStart(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentStart(call.ctx, call.output, call.global, call.args));
-}
 
-fn hostCallTest262AgentBroadcast(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentBroadcast(call.ctx, call.output, call.global, call.args));
-}
-
-fn hostCallTest262AgentReceiveBroadcast(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentReceiveBroadcast(call.ctx, call.output, call.global, call.args));
-}
-
-fn hostCallTest262AgentReport(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentReport(call.ctx, call.output, call.global, call.args));
-}
-
-fn hostCallTest262AgentGetReport(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentGetReport(call.ctx, call.output, call.global, call.args));
-}
-
-fn hostCallTest262AgentLeaving(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentLeaving(call.ctx, call.output, call.global, call.args));
-}
-
-fn hostCallTest262AgentSleep(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentSleep(call.ctx, call.output, call.global, call.args));
-}
-
-fn hostCallTest262AgentMonotonicNow(call: HostCall) HostError!core.JSValue {
-    return try hostResult(shared_vm.qjsTest262AgentMonotonicNow(call.ctx, call.output, call.global, call.args));
-}
 
 fn hostCallTest262AgentSetTimeout(call: HostCall) HostError!core.JSValue {
     return hostCallOsSetTimer(call, false);
@@ -7570,7 +7535,7 @@ fn hostCallCreateRealm(call: HostCall) HostError!core.JSValue {
 
 fn hostCallEvalScript(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsTest262EvalScript(call.ctx, call.output, global, call.func_obj, call.args));
+    return try hostResult(qjsTest262EvalScript(call.ctx, call.output, global, call.func_obj, call.args));
 }
 
 fn hostCallDstrGet(call: HostCall) HostError!core.JSValue {
@@ -8120,4 +8085,41 @@ fn printNativeFunction(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *cor
     try writer.print("function ", .{});
     if (name_value.isString()) try printString(writer, name_value);
     try writer.print("() {{\n    [native code]\n}}", .{});
+}
+
+pub fn qjsTest262EvalScript(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    if (args.len == 0) return core.JSValue.undefinedValue();
+    if (!args[0].isString()) return error.TypeError;
+    const eval_global = shared_vm.objectRealmGlobal(function_object) orelse global;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(ctx.runtime.memory.allocator);
+    try shared_vm.appendSourceStringUtf8(ctx.runtime, &source, args[0]);
+    return qjsEvalGlobalScriptSource(ctx, output, eval_global, source.items, "<evalScript>");
+}
+
+pub fn qjsEvalGlobalScriptSource(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    source: []const u8,
+    filename: []const u8,
+) !core.JSValue {
+    const frontend = @import("../frontend/root.zig");
+    const stack_mod = @import("stack.zig");
+    const zjs_vm = @import("zjs_vm.zig");
+
+    var compiled = try frontend.parser.parse(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true });
+    defer compiled.deinit();
+    if (compiled.syntax_error != null) return error.SyntaxError;
+    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    defer nested_stack.deinit(ctx.runtime);
+    return zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
+        return shared_vm.normalizeEvalRuntimeError(err);
+    };
 }

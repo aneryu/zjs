@@ -385,9 +385,10 @@ test "closure helper stores closure state outside the VM" {
 }
 
 test "test262 helpers own SameValue assertions" {
-    const same_nan = try engine.exec.test262_helpers.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
+    const test262_helpers = @import("../../cli/test262_helpers.zig");
+    const same_nan = try test262_helpers.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
     try std.testing.expect(same_nan.isUndefined());
-    try std.testing.expectError(error.Test262Error, engine.exec.test262_helpers.assertSameValue(core.JSValue.int32(1), core.JSValue.int32(2)));
+    try std.testing.expectError(error.Test262Error, test262_helpers.assertSameValue(core.JSValue.int32(1), core.JSValue.int32(2)));
 }
 
 test "call subsystem installs and invokes host globals" {
@@ -399,6 +400,7 @@ test "call subsystem installs and invokes host globals" {
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
     try engine.exec.call.installHostGlobals(rt, global);
+    try engine.exec.call.installTest262Globals(rt, global);
 
     const print_key = try rt.internAtom("print");
     defer rt.atoms.free(print_key);

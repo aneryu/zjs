@@ -1672,9 +1672,13 @@ fn runEmbeddedEngine(
     errdefer rt.destroy();
     const ctx = try engine.core.JSContext.create(rt);
     errdefer ctx.destroy();
+    const global_obj = try engine.exec.zjs_vm.contextGlobal(ctx);
+    try engine.exec.call.installTest262Globals(rt, global_obj);
+    const test262_helpers = @import("test262_helpers.zig");
+    try test262_helpers.installTest262AgentGlobals(rt, ctx, global_obj);
     defer {
         engine.exec.zjs_vm.cleanupWorkersForRuntime(rt);
-        _ = engine.exec.zjs_vm.cleanupTest262Agents(rt);
+        _ = test262_helpers.cleanupTest262Agents(rt);
         engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx);
         ctx.destroy();
         rt.destroy();

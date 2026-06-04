@@ -238,8 +238,7 @@ pub const stringValueContainsUnitByte = string_ops.stringValueContainsUnitByte;
 pub const stringValueUnits = string_ops.stringValueUnits;
 pub const stringValueUnitsEqualBytes = string_ops.stringValueUnitsEqualBytes;
 pub const surrogatePairFromCodePoint = string_ops.surrogatePairFromCodePoint;
-pub const test262AgentStringArg = string_ops.test262AgentStringArg;
-pub const test262AgentStringValue = string_ops.test262AgentStringValue;
+
 pub const thrownValueMatchesConstructor = string_ops.thrownValueMatchesConstructor;
 pub const toObjectForStringRaw = string_ops.toObjectForStringRaw;
 pub const toOrdinaryPrimitiveString = string_ops.toOrdinaryPrimitiveString;
@@ -2829,7 +2828,7 @@ pub fn callValueOrBytecodeClassMode(
         if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
             if (try qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         }
-        if (std.mem.eql(u8, name, "evalScript")) return qjsTest262EvalScript(ctx, output, global, function_object, args);
+        if (std.mem.eql(u8, name, "evalScript")) return call_mod.qjsTest262EvalScript(ctx, output, global, function_object, args);
         if (std.mem.eql(u8, name, "eval")) {
             const eval_global = if (function_object.functionRealmGlobalSlot().*) |realm_value|
                 property_ops.expectObject(realm_value) catch global
@@ -11143,40 +11142,6 @@ pub fn directEvalGlobalDataVarNeedsTemporaryRef(rt: *core.JSRuntime, global: *co
     return desc.kind == .data and desc.writable != true;
 }
 
-const test262_helpers = @import("test262_helpers.zig");
-pub const Test262Agent = test262_helpers.Test262Agent;
-pub const Test262AgentReportEntry = test262_helpers.Test262AgentReportEntry;
-pub const Test262AgentCoordinator = test262_helpers.Test262AgentCoordinator;
-pub const test262_agents = &test262_helpers.test262_agents;
-pub const current_test262_agent = &test262_helpers.current_test262_agent;
-pub const test262_gpa = &test262_helpers.test262_gpa;
-pub const test262PageAllocator = test262_helpers.test262PageAllocator;
-pub const test262AgentIo = test262_helpers.test262AgentIo;
-pub const test262AgentAppend = test262_helpers.test262AgentAppend;
-pub const test262AgentEnqueueReport = test262_helpers.test262AgentEnqueueReport;
-pub const test262AgentDestroy = test262_helpers.test262AgentDestroy;
-pub const test262AgentEnsureAgentCapacityLocked = test262_helpers.test262AgentEnsureAgentCapacityLocked;
-pub const test262AgentEnsureReportCapacityLocked = test262_helpers.test262AgentEnsureReportCapacityLocked;
-pub const test262AgentRemoveAtLocked = test262_helpers.test262AgentRemoveAtLocked;
-pub const test262AgentRemove = test262_helpers.test262AgentRemove;
-pub const test262AgentSweepCompletedLocked = test262_helpers.test262AgentSweepCompletedLocked;
-pub const test262AgentTakeReportLocked = test262_helpers.test262AgentTakeReportLocked;
-pub const test262AgentSweepReportsLocked = test262_helpers.test262AgentSweepReportsLocked;
-pub const cleanupTest262Agents = test262_helpers.cleanupTest262Agents;
-pub const test262AgentRecordCountForTests = test262_helpers.test262AgentRecordCountForTests;
-pub const test262AgentInterruptHandler = test262_helpers.test262AgentInterruptHandler;
-pub const test262AgentRun = test262_helpers.test262AgentRun;
-pub const test262AgentIsDone = test262_helpers.test262AgentIsDone;
-pub const qjsTest262EvalScript = test262_helpers.qjsTest262EvalScript;
-pub const qjsEvalGlobalScriptSource = test262_helpers.qjsEvalGlobalScriptSource;
-pub const qjsTest262AgentStart = test262_helpers.qjsTest262AgentStart;
-pub const qjsTest262AgentBroadcast = test262_helpers.qjsTest262AgentBroadcast;
-pub const qjsTest262AgentReceiveBroadcast = test262_helpers.qjsTest262AgentReceiveBroadcast;
-pub const qjsTest262AgentReport = test262_helpers.qjsTest262AgentReport;
-pub const qjsTest262AgentGetReport = test262_helpers.qjsTest262AgentGetReport;
-pub const qjsTest262AgentLeaving = test262_helpers.qjsTest262AgentLeaving;
-pub const qjsTest262AgentSleep = test262_helpers.qjsTest262AgentSleep;
-pub const qjsTest262AgentMonotonicNow = test262_helpers.qjsTest262AgentMonotonicNow;
 
 pub const WorkerMessage = union(enum) {
     undefined,
@@ -11272,7 +11237,7 @@ pub fn qjsWorkerFunctionCall(
     defer path_bytes.deinit(ctx.runtime.memory.allocator);
     try appendSourceStringUtf8(ctx.runtime, &path_bytes, args[0]);
 
-    const allocator = test262PageAllocator();
+    const allocator = workerPageAllocator();
     const worker = try allocator.create(QjsWorker);
     var raw_worker_owned = true;
     errdefer if (raw_worker_owned) allocator.destroy(worker);
@@ -11375,7 +11340,7 @@ pub fn cleanupWorkersForRuntime(rt: *core.JSRuntime) void {
 }
 
 pub fn qjsWorkerDestroyRecord(worker: *QjsWorker) void {
-    const allocator = test262PageAllocator();
+    const allocator = workerPageAllocator();
     allocator.free(worker.path);
     qjsWorkerFreeMessageQueue(allocator, worker.to_worker, worker.to_worker_capacity);
     qjsWorkerFreeMessageQueue(allocator, worker.to_parent, worker.to_parent_capacity);
@@ -11396,7 +11361,7 @@ pub fn qjsWorkerThreadMain(worker: *QjsWorker) void {
         qjs_workers.mutex.unlock(io);
     }
 
-    const allocator = test262PageAllocator();
+    const allocator = workerPageAllocator();
     const rt = core.JSRuntime.create(allocator) catch return;
     defer rt.destroy();
     defer {
@@ -11863,7 +11828,7 @@ pub fn qjsWorkerPostMessage(ctx: *core.JSContext, this_value: core.JSValue, args
 
     const worker_id = try qjsWorkerObjectId(ctx.runtime, rooted_this);
     const payload = try qjsWorkerMessageFromValue(ctx.runtime, rooted_payload);
-    errdefer payload.deinit(test262PageAllocator());
+    errdefer payload.deinit(workerPageAllocator());
     const io = qjsWorkerIo();
     qjs_workers.mutex.lockUncancelable(io);
     defer qjs_workers.mutex.unlock(io);
@@ -11955,7 +11920,7 @@ pub fn qjsWorkerDispatchOne(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
     if (!isCallableValue(handler)) return false;
     const worker_id = try qjsWorkerObjectId(ctx.runtime, rooted_endpoint_value);
     const message = qjsWorkerPopMessage(worker_id, endpoint) orelse return false;
-    defer message.deinit(test262PageAllocator());
+    defer message.deinit(workerPageAllocator());
     data = try qjsWorkerMessageToValue(ctx.runtime, message);
     defer {
         const owned_data = data;
@@ -11984,7 +11949,7 @@ pub fn qjsWorkerByIdLocked(id: i32) ?*QjsWorker {
 
 pub fn qjsWorkerEnsureRecordCapacity(min_capacity: usize) !void {
     if (qjs_workers.workers_capacity >= min_capacity) return;
-    const allocator = test262PageAllocator();
+    const allocator = workerPageAllocator();
     var next_capacity = if (qjs_workers.workers_capacity == 0) @as(usize, 4) else qjs_workers.workers_capacity * 2;
     while (next_capacity < min_capacity) : (next_capacity *= 2) {}
     const next = try allocator.alloc(*QjsWorker, next_capacity);
@@ -12002,7 +11967,7 @@ pub fn qjsWorkerRemoveRecordAtLocked(index: usize) void {
     }
     qjs_workers.workers = qjs_workers.workers.ptr[0 .. old_len - 1];
     if (qjs_workers.workers.len == 0 and qjs_workers.workers_capacity != 0) {
-        const allocator = test262PageAllocator();
+        const allocator = workerPageAllocator();
         allocator.free(qjs_workers.workers.ptr[0..qjs_workers.workers_capacity]);
         qjs_workers.workers = &.{};
         qjs_workers.workers_capacity = 0;
@@ -12027,7 +11992,7 @@ pub fn qjsWorkerFreeMessageQueue(allocator: std.mem.Allocator, queue: []WorkerMe
 }
 
 pub fn qjsWorkerEnsureMessageCapacity(queue: *[]WorkerMessage, capacity: *usize, min_capacity: usize) !void {
-    const allocator = test262PageAllocator();
+    const allocator = workerPageAllocator();
     if (capacity.* >= min_capacity) return;
     var next_capacity = if (capacity.* == 0) @as(usize, 4) else capacity.* * 2;
     while (next_capacity < min_capacity) : (next_capacity *= 2) {}
@@ -12068,7 +12033,7 @@ pub fn qjsWorkerMessageFromValue(rt: *core.JSRuntime, value: core.JSValue) !Work
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.memory.allocator);
         try appendSourceStringUtf8(rt, &bytes, rooted_value);
-        return .{ .string = try test262PageAllocator().dupe(u8, bytes.items) };
+        return .{ .string = try workerPageAllocator().dupe(u8, bytes.items) };
     }
     if (objectFromValue(rooted_value)) |object| {
         if (object.class_id == core.class.ids.shared_array_buffer) {
@@ -14399,142 +14364,12 @@ pub fn qjsDefinePropertiesCall(
     return args[0].dup();
 }
 
-pub fn qjsMathSumPrecise(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-
-    var finite_values = std.ArrayList(f64).empty;
-    defer finite_values.deinit(ctx.runtime.memory.allocator);
-    var saw_nan = false;
-    var saw_positive_inf = false;
-    var saw_negative_inf = false;
-    var saw_positive_zero = false;
-    var saw_negative_zero = false;
-
-    while (true) {
-        const step = try iteratorStepValue(ctx, output, global, iterator_value);
-        defer step.value.free(ctx.runtime);
-        if (step.done) break;
-        const number = value_ops.numberValue(step.value) orelse {
-            try qjsIteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame);
-            return error.TypeError;
-        };
-        if (std.math.isNan(number)) {
-            saw_nan = true;
-        } else if (std.math.isPositiveInf(number)) {
-            saw_positive_inf = true;
-        } else if (std.math.isNegativeInf(number)) {
-            saw_negative_inf = true;
-        } else if (number == 0) {
-            if (std.math.isNegativeZero(number)) {
-                saw_negative_zero = true;
-            } else {
-                saw_positive_zero = true;
-            }
-        } else {
-            try finite_values.append(ctx.runtime.memory.allocator, number);
-        }
-    }
-
-    if (saw_nan or (saw_positive_inf and saw_negative_inf)) return core.JSValue.float64(std.math.nan(f64));
-    if (saw_positive_inf) return core.JSValue.float64(std.math.inf(f64));
-    if (saw_negative_inf) return core.JSValue.float64(-std.math.inf(f64));
-    if (finite_values.items.len == 0) {
-        return if (saw_positive_zero) core.JSValue.int32(0) else core.JSValue.float64(-0.0);
-    }
-
-    const rounded = try exactF64Sum(ctx.runtime.memory.allocator, finite_values.items);
-    if (rounded == 0 and !saw_positive_zero and saw_negative_zero) return core.JSValue.float64(-0.0);
-    return value_ops.numberToValue(rounded);
-}
-
-pub fn exactF64Sum(allocator: std.mem.Allocator, values: []const f64) !f64 {
-    var total = bignum.BigInt{ .allocator = allocator };
-    defer total.deinit();
-
-    for (values) |number| {
-        var term = try exactF64ScaledInteger(allocator, number);
-        defer term.deinit();
-        const next = try total.add(term);
-        total.deinit();
-        total = next;
-    }
-
-    return try scaledIntegerToF64(allocator, total);
-}
-
-pub fn exactF64ScaledInteger(allocator: std.mem.Allocator, number: f64) !bignum.BigInt {
-    const bits: u64 = @bitCast(number);
-    const sign = (bits >> 63) != 0;
-    const exponent_bits: u16 = @intCast((bits >> 52) & 0x7ff);
-    const fraction = bits & ((@as(u64, 1) << 52) - 1);
-    const mantissa: u64 = if (exponent_bits == 0) fraction else ((@as(u64, 1) << 52) | fraction);
-    const exponent: i32 = if (exponent_bits == 0) -1074 else @as(i32, exponent_bits) - 1023 - 52;
-    var base = try bignum.BigInt.fromIntAlloc(allocator, if (sign) -@as(i128, @intCast(mantissa)) else @as(i128, @intCast(mantissa)));
-    if (mantissa == 0) return base;
-    const shift: usize = @intCast(exponent + 1074);
-    const shifted = try base.shl(allocator, shift);
-    base.deinit();
-    return shifted;
-}
-
-pub fn scaledIntegerToF64(allocator: std.mem.Allocator, value: bignum.BigInt) !f64 {
-    if (value.isZero()) return 0;
-    var magnitude = try value.cloneWithAllocator(allocator);
-    defer magnitude.deinit();
-    const negative = magnitude.negative;
-    magnitude.negative = false;
-
-    const bit_len = magnitude.bitLengthAbs();
-    if (bit_len <= 52) {
-        const fraction: u64 = @intCast(magnitude.toUsize() orelse return error.TypeError);
-        const bits = (@as(u64, @intFromBool(negative)) << 63) | fraction;
-        return @bitCast(bits);
-    }
-
-    var exponent = @as(i32, @intCast(bit_len - 1)) - 1074;
-    if (exponent > 1023) return if (negative) -std.math.inf(f64) else std.math.inf(f64);
-
-    const shift = bit_len - 53;
-    var top_int = if (shift == 0)
-        try magnitude.cloneWithAllocator(allocator)
-    else
-        try magnitude.shr(allocator, shift);
-    defer top_int.deinit();
-    var significand: u64 = @intCast(top_int.toUsize() orelse return error.TypeError);
-
-    if (shift > 0 and shouldRoundScaledIntegerUp(magnitude, shift, significand)) {
-        significand += 1;
-        if (significand == (@as(u64, 1) << 53)) {
-            significand >>= 1;
-            exponent += 1;
-            if (exponent > 1023) return if (negative) -std.math.inf(f64) else std.math.inf(f64);
-        }
-    }
-
-    const exponent_bits: u64 = @intCast(exponent + 1023);
-    const fraction = significand & ((@as(u64, 1) << 52) - 1);
-    const bits = (@as(u64, @intFromBool(negative)) << 63) | (exponent_bits << 52) | fraction;
-    return @bitCast(bits);
-}
-
-pub fn shouldRoundScaledIntegerUp(magnitude: bignum.BigInt, shift: usize, significand: u64) bool {
-    if (!magnitude.testBit(shift - 1)) return false;
-    if ((significand & 1) != 0) return true;
-    var bit: usize = 0;
-    while (bit + 1 < shift) : (bit += 1) {
-        if (magnitude.testBit(bit)) return true;
-    }
-    return false;
-}
+const math_ops = @import("math_ops.zig");
+pub const qjsMathSumPrecise = math_ops.qjsMathSumPrecise;
+pub const exactF64Sum = math_ops.exactF64Sum;
+pub const exactF64ScaledInteger = math_ops.exactF64ScaledInteger;
+pub const scaledIntegerToF64 = math_ops.scaledIntegerToF64;
+pub const shouldRoundScaledIntegerUp = math_ops.shouldRoundScaledIntegerUp;
 
 pub const IntegrityLevel = enum {
     sealed,
@@ -15541,4 +15376,13 @@ pub fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
 
 pub fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
+}
+
+var worker_gpa = std.heap.DebugAllocator(.{
+    .safety = false,
+    .stack_trace_frames = 0,
+    .retain_metadata = true,
+}){};
+pub fn workerPageAllocator() std.mem.Allocator {
+    return worker_gpa.allocator();
 }
