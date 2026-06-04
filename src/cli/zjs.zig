@@ -1,5 +1,19 @@
 const std = @import("std");
 const zjs = @import("zjs");
+const cli_helpers = @import("helpers.zig");
+
+const Runtime = struct {
+    runtime: *zjs.core.JSRuntime,
+    context: *zjs.core.JSContext,
+
+    pub fn deinit(self: *Runtime) void {
+        zjs.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
+        _ = zjs.exec.zjs_vm.cleanupTest262Agents(self.runtime);
+        zjs.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
+        self.context.destroy();
+        self.runtime.destroy();
+    }
+};
 
 const max_source_size = 64 * 1024 * 1024;
 const max_include_paths = 16;
@@ -165,10 +179,23 @@ pub fn main(init: std.process.Init) !void {
     var eval_ns: u64 = 0;
     var jobs_ns: u64 = 0;
     const runtime_start = monotonicNanos();
-    var runtime = zjs.Engine.initWithTrace(allocator, if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null) catch |err| {
+    const rt = zjs.core.JSRuntime.createWithOptions(allocator, .{
+        .trace_writer = if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null,
+        .memory_limit = commandRuntimeOptions(command).memory_limit,
+        .gc_threshold = zjs.core.runtime.default_gc_threshold,
+        .stack_size = commandRuntimeOptions(command).stack_size orelse zjs.core.runtime.default_stack_size,
+    }) catch |err| {
         try printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
+    errdefer rt.destroy();
+    const ctx = zjs.core.JSContext.create(rt) catch |err| {
+        try printError(io, "zjs: context init failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    errdefer ctx.destroy();
+    var runtime = Runtime{ .runtime = rt, .context = ctx };
+
     const runtime_create_ns = elapsedNanosSince(runtime_start);
     const setup_start = monotonicNanos();
     applyRuntimeOptions(&runtime, commandRuntimeOptions(command));
@@ -180,16 +207,16 @@ pub fn main(init: std.process.Init) !void {
         _ = zjs.core.profile.activate(&opcode_profile);
     }
     if (commandRuntimeOptions(command).expose_std) {
-        runtime.exposeStdOsGlobals() catch |err| {
+        cli_helpers.exposeStdOsGlobals(runtime.runtime, runtime.context) catch |err| {
             try printError(io, "zjs: --std setup failed: {s}\n", .{@errorName(err)});
             std.process.exit(1);
         };
     }
-    runtime.defineCliArgvGlobalsLazy(args[0], args) catch |err| {
+    cli_helpers.defineCliArgvGlobalsLazy(runtime.runtime, runtime.context, args[0], args) catch |err| {
         try printError(io, "zjs: argv setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    runtime.defineCliScriptArgsLazy(commandScriptArgs(command)) catch |err| {
+    cli_helpers.defineCliScriptArgsLazy(runtime.runtime, runtime.context, commandScriptArgs(command)) catch |err| {
         try printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -218,11 +245,27 @@ pub fn main(init: std.process.Init) !void {
     include_ns = elapsedNanosSince(include_start);
     const eval_start = monotonicNanos();
     const value = switch (command) {
-        .eval => runtime.evalFileWithOutputModeTimedStrict(source_text, &stdout_writer.interface, .script, "<eval>", &eval_timing, true),
+        .eval => runtime.context.eval(source_text, .{
+            .mode = .script,
+            .filename = "<eval>",
+            .output = &stdout_writer.interface,
+            .parse_strict = true,
+            .runtime_strict = true,
+            .discard_script_result = true,
+            .timing = &eval_timing,
+        }),
         .file => |file| if (detectFileMode(file.path, source_text, file.mode) == .module)
-            runtime.evalFileModuleGraphWithOutput(source_text, &stdout_writer.interface, file.path, io, allocator, max_source_size)
+            cli_helpers.evalFileModuleGraphWithOutput(runtime.runtime, runtime.context, source_text, &stdout_writer.interface, file.path, io, allocator, max_source_size)
         else
-            runtime.evalFileWithOutputModeTimedRuntimeStrict(source_text, &stdout_writer.interface, .script, file.path, &eval_timing, true),
+            runtime.context.eval(source_text, .{
+                .mode = .script,
+                .filename = file.path,
+                .output = &stdout_writer.interface,
+                .parse_strict = false,
+                .runtime_strict = true,
+                .discard_script_result = true,
+                .timing = &eval_timing,
+            }),
     } catch |err| {
         try exitIfRequested(&runtime, &stdout_writer.interface, err);
         if (runtime.context.hasException()) {
@@ -247,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const jobs_start = monotonicNanos();
-    try runtime.runJobs();
+    try cli_helpers.runJobs(runtime.runtime, runtime.context, &stdout_writer.interface);
     jobs_ns = elapsedNanosSince(jobs_start);
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         const exception = takePendingRejectionOrException(&runtime);
@@ -318,7 +361,7 @@ fn commandScriptArgs(command: Command) []const []const u8 {
     };
 }
 
-fn applyRuntimeOptions(runtime: *zjs.Engine, options: RuntimeOptions) void {
+fn applyRuntimeOptions(runtime: *Runtime, options: RuntimeOptions) void {
     runtime.runtime.setCanBlock(options.can_block);
     if (options.memory_limit) |limit| runtime.runtime.setMemoryLimit(limit);
     if (options.stack_size) |size| {
@@ -327,22 +370,29 @@ fn applyRuntimeOptions(runtime: *zjs.Engine, options: RuntimeOptions) void {
     }
 }
 
-fn exitIfRequested(runtime: *zjs.Engine, output: *std.Io.Writer, err: anyerror) !void {
+fn exitIfRequested(runtime: *Runtime, output: *std.Io.Writer, err: anyerror) !void {
     if (err != error.ProcessExit) return;
     const code = runtime.context.exit_code orelse return;
     try output.flush();
     std.process.exit(code);
 }
 
-fn runIncludeFiles(runtime: *zjs.Engine, options: RuntimeOptions, output: *std.Io.Writer, io: std.Io, allocator: std.mem.Allocator) !void {
+fn runIncludeFiles(runtime: *Runtime, options: RuntimeOptions, output: *std.Io.Writer, io: std.Io, allocator: std.mem.Allocator) !void {
     for (options.includes()) |path| {
         const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
         defer allocator.free(source);
         const mode = detectFileMode(path, source, .script);
         const result = if (mode == .module)
-            try runtime.evalFileModuleGraphWithOutput(source, output, path, io, allocator, max_source_size)
+            try cli_helpers.evalFileModuleGraphWithOutput(runtime.runtime, runtime.context, source, output, path, io, allocator, max_source_size)
         else
-            try runtime.evalFileWithOutputModeRuntimeStrict(source, output, .script, path, true);
+            try runtime.context.eval(source, .{
+                .mode = .script,
+                .filename = path,
+                .output = output,
+                .parse_strict = false,
+                .runtime_strict = true,
+                .discard_script_result = true,
+            });
         result.free(runtime.runtime);
     }
 }
@@ -480,7 +530,7 @@ fn isIdentifierContinue(byte: u8) bool {
     return isIdentifierStart(byte) or (byte >= '0' and byte <= '9');
 }
 
-fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *zjs.Engine) !void {
+fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *Runtime) !void {
     const rt = runtime.runtime;
     var live_dynamic_atoms: usize = 0;
     var dynamic_atom_bytes: usize = 0;
@@ -523,7 +573,7 @@ const PerfJsonTimings = struct {
     zjs: zjs.EvalTiming,
 };
 
-fn dumpPerfJson(io: std.Io, command: Command, runtime: *zjs.Engine, perf_profile: ?*const zjs.core.OpcodeProfile, timings: PerfJsonTimings) !void {
+fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?*const zjs.core.OpcodeProfile, timings: PerfJsonTimings) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
@@ -710,13 +760,8 @@ fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRo
     return lhs.opcode < rhs.opcode;
 }
 
-fn takePendingRejectionOrException(runtime: *zjs.Engine) zjs.core.JSValue {
-    if (runtime.context.hasUnhandledRejection()) {
-        const rejection = runtime.context.takeUnhandledRejection();
-        if (runtime.context.hasException()) runtime.context.clearException();
-        return rejection;
-    }
-    return runtime.takeException();
+fn takePendingRejectionOrException(runtime: *Runtime) zjs.core.JSValue {
+    return cli_helpers.takeException(runtime.context);
 }
 
 fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
@@ -727,12 +772,12 @@ fn printError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try stderr.flush();
 }
 
-fn printEvaluationError(io: std.Io, runtime: *zjs.Engine, err: anyerror) !void {
+fn printEvaluationError(io: std.Io, runtime: *Runtime, err: anyerror) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
-    if (runtime.context.hasException()) {
-        const thrown = runtime.takeException();
+    if (runtime.context.hasException() or runtime.context.hasUnhandledRejection()) {
+        const thrown = cli_helpers.takeException(runtime.context);
         defer thrown.free(runtime.runtime);
         if (try printExceptionValue(stderr, runtime, thrown)) return;
     }
@@ -741,7 +786,7 @@ fn printEvaluationError(io: std.Io, runtime: *zjs.Engine, err: anyerror) !void {
     try stderr.flush();
 }
 
-fn printExceptionValue(stderr: *std.Io.Writer, runtime: *zjs.Engine, value: zjs.core.JSValue) !bool {
+fn printExceptionValue(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.core.JSValue) !bool {
     const rt = runtime.runtime;
     const object = objectFromValue(value) orelse return false;
     if (try printStringProperty(stderr, rt, object, "name")) {
@@ -837,7 +882,7 @@ fn stringFromValue(value: zjs.core.JSValue) ?*zjs.core.string.String {
     return @fieldParentPtr("header", header);
 }
 
-fn printUnhandledRejection(io: std.Io, runtime: *zjs.Engine, value: zjs.core.JSValue) !void {
+fn printUnhandledRejection(io: std.Io, runtime: *Runtime, value: zjs.core.JSValue) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;

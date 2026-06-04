@@ -1,5 +1,6 @@
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
+const cli_helpers = @import("helpers.zig");
 
 extern "c" fn getpid() c_int;
 
@@ -1667,17 +1668,30 @@ fn runEmbeddedEngine(
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
-    var js = try engine.harness.Engine.init(allocator);
-    defer js.deinit();
-    js.runtime.setCanBlock(can_block);
+    const rt = try engine.core.JSRuntime.createWithOptions(allocator, .{});
+    errdefer rt.destroy();
+    const ctx = try engine.core.JSContext.create(rt);
+    errdefer ctx.destroy();
+    defer {
+        engine.exec.zjs_vm.cleanupWorkersForRuntime(rt);
+        _ = engine.exec.zjs_vm.cleanupTest262Agents(rt);
+        engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx);
+        ctx.destroy();
+        rt.destroy();
+    }
+    rt.setCanBlock(can_block);
     var output_buffer: [64 * 1024]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var value = (if (run_as_module)
-        js.evalFileModuleGraphWithOutput(source, &output, path, io, allocator, 16 * 1024 * 1024)
+        cli_helpers.evalFileModuleGraphWithOutput(rt, ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
-        js.evalWithOutputMode(source, &output, .script)) catch |err| failed: {
+        ctx.eval(source, .{
+            .mode = .script,
+            .output = &output,
+            .discard_script_result = true,
+        })) catch |err| failed: {
         if (err == error.Test262Error) {
-            if (try formatPendingExceptionName(&js, stderr_storage)) |name| {
+            if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
                 stderr_out.* = name;
                 break :failed engine.core.JSValue.exception();
             }
@@ -1685,27 +1699,27 @@ fn runEmbeddedEngine(
         stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
         break :failed engine.core.JSValue.exception();
     };
-    defer value.free(js.runtime);
+    defer value.free(rt);
 
     if (!value.isException()) {
-        try js.runJobs();
-        if (js.context.hasException()) {
+        try cli_helpers.runJobs(rt, ctx, &output);
+        if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
-            const async_exception = js.takeException();
-            async_exception.free(js.runtime);
+            const async_exception = cli_helpers.takeException(ctx);
+            async_exception.free(rt);
             return false;
         }
     }
     return !value.isException();
 }
 
-fn formatPendingExceptionName(js: *engine.harness.Engine, storage: *[stderr_storage_len]u8) !?[]const u8 {
-    if (!js.context.hasException()) return null;
-    const thrown = js.takeException();
-    defer thrown.free(js.runtime);
+fn formatPendingExceptionName(rt: *engine.core.JSRuntime, ctx: *engine.core.JSContext, storage: *[stderr_storage_len]u8) !?[]const u8 {
+    if (!ctx.hasException()) return null;
+    const thrown = cli_helpers.takeException(ctx);
+    defer thrown.free(rt);
     const object = objectFromValue(thrown) orelse return null;
     const name_value = object.getProperty(engine.core.atom.ids.name);
-    defer name_value.free(js.runtime);
+    defer name_value.free(rt);
     const name_string = stringFromValue(name_value) orelse return null;
     return switch (name_string.resolveData()) {
         .latin1 => |bytes| return try std.fmt.bufPrint(storage, "{s}", .{bytes}),
