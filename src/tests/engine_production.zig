@@ -34,7 +34,7 @@ test "production embedding can own JSRuntime and JSContext directly" {
 }
 
 test "production embedding API applies limits and releases eval handles" {
-    var js = try engine.harness.Engine.initWithOptions(.{
+    var js = try engine.Engine.initWithOptions(.{
         .allocator = std.testing.allocator,
         .limits = .{
             .stack_bytes = 128 * 1024,
@@ -58,7 +58,7 @@ test "production embedding API applies limits and releases eval handles" {
 test "production embedding lifecycle deinitializes repeated script and module evals" {
     var index: usize = 0;
     while (index < 4) : (index += 1) {
-        var js = try engine.harness.Engine.init(std.testing.allocator);
+        var js = try engine.Engine.init(std.testing.allocator);
         defer js.deinit();
 
         var script_result = try js.evalHandle(
@@ -78,7 +78,7 @@ test "production embedding lifecycle deinitializes repeated script and module ev
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
@@ -88,7 +88,7 @@ test "production embedding memory limit reports allocation failure without leaki
 }
 
 test "production embedding interrupt handler aborts unbounded execution" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     var state = InterruptState{};
@@ -100,7 +100,7 @@ test "production embedding interrupt handler aborts unbounded execution" {
 }
 
 test "production embedding takeExceptionInfo captures exception snapshot without leaking" {
-    var js = try engine.harness.Engine.init(std.testing.allocator);
+    var js = try engine.Engine.init(std.testing.allocator);
     defer js.deinit();
 
     _ = js.eval("throw new Error('test exception snapshot');") catch |err| {

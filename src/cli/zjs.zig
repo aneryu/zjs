@@ -1,6 +1,45 @@
 const std = @import("std");
-const zjs = @import("zjs");
-const cli_helpers = @import("helpers.zig");
+const zjs_mod = @import("zjs");
+const cli_helpers = zjs_mod.internal.cli_helpers;
+
+const zjs = struct {
+    pub const core = zjs_mod.internal.core;
+    pub const frontend = zjs_mod.internal.frontend;
+    pub const exec = zjs_mod.internal.exec;
+    pub const bytecode = zjs_mod.internal.bytecode;
+    pub const internal = zjs_mod.internal;
+
+    pub const Limits = zjs_mod.Limits;
+    pub const EngineOptions = zjs_mod.EngineOptions;
+    pub const Engine = zjs_mod.Engine;
+    pub const ValueHandle = zjs_mod.ValueHandle;
+    pub const ExceptionInfo = zjs_mod.ExceptionInfo;
+    pub const HostHooks = zjs_mod.HostHooks;
+
+    pub const RuntimeError = zjs_mod.RuntimeError;
+    pub const HostError = zjs_mod.HostError;
+    pub const EngineError = zjs_mod.EngineError;
+
+    pub const JSRuntime = zjs_mod.JSRuntime;
+    pub const JSContext = zjs_mod.JSContext;
+    pub const JSValue = zjs_mod.JSValue;
+    pub const JSValueHandle = zjs_mod.JSValueHandle;
+    pub const LocalHandle = zjs_mod.LocalHandle;
+    pub const HandleScope = zjs_mod.HandleScope;
+    pub const WeakPersistent = zjs_mod.WeakPersistent;
+    pub const WeakPersistentValue = zjs_mod.WeakPersistentValue;
+    pub const NativePin = zjs_mod.NativePin;
+    pub const GCPolicy = zjs_mod.GCPolicy;
+    pub const GCStats = zjs_mod.GCStats;
+
+    pub const EvalOptions = zjs_mod.EvalOptions;
+    pub const EvalTiming = zjs_mod.EvalTiming;
+    pub const ExternalHostCall = zjs_mod.ExternalHostCall;
+    pub const ExternalHostCallFn = zjs_mod.ExternalHostCallFn;
+    pub const ExternalHostFinalizer = zjs_mod.ExternalHostFinalizer;
+
+    pub const harness = zjs_mod.harness;
+};
 
 const Runtime = struct {
     runtime: *zjs.core.JSRuntime,
@@ -8,7 +47,7 @@ const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         zjs.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
-        const test262_helpers = @import("test262_helpers.zig");
+        const test262_helpers = zjs.internal.test262_helpers;
         _ = test262_helpers.cleanupTest262Agents(self.runtime);
         zjs.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();

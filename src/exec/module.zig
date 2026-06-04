@@ -120,6 +120,7 @@ pub fn preloadFileModuleGraph(
     io: std.Io,
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: ?*core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -129,13 +130,14 @@ pub fn preloadFileModuleGraph(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInner(io, allocator, runtime, root_source, root_path, max_source_size, &seen, null);
+    try preloadFileModuleGraphInner(io, allocator, runtime, context, root_source, root_path, max_source_size, &seen, null);
 }
 
 pub fn preloadFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: ?*core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -146,13 +148,14 @@ pub fn preloadFileModuleGraphWithOrder(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInner(io, allocator, runtime, root_source, root_path, max_source_size, &seen, postorder);
+    try preloadFileModuleGraphInner(io, allocator, runtime, context, root_source, root_path, max_source_size, &seen, postorder);
 }
 
 pub fn preloadMissingFileModuleGraphWithOrder(
     io: std.Io,
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: ?*core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
     max_source_size: usize,
@@ -163,7 +166,7 @@ pub fn preloadMissingFileModuleGraphWithOrder(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphInnerMode(io, allocator, runtime, root_source, root_path, max_source_size, &seen, postorder, true);
+    try preloadFileModuleGraphInnerMode(io, allocator, runtime, context, root_source, root_path, max_source_size, &seen, postorder, true);
 }
 
 pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {
@@ -719,19 +722,21 @@ fn preloadFileModuleGraphInner(
     io: std.Io,
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: ?*core.JSContext,
     source_text: []const u8,
     path: []const u8,
     max_source_size: usize,
     seen: *std.ArrayList([]const u8),
     postorder: ?*std.ArrayList([]const u8),
 ) !void {
-    try preloadFileModuleGraphInnerMode(io, allocator, runtime, source_text, path, max_source_size, seen, postorder, false);
+    try preloadFileModuleGraphInnerMode(io, allocator, runtime, context, source_text, path, max_source_size, seen, postorder, false);
 }
 
 fn preloadFileModuleGraphInnerMode(
     io: std.Io,
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: ?*core.JSContext,
     source_text: []const u8,
     path: []const u8,
     max_source_size: usize,
@@ -750,7 +755,15 @@ fn preloadFileModuleGraphInnerMode(
     var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
-        if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+        if (context) |ctx| {
+            const exception_ops = @import("vm_exception_ops.zig");
+            const global_object = try ctx.globalObject();
+            var msg_buf = std.ArrayList(u8).empty;
+            defer msg_buf.deinit(runtime.memory.allocator);
+            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+            const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+            _ = ctx.throwValue(error_val);
+        }
         return error.SyntaxError;
     }
 
@@ -780,7 +793,7 @@ fn preloadFileModuleGraphInnerMode(
             else => |e| return e,
         };
         defer allocator.free(dep_source);
-        try preloadFileModuleGraphInnerMode(io, allocator, runtime, dep_source, dep_path, max_source_size, seen, postorder, skip_existing);
+        try preloadFileModuleGraphInnerMode(io, allocator, runtime, context, dep_source, dep_path, max_source_size, seen, postorder, skip_existing);
     }
     if (postorder) |order| {
         try appendTrackedPath(allocator, order, path);

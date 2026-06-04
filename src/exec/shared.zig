@@ -77,9 +77,6 @@ pub const callStringWellKnownMethod = string_ops.callStringWellKnownMethod;
 pub const captureReplaceMatch = string_ops.captureReplaceMatch;
 pub const classEscapeUnitMatches = string_ops.classEscapeUnitMatches;
 pub const codePointFromSurrogatePair = string_ops.codePointFromSurrogatePair;
-pub const codePointInSortedUnicodeRanges = regexp_unicode.codePointInSortedUnicodeRanges;
-pub const codePointInSortedUnicodeSingles = regexp_unicode.codePointInSortedUnicodeSingles;
-pub const codePointInUnicodeSet = regexp_unicode.codePointInUnicodeSet;
 pub const combinedSurrogateCodePoint = string_ops.combinedSurrogateCodePoint;
 pub const complementClassUnitMatches = string_ops.complementClassUnitMatches;
 pub const concatAppendValue = string_ops.concatAppendValue;
@@ -11500,7 +11497,7 @@ pub fn qjsWorkerEvalModuleGraph(
         for (module_postorder.items) |path| allocator.free(path);
         module_postorder.deinit(allocator);
     }
-    try module_mod.preloadFileModuleGraphWithOrder(io, allocator, ctx.runtime, source_text, normalized_filename, max_source_size, &module_postorder);
+    try module_mod.preloadFileModuleGraphWithOrder(io, allocator, ctx.runtime, ctx, source_text, normalized_filename, max_source_size, &module_postorder);
     const root_module_name = try ctx.runtime.internAtom(normalized_filename);
     defer ctx.runtime.atoms.free(root_module_name);
     ctx.runtime.modules.linkModule(ctx.runtime, root_module_name) catch |err| return qjsWorkerModuleResolutionError(err);

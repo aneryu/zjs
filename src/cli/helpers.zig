@@ -1,49 +1,17 @@
 const std = @import("std");
-const core = @import("../core/root.zig");
-const frontend = @import("../frontend/root.zig");
-const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
-const exec = @import("../exec/root.zig");
+const zjs = @import("../root.zig");
+const core = zjs.internal.core;
+const frontend = zjs.internal.frontend;
+const bytecode = zjs.internal.bytecode;
+const builtins = zjs.internal.builtins;
+const exec = zjs.internal.exec;
 
 pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;
 
-pub const Limits = struct {
-    memory_bytes: ?usize = null,
-    stack_bytes: ?usize = null,
-    gc_threshold_bytes: ?usize = null,
-};
-
-pub const EvalTiming = core.context.ContextEvalTiming;
-
-pub const ExceptionInfo = struct {
-    value: core.JSValueHandle,
-
-    pub fn deinit(self: *ExceptionInfo) void {
-        self.value.deinit();
-    }
-};
-
-pub const HostHooks = struct {
-    ptr: *anyopaque,
-    resolveModule: *const fn (*anyopaque, []const u8, ?[]const u8, std.mem.Allocator) anyerror!ResolvedModule,
-    loadModule: *const fn (*anyopaque, ResolvedModule, std.mem.Allocator) anyerror!LoadedModule,
-
-    pub const ModuleKind = enum { esm, commonjs, json, wasm, builtin };
-
-    pub const ResolvedModule = struct {
-        specifier: []const u8,
-        path: []const u8,
-        kind: ModuleKind,
-    };
-
-    pub const LoadedModule = struct {
-        source: []const u8,
-        path: []const u8,
-        kind: ModuleKind,
-        owned: bool = false,
-    };
-};
+pub const Limits = zjs.Limits;
+pub const ExceptionInfo = zjs.ExceptionInfo;
+pub const HostHooks = zjs.HostHooks;
 
 pub const ModuleEvalStep = union(enum) {
     completed: core.JSValue,
@@ -234,7 +202,7 @@ pub fn evalFileModuleGraphWithOutput(
         for (module_postorder.items) |path| allocator.free(path);
         module_postorder.deinit(allocator);
     }
-    try exec.module.preloadFileModuleGraphWithOrder(io, allocator, runtime, source_text, normalized_filename, max_source_size, &module_postorder);
+    try exec.module.preloadFileModuleGraphWithOrder(io, allocator, runtime, context, source_text, normalized_filename, max_source_size, &module_postorder);
     const root_module_name = try runtime.internAtom(normalized_filename);
     defer runtime.atoms.free(root_module_name);
     if (runtime.modules.find(root_module_name)) |record| record.import_meta_main = true;
@@ -289,7 +257,7 @@ pub fn evalFileModuleGraphWithHostHooks(
         for (module_postorder.items) |path| allocator.free(path);
         module_postorder.deinit(allocator);
     }
-    try preloadFileModuleGraphWithHostHooks(allocator, runtime, host_hooks, source_text, filename, &module_postorder);
+    try preloadFileModuleGraphWithHostHooks(allocator, runtime, context, host_hooks, source_text, filename, &module_postorder);
 
     const root_module_name = try runtime.internAtom(filename);
     defer runtime.atoms.free(root_module_name);
@@ -324,7 +292,12 @@ pub fn evalFileModuleGraphWithHostHooks(
         if (loaded_owned) allocator.free(raw_module_source);
         defer compiled.deinit();
         if (compiled.syntax_error) |err| {
-            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+            const exception_ops = @import("../exec/vm_exception_ops.zig");
+            var msg_buf = std.ArrayList(u8).empty;
+            defer msg_buf.deinit(runtime.memory.allocator);
+            try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+            const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+            _ = context.throwValue(error_val);
             return error.SyntaxError;
         }
         const module_name = try runtime.internAtom(path);
@@ -494,7 +467,13 @@ fn evalPreloadedFileModuleStep(
     var compiled = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = filename });
     defer compiled.deinit();
     if (compiled.syntax_error) |err| {
-        if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in evalPreloadedFileModuleStep {s}:{d}:{d} - {s}\n", .{ filename, err.position.line, err.position.column, err.message });
+        const exception_ops = @import("../exec/vm_exception_ops.zig");
+        const global_object = try exec.zjs_vm.contextGlobal(context);
+        var msg_buf = std.ArrayList(u8).empty;
+        defer msg_buf.deinit(runtime.memory.allocator);
+        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalPreloadedFileModuleStep {s}:{d}:{d} - {s}", .{ filename, err.position.line, err.position.column, err.message });
+        const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+        _ = context.throwValue(error_val);
         return error.SyntaxError;
     }
 
@@ -502,7 +481,13 @@ fn evalPreloadedFileModuleStep(
     defer runtime.atoms.free(module_name);
     if (runtime.modules.find(module_name) == null) return error.ModuleNotFound;
     runtime.modules.linkModule(runtime, module_name) catch |err| {
-        if (!@import("builtin").is_test) std.debug.print("LINK ERROR in evalPreloadedFileModuleStep for module {s}: {s}\n", .{ filename, @errorName(err) });
+        const exception_ops = @import("../exec/vm_exception_ops.zig");
+        const global_object = try exec.zjs_vm.contextGlobal(context);
+        var msg_buf = std.ArrayList(u8).empty;
+        defer msg_buf.deinit(runtime.memory.allocator);
+        try msg_buf.print(runtime.memory.allocator, "LINK ERROR in evalPreloadedFileModuleStep for module {s}: {s}", .{ filename, @errorName(err) });
+        const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+        _ = context.throwValue(error_val);
         return moduleResolutionError(err);
     };
 
@@ -761,7 +746,7 @@ fn evalDynamicImportModule(
             for (postorder.items) |item| allocator.free(item);
             postorder.deinit(allocator);
         }
-        _ = try exec.module.preloadFileModuleGraphWithOrder(io, allocator, runtime, source, target_path, max_source_size, &postorder);
+        _ = try exec.module.preloadFileModuleGraphWithOrder(io, allocator, runtime, context, source, target_path, max_source_size, &postorder);
         try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size);
         try initializeNativeSyntheticModules(runtime, context);
     }
@@ -781,6 +766,7 @@ fn evalDynamicImportModule(
 fn preloadFileModuleGraphWithHostHooks(
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: *core.JSContext,
     host_hooks: HostHooks,
     root_source: []const u8,
     root_path: []const u8,
@@ -791,12 +777,13 @@ fn preloadFileModuleGraphWithHostHooks(
         for (seen.items) |path| allocator.free(path);
         seen.deinit(allocator);
     }
-    try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, host_hooks, root_source, root_path, &seen, postorder);
+    try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, context, host_hooks, root_source, root_path, &seen, postorder);
 }
 
 fn preloadFileModuleGraphWithHostHooksInner(
     allocator: std.mem.Allocator,
     runtime: *core.JSRuntime,
+    context: *core.JSContext,
     host_hooks: HostHooks,
     source_text: []const u8,
     path: []const u8,
@@ -818,7 +805,13 @@ fn preloadFileModuleGraphWithHostHooksInner(
     var parsed = try frontend.parser.parse(runtime, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
-        if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in preloadFileModuleGraphWithHostHooksInner {s}:{d}:{d} - {s}\n", .{ path, err.position.line, err.position.column, err.message });
+        const exception_ops = @import("../exec/vm_exception_ops.zig");
+        const global_object = try exec.zjs_vm.contextGlobal(context);
+        var msg_buf = std.ArrayList(u8).empty;
+        defer msg_buf.deinit(runtime.memory.allocator);
+        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphWithHostHooksInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+        const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+        _ = context.throwValue(error_val);
         return error.SyntaxError;
     }
 
@@ -884,7 +877,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
         const module_source = try wrapSourceByKind(allocator, loaded.kind, loaded.source, loaded.path, &module_source_allocated);
         defer if (module_source_allocated) allocator.free(module_source);
 
-        try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, host_hooks, module_source, loaded.path, seen, postorder);
+        try preloadFileModuleGraphWithHostHooksInner(allocator, runtime, context, host_hooks, module_source, loaded.path, seen, postorder);
     }
 
     const order_path = try allocator.dupe(u8, path);

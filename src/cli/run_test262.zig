@@ -1,6 +1,12 @@
 const std = @import("std");
-const engine = @import("quickjs_zig_engine");
-const cli_helpers = @import("helpers.zig");
+const engine_mod = @import("quickjs_zig_engine");
+const cli_helpers = engine_mod.internal.cli_helpers;
+
+const engine = struct {
+    pub const core = engine_mod.internal.core;
+    pub const exec = engine_mod.internal.exec;
+    pub const internal = engine_mod.internal;
+};
 
 extern "c" fn getpid() c_int;
 
@@ -1674,7 +1680,7 @@ fn runEmbeddedEngine(
     errdefer ctx.destroy();
     const global_obj = try engine.exec.zjs_vm.contextGlobal(ctx);
     try engine.exec.call.installTest262Globals(rt, global_obj);
-    const test262_helpers = @import("test262_helpers.zig");
+    const test262_helpers = engine.internal.test262_helpers;
     try test262_helpers.installTest262AgentGlobals(rt, ctx, global_obj);
     defer {
         engine.exec.zjs_vm.cleanupWorkersForRuntime(rt);

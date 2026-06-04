@@ -22,6 +22,7 @@ pub const jobs = @import("jobs.zig");
 pub const value_ops = @import("value_ops.zig");
 pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
+pub const shared = @import("shared.zig");
 
 
 pub const Vm = struct {

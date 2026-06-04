@@ -3856,10 +3856,6 @@ pub fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
     index.* += 1;
     return @intCast(high);
 }
-const codePointInUnicodeSet = regexp_unicode.codePointInUnicodeSet;
-const codePointInSortedUnicodeRanges = regexp_unicode.codePointInSortedUnicodeRanges;
-const codePointInSortedUnicodeSingles = regexp_unicode.codePointInSortedUnicodeSingles;
-
 pub fn complementClassUnitMatches(source: []const u8, unit: u16) bool {
     if (std.mem.eql(u8, source, "^\\D+$")) return !isAsciiDigitUnit(unit);
     if (std.mem.eql(u8, source, "^\\W+$")) return !isAsciiWordUnit(unit);

@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zjs", .module = test262_engine_fast_mod },
+            .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
         },
     });
     const zjs_exe = b.addExecutable(.{
@@ -48,6 +49,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
+                .{ .name = "zjs", .module = test262_engine_fast_mod },
             },
         }),
     });

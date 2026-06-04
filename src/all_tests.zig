@@ -2,12 +2,13 @@ const std = @import("std");
 
 const engine = @import("root.zig");
 
-pub const core = engine.core;
-pub const frontend = engine.frontend;
-pub const bytecode = engine.bytecode;
-pub const exec = engine.exec;
-pub const builtins = engine.builtins;
-pub const libs = engine.libs;
+pub const internal = engine.internal;
+pub const core = engine.internal.core;
+pub const frontend = engine.internal.frontend;
+pub const bytecode = engine.internal.bytecode;
+pub const exec = engine.internal.exec;
+pub const builtins = engine.internal.builtins;
+pub const libs = engine.internal.libs;
 pub const RuntimeError = engine.RuntimeError;
 pub const HostError = engine.HostError;
 pub const EngineError = engine.EngineError;
@@ -34,6 +35,7 @@ pub const ExceptionInfo = engine.ExceptionInfo;
 pub const Engine = engine.Engine;
 
 fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) void {
+    @setEvalBranchQuota(200000);
     if (!@import("builtin").is_test) return;
 
     // Avoid infinite recursion on cycles

@@ -544,7 +544,13 @@ pub const JSContext = struct {
         defer compiled.deinit();
         if (compiled.syntax_error) |err| {
             if (options.mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return JSValue.undefinedValue();
-            if (!@import("builtin").is_test) std.debug.print("SYNTAX ERROR in {s}:{d}:{d} - {s}\n", .{ options.filename, err.position.line, err.position.column, err.message });
+            const exception_ops = @import("../exec/vm_exception_ops.zig");
+            const global = try self.globalObject();
+            var msg_buf = std.ArrayList(u8).empty;
+            defer msg_buf.deinit(rt.memory.allocator);
+            try msg_buf.print(rt.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ options.filename, err.position.line, err.position.column, err.message });
+            const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
+            _ = self.throwValue(error_val);
             return error.SyntaxError;
         }
         if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(&compiled.function);
@@ -564,7 +570,13 @@ pub const JSContext = struct {
             _ = try exec.module.instantiateParsedRecordWithReferrer(rt, module_name, &compiled.function, referrer_path);
             if (rt.modules.find(module_name)) |record| record.import_meta_main = true;
             rt.modules.linkModule(rt, module_name) catch |err| {
-                if (!@import("builtin").is_test) std.debug.print("LINK ERROR for module {s}: {s}\n", .{ options.filename, @errorName(err) });
+                const exception_ops = @import("../exec/vm_exception_ops.zig");
+                const global = try self.globalObject();
+                var msg_buf = std.ArrayList(u8).empty;
+                defer msg_buf.deinit(rt.memory.allocator);
+                try msg_buf.print(rt.memory.allocator, "LINK ERROR for module {s}: {s}", .{ options.filename, @errorName(err) });
+                const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
+                _ = self.throwValue(error_val);
                 return moduleResolutionError(err);
             };
             try self.initializeNativeSyntheticModules();

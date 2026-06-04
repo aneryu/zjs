@@ -1,12 +1,14 @@
 const std = @import("std");
-const builtins = @import("../builtins/root.zig");
-const core = @import("../core/root.zig");
-const frontend = @import("../frontend/root.zig");
-const value_ops = @import("../exec/value_ops.zig");
-const stack_mod = @import("../exec/stack.zig");
-const zjs_vm = @import("../exec/zjs_vm.zig");
-const shared_vm = @import("../exec/shared.zig");
-const call_vm = @import("../exec/call.zig");
+const zjs = @import("../root.zig");
+const builtins = zjs.internal.builtins;
+const core = zjs.internal.core;
+const frontend = zjs.internal.frontend;
+const exec = zjs.internal.exec;
+const value_ops = exec.value_ops;
+const stack_mod = exec.stack;
+const zjs_vm = exec.zjs_vm;
+const shared_vm = exec.shared;
+const call_vm = exec.call;
 
 pub const ErrorKind = enum {
     test262,
@@ -367,8 +369,7 @@ pub fn test262AgentRun(agent: *Test262Agent) void {
     defer ctx.destroy();
     defer zjs_vm.cleanupAtomicsWaitersForContext(ctx);
     const global = zjs_vm.contextGlobal(ctx) catch return;
-    const call_mod = @import("../exec/call.zig");
-    call_mod.installTest262Globals(rt, global) catch return;
+    call_vm.installTest262Globals(rt, global) catch return;
     installTest262AgentGlobals(rt, ctx, global) catch return;
     var compiled = frontend.parser.parse(rt, agent.source, .{ .mode = .script, .filename = "<test262-agent>" }) catch return;
     defer compiled.deinit();
@@ -753,10 +754,10 @@ fn createExternalHostFunction(
     const function_value = try builtins.function.nativeFunction(runtime, name, length);
     errdefer function_value.free(runtime);
 
-    const function_object = try @import("../exec/property_ops.zig").expectObject(function_value);
+    const function_object = try exec.property_ops.expectObject(function_value);
     function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
     function_object.externalHostFunctionIdSlot().* = id;
-    const global_object = try @import("../exec/zjs_vm.zig").contextGlobal(context);
+    const global_object = try zjs_vm.contextGlobal(context);
     try function_object.setFunctionRealmGlobalPtr(runtime, global_object);
     return function_value;
 }
