@@ -5,7 +5,7 @@ const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
-const shared_vm = @import("vm/shared.zig");
+const shared_vm = @import("shared.zig");
 
 const DateToPrimitiveHint = enum {
     string,

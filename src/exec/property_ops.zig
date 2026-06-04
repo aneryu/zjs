@@ -6,7 +6,7 @@ const dtoa = @import("../libs/dtoa.zig");
 const frame_mod = @import("frame.zig");
 const arith_vm = @import("vm_arith.zig");
 const property_ops = @import("property_ops.zig");
-const shared_vm = @import("vm/shared.zig");
+const shared_vm = @import("shared.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 

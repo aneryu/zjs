@@ -1353,4 +1353,4 @@ fn cleanupRealmCachedGeneratorPrototypeOOMIteration(rt: *core.JSRuntime, global:
 }
 
 const std = @import("std");
-const shared_vm = @import("exec/vm/shared.zig");
+const shared_vm = @import("exec/shared.zig");

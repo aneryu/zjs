@@ -6,7 +6,7 @@ const core = @import("../core/root.zig");
 const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
-const shared_vm = @import("vm/shared.zig");
+const shared_vm = @import("shared.zig");
 const HostError = exceptions.HostError;
 
 const JsonSourceCollectError = std.mem.Allocator.Error;

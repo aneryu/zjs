@@ -1,10 +1,10 @@
 const std = @import("std");
 
-const bytecode = @import("../../bytecode/root.zig");
-const core = @import("../../core/root.zig");
-const frame_mod = @import("../frame.zig");
-const stack_mod = @import("../stack.zig");
-const value_ops = @import("../value_ops.zig");
+const bytecode = @import("../bytecode/root.zig");
+const core = @import("../core/root.zig");
+const frame_mod = @import("frame.zig");
+const stack_mod = @import("stack.zig");
+const value_ops = @import("value_ops.zig");
 
 pub const ThrowResult = enum {
     handled,

@@ -19,8 +19,8 @@ const atom_buffer = core.atom.predefinedId("buffer", .string).?;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 const exceptions = @import("exceptions.zig");
-const exception_ops = @import("vm/exception_ops.zig");
-const shared_vm = @import("vm/shared.zig");
+const exception_ops = @import("vm_exception_ops.zig");
+const shared_vm = @import("shared.zig");
 
 // --- Dynamically gathered shared_vm aliases (excluding local definitions) ---
 const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;

@@ -1,9 +1,9 @@
 const std = @import("std");
 
-const builtins = @import("../../builtins/root.zig");
-const core = @import("../../core/root.zig");
-const property_ops = @import("../property_ops.zig");
-const value_ops = @import("../value_ops.zig");
+const builtins = @import("../builtins/root.zig");
+const core = @import("../core/root.zig");
+const property_ops = @import("property_ops.zig");
+const value_ops = @import("value_ops.zig");
 
 pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 

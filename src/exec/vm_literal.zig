@@ -1,12 +1,12 @@
 const std = @import("std");
 
-const bytecode = @import("../../bytecode/root.zig");
-const builtins = @import("../../builtins/root.zig");
-const core = @import("../../core/root.zig");
-const frame_mod = @import("../frame.zig");
-const property_ops = @import("../property_ops.zig");
+const bytecode = @import("../bytecode/root.zig");
+const builtins = @import("../builtins/root.zig");
+const core = @import("../core/root.zig");
+const frame_mod = @import("frame.zig");
+const property_ops = @import("property_ops.zig");
 const shared_vm = @import("shared.zig");
-const stack_mod = @import("../stack.zig");
+const stack_mod = @import("stack.zig");
 
 const op = bytecode.opcode.op;
 const atom_print = core.atom.predefinedId("print", .string).?;

@@ -17,9 +17,9 @@ const qjsPromiseAggregateError = exception_ops.qjsPromiseAggregateError;
 const qjsPromiseErrorValue = exception_ops.qjsPromiseErrorValue;
 const runWithArgsState = zjs_vm.runWithArgsState;
 const exceptions = @import("exceptions.zig");
-const exception_ops = @import("vm/exception_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 
-const shared_vm = @import("vm/shared.zig");
+const shared_vm = @import("shared.zig");
 const AtomicsWaiter = shared_vm.AtomicsWaiter;
 const ReflectConstructResolution = shared_vm.ReflectConstructResolution;
 const ValueSliceRoot = shared_vm.ValueSliceRoot;

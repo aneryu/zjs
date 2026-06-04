@@ -1,7 +1,7 @@
 const std = @import("std");
-const core = @import("../../core/root.zig");
-const frame_mod = @import("../frame.zig");
-const stack_mod = @import("../stack.zig");
+const core = @import("../core/root.zig");
+const frame_mod = @import("frame.zig");
+const stack_mod = @import("stack.zig");
 
 pub fn ensureLocalsCapacity(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize) !void {
     if (idx < frame.locals.len and idx < frame.locals_uninit.len) return;

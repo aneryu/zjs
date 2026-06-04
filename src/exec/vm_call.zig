@@ -1,14 +1,14 @@
 const std = @import("std");
 
-const bytecode = @import("../../bytecode/root.zig");
-const builtins = @import("../../builtins/root.zig");
-const core = @import("../../core/root.zig");
-const frame_mod = @import("../frame.zig");
-const collection_vm = @import("../array_ops.zig");
-const property_ops = @import("../property_ops.zig");
+const bytecode = @import("../bytecode/root.zig");
+const builtins = @import("../builtins/root.zig");
+const core = @import("../core/root.zig");
+const frame_mod = @import("frame.zig");
+const collection_vm = @import("array_ops.zig");
+const property_ops = @import("property_ops.zig");
 const shared_vm = @import("shared.zig");
-const stack_mod = @import("../stack.zig");
-const value_ops = @import("../value_ops.zig");
+const stack_mod = @import("stack.zig");
+const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
 

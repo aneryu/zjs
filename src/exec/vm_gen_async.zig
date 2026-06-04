@@ -1,9 +1,9 @@
 const std = @import("std");
 
-const bytecode = @import("../../bytecode/root.zig");
-const core = @import("../../core/root.zig");
-const frame_mod = @import("../frame.zig");
-const stack_mod = @import("../stack.zig");
+const bytecode = @import("../bytecode/root.zig");
+const core = @import("../core/root.zig");
+const frame_mod = @import("frame.zig");
+const stack_mod = @import("stack.zig");
 
 pub const Result = union(enum) {
     none,
