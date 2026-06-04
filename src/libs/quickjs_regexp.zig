@@ -943,3 +943,13 @@ fn patternUsesCodeUnitMode(flags: []const u8) bool {
     }
     return true;
 }
+
+test "quickjs_regexp compilation and execution" {
+    var compiled = try compile(std.testing.allocator, "abc", "i");
+    defer compiled.deinit(std.testing.allocator);
+    const status = try regexp.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
+    try std.testing.expect(status.result == .match);
+    try std.testing.expectEqual(@as(usize, 2), status.match.start);
+    try std.testing.expectEqual(@as(usize, 5), status.match.end);
+}
+

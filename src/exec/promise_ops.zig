@@ -3895,3 +3895,26 @@ pub fn rejectModuleNamespaceSuperSet(ctx: *core.JSContext, receiver: core.JSValu
     }
     return error.TypeError;
 }
+
+var promise_jobs: usize = 0;
+fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue {
+    promise_jobs += 1;
+    if (args.len >= 1) promise_jobs += @intCast(args[0].asInt32().?);
+    return core.JSValue.undefinedValue();
+}
+
+test "promise enqueues reactions and executes jobs via engine" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    promise_jobs = 0;
+    try builtins.promise.enqueueReaction(ctx, countPromiseJob, &.{core.JSValue.int32(2)});
+
+    rt.job_queue.runAll();
+    const global_object = try ctx.globalObject();
+    try drainPendingPromiseJobs(ctx, null, global_object);
+
+    try std.testing.expectEqual(@as(usize, 3), promise_jobs);
+}

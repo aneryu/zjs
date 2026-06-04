@@ -197,3 +197,15 @@ pub const Token = struct {
     len: usize,
     payload: Payload,
 };
+
+test "F1: keyword token integer values match QuickJS TOK_*" {
+    // Spot-check anchors from quickjs.c:21246..21338.
+    try std.testing.expectEqual(@as(TokenKind, -128), TOK_NUMBER);
+    try std.testing.expectEqual(@as(TokenKind, -127), TOK_STRING);
+    try std.testing.expectEqual(@as(TokenKind, -125), TOK_IDENT);
+    try std.testing.expectEqual(@as(TokenKind, -86), TOK_EOF);
+    try std.testing.expectEqual(@as(TokenKind, -85), TOK_NULL);
+    try std.testing.expectEqual(@as(TokenKind, -40), TOK_AWAIT);
+    try std.testing.expectEqual(@as(TokenKind, -39), TOK_OF);
+}
+

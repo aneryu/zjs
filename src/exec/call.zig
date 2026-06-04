@@ -8123,3 +8123,15 @@ pub fn qjsEvalGlobalScriptSource(
         return shared_vm.normalizeEvalRuntimeError(err);
     };
 }
+
+test "host global bootstrap installs and tears down builtin plus host domains" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    global.is_global = true;
+    defer global.value().free(rt);
+
+    try installHostGlobals(rt, global);
+}
+

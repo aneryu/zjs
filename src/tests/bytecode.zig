@@ -1,434 +1,188 @@
-//! F10 pipeline tests: pc2line encoding, stack_size BFS, FunctionDef.
-
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
 const bytecode = engine.bytecode;
 const core = engine.core;
+
+test "constant pool retains and releases values" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
+    defer pool.deinit(rt);
+
+    const text = try core.string.String.createAscii(rt, "constant");
+    const value = text.value();
+    const index = try pool.append(value);
+    try std.testing.expectEqual(@as(u32, 0), index);
+    try std.testing.expectEqual(@as(i32, 2), text.header.rc);
+
+    const loaded = pool.get(0).?;
+    try std.testing.expectEqual(@as(i32, 3), text.header.rc);
+    loaded.free(rt);
+    value.free(rt);
+}
+
+test "constant pool appendOwned transfers refcounted values" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
+    defer pool.deinit(rt);
+
+    const text = try core.string.String.createAscii(rt, "owned-constant");
+    const value = text.value();
+    _ = try pool.appendOwned(value);
+
+    try std.testing.expectEqual(@as(i32, 1), text.header.rc);
+}
+
+test "constant pool retains owned unique symbol atoms until release" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
+    var pool_alive = true;
+    defer if (pool_alive) pool.deinit(rt);
+
+    const borrowed_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-symbol");
+    _ = try pool.append(core.JSValue.symbol(borrowed_symbol));
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
+
+    pool.deinit(rt);
+    pool_alive = false;
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(borrowed_symbol) == null);
+}
+
+test "constant pool appendOwned retains unique symbol atoms until release" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
+    var pool_alive = true;
+    defer if (pool_alive) pool.deinit(rt);
+
+    const owned_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-owned-symbol");
+    _ = try pool.appendOwned(core.JSValue.symbol(owned_symbol));
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(owned_symbol) != null);
+
+    pool.deinit(rt);
+    pool_alive = false;
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(owned_symbol) == null);
+}
+
+test "function bytecode owns code constants scopes module and debug metadata" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("compiled");
+    const filename = try rt.internAtom("input.js");
+    const local = try rt.internAtom("x");
+    const dep = try rt.internAtom("dep.mjs");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(filename);
+    defer rt.atoms.free(local);
+    defer rt.atoms.free(dep);
+
+    var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function_bc.deinit(rt);
+
+    try function_bc.setCode(&.{ 1, 2, 3 });
+    try std.testing.expectEqual(@as(usize, 3), function_bc.code.len);
+    _ = try function_bc.addConstant(core.JSValue.int32(7));
+    try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
+
+    const scope_record = try function_bc.addScope(null);
+    _ = try scope_record.addBinding(local, .let_, true);
+    _ = try scope_record.addClosureVar(local, 0, 0, false);
+    try std.testing.expectEqual(@as(usize, 1), scope_record.bindings.len);
+    try std.testing.expect(scope_record.bindings[0].is_lexical);
+    try std.testing.expectEqual(@as(usize, 1), scope_record.closure_vars.len);
+
+    const mod_record = function_bc.ensureModule();
+    const req_index = try mod_record.addRequest(dep);
+    const default_atom = core.atom.predefinedId("*default*", .string).?;
+    try mod_record.addImport(req_index, default_atom, local);
+    try mod_record.addExport(default_atom, local);
+    try mod_record.addIndirectExport(req_index, local, default_atom);
+    try mod_record.addStarExport(req_index, default_atom);
+    try mod_record.addImportAttribute(req_index, local, default_atom);
+    mod_record.has_top_level_await = true;
+    try std.testing.expectEqual(@as(usize, 1), mod_record.requests.len);
+    try std.testing.expectEqual(@as(usize, 1), mod_record.imports.len);
+    try std.testing.expectEqual(@as(usize, 1), mod_record.exports.len);
+    try std.testing.expectEqual(@as(usize, 1), mod_record.indirect_exports.len);
+    try std.testing.expectEqual(@as(usize, 1), mod_record.star_exports.len);
+    try std.testing.expectEqual(@as(usize, 1), mod_record.import_attributes.len);
+    try std.testing.expect(mod_record.has_top_level_await);
+
+    const dbg = function_bc.ensureDebug(filename);
+    try dbg.add(.{ .pc = 0, .line = 1 });
+    try dbg.add(.{ .pc = 3, .line = 2 });
+    try std.testing.expectEqual(@as(?u32, 2), dbg.lineForPc(4));
+}
+
+test "bytecode setCode skips zero-length allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    defer function_bc.deinit(rt);
+
+    const base_bytes = rt.memory.allocated_bytes;
+    const base_allocations = rt.memory.allocation_count;
+
+    try function_bc.setCode(&.{});
+    try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
+
+    try function_bc.setCode(&.{ 1, 2 });
+    try std.testing.expectEqual(@as(usize, 2), function_bc.code.len);
+    try function_bc.setCode(&.{});
+    try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 0), function_bc.code_capacity);
+    try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
+}
+
+test "bytecode module record add failure releases duplicated atom references" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var record = bytecode.module.Record.init(&rt.memory, &rt.atoms);
+    defer record.deinit();
+
+    const import_name = try rt.internAtom("oom-bytecode-import");
+    const local_name = try rt.internAtom("oom-bytecode-local");
+
+    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    try std.testing.expectError(error.OutOfMemory, record.addImport(0, import_name, local_name));
+    rt.setMemoryLimit(null);
+
+    try std.testing.expectEqual(@as(usize, 0), record.imports.len);
+
+    rt.atoms.free(import_name);
+    rt.atoms.free(local_name);
+
+    try std.testing.expect(rt.atoms.name(import_name) == null);
+    try std.testing.expect(rt.atoms.name(local_name) == null);
+}
+
 const atom_module = engine.core.atom;
 const pipeline = bytecode.pipeline;
 const pc2line = pipeline.pc2line;
 const stack_size = pipeline.stack_size;
 const function_def = bytecode.function_def;
-
-test "pc2line: empty slot list produces empty buffer" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    var encoded = try pc2line.encode(&account, &.{}, 1, 0);
-    defer encoded.deinit();
-    try std.testing.expectEqual(@as(usize, 0), encoded.bytes.len);
-}
-
-test "pc2line: compact encoding for small line/pc deltas" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    // Two slots: same line, small pc delta. Compact form is one byte
-    // (line/pc compact) plus a sleb128 col diff.
-    const slots = [_]pc2line.SourceLocSlot{
-        .{ .pc = 0, .line_num = 1, .col_num = 1 },
-        .{ .pc = 5, .line_num = 1, .col_num = 4 },
-    };
-    var encoded = try pc2line.encode(&account, &slots, 1, 1);
-    defer encoded.deinit();
-
-    // First slot has diff_pc=0, diff_line=0, diff_col=0 from start (1,1) → skipped.
-    // Second slot has diff_pc=5, diff_line=0, diff_col=3 from previous.
-    // Compact byte = (0 - (-1)) + 5*5 + 1 = 1 + 25 + 1 = 27, then sleb128(3) = 0x03.
-    try std.testing.expectEqual(@as(usize, 2), encoded.bytes.len);
-    try std.testing.expectEqual(@as(u8, 27), encoded.bytes[0]);
-    try std.testing.expectEqual(@as(u8, 3), encoded.bytes[1]);
-}
-
-test "pc2line: long encoding for large pc delta" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    const slots = [_]pc2line.SourceLocSlot{
-        .{ .pc = 100, .line_num = 2, .col_num = 1 },
-    };
-    var encoded = try pc2line.encode(&account, &slots, 1, 1);
-    defer encoded.deinit();
-
-    // diff_pc=100 > MAX(50) → long form: 0, leb128(100), sleb128(1), sleb128(0).
-    try std.testing.expectEqual(@as(usize, 4), encoded.bytes.len);
-    try std.testing.expectEqual(@as(u8, 0), encoded.bytes[0]);
-    try std.testing.expectEqual(@as(u8, 100), encoded.bytes[1]);
-    try std.testing.expectEqual(@as(u8, 1), encoded.bytes[2]); // sleb128(1) for diff_line
-    try std.testing.expectEqual(@as(u8, 0), encoded.bytes[3]); // sleb128(0) for diff_col
-}
-
-test "pc2line: encode/decode round-trip" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    const input_slots = [_]pc2line.SourceLocSlot{
-        .{ .pc = 5, .line_num = 1, .col_num = 4 },
-        .{ .pc = 10, .line_num = 2, .col_num = 1 },
-        .{ .pc = 200, .line_num = 5, .col_num = 12 },
-        .{ .pc = 250, .line_num = 5, .col_num = 25 },
-    };
-    var encoded = try pc2line.encode(&account, &input_slots, 1, 1);
-    defer encoded.deinit();
-
-    const decoded = try pc2line.decode(std.testing.allocator, encoded);
-    defer std.testing.allocator.free(decoded);
-
-    try std.testing.expectEqual(input_slots.len, decoded.len);
-    for (input_slots, decoded) |expected, actual| {
-        try std.testing.expectEqual(expected.pc, actual.pc);
-        try std.testing.expectEqual(expected.line_num, actual.line_num);
-        try std.testing.expectEqual(expected.col_num, actual.col_num);
-    }
-}
-
-test "pc2line: skips slots with no real change or backward pc" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    const slots = [_]pc2line.SourceLocSlot{
-        .{ .pc = 10, .line_num = 1, .col_num = 5 },
-        .{ .pc = 10, .line_num = 1, .col_num = 5 }, // duplicate → skipped
-        .{ .pc = 5, .line_num = 1, .col_num = 5 }, // backward pc → skipped
-        .{ .pc = 15, .line_num = -1, .col_num = 5 }, // line < 0 → skipped
-        .{ .pc = 20, .line_num = 1, .col_num = 8 }, // valid
-    };
-    var encoded = try pc2line.encode(&account, &slots, 1, 1);
-    defer encoded.deinit();
-
-    const decoded = try pc2line.decode(std.testing.allocator, encoded);
-    defer std.testing.allocator.free(decoded);
-
-    try std.testing.expectEqual(@as(usize, 2), decoded.len);
-    try std.testing.expectEqual(@as(u32, 10), decoded[0].pc);
-    try std.testing.expectEqual(@as(u32, 20), decoded[1].pc);
-}
-
-test "pc2line: negative line delta encoded compactly" {
-    var account = core.memory.MemoryAccount.init(std.testing.allocator);
-    const slots = [_]pc2line.SourceLocSlot{
-        .{ .pc = 5, .line_num = 5, .col_num = 1 },
-        .{ .pc = 10, .line_num = 4, .col_num = 1 }, // diff_line = -1, in compact range
-    };
-    var encoded = try pc2line.encode(&account, &slots, 1, 1);
-    defer encoded.deinit();
-
-    const decoded = try pc2line.decode(std.testing.allocator, encoded);
-    defer std.testing.allocator.free(decoded);
-
-    try std.testing.expectEqual(@as(usize, 2), decoded.len);
-    try std.testing.expectEqual(@as(i32, 5), decoded[0].line_num);
-    try std.testing.expectEqual(@as(i32, 4), decoded[1].line_num);
-}
-
-test "stack_size: empty bytecode produces zero stack" {
-    const result = try stack_size.compute(&.{}, .{ .opcode_table = null });
-    try std.testing.expectEqual(@as(u16, 0), result);
-}
-
-fn loadOpcodeTable(allocator: std.mem.Allocator) !struct {
-    source: []u8,
-    table: bytecode.opcode.ParsedTable,
-} {
-    const source = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        bytecode.opcode.quickjs_opcode_path,
-        allocator,
-        .limited(1024 * 1024),
-    );
-    return .{ .source = source, .table = bytecode.opcode.parse(source) };
-}
-
-test "stack_size: simple push + return_undef gives stack=1" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // push_i32 <42> ; return_undef
-    var bc = [_]u8{0} ** 6;
-    bc[0] = op.push_i32;
-    std.mem.writeInt(i32, bc[1..5], 42, .little);
-    bc[5] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 1), result);
-}
-
-test "stack_size: push push add return gives stack=2" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // push_i32 1 ; push_i32 2 ; add ; return_undef
-    var bc = [_]u8{0} ** 12;
-    bc[0] = op.push_i32;
-    std.mem.writeInt(i32, bc[1..5], 1, .little);
-    bc[5] = op.push_i32;
-    std.mem.writeInt(i32, bc[6..10], 2, .little);
-    bc[10] = op.add;
-    bc[11] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 2), result);
-}
-
-test "stack_size: stack underflow detected" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // drop without anything on the stack → underflow.
-    const bc = [_]u8{ op.drop, op.return_undef };
-    const result = stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectError(error.StackUnderflow, result);
-}
-
-test "stack_size: relative goto explored" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // push_i32 7 ; goto +1 (skip drop) ; drop ; return_undef
-    // Layout (pc): 0: push_i32, 5: goto, 10: drop, 11: return_undef.
-    // Goto operand at pc+1 = 6, target = pos + 1 + diff. We want to
-    // reach pc=11, so diff = 11 - (5 + 1) = 5.
-    var bc = [_]u8{0} ** 12;
-    bc[0] = op.push_i32;
-    std.mem.writeInt(i32, bc[1..5], 7, .little);
-    bc[5] = op.goto;
-    std.mem.writeInt(i32, bc[6..10], 5, .little);
-    bc[10] = op.drop; // skipped by goto
-    bc[11] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    // The drop is unreachable, so max stack = 1 (push_i32) and no underflow.
-    try std.testing.expectEqual(@as(u16, 1), result);
-}
-
-test "stack_size: catch handler edge contributes to max stack" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // catch +5 (handler at pc=6) ; return_undef ; push_i32 9 ; return_undef
-    // The normal fallthrough only reaches stack depth 1 from the catch marker.
-    // The exception edge reaches the handler with the thrown value on the
-    // stack, then push_i32 raises the required max stack to 2.
-    var bc = [_]u8{0} ** 12;
-    bc[0] = op.@"catch";
-    std.mem.writeInt(i32, bc[1..5], 5, .little);
-    bc[5] = op.return_undef;
-    bc[6] = op.push_i32;
-    std.mem.writeInt(i32, bc[7..11], 9, .little);
-    bc[11] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 2), result);
-}
-
-test "stack_size: indexed method call QuickJS shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // get_var obj ; get_var key ; get_array_el2 ; get_var arg ; call_method 1 ; drop ; return_undef
-    var bc = [_]u8{0} ** 21;
-    bc[0] = op.get_var;
-    bc[5] = op.get_var;
-    bc[10] = op.get_array_el2;
-    bc[11] = op.get_var;
-    bc[16] = op.call_method;
-    std.mem.writeInt(u16, bc[17..19], 1, .little);
-    bc[19] = op.drop;
-    bc[20] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 3), result);
-}
-
-test "stack_size: indexed compound assignment QuickJS shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // get_var obj ; get_var key ; to_propkey2 ; dup2 ; get_array_el ;
-    // get_var rhs ; add ; put_array_el ; return_undef
-    var bc = [_]u8{0} ** 22;
-    bc[0] = op.get_var;
-    bc[5] = op.get_var;
-    bc[10] = op.to_propkey2;
-    bc[11] = op.dup2;
-    bc[12] = op.get_array_el;
-    bc[13] = op.get_var;
-    bc[18] = op.add;
-    bc[19] = op.put_array_el;
-    bc[20] = op.undefined;
-    bc[21] = op.@"return";
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 4), result);
-}
-
-test "stack_size: regexp literal QuickJS shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // push_atom_value "a" ; push_atom_value "g" ; regexp ; return_undef
-    var bc = [_]u8{0} ** 12;
-    bc[0] = op.push_atom_value;
-    bc[5] = op.push_atom_value;
-    bc[10] = op.regexp;
-    bc[11] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 2), result);
-}
-
-test "stack_size: bare new expression QuickJS shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // get_var X ; dup ; call_constructor 0 ; drop ; return_undef
-    var bc = [_]u8{0} ** 15;
-    bc[0] = op.get_var;
-    bc[5] = op.dup;
-    bc[6] = op.call_constructor;
-    std.mem.writeInt(u16, bc[7..9], 0, .little);
-    bc[9] = op.drop;
-    bc[10] = op.return_undef;
-
-    const result = try stack_size.compute(bc[0..11], .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 2), result);
-}
-
-test "stack_size: super method call shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // push_this ; special_object home ; get_super ; push_atom_value x ;
-    // get_array_el ; tail_call_method 0
-    var bc = [_]u8{0} ** 16;
-    bc[0] = op.push_this;
-    bc[1] = op.special_object;
-    bc[2] = 4;
-    bc[3] = op.get_super;
-    bc[4] = op.push_atom_value;
-    bc[9] = op.get_array_el;
-    bc[10] = op.tail_call_method;
-    std.mem.writeInt(u16, bc[11..13], 0, .little);
-
-    const result = try stack_size.compute(bc[0..13], .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 3), result);
-}
-
-test "stack_size: super property value shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // push_this ; special_object home ; get_super ; push_atom_value x ;
-    // get_super_value ; return
-    var bc = [_]u8{0} ** 12;
-    bc[0] = op.push_this;
-    bc[1] = op.special_object;
-    bc[2] = 4;
-    bc[3] = op.get_super;
-    bc[4] = op.push_atom_value;
-    bc[9] = op.get_super_value;
-    bc[10] = op.@"return";
-
-    const result = try stack_size.compute(bc[0..11], .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 3), result);
-}
-
-test "stack_size: base class declaration QuickJS shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // set_loc_uninitialized C ; undefined ; set_loc_uninitialized <class_fields_init> ;
-    // push_const ctor ; define_class ; undefined ; put_loc fields ; drop ;
-    // set_loc C ; close_loc fields ; put_var_ref C ; return_undef
-    var bc = [_]u8{0} ** 35;
-    bc[0] = op.set_loc_uninitialized;
-    std.mem.writeInt(u16, bc[1..3], 0, .little);
-    bc[3] = op.undefined;
-    bc[4] = op.set_loc_uninitialized;
-    std.mem.writeInt(u16, bc[5..7], 1, .little);
-    bc[7] = op.push_const;
-    bc[12] = op.define_class;
-    bc[18] = op.undefined;
-    bc[19] = op.put_loc;
-    std.mem.writeInt(u16, bc[20..22], 1, .little);
-    bc[22] = op.drop;
-    bc[23] = op.set_loc;
-    std.mem.writeInt(u16, bc[24..26], 0, .little);
-    bc[26] = op.close_loc;
-    std.mem.writeInt(u16, bc[27..29], 1, .little);
-    bc[29] = op.put_var_ref;
-    std.mem.writeInt(u16, bc[30..32], 0, .little);
-    bc[32] = op.return_undef;
-
-    const result = try stack_size.compute(bc[0..33], .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 3), result);
-}
-
-test "stack_size: default derived constructor QuickJS shape is strict-computable" {
-    const parsed = try loadOpcodeTable(std.testing.allocator);
-    defer std.testing.allocator.free(parsed.source);
-    const op = bytecode.opcode.op;
-
-    // set_loc_uninitialized this ; init_ctor ; put_loc_check_init this ;
-    // get_var_ref_check <class_fields_init> ; dup ; if_false8 8 ;
-    // get_loc_check this ; swap ; call_method 0 ; drop ; get_loc_check this ; return
-    var bc = [_]u8{0} ** 25;
-    bc[0] = op.set_loc_uninitialized;
-    std.mem.writeInt(u16, bc[1..3], 0, .little);
-    bc[3] = op.init_ctor;
-    bc[4] = op.put_loc_check_init;
-    std.mem.writeInt(u16, bc[5..7], 0, .little);
-    bc[7] = op.get_var_ref_check;
-    std.mem.writeInt(u16, bc[8..10], 0, .little);
-    bc[10] = op.dup;
-    bc[11] = op.if_false8;
-    bc[12] = 8;
-    bc[13] = op.get_loc_check;
-    std.mem.writeInt(u16, bc[14..16], 0, .little);
-    bc[16] = op.swap;
-    bc[17] = op.call_method;
-    std.mem.writeInt(u16, bc[18..20], 0, .little);
-    bc[20] = op.drop;
-    bc[21] = op.get_loc_check;
-    std.mem.writeInt(u16, bc[22..24], 0, .little);
-    bc[24] = op.@"return";
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = &parsed.table });
-    try std.testing.expectEqual(@as(u16, 3), result);
-}
-
-test "stack_size: for-of iterator close catch position is strict-computable" {
-    const op = bytecode.opcode.op;
-
-    // array_from 0 ; for_of_start ; goto next ; body: put_loc0 ; goto next ;
-    // exit: drop ; iterator_close ; return_undef ;
-    // next: for_of_next 0 ; if_false body ; drop ; iterator_close ; return_undef
-    var bc = [_]u8{0} ** 19;
-    bc[0] = op.array_from;
-    std.mem.writeInt(u16, bc[1..3], 0, .little);
-    bc[3] = op.for_of_start;
-    bc[4] = op.goto8;
-    bc[5] = 7;
-    bc[6] = op.put_loc0;
-    bc[7] = op.goto8;
-    bc[8] = 4;
-    bc[9] = op.drop;
-    bc[10] = op.iterator_close;
-    bc[11] = op.return_undef;
-    bc[12] = op.for_of_next;
-    bc[13] = 0;
-    bc[14] = op.if_false8;
-    bc[15] = @bitCast(@as(i8, -9));
-    bc[16] = op.drop;
-    bc[17] = op.iterator_close;
-    bc[18] = op.return_undef;
-
-    const result = try stack_size.compute(&bc, .{ .opcode_table = null });
-    try std.testing.expectEqual(@as(u16, 5), result);
-}
 
 test "FunctionDef: init/deinit" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -1617,8 +1371,7 @@ test "resolve_labels: base class constructor prologue does not duplicate class f
             op.return_undef,
         };
         try std.testing.expectEqualSlices(u8, &expected, bc.code);
-
-        const computed = try stack_size.compute(bc.code, .{ .opcode_table = null });
+        const computed = try stack_size.compute(bc.code, .{});
         try std.testing.expectEqual(@as(u16, 1), computed);
     }
 

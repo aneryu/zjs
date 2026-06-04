@@ -67,15 +67,12 @@ fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) voi
 test {
     refAllDeclsRecursive(engine, .{});
     std.testing.refAllDecls(@import("tests/engine_production.zig"));
-    std.testing.refAllDecls(@import("tests/core/all.zig"));
-    std.testing.refAllDecls(@import("tests/bytecode/all.zig"));
-    std.testing.refAllDecls(@import("tests/frontend/all.zig"));
-    std.testing.refAllDecls(@import("tests/builtins/all.zig"));
-    std.testing.refAllDecls(@import("tests/tools/all.zig"));
-    std.testing.refAllDecls(@import("tests/exec/core_native.zig"));
-    std.testing.refAllDecls(@import("tests/exec/builtins_async.zig"));
-    std.testing.refAllDecls(@import("tests/exec/engine_smoke.zig"));
-    std.testing.refAllDecls(@import("tests/exec/collection_typedarray.zig"));
+    std.testing.refAllDecls(@import("tests/core.zig"));
+    std.testing.refAllDecls(@import("tests/bytecode.zig"));
+    std.testing.refAllDecls(@import("tests/frontend.zig"));
+    std.testing.refAllDecls(@import("tests/exec.zig"));
+    std.testing.refAllDecls(@import("tests/builtins.zig"));
+
 
     // Relative imports for files that are not module roots
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));

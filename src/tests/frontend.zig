@@ -1,20 +1,601 @@
-//! F4 — Parser tests for the QuickJS-aligned expression parser.
-//!
-//! Validates the new parser's bytecode output by comparing emitted
-//! byte sequences against the QuickJS lowering reference. The new
-//! parser uses real QuickJS opcode ids (`bytecode.opcode.op.<name>`)
-//! and is independent of the legacy QuickParser/VM. F2-3 will wire
-//! up a VM dispatcher capable of executing this bytecode end-to-end.
-
 const std = @import("std");
 const engine = @import("quickjs_zig_engine");
 
-const QjsLexer = engine.frontend.zjs_lexer.Lexer;
-const zjs_parser = engine.frontend.zjs_parser;
-const ParseState = zjs_parser.ParseState;
+const core = engine.core;
+const frontend = engine.frontend;
+const function_def = engine.bytecode.function_def;
+const qop = engine.bytecode.opcode.op;
 const op = engine.bytecode.opcode.op;
 
-const TestEnv = struct {
+const t = engine.frontend.zjs_token;
+const QjsLexer = engine.frontend.zjs_lexer.Lexer;
+const QjsParser = engine.frontend.zjs_parser.Parser;
+const zjs_parser = engine.frontend.zjs_parser;
+const atom = engine.core.atom;
+const function_def_mod = engine.bytecode.function_def;
+const ParseState = engine.frontend.zjs_parser.ParseState;
+
+// ================== LEXER TESTS ==================
+
+const LexerTestEnv = struct {
+    rt: *engine.core.runtime.JSRuntime,
+    fn init() !LexerTestEnv {
+        return .{ .rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator) };
+    }
+    fn deinit(self: *LexerTestEnv) void {
+        self.rt.destroy();
+    }
+    fn lexer(self: *LexerTestEnv, src: []const u8) QjsLexer {
+        return QjsLexer.init(std.testing.allocator, &self.rt.atoms, src);
+    }
+};
+
+fn freeAndDrain(lx: *QjsLexer, tok: *t.Token) void {
+    lx.freeToken(tok);
+}
+
+// ---- F1.1 / F1.5 -----------------------------------------------------
+
+
+
+test "F1.5: every keyword token maps to its predefined atom" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    const cases = .{
+        .{ "null", t.TOK_NULL, "null" },
+        .{ "true", t.TOK_TRUE, "true" },
+        .{ "if", t.TOK_IF, "if" },
+        .{ "return", t.TOK_RETURN, "return" },
+        .{ "function", t.TOK_FUNCTION, "function" },
+        .{ "with", t.TOK_WITH, "with" },
+        .{ "class", t.TOK_CLASS, "class" },
+        .{ "super", t.TOK_SUPER, "super" },
+        .{ "yield", t.TOK_YIELD, "yield" },
+        .{ "await", t.TOK_AWAIT, "await" },
+    };
+
+    inline for (cases) |c| {
+        var lx = env.lexer(c[0]);
+        var tok = try lx.next();
+        defer freeAndDrain(&lx, &tok);
+        try std.testing.expectEqual(@as(t.TokenKind, c[1]), tok.val);
+        const ka = t.keywordAtom(c[1]);
+        try std.testing.expectEqual(tok.payload.ident.atom, ka);
+        const expected_atom = try env.rt.atoms.internString(c[2]);
+        try std.testing.expectEqual(expected_atom, ka);
+    }
+}
+
+test "F1: of remains an identifier in ordinary lexing" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("of");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    const name = env.rt.atoms.name(tok.payload.ident.atom).?;
+    try std.testing.expectEqualStrings("of", name);
+}
+
+test "F1: punctuators use raw ASCII for single-character tokens" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("(){};,:");
+    inline for ("(){};,:") |ch| {
+        var tok = try lx.next();
+        defer freeAndDrain(&lx, &tok);
+        try std.testing.expectEqual(@as(t.TokenKind, ch), tok.val);
+    }
+    var eof = try lx.next();
+    defer freeAndDrain(&lx, &eof);
+    try std.testing.expectEqual(t.TOK_EOF, eof.val);
+}
+
+test "F1: multi-character operator sequences land on TOK_* values" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    const Case = struct { src: []const u8, val: t.TokenKind };
+    const cases = [_]Case{
+        .{ .src = "===", .val = t.TOK_STRICT_EQ },
+        .{ .src = "!==", .val = t.TOK_STRICT_NEQ },
+        .{ .src = "==", .val = t.TOK_EQ },
+        .{ .src = "!=", .val = t.TOK_NEQ },
+        .{ .src = "<=", .val = t.TOK_LTE },
+        .{ .src = ">=", .val = t.TOK_GTE },
+        .{ .src = "<<", .val = t.TOK_SHL },
+        .{ .src = ">>", .val = t.TOK_SAR },
+        .{ .src = ">>>", .val = t.TOK_SHR },
+        .{ .src = ">>>=", .val = t.TOK_SHR_ASSIGN },
+        .{ .src = "**", .val = t.TOK_POW },
+        .{ .src = "**=", .val = t.TOK_POW_ASSIGN },
+        .{ .src = "&&", .val = t.TOK_LAND },
+        .{ .src = "||", .val = t.TOK_LOR },
+        .{ .src = "??", .val = t.TOK_DOUBLE_QUESTION_MARK },
+        .{ .src = "??=", .val = t.TOK_DOUBLE_QUESTION_MARK_ASSIGN },
+        .{ .src = "?.", .val = t.TOK_QUESTION_MARK_DOT },
+        .{ .src = "...", .val = t.TOK_ELLIPSIS },
+        .{ .src = "=>", .val = t.TOK_ARROW },
+        .{ .src = "++", .val = t.TOK_INC },
+        .{ .src = "--", .val = t.TOK_DEC },
+        .{ .src = "+=", .val = t.TOK_PLUS_ASSIGN },
+        .{ .src = "-=", .val = t.TOK_MINUS_ASSIGN },
+    };
+    for (cases) |c| {
+        var lx = env.lexer(c.src);
+        var tok = try lx.next();
+        defer freeAndDrain(&lx, &tok);
+        try std.testing.expectEqual(c.val, tok.val);
+    }
+}
+
+// ---- F1.2 ------------------------------------------------------------
+
+test "F1.2: numeric literals (decimal, hex, octal, binary, exponent, separators)" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    const Case = struct { src: []const u8, expected: f64 };
+    const cases = [_]Case{
+        .{ .src = "0", .expected = 0 },
+        .{ .src = "42", .expected = 42 },
+        .{ .src = "1_000_000", .expected = 1_000_000 },
+        .{ .src = "0xFF", .expected = 255 },
+        .{ .src = "0b1010", .expected = 10 },
+        .{ .src = "0o17", .expected = 15 },
+        .{ .src = "1.5", .expected = 1.5 },
+        .{ .src = "1e3", .expected = 1000 },
+        .{ .src = "1.25e2", .expected = 125 },
+        .{ .src = ".5", .expected = 0.5 },
+    };
+    for (cases) |c| {
+        var lx = env.lexer(c.src);
+        var tok = try lx.next();
+        defer freeAndDrain(&lx, &tok);
+        try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+        try std.testing.expect(!tok.payload.num.is_bigint);
+        try std.testing.expectApproxEqAbs(c.expected, tok.payload.num.value, 1e-9);
+    }
+}
+
+test "F1.2: bigint suffix records is_bigint and source text" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("9007199254740993n");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+    try std.testing.expect(tok.payload.num.is_bigint);
+    try std.testing.expectEqualStrings("9007199254740993", tok.payload.num.bigint_text);
+}
+
+test "F1.2: string escapes (basic, hex, unicode short and braced, surrogate pair)" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("\"a\\nb\\tc\\x41\\u0041\\u{1F600}\"");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_STRING, tok.val);
+    // a\nb\tcAA<U+1F600>  — last cp encodes to F0 9F 98 80
+    const want = "a\nb\tcAA\xF0\x9F\x98\x80";
+    try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
+    try std.testing.expectEqual(@as(u8, '"'), tok.payload.str.sep);
+}
+
+test "M3.1 F4: string lexer preserves lone surrogate escapes as code units" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("\"\\uD800\"");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_STRING, tok.val);
+    try std.testing.expectEqualStrings("\xED\xA0\x80", tok.payload.str.bytes);
+}
+
+test "F1.2: line continuation in string and \\0 NUL escape" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("'foo\\\nbar\\0z'");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_STRING, tok.val);
+    const want = "foobar\x00z";
+    try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
+}
+
+test "F1.2: legacy octal in strict mode is rejected" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("'\\1'");
+    lx.is_strict_mode = true;
+    const tok_or_err = lx.next();
+    try std.testing.expectError(error.LegacyOctalInStrictMode, tok_or_err);
+}
+
+test "G1/P0: template legacy octal escapes mark cooked value invalid" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var zero_digit = env.lexer("`\\00`");
+    var zero_digit_tok = try zero_digit.next();
+    defer freeAndDrain(&zero_digit, &zero_digit_tok);
+    try std.testing.expect(zero_digit_tok.payload.str.cooked_invalid);
+
+    var non_zero = env.lexer("`\\1`");
+    var non_zero_tok = try non_zero.next();
+    defer freeAndDrain(&non_zero, &non_zero_tok);
+    try std.testing.expect(non_zero_tok.payload.str.cooked_invalid);
+
+    var eight = env.lexer("`\\8`");
+    var eight_tok = try eight.next();
+    defer freeAndDrain(&eight, &eight_tok);
+    try std.testing.expect(eight_tok.payload.str.cooked_invalid);
+}
+
+test "F1.2: template head/middle/tail produce TemplatePart classification" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("`a${1}b${2}c`");
+    var head = try lx.next();
+    defer freeAndDrain(&lx, &head);
+    try std.testing.expectEqual(t.TOK_TEMPLATE, head.val);
+    try std.testing.expectEqual(t.TemplatePart.head, head.payload.str.template.?);
+    try std.testing.expectEqualStrings("a", head.payload.str.bytes);
+
+    // Substitution: parser would consume `1` and `}`. Skip the number here.
+    var num1 = try lx.next();
+    defer freeAndDrain(&lx, &num1);
+    try std.testing.expectEqual(t.TOK_NUMBER, num1.val);
+
+    // After the parser sees the closing `}`, it asks for the next part.
+    var middle = try lx.nextTemplatePart();
+    defer freeAndDrain(&lx, &middle);
+    try std.testing.expectEqual(t.TemplatePart.middle, middle.payload.str.template.?);
+    try std.testing.expectEqualStrings("b", middle.payload.str.bytes);
+
+    var num2 = try lx.next();
+    defer freeAndDrain(&lx, &num2);
+    try std.testing.expectEqual(t.TOK_NUMBER, num2.val);
+
+    var tail = try lx.nextTemplatePart();
+    defer freeAndDrain(&lx, &tail);
+    try std.testing.expectEqual(t.TemplatePart.tail, tail.payload.str.template.?);
+    try std.testing.expectEqualStrings("c", tail.payload.str.bytes);
+}
+
+test "F1.2: no-substitution template" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+    var lx = env.lexer("`hello`");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TemplatePart.no_substitution, tok.payload.str.template.?);
+    try std.testing.expectEqualStrings("hello", tok.payload.str.bytes);
+    try std.testing.expectEqualStrings("hello", tok.payload.str.raw_bytes);
+}
+
+test "G1/P0: template token keeps raw escape bytes" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("`\\n`");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TemplatePart.no_substitution, tok.payload.str.template.?);
+    try std.testing.expectEqualStrings("\n", tok.payload.str.bytes);
+    try std.testing.expectEqualStrings("\\n", tok.payload.str.raw_bytes);
+}
+
+test "G1/P0: template token normalizes raw CR line terminators" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("`\r\n\r`");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TemplatePart.no_substitution, tok.payload.str.template.?);
+    try std.testing.expectEqualStrings("\n\n", tok.payload.str.bytes);
+    try std.testing.expectEqualStrings("\n\n", tok.payload.str.raw_bytes);
+}
+
+test "F1.2: regex literal exposes pattern and flags" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    // Provide the slash directly to rescanRegexp; in real usage the
+    // parser would call this once it knew the / starts a regex.
+    var lx = env.lexer("/a[bc]\\/d/gi");
+    var tok = try lx.rescanRegexp(0);
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_REGEXP, tok.val);
+    try std.testing.expectEqualStrings("a[bc]\\/d", tok.payload.regexp.pattern);
+    try std.testing.expectEqualStrings("gi", tok.payload.regexp.flags);
+}
+
+// ---- F1.3 ------------------------------------------------------------
+
+test "F1.3: private name keeps the # prefix in the atom" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("#secret");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_PRIVATE_NAME, tok.val);
+    try std.testing.expectEqualStrings("#secret", env.rt.atoms.name(tok.payload.ident.atom).?);
+}
+
+test "F1.3: unicode escape inside identifier is decoded into the atom" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("\\u0061sync");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expect(tok.payload.ident.has_escape);
+    try std.testing.expectEqualStrings("async", env.rt.atoms.name(tok.payload.ident.atom).?);
+}
+
+test "F1.3: escaped keyword spelling is treated as identifier (per spec)" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("\\u0069f"); // \u0069f = "if"
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val); // not TOK_IF
+    try std.testing.expectEqualStrings("if", env.rt.atoms.name(tok.payload.ident.atom).?);
+}
+
+test "F1.3: raw Unicode identifier start accepts ID_Start and rejects emoji" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var good = env.lexer("\xCF\x80");
+    var good_tok = try good.next();
+    defer freeAndDrain(&good, &good_tok);
+    try std.testing.expectEqual(t.TOK_IDENT, good_tok.val);
+    try std.testing.expectEqualStrings("\xCF\x80", env.rt.atoms.name(good_tok.payload.ident.atom).?);
+
+    var bad = env.lexer("\xF0\x9F\x98\x80");
+    try std.testing.expectError(error.InvalidIdentifier, bad.next());
+}
+
+// ---- F1.4 ------------------------------------------------------------
+
+test "F1.4: got_lf is true after a LineTerminator and false otherwise" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("a b\nc");
+    var a = try lx.next();
+    defer freeAndDrain(&lx, &a);
+    try std.testing.expect(!lx.got_lf);
+
+    var b = try lx.next();
+    defer freeAndDrain(&lx, &b);
+    try std.testing.expect(!lx.got_lf);
+
+    var c = try lx.next();
+    defer freeAndDrain(&lx, &c);
+    try std.testing.expect(lx.got_lf);
+}
+
+test "F1.4: line_num and col_num are 1-based" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("a\n  b");
+    var a = try lx.next();
+    defer freeAndDrain(&lx, &a);
+    try std.testing.expectEqual(@as(u32, 1), a.line_num);
+    try std.testing.expectEqual(@as(u32, 1), a.col_num);
+
+    var b = try lx.next();
+    defer freeAndDrain(&lx, &b);
+    try std.testing.expectEqual(@as(u32, 2), b.line_num);
+    try std.testing.expectEqual(@as(u32, 3), b.col_num);
+}
+
+// ---- comprehensive --------------------------------------------------
+
+test "F1: end-to-end lex of a small program" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer(
+        \\const x = 42;
+        \\function f(a, b) { return a + b; }
+        \\let s = "hi" + `world`;
+        \\
+    );
+
+    const expected = [_]t.TokenKind{
+        t.TOK_CONST,    t.TOK_IDENT, '=',          t.TOK_NUMBER, ';',
+        t.TOK_FUNCTION, t.TOK_IDENT, '(',          t.TOK_IDENT,  ',',
+        t.TOK_IDENT,    ')',         '{',          t.TOK_RETURN, t.TOK_IDENT,
+        '+',            t.TOK_IDENT, ';',          '}',          t.TOK_LET,
+        t.TOK_IDENT,    '=',         t.TOK_STRING, '+',          t.TOK_TEMPLATE,
+        ';',            t.TOK_EOF,
+    };
+    for (expected) |want| {
+        var tok = try lx.next();
+        defer freeAndDrain(&lx, &tok);
+        try std.testing.expectEqual(want, tok.val);
+    }
+}
+
+test "F1: HTML comments are stripped in script mode but rejected in module mode" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    {
+        var lx = env.lexer("a <!-- comment\nb");
+        var a = try lx.next();
+        defer freeAndDrain(&lx, &a);
+        try std.testing.expectEqual(t.TOK_IDENT, a.val);
+        var b = try lx.next();
+        defer freeAndDrain(&lx, &b);
+        try std.testing.expectEqual(t.TOK_IDENT, b.val);
+    }
+    {
+        var lx = env.lexer("a <!-- comment\nb");
+        lx.is_module = true;
+        var a = try lx.next();
+        defer freeAndDrain(&lx, &a);
+        try std.testing.expectEqual(t.TOK_IDENT, a.val);
+        // In module mode `<` is a punctuator, so the next token is `<`.
+        var lt = try lx.next();
+        defer freeAndDrain(&lx, &lt);
+        try std.testing.expectEqual(@as(t.TokenKind, '<'), lt.val);
+    }
+}
+
+test "F1: hashbang at start of file is skipped, but not later" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    var lx = env.lexer("#!/usr/bin/env zjs\n42");
+    var tok = try lx.next();
+    defer freeAndDrain(&lx, &tok);
+    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+}
+
+test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    // Walk every keyword TOK_* and verify the keywordAtom() result
+    // resolves to the expected predefined-atom string.
+    const expected = [_]struct { val: t.TokenKind, name: []const u8 }{
+        .{ .val = t.TOK_NULL, .name = "null" },
+        .{ .val = t.TOK_FALSE, .name = "false" },
+        .{ .val = t.TOK_TRUE, .name = "true" },
+        .{ .val = t.TOK_IF, .name = "if" },
+        .{ .val = t.TOK_ELSE, .name = "else" },
+        .{ .val = t.TOK_RETURN, .name = "return" },
+        .{ .val = t.TOK_VAR, .name = "var" },
+        .{ .val = t.TOK_THIS, .name = "this" },
+        .{ .val = t.TOK_DELETE, .name = "delete" },
+        .{ .val = t.TOK_VOID, .name = "void" },
+        .{ .val = t.TOK_TYPEOF, .name = "typeof" },
+        .{ .val = t.TOK_NEW, .name = "new" },
+        .{ .val = t.TOK_IN, .name = "in" },
+        .{ .val = t.TOK_INSTANCEOF, .name = "instanceof" },
+        .{ .val = t.TOK_DO, .name = "do" },
+        .{ .val = t.TOK_WHILE, .name = "while" },
+        .{ .val = t.TOK_FOR, .name = "for" },
+        .{ .val = t.TOK_BREAK, .name = "break" },
+        .{ .val = t.TOK_CONTINUE, .name = "continue" },
+        .{ .val = t.TOK_SWITCH, .name = "switch" },
+        .{ .val = t.TOK_CASE, .name = "case" },
+        .{ .val = t.TOK_DEFAULT, .name = "default" },
+        .{ .val = t.TOK_THROW, .name = "throw" },
+        .{ .val = t.TOK_TRY, .name = "try" },
+        .{ .val = t.TOK_CATCH, .name = "catch" },
+        .{ .val = t.TOK_FINALLY, .name = "finally" },
+        .{ .val = t.TOK_FUNCTION, .name = "function" },
+        .{ .val = t.TOK_DEBUGGER, .name = "debugger" },
+        .{ .val = t.TOK_WITH, .name = "with" },
+        .{ .val = t.TOK_CLASS, .name = "class" },
+        .{ .val = t.TOK_CONST, .name = "const" },
+        .{ .val = t.TOK_ENUM, .name = "enum" },
+        .{ .val = t.TOK_EXPORT, .name = "export" },
+        .{ .val = t.TOK_EXTENDS, .name = "extends" },
+        .{ .val = t.TOK_IMPORT, .name = "import" },
+        .{ .val = t.TOK_SUPER, .name = "super" },
+        .{ .val = t.TOK_IMPLEMENTS, .name = "implements" },
+        .{ .val = t.TOK_INTERFACE, .name = "interface" },
+        .{ .val = t.TOK_LET, .name = "let" },
+        .{ .val = t.TOK_PACKAGE, .name = "package" },
+        .{ .val = t.TOK_PRIVATE, .name = "private" },
+        .{ .val = t.TOK_PROTECTED, .name = "protected" },
+        .{ .val = t.TOK_PUBLIC, .name = "public" },
+        .{ .val = t.TOK_STATIC, .name = "static" },
+        .{ .val = t.TOK_YIELD, .name = "yield" },
+        .{ .val = t.TOK_AWAIT, .name = "await" },
+    };
+    for (expected) |e| {
+        const ka = t.keywordAtom(e.val);
+        try std.testing.expectEqualStrings(e.name, env.rt.atoms.name(ka).?);
+    }
+}
+
+test "F1: Lexer enableTypeScript strips variable and function TypeScript annotations dynamically" {
+    var env = try LexerTestEnv.init();
+    defer env.deinit();
+
+    const src =
+        \\const x: number = 42;
+        \\function add(a: number, b?: number): number { return a + (b || 0); }
+        \\console.log(add(x, 1));
+    ;
+    var lex = env.lexer(src);
+    defer lex.deinit();
+    try lex.enableTypeScript();
+
+    // The lexer should skip all TS type parts and only emit clean JS tokens.
+    // e.g. "const", "x", "=", "42", ";", etc.
+    var tok = try lex.next();
+    defer freeAndDrain(&lex, &tok);
+    try std.testing.expectEqual(t.TOK_CONST, tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("x", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual('=', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_NUMBER, tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(';', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_FUNCTION, tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("add", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual('(', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("a", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(',', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(t.TOK_IDENT, tok.val);
+    try std.testing.expectEqualStrings("b", tok.ptr[0..tok.len]);
+
+    tok = try lex.next();
+    try std.testing.expectEqual(')', tok.val);
+
+    tok = try lex.next();
+    try std.testing.expectEqual('{', tok.val);
+}
+
+// ================== PARSER TESTS ==================
+
+const TestEnv = ParserTestEnv;
+const ParserTestEnv = struct {
     rt: *engine.core.runtime.JSRuntime,
 
     fn init() !TestEnv {
@@ -295,7 +876,7 @@ fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
 }
 
 test "parser accepts computed public class fields" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var function = try parseStatement(&env, "class C { [\"x\"] = 1; }");
     defer function.deinit(env.rt);
@@ -327,7 +908,7 @@ fn countOpcode(code: []const u8, opcode: u8) usize {
 // ---- F4 first slice -------------------------------------------------
 
 test "F4: number literal lowers to push_i32 for small integers" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "42");
     defer fn_bc.deinit(env.rt);
@@ -338,7 +919,7 @@ test "F4: number literal lowers to push_i32 for small integers" {
 }
 
 test "F4: number literal with non-integer value lowers to push_const" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "3.5");
     defer fn_bc.deinit(env.rt);
@@ -352,7 +933,7 @@ test "F4: number literal with non-integer value lowers to push_const" {
 }
 
 test "F4: large bigint literal lowers to constant pool value" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "0x100000000n");
     defer fn_bc.deinit(env.rt);
@@ -366,7 +947,7 @@ test "F4: large bigint literal lowers to constant pool value" {
 }
 
 test "F4: boolean and null literals" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     var t_bc = try parseExpr(&env, "true");
@@ -383,7 +964,7 @@ test "F4: boolean and null literals" {
 }
 
 test "F4: identifier reads global via get_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x");
     defer fn_bc.deinit(env.rt);
@@ -394,7 +975,7 @@ test "F4: identifier reads global via get_var" {
 }
 
 test "F4: parseExprBinary level 1 (mul/div/mod)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "2 * 3");
     defer fn_bc.deinit(env.rt);
@@ -409,7 +990,7 @@ test "F4: parseExprBinary level 1 (mul/div/mod)" {
 }
 
 test "F4: parseExprBinary level 2 (add/sub) is left-associative" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "1 + 2 - 3");
     defer fn_bc.deinit(env.rt);
@@ -424,7 +1005,7 @@ test "F4: parseExprBinary level 2 (add/sub) is left-associative" {
 }
 
 test "F4: precedence — multiplication before addition" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "1 + 2 * 3");
     defer fn_bc.deinit(env.rt);
@@ -439,7 +1020,7 @@ test "F4: precedence — multiplication before addition" {
 }
 
 test "F4: parentheses override precedence" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "(1 + 2) * 3");
     defer fn_bc.deinit(env.rt);
@@ -451,7 +1032,7 @@ test "F4: parentheses override precedence" {
 }
 
 test "F4: comparison operators map to op.lt/op.lte/op.eq/op.strict_eq" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     var lt_bc = try parseExpr(&env, "1 < 2");
@@ -472,7 +1053,7 @@ test "F4: comparison operators map to op.lt/op.lte/op.eq/op.strict_eq" {
 }
 
 test "F4: bitwise levels 6/7/8 (and/xor/or) and shifts" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     var and_bc = try parseExpr(&env, "1 & 2");
@@ -497,7 +1078,7 @@ test "F4: bitwise levels 6/7/8 (and/xor/or) and shifts" {
 }
 
 test "F4: unary +/-/~/! lower to plus/neg/not/lnot" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     var pos_bc = try parseExpr(&env, "+x");
@@ -518,7 +1099,7 @@ test "F4: unary +/-/~/! lower to plus/neg/not/lnot" {
 }
 
 test "F4: typeof identifier uses get_var_undef + typeof" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "typeof x");
     defer fn_bc.deinit(env.rt);
@@ -530,7 +1111,7 @@ test "F4: typeof identifier uses get_var_undef + typeof" {
 }
 
 test "F4: void evaluates and discards then pushes undefined" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "void 0");
     defer fn_bc.deinit(env.rt);
@@ -543,7 +1124,7 @@ test "F4: void evaluates and discards then pushes undefined" {
 }
 
 test "M3.1 F4: strict eval and arguments update targets are rejected" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     try std.testing.expectError(error.InvalidAssignmentTarget, parseExprStrict(&env, "++eval"));
@@ -551,7 +1132,7 @@ test "M3.1 F4: strict eval and arguments update targets are rejected" {
 }
 
 test "F4: power operator is right-associative" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "2 ** 3");
     defer fn_bc.deinit(env.rt);
@@ -559,7 +1140,7 @@ test "F4: power operator is right-associative" {
 }
 
 test "F4: logical && uses dup + if_false short-circuit" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x && y");
     defer fn_bc.deinit(env.rt);
@@ -583,7 +1164,7 @@ test "F4: logical && uses dup + if_false short-circuit" {
 }
 
 test "F4: logical || uses dup + if_true short-circuit" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x || y");
     defer fn_bc.deinit(env.rt);
@@ -592,7 +1173,7 @@ test "F4: logical || uses dup + if_true short-circuit" {
 }
 
 test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x ?? y");
     defer fn_bc.deinit(env.rt);
@@ -604,7 +1185,7 @@ test "F4: nullish coalescing ?? uses is_undefined_or_null gate" {
 }
 
 test "M3.1 F4: nullish coalescing chains and rejects direct logical mixing" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x ?? y ?? z");
     defer fn_bc.deinit(env.rt);
@@ -617,7 +1198,7 @@ test "M3.1 F4: nullish coalescing chains and rejects direct logical mixing" {
 }
 
 test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a ? b : c");
     defer fn_bc.deinit(env.rt);
@@ -642,7 +1223,7 @@ test "F4: ternary cond ? a : b emits if_false + goto skeleton" {
 }
 
 test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x = 1");
     defer fn_bc.deinit(env.rt);
@@ -658,7 +1239,7 @@ test "F4: simple assignment x = 1 emits push ; dup ; put_var (KEEP_TOP)" {
 }
 
 test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x += 1");
     defer fn_bc.deinit(env.rt);
@@ -673,7 +1254,7 @@ test "F4: compound assignment x += 1 emits get_var ; rhs ; add ; dup ; put_var" 
 }
 
 test "F4: comma operator drops left, keeps right" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "1, 2");
     defer fn_bc.deinit(env.rt);
@@ -686,7 +1267,7 @@ test "F4: comma operator drops left, keeps right" {
 }
 
 test "F4: member access a.b emits get_var + get_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a.b");
     defer fn_bc.deinit(env.rt);
@@ -698,7 +1279,7 @@ test "F4: member access a.b emits get_var + get_field" {
 }
 
 test "F4: index access a[i] emits get_var ; get_var ; get_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a[i]");
     defer fn_bc.deinit(env.rt);
@@ -713,7 +1294,7 @@ test "F4: index access a[i] emits get_var ; get_var ; get_array_el" {
 // ---- F4 slice 2 -----------------------------------------------------
 
 test "F4: nested assignment 1 + (a = b) preserves the leading push" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "1 + (a = b)");
     defer fn_bc.deinit(env.rt);
@@ -728,7 +1309,7 @@ test "F4: nested assignment 1 + (a = b) preserves the leading push" {
 }
 
 test "F4: string literal lowers to push_atom_value" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "\"hello\"");
     defer fn_bc.deinit(env.rt);
@@ -739,7 +1320,7 @@ test "F4: string literal lowers to push_atom_value" {
 }
 
 test "F4: empty string literal lowers to push_empty_string" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "\"\"");
     defer fn_bc.deinit(env.rt);
@@ -749,7 +1330,7 @@ test "F4: empty string literal lowers to push_empty_string" {
 }
 
 test "F4: array literal lowers to push elements ; array_from N" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "[1, 2, 3]");
     defer fn_bc.deinit(env.rt);
@@ -765,7 +1346,7 @@ test "F4: array literal lowers to push elements ; array_from N" {
 }
 
 test "F4: empty array literal emits array_from 0" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "[]");
     defer fn_bc.deinit(env.rt);
@@ -777,7 +1358,7 @@ test "F4: empty array literal emits array_from 0" {
 }
 
 test "F4: trailing comma in array literal is allowed" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "[1, 2,]");
     defer fn_bc.deinit(env.rt);
@@ -788,7 +1369,7 @@ test "F4: trailing comma in array literal is allowed" {
 }
 
 test "F4: object literal { a: 1, b: 2 } lowers to object + define_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ a: 1, b: 2 }");
     defer fn_bc.deinit(env.rt);
@@ -808,7 +1389,7 @@ test "F4: object literal { a: 1, b: 2 } lowers to object + define_field" {
 }
 
 test "F4: empty object literal emits object" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{}");
     defer fn_bc.deinit(env.rt);
@@ -821,7 +1402,7 @@ test "F4: empty object literal emits object" {
 }
 
 test "F4: shorthand object property { x } emits get_var x ; define_field x" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ x }");
     defer fn_bc.deinit(env.rt);
@@ -834,7 +1415,7 @@ test "F4: shorthand object property { x } emits get_var x ; define_field x" {
 }
 
 test "M3.1 F4: computed object property emits define_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [\"x\"]: 1 }");
     defer fn_bc.deinit(env.rt);
@@ -845,7 +1426,7 @@ test "M3.1 F4: computed object property emits define_array_el" {
 }
 
 test "M3.1 F4: object spread emits copy_data_properties" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ a: 1, ...b }");
     defer fn_bc.deinit(env.rt);
@@ -855,7 +1436,7 @@ test "M3.1 F4: object spread emits copy_data_properties" {
 }
 
 test "M3.1 F4: keyword object property names parse as literal keys" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ default: 1, while: 2 }");
     defer fn_bc.deinit(env.rt);
@@ -865,7 +1446,7 @@ test "M3.1 F4: keyword object property names parse as literal keys" {
 }
 
 test "M3.1 F4: object literal __proto__ emits set_proto" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ \"__proto__\": null }");
     defer fn_bc.deinit(env.rt);
@@ -875,7 +1456,7 @@ test "M3.1 F4: object literal __proto__ emits set_proto" {
 }
 
 test "M3.1 F4: object method shorthand emits define_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "{ default() { return 1; } }");
     defer fn_bc.deinit(env.rt);
@@ -889,7 +1470,7 @@ test "M3.1 F4: object method shorthand emits define_method" {
 }
 
 test "M3.1 F4: for-await close keeps body statement source location" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const source =
         \\async function f() {
@@ -947,7 +1528,7 @@ test "M3.1 F4: for-await close keeps body statement source location" {
 }
 
 test "M3.1 F4: computed object method emits define_method_computed" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [\"m\"]() { return 1; } }");
     defer fn_bc.deinit(env.rt);
@@ -957,7 +1538,7 @@ test "M3.1 F4: computed object method emits define_method_computed" {
 }
 
 test "M3.1 F4: object string getter emits define_method getter flag" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ get \"default\"() { return 1; } }");
     defer fn_bc.deinit(env.rt);
@@ -967,7 +1548,7 @@ test "M3.1 F4: object string getter emits define_method getter flag" {
 }
 
 test "M3.1 F4: object numeric setter emits define_method setter flag" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ set 0(v) { x = v; } }");
     defer fn_bc.deinit(env.rt);
@@ -977,7 +1558,7 @@ test "M3.1 F4: object numeric setter emits define_method setter flag" {
 }
 
 test "M3.1 F4: computed object getter emits define_method_computed getter flag" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ get [\"x\"]() { return 1; } }");
     defer fn_bc.deinit(env.rt);
@@ -987,7 +1568,7 @@ test "M3.1 F4: computed object getter emits define_method_computed getter flag" 
 }
 
 test "M3.1 F4: computed object keys emit to_propkey before definition" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [key]: value }");
     defer fn_bc.deinit(env.rt);
@@ -998,14 +1579,14 @@ test "M3.1 F4: computed object keys emit to_propkey before definition" {
 }
 
 test "M3.1 F4: duplicate non-computed __proto__ data fields reject" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, parseExpr(&env, "{ __proto__: null, \"__proto__\": null }"));
 }
 
 test "M3.1 F4: computed __proto__ duplicate is permitted" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ __proto__: null, [\"__proto__\"]: 1 }");
     defer fn_bc.deinit(env.rt);
@@ -1015,7 +1596,7 @@ test "M3.1 F4: computed __proto__ duplicate is permitted" {
 }
 
 test "M3.1 F4: computed object key accepts logical and assignment" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [x &&= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
@@ -1025,7 +1606,7 @@ test "M3.1 F4: computed object key accepts logical and assignment" {
 }
 
 test "M3.1 F4: computed object key accepts logical or assignment" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [x ||= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
@@ -1035,7 +1616,7 @@ test "M3.1 F4: computed object key accepts logical or assignment" {
 }
 
 test "M3.1 F4: computed object key accepts indexed logical assignment" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [a[0] ||= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
@@ -1046,7 +1627,7 @@ test "M3.1 F4: computed object key accepts indexed logical assignment" {
 }
 
 test "M3.1 F4: computed object key accepts nullish assignment" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [x ??= 1]: 2 }");
     defer fn_bc.deinit(env.rt);
@@ -1056,7 +1637,7 @@ test "M3.1 F4: computed object key accepts nullish assignment" {
 }
 
 test "F4: simple call f(a, b) emits get_var ; args ; call argc" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "f(a, b)");
     defer fn_bc.deinit(env.rt);
@@ -1072,7 +1653,7 @@ test "F4: simple call f(a, b) emits get_var ; args ; call argc" {
 }
 
 test "F4: zero-arg call f() emits call 0" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "f()");
     defer fn_bc.deinit(env.rt);
@@ -1084,7 +1665,7 @@ test "F4: zero-arg call f() emits call 0" {
 }
 
 test "F4: method call obj.m(x) uses get_field2 + call_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "obj.m(x)");
     defer fn_bc.deinit(env.rt);
@@ -1098,7 +1679,7 @@ test "F4: method call obj.m(x) uses get_field2 + call_method" {
 }
 
 test "F4: indexed call obj[k](x) uses get_array_el2 + call_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "obj[k](x)");
     defer fn_bc.deinit(env.rt);
@@ -1113,7 +1694,7 @@ test "F4: indexed call obj[k](x) uses get_array_el2 + call_method" {
 }
 
 test "F4: new X(a) emits get_var X ; dup ; get_var a ; call_constructor 1" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "new X(a)");
     defer fn_bc.deinit(env.rt);
@@ -1128,7 +1709,7 @@ test "F4: new X(a) emits get_var X ; dup ; get_var a ; call_constructor 1" {
 }
 
 test "F4: bare new X (no args) emits call_constructor 0" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "new X");
     defer fn_bc.deinit(env.rt);
@@ -1142,7 +1723,7 @@ test "F4: bare new X (no args) emits call_constructor 0" {
 }
 
 test "F4: postfix x++ emits get_var ; post_inc ; put_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x++");
     defer fn_bc.deinit(env.rt);
@@ -1155,7 +1736,7 @@ test "F4: postfix x++ emits get_var ; post_inc ; put_var" {
 }
 
 test "F4: postfix x-- emits get_var ; post_dec ; put_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "x--");
     defer fn_bc.deinit(env.rt);
@@ -1164,7 +1745,7 @@ test "F4: postfix x-- emits get_var ; post_dec ; put_var" {
 }
 
 test "F4: prefix ++x emits get_var ; inc ; dup ; put_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "++x");
     defer fn_bc.deinit(env.rt);
@@ -1178,7 +1759,7 @@ test "F4: prefix ++x emits get_var ; inc ; dup ; put_var" {
 }
 
 test "F4: prefix --x emits get_var ; dec ; dup ; put_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "--x");
     defer fn_bc.deinit(env.rt);
@@ -1188,7 +1769,7 @@ test "F4: prefix --x emits get_var ; dec ; dup ; put_var" {
 }
 
 test "F4: delete unresolvable identifier emits delete_var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete x");
     defer fn_bc.deinit(env.rt);
@@ -1198,7 +1779,7 @@ test "F4: delete unresolvable identifier emits delete_var" {
 }
 
 test "F4: delete a.b emits get_var a ; push_atom_value b ; delete" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete a.b");
     defer fn_bc.deinit(env.rt);
@@ -1210,7 +1791,7 @@ test "F4: delete a.b emits get_var a ; push_atom_value b ; delete" {
 }
 
 test "F4: delete a[i] emits get_var a ; get_var i ; delete" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete a[i]");
     defer fn_bc.deinit(env.rt);
@@ -1222,7 +1803,7 @@ test "F4: delete a[i] emits get_var a ; get_var i ; delete" {
 }
 
 test "F4: delete on a non-reference yields drop ; push_true" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete (1 + 2)");
     defer fn_bc.deinit(env.rt);
@@ -1233,7 +1814,7 @@ test "F4: delete on a non-reference yields drop ; push_true" {
 }
 
 test "F4: chained call f(a)(b) emits two call ops" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "f(a)(b)");
     defer fn_bc.deinit(env.rt);
@@ -1247,7 +1828,7 @@ test "F4: chained call f(a)(b) emits two call ops" {
 // ---- F4 slice 3: member-target assign + update ----------------------
 
 test "F4: dotted assignment a.b = v emits get_var ; rhs ; insert2 ; put_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a.b = v");
     defer fn_bc.deinit(env.rt);
@@ -1262,7 +1843,7 @@ test "F4: dotted assignment a.b = v emits get_var ; rhs ; insert2 ; put_field" {
 }
 
 test "F4: indexed assignment a[i] = v emits get_var ; key ; rhs ; insert3 ; put_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a[i] = v");
     defer fn_bc.deinit(env.rt);
@@ -1278,7 +1859,7 @@ test "F4: indexed assignment a[i] = v emits get_var ; key ; rhs ; insert3 ; put_
 }
 
 test "F4: compound dotted assignment a.b += v rewrites get_field to get_field2" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a.b += v");
     defer fn_bc.deinit(env.rt);
@@ -1294,7 +1875,7 @@ test "F4: compound dotted assignment a.b += v rewrites get_field to get_field2" 
 }
 
 test "F4: compound indexed assignment a[i] += v keeps QuickJS indexed lvalue shape" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a[i] += v");
     defer fn_bc.deinit(env.rt);
@@ -1314,7 +1895,7 @@ test "F4: compound indexed assignment a[i] += v keeps QuickJS indexed lvalue sha
 }
 
 test "F4: postfix dotted a.b++ emits get_field2 ; post_inc ; perm3 ; put_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a.b++");
     defer fn_bc.deinit(env.rt);
@@ -1330,7 +1911,7 @@ test "F4: postfix dotted a.b++ emits get_field2 ; post_inc ; perm3 ; put_field" 
 }
 
 test "F4: postfix indexed a[i]-- emits QuickJS indexed lvalue read ; post_dec ; perm4 ; put_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a[i]--");
     defer fn_bc.deinit(env.rt);
@@ -1350,7 +1931,7 @@ test "F4: postfix indexed a[i]-- emits QuickJS indexed lvalue read ; post_dec ; 
 }
 
 test "F4: prefix ++a.b emits get_field2 ; inc ; insert2 ; put_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "++a.b");
     defer fn_bc.deinit(env.rt);
@@ -1365,7 +1946,7 @@ test "F4: prefix ++a.b emits get_field2 ; inc ; insert2 ; put_field" {
 }
 
 test "F4: prefix --a[i] emits QuickJS indexed lvalue read ; dec ; insert3 ; put_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "--a[i]");
     defer fn_bc.deinit(env.rt);
@@ -1384,7 +1965,7 @@ test "F4: prefix --a[i] emits QuickJS indexed lvalue read ; dec ; insert3 ; put_
 }
 
 test "F4: dotted assign value remains on stack via insert2 (chained)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // (a.b = v) + 1 — verifies the assignment leaves v on the stack.
     var fn_bc = try parseExpr(&env, "(a.b = v) + 1");
@@ -1397,7 +1978,7 @@ test "F4: dotted assign value remains on stack via insert2 (chained)" {
 // ---- F4 slice 4: array holes + multi-level delete + optional chaining
 
 test "F4: array hole [1, , 3] emits sparse define_field for present elements" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "[1, , 3]");
     defer fn_bc.deinit(env.rt);
@@ -1416,7 +1997,7 @@ test "F4: array hole [1, , 3] emits sparse define_field for present elements" {
 }
 
 test "F4: leading hole [, 1] emits sparse define_field at index 1" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "[, 1]");
     defer fn_bc.deinit(env.rt);
@@ -1434,7 +2015,7 @@ test "F4: leading hole [, 1] emits sparse define_field at index 1" {
 }
 
 test "F4: consecutive holes [, , 1] emits sparse define_field at index 2" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "[, , 1]");
     defer fn_bc.deinit(env.rt);
@@ -1452,7 +2033,7 @@ test "F4: consecutive holes [, , 1] emits sparse define_field at index 2" {
 }
 
 test "F4: multi-level delete a.b.c rewrites only the last get_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete a.b.c");
     defer fn_bc.deinit(env.rt);
@@ -1466,7 +2047,7 @@ test "F4: multi-level delete a.b.c rewrites only the last get_field" {
 }
 
 test "F4: multi-level delete a.b[i] truncates the trailing get_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete a.b[i]");
     defer fn_bc.deinit(env.rt);
@@ -1480,7 +2061,7 @@ test "F4: multi-level delete a.b[i] truncates the trailing get_array_el" {
 }
 
 test "F4: delete on a postfix update result evaluates and returns true" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "delete (a.b++)");
     defer fn_bc.deinit(env.rt);
@@ -1492,7 +2073,7 @@ test "F4: delete on a postfix update result evaluates and returns true" {
 }
 
 test "F4: optional chain a?.b emits inline chain_test + normal get_field" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a?.b");
     defer fn_bc.deinit(env.rt);
@@ -1527,7 +2108,7 @@ test "F4: optional chain a?.b emits inline chain_test + normal get_field" {
 }
 
 test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a?.[i]");
     defer fn_bc.deinit(env.rt);
@@ -1542,7 +2123,7 @@ test "F4: optional chain a?.[i] emits inline chain_test + get_array_el" {
 }
 
 test "F4: optional chain a?.b.c — chain test only at the ?. site" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a?.b.c");
     defer fn_bc.deinit(env.rt);
@@ -1559,7 +2140,7 @@ test "F4: optional chain a?.b.c — chain test only at the ?. site" {
 }
 
 test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a?.b?.c");
     defer fn_bc.deinit(env.rt);
@@ -1575,7 +2156,7 @@ test "F4: a?.b?.c emits two chain_tests sharing a common chain exit" {
 }
 
 test "F4: optional call a?.() emits chain_test + plain call" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "a?.()");
     defer fn_bc.deinit(env.rt);
@@ -1598,7 +2179,7 @@ test "F4: optional call a?.() emits chain_test + plain call" {
 }
 
 test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "obj?.b(x)");
     defer fn_bc.deinit(env.rt);
@@ -1615,7 +2196,7 @@ test "F4: method-on-opt-chain obj?.b(x) uses get_field2 + call_method" {
 }
 
 test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "obj?.[k](x)");
     defer fn_bc.deinit(env.rt);
@@ -1633,7 +2214,7 @@ test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method
 // ---- F4 finish: tagged templates -----------------------------------
 
 test "F4: tagged template tag`hello` emits singleton template-object + call 1" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "tag`hello`");
     defer fn_bc.deinit(env.rt);
@@ -1653,7 +2234,7 @@ test "F4: tagged template tag`hello` emits singleton template-object + call 1" {
 }
 
 test "F4: tagged template tag`a${x}b` includes substitutions in argc" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "tag`a${x}b`");
     defer fn_bc.deinit(env.rt);
@@ -1669,7 +2250,7 @@ test "F4: tagged template tag`a${x}b` includes substitutions in argc" {
 }
 
 test "F4: tagged template on member access obj.tag`hello` rewrites to call_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "obj.tag`hello`");
     defer fn_bc.deinit(env.rt);
@@ -1688,7 +2269,7 @@ test "F4: tagged template on member access obj.tag`hello` rewrites to call_metho
 }
 
 test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "tag`a${x}b${y}c`");
     defer fn_bc.deinit(env.rt);
@@ -1699,7 +2280,7 @@ test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
 }
 
 test "F4: optional call without chain receiver a?.()(b) — chain only on first call" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // After a?.(), the chain ends. The trailing (b) call is unconditional.
     var fn_bc = try parseExpr(&env, "a?.()(b)");
@@ -1719,7 +2300,7 @@ test "F4: optional call without chain receiver a?.()(b) — chain only on first 
 // ---- F4 slice 5: template literals -----------------------------------
 
 test "F4: no-substitution template `hello` lowers to push_atom_value" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "`hello`");
     defer fn_bc.deinit(env.rt);
@@ -1729,7 +2310,7 @@ test "F4: no-substitution template `hello` lowers to push_atom_value" {
 }
 
 test "F4: empty template `` lowers to push_empty_string" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "``");
     defer fn_bc.deinit(env.rt);
@@ -1739,7 +2320,7 @@ test "F4: empty template `` lowers to push_empty_string" {
 }
 
 test "F4: simple template with one substitution uses get_field2 concat + call_method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // `a${b}c` lowers to:
     //   push_atom_value "a"   (5)
@@ -1761,7 +2342,7 @@ test "F4: simple template with one substitution uses get_field2 concat + call_me
 }
 
 test "F4: empty-head template `${b}` skips middle/tail empty strings" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // `${b}` lowers to:
     //   push_empty_string    (1)
@@ -1783,7 +2364,7 @@ test "F4: empty-head template `${b}` skips middle/tail empty strings" {
 }
 
 test "F4: template with two substitutions accumulates argc correctly" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // `a${b}c${d}e` →
     //   push_atom_value "a"   (5)
@@ -1805,7 +2386,7 @@ test "F4: template with two substitutions accumulates argc correctly" {
 // ---- F4 slice 6: spread in calls and arrays --------------------------
 
 test "F4: spread call f(...x) emits array_from + apply 0" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // Expected:
     //   get_var f          (5)
@@ -1835,7 +2416,7 @@ test "F4: spread call f(...x) emits array_from + apply 0" {
 }
 
 test "F4: mixed spread call f(a, ...b) starts array_from with leading count" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // Expected:
     //   get_var f          (5)
@@ -1863,7 +2444,7 @@ test "F4: mixed spread call f(a, ...b) starts array_from with leading count" {
 }
 
 test "F4: trailing element after spread uses define_array_el + inc" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // f(...a, b):
     //   get_var f          (5)
@@ -1889,7 +2470,7 @@ test "F4: trailing element after spread uses define_array_el + inc" {
 }
 
 test "F4: method call with spread obj.m(...x) uses perm3 + apply 0" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // Expected:
     //   get_var obj          (5)
@@ -1911,7 +2492,7 @@ test "F4: method call with spread obj.m(...x) uses perm3 + apply 0" {
 }
 
 test "F4: new with spread new X(...args) uses apply with is_new=1" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "new X(...args)");
     defer fn_bc.deinit(env.rt);
@@ -1922,7 +2503,7 @@ test "F4: new with spread new X(...args) uses apply with is_new=1" {
 }
 
 test "F4: array literal spread [...a] starts with array_from 0 + push_i32 0" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // Expected:
     //   array_from 0       (3)
@@ -1941,7 +2522,7 @@ test "F4: array literal spread [...a] starts with array_from 0 + push_i32 0" {
 }
 
 test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // get_var a (5) ; array_from 1 (3) ; push_i32 1 (5) ; get_var b (5) ; append (1) ;
     // get_var c (5) ; define_array_el (1) ; inc (1) ; drop (1)
@@ -1957,7 +2538,7 @@ test "F4: array literal mixed spread [a, ...b, c] uses define_array_el+inc" {
 }
 
 test "F4: template with empty middle still emits call_method with correct argc" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     // `${b}${c}` — empty head emits push_empty_string + get_field2 concat;
     // empty middle is skipped; empty tail is skipped.
@@ -1979,7 +2560,7 @@ test "F4: template with empty middle still emits call_method with correct argc" 
 // ---- F5: Statement parsing tests -------------------------------------
 
 test "F5: empty statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, ";");
     defer fn_bc.deinit(env.rt);
@@ -1988,7 +2569,7 @@ test "F5: empty statement" {
 }
 
 test "F5: block statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "{ x; y; }");
     defer fn_bc.deinit(env.rt);
@@ -2001,7 +2582,7 @@ test "F5: block statement" {
 }
 
 test "F5: return statement without value" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return;");
     defer fn_bc.deinit(env.rt);
@@ -2011,7 +2592,7 @@ test "F5: return statement without value" {
 }
 
 test "F5: return statement with value" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseFunctionBodyStatement(&env, "return x;");
     defer fn_bc.deinit(env.rt);
@@ -2022,7 +2603,7 @@ test "F5: return statement with value" {
 }
 
 test "F5: throw statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "throw x;");
     defer fn_bc.deinit(env.rt);
@@ -2033,7 +2614,7 @@ test "F5: throw statement" {
 }
 
 test "F5: if statement without else" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "if (x) y;");
     defer fn_bc.deinit(env.rt);
@@ -2049,7 +2630,7 @@ test "F5: if statement without else" {
 }
 
 test "F5: if statement with else" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "if (x) y; else z;");
     defer fn_bc.deinit(env.rt);
@@ -2071,7 +2652,7 @@ test "F5: if statement with else" {
 }
 
 test "F5: while statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "while (x) y;");
     defer fn_bc.deinit(env.rt);
@@ -2093,7 +2674,7 @@ test "F5: while statement" {
 }
 
 test "F5: do-while statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "do { y; } while (x);");
     defer fn_bc.deinit(env.rt);
@@ -2107,7 +2688,7 @@ test "F5: do-while statement" {
 }
 
 test "F5: expression statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "x;");
     defer fn_bc.deinit(env.rt);
@@ -2118,7 +2699,7 @@ test "F5: expression statement" {
 }
 
 test "F5: var declaration without initializer" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "var x;");
     defer fn_bc.deinit(env.rt);
@@ -2129,7 +2710,7 @@ test "F5: var declaration without initializer" {
 }
 
 test "F5: var declaration with initializer" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "var x = 1;");
     defer fn_bc.deinit(env.rt);
@@ -2145,7 +2726,7 @@ test "F5: var declaration with initializer" {
 }
 
 test "F5: module-ref var initializer consumes value unless next statement reuses binding" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleRefStatement(&env, "var x = 1; y;");
     defer fn_bc.deinit(env.rt);
@@ -2155,7 +2736,7 @@ test "F5: module-ref var initializer consumes value unless next statement reuses
 }
 
 test "F5: module-ref var initializer preserves value for immediate same-name expression" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleRefStatement(&env, "var x = 1; x;");
     defer fn_bc.deinit(env.rt);
@@ -2165,7 +2746,7 @@ test "F5: module-ref var initializer preserves value for immediate same-name exp
 }
 
 test "F5: let declaration" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "let x;");
     defer fn_bc.deinit(env.rt);
@@ -2186,7 +2767,7 @@ test "F5: let declaration" {
 }
 
 test "F5: let declaration with initializer" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "let x = 1;");
     defer fn_bc.deinit(env.rt);
@@ -2204,13 +2785,13 @@ test "F5: let declaration with initializer" {
 }
 
 test "F5: const declaration without initializer should fail" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     try std.testing.expectError(error.UnexpectedToken, parseStatement(&env, "const x;"));
 }
 
 test "F5: const declaration with initializer" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "const x = 1;");
     defer fn_bc.deinit(env.rt);
@@ -2225,7 +2806,7 @@ test "F5: const declaration with initializer" {
 }
 
 test "F5: multiple var declarations" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "var x = 1, y = 2;");
     defer fn_bc.deinit(env.rt);
@@ -2242,7 +2823,7 @@ test "F5: multiple var declarations" {
 }
 
 test "F5: directive prologue with 'use strict'" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "{ \"use strict\"; x; }");
     defer fn_bc.deinit(env.rt);
@@ -2253,7 +2834,7 @@ test "F5: directive prologue with 'use strict'" {
 }
 
 test "M3.1 F4: strict object setter rejects eval and arguments parameters" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, parseStatement(&env, "{ \"use strict\"; var obj = { set x(eval) {} }; }"));
@@ -2261,7 +2842,7 @@ test "M3.1 F4: strict object setter rejects eval and arguments parameters" {
 }
 
 test "F5: directive prologue with multiple directives" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "{ \"use strict\"; \"other directive\"; x; }");
     defer fn_bc.deinit(env.rt);
@@ -2272,7 +2853,7 @@ test "F5: directive prologue with multiple directives" {
 }
 
 test "F5: directive prologue with ASI" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "{ \"use strict\"\n x; }");
     defer fn_bc.deinit(env.rt);
@@ -2285,7 +2866,7 @@ test "F5: directive prologue with ASI" {
 // ---- F6 function parsing tests -----------------------------------------
 
 test "F6: simple function declaration" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function foo() {}");
     defer fn_bc.deinit(env.rt);
@@ -2300,7 +2881,7 @@ test "F6: simple function declaration" {
 }
 
 test "F6: function declaration with parameters" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function foo(x, y) {}");
     defer fn_bc.deinit(env.rt);
@@ -2315,7 +2896,7 @@ test "F6: function declaration with parameters" {
 }
 
 test "F6: function declaration with rest parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function foo(...args) {}");
     defer fn_bc.deinit(env.rt);
@@ -2330,7 +2911,7 @@ test "F6: function declaration with rest parameter" {
 }
 
 test "F6: arrow function with block body" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "() => {}");
     defer fn_bc.deinit(env.rt);
@@ -2344,7 +2925,7 @@ test "F6: arrow function with block body" {
 }
 
 test "F6: arrow function with expression body" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "() => 42");
     defer fn_bc.deinit(env.rt);
@@ -2359,7 +2940,7 @@ test "F6: arrow function with expression body" {
 }
 
 test "F6: arrow function with single parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "x => x");
     defer fn_bc.deinit(env.rt);
@@ -2374,7 +2955,7 @@ test "F6: arrow function with single parameter" {
 }
 
 test "F6: arrow function with multiple parameters" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "(x, y) => x + y");
     defer fn_bc.deinit(env.rt);
@@ -2392,7 +2973,7 @@ test "F6: arrow function with multiple parameters" {
 }
 
 test "F6: arrow function with rest parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "(...args) => args");
     defer fn_bc.deinit(env.rt);
@@ -2407,7 +2988,7 @@ test "F6: arrow function with rest parameter" {
 }
 
 test "F6: function with object destructuring parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function foo({a, b}) {}");
     defer fn_bc.deinit(env.rt);
@@ -2421,7 +3002,7 @@ test "F6: function with object destructuring parameter" {
 }
 
 test "F6: function with array destructuring parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function foo([a, b]) {}");
     defer fn_bc.deinit(env.rt);
@@ -2435,7 +3016,7 @@ test "F6: function with array destructuring parameter" {
 }
 
 test "F6: arrow function with object destructuring parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "({a, b}) => a");
     defer fn_bc.deinit(env.rt);
@@ -2449,7 +3030,7 @@ test "F6: arrow function with object destructuring parameter" {
 }
 
 test "F6: arrow function with array destructuring parameter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "([a, b]) => a");
     defer fn_bc.deinit(env.rt);
@@ -2465,7 +3046,7 @@ test "F6: arrow function with array destructuring parameter" {
 // ---- F7 Class parsing tests ----
 
 test "F7: class with constructor" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { constructor(x) { this.x = x; } }");
     defer fn_bc.deinit(env.rt);
@@ -2480,7 +3061,7 @@ test "F7: class with constructor" {
 }
 
 test "F7: class with getter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { get x() { return this._x; } }");
     defer fn_bc.deinit(env.rt);
@@ -2495,7 +3076,7 @@ test "F7: class with getter" {
 }
 
 test "F7: class with setter" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { set x(value) { this._x = value; } }");
     defer fn_bc.deinit(env.rt);
@@ -2510,7 +3091,7 @@ test "F7: class with setter" {
 }
 
 test "F7: class field ASI before generator method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     var get_field = try parseStatementWithTopLevelChildren(&env,
@@ -2542,7 +3123,7 @@ test "F7: class field ASI before generator method" {
 }
 
 test "F7: super keyword in class method" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { m() { super.x(); } }");
     defer fn_bc.deinit(env.rt);
@@ -2554,7 +3135,7 @@ test "F7: super keyword in class method" {
 }
 
 test "F7: super property access" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { m() { return super.x; } }");
     defer fn_bc.deinit(env.rt);
@@ -2566,7 +3147,7 @@ test "F7: super property access" {
 }
 
 test "F7: super() constructor call" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C extends B { constructor(x) { super(x); } }");
     defer fn_bc.deinit(env.rt);
@@ -2581,14 +3162,14 @@ test "F7: super() constructor call" {
 }
 
 test "F7: super() rejected in base constructor" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, parseStatement(&env, "class C { constructor(x) { super(x); } }"));
 }
 
 test "F9: yield expression" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function* g() { yield 42; }");
     defer fn_bc.deinit(env.rt);
@@ -2601,7 +3182,7 @@ test "F9: yield expression" {
 }
 
 test "F9: yield* expression" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "function* g() { yield* iterable; }");
     defer fn_bc.deinit(env.rt);
@@ -2616,7 +3197,7 @@ test "F9: yield* expression" {
 }
 
 test "F8: export default statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export default 42;");
     defer fn_bc.deinit(env.rt);
@@ -2627,7 +3208,7 @@ test "F8: export default statement" {
 }
 
 test "F8: export named statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export { x, y };");
     defer fn_bc.deinit(env.rt);
@@ -2639,7 +3220,7 @@ test "F8: export named statement" {
 }
 
 test "F7: private field in class" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { #x; }");
     defer fn_bc.deinit(env.rt);
@@ -2649,7 +3230,7 @@ test "F7: private field in class" {
 }
 
 test "F7: private method in class" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { #m() {} }");
     defer fn_bc.deinit(env.rt);
@@ -2659,7 +3240,7 @@ test "F7: private method in class" {
 }
 
 test "F7: private getter in class" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { get #x() { return this._x; } }");
     defer fn_bc.deinit(env.rt);
@@ -2669,7 +3250,7 @@ test "F7: private getter in class" {
 }
 
 test "F7: private setter in class" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { set #x(value) { this._x = value; } }");
     defer fn_bc.deinit(env.rt);
@@ -2679,7 +3260,7 @@ test "F7: private setter in class" {
 }
 
 test "F7: class with extends (derived constructor)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatement(&env, "class C extends B { constructor(x) { super(x); } }");
     defer fn_bc.deinit(env.rt);
@@ -2689,7 +3270,7 @@ test "F7: class with extends (derived constructor)" {
 }
 
 test "F7: class without extends (base constructor)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { constructor(x) { this.x = x; } }");
     defer fn_bc.deinit(env.rt);
@@ -2699,7 +3280,7 @@ test "F7: class without extends (base constructor)" {
 }
 
 test "F8: basic import statement" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "import x from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2711,7 +3292,7 @@ test "F8: basic import statement" {
 }
 
 test "F8: side-effect import" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "import 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2722,7 +3303,7 @@ test "F8: side-effect import" {
 }
 
 test "F8: named imports" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "import { x, y } from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2735,7 +3316,7 @@ test "F8: named imports" {
 }
 
 test "F8: renamed imports" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "import { x as a, y as b } from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2748,7 +3329,7 @@ test "F8: renamed imports" {
 }
 
 test "F8: namespace import" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "import * as ns from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2760,7 +3341,7 @@ test "F8: namespace import" {
 }
 
 test "F8: mixed import" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "import x, { y } from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2773,7 +3354,7 @@ test "F8: mixed import" {
 }
 
 test "F8: export named" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export { x, y }");
     defer fn_bc.deinit(env.rt);
@@ -2785,7 +3366,7 @@ test "F8: export named" {
 }
 
 test "F8: export renamed" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export { x as a, y as b }");
     defer fn_bc.deinit(env.rt);
@@ -2797,7 +3378,7 @@ test "F8: export renamed" {
 }
 
 test "F8: export default expression" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export default 42");
     defer fn_bc.deinit(env.rt);
@@ -2808,7 +3389,7 @@ test "F8: export default expression" {
 }
 
 test "F8: export default function" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export default function f() {}");
     defer fn_bc.deinit(env.rt);
@@ -2819,7 +3400,7 @@ test "F8: export default function" {
 }
 
 test "F8: export default class" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export default class C {}");
     defer fn_bc.deinit(env.rt);
@@ -2830,7 +3411,7 @@ test "F8: export default class" {
 }
 
 test "F8: export star" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export * from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2842,7 +3423,7 @@ test "F8: export star" {
 }
 
 test "F8: export star as namespace" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export * as ns from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2854,7 +3435,7 @@ test "F8: export star as namespace" {
 }
 
 test "F8: export from" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export { x, y } from 'module'");
     defer fn_bc.deinit(env.rt);
@@ -2867,7 +3448,7 @@ test "F8: export from" {
 }
 
 test "F8: export var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export const x = 1");
     defer fn_bc.deinit(env.rt);
@@ -2878,7 +3459,7 @@ test "F8: export var" {
 }
 
 test "F8: export function" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export function f() {}");
     defer fn_bc.deinit(env.rt);
@@ -2889,7 +3470,7 @@ test "F8: export function" {
 }
 
 test "F8: export class" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseModuleStatement(&env, "export class C {}");
     defer fn_bc.deinit(env.rt);
@@ -2902,7 +3483,7 @@ test "F8: export class" {
 // ---- F9 Generator / Async / Await tests ----
 
 test "F9: async function expression" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "async function() {}");
     defer fn_bc.deinit(env.rt);
@@ -2914,7 +3495,7 @@ test "F9: async function expression" {
 }
 
 test "F9: async arrow function" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExprWithTopLevelChildren(&env, "async () => {}");
     defer fn_bc.deinit(env.rt);
@@ -2927,7 +3508,7 @@ test "F9: async arrow function" {
 }
 
 test "F9: async function declaration" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "async function f() {}");
     defer fn_bc.deinit(env.rt);
@@ -2939,7 +3520,7 @@ test "F9: async function declaration" {
 }
 
 test "F9: async function declaration with parameters" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "async function f(x, y) {}");
     defer fn_bc.deinit(env.rt);
@@ -2952,7 +3533,7 @@ test "F9: async function declaration with parameters" {
 }
 
 test "F9: async function declaration with body" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "async function f() { return 42; }");
     defer fn_bc.deinit(env.rt);
@@ -2964,21 +3545,21 @@ test "F9: async function declaration with body" {
 }
 
 test "F9: yield outside generator error" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const result = parseStatement(&env, "yield 42");
     try std.testing.expectError(error.YieldOutsideGenerator, result);
 }
 
 test "F9: await outside async function error" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const result = parseStatement(&env, "await x");
     try std.testing.expectError(error.AwaitOutsideAsyncFunction, result);
 }
 
 test "F9: await inside async function no error" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "async function f() { await x; }");
     defer fn_bc.deinit(env.rt);
@@ -2992,7 +3573,7 @@ test "F9: await inside async function no error" {
 // ---- Object literal enhancements ----
 
 test "Object literal: computed property name" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ [x]: 1 }");
     defer fn_bc.deinit(env.rt);
@@ -3003,7 +3584,7 @@ test "Object literal: computed property name" {
 }
 
 test "Object literal: method shorthand" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ method() {} }");
     defer fn_bc.deinit(env.rt);
@@ -3013,7 +3594,7 @@ test "Object literal: method shorthand" {
 }
 
 test "Object literal: spread" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var fn_bc = try parseExpr(&env, "{ ...obj }");
     defer fn_bc.deinit(env.rt);
@@ -3035,10 +3616,10 @@ test "Object literal: spread" {
 // These tests cover the FunctionDef-side data that the finalize pipeline
 // consumes, without depending on full bytecode emission.
 
-const function_def_mod = engine.bytecode.function_def;
+
 
 test "F10.1a FunctionDef: initial scope chain has scope 0 with parent -1" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3059,7 +3640,7 @@ test "F10.1a FunctionDef: initial scope chain has scope 0 with parent -1" {
 }
 
 test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3080,7 +3661,7 @@ test "F10.1a FunctionDef: parseBlock pushes/pops a scope (balanced)" {
 }
 
 test "F10.1a FunctionDef: nested blocks build parent chain" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3104,7 +3685,7 @@ test "F10.1a FunctionDef: nested blocks build parent chain" {
 }
 
 test "F10.1a FunctionDef: let registers as lexical, non-const" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3131,7 +3712,7 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
 }
 
 test "F10.1a FunctionDef: const registers as lexical + const" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3150,7 +3731,7 @@ test "F10.1a FunctionDef: const registers as lexical + const" {
 }
 
 test "F10.1a FunctionDef: top-level block var registers as global var" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3170,7 +3751,7 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
 }
 
 test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3191,7 +3772,7 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
 }
 
 test "F10.1a FunctionDef: findVar locates by name" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3218,7 +3799,7 @@ test "F10.1a FunctionDef: findVar locates by name" {
 }
 
 test "F10.1b Nested function: cur_func stack management" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3243,7 +3824,7 @@ test "F10.1b Nested function: cur_func stack management" {
 }
 
 test "F10.1c Nested function: bytecode dual-buffering" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
     defer env.rt.atoms.free(name);
@@ -3271,7 +3852,7 @@ test "F10.1c Nested function: bytecode dual-buffering" {
 }
 
 test "TS: Class Constructor Parameter Properties" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\class Point {
@@ -3284,7 +3865,7 @@ test "TS: Class Constructor Parameter Properties" {
 }
 
 test "TS: Enum Declarations" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\enum Direction {
@@ -3300,7 +3881,7 @@ test "TS: Enum Declarations" {
 }
 
 test "TS: Namespaces" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\namespace Outer {
@@ -3316,7 +3897,7 @@ test "TS: Namespaces" {
 }
 
 test "TS: Nested Constructor Block Parameter Re-emission" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\class Base {
@@ -3333,7 +3914,7 @@ test "TS: Nested Constructor Block Parameter Re-emission" {
 }
 
 test "TS: Derived Constructor Parameter Properties post-super" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\class Derived extends Base {
@@ -3347,7 +3928,7 @@ test "TS: Derived Constructor Parameter Properties post-super" {
 }
 
 test "TS: Namespace Scope Isolation" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\namespace N {
@@ -3360,7 +3941,7 @@ test "TS: Namespace Scope Isolation" {
 }
 
 test "TS: Dotted Namespaces" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
     var bytecode = try parseTSStatement(&env,
         \\namespace A.B {
@@ -3372,7 +3953,7 @@ test "TS: Dotted Namespaces" {
 }
 
 test "TS: Strict Enum Constant Expression Rejection" {
-    var env = try TestEnv.init();
+    var env = try ParserTestEnv.init();
     defer env.deinit();
 
     // 1. Valid enum declaration with positive/negative numbers and string literals
@@ -3394,3 +3975,993 @@ test "TS: Strict Enum Constant Expression Rejection" {
     );
     try std.testing.expectError(error.UnexpectedToken, invalid_res);
 }
+
+// ================== INTEGRATION TESTS ==================
+
+
+
+fn countCalls(code: []const u8) usize {
+    return countOpcode(code, qop.call) +
+        countOpcode(code, qop.call0) +
+        countOpcode(code, qop.call1) +
+        countOpcode(code, qop.call2) +
+        countOpcode(code, qop.call3);
+}
+
+fn countFunctionClosures(code: []const u8) usize {
+    return countOpcode(code, qop.fclosure) + countOpcode(code, qop.fclosure8);
+}
+
+
+
+fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: function_def.FunctionKind) bool {
+    if (fb.func_kind == kind) return true;
+    for (fb.cpool) |value| {
+        if (functionBytecodeFromValue(value)) |child| {
+            if (functionBytecodeHasKind(child, kind)) return true;
+        }
+    }
+    return false;
+}
+
+fn functionHasKind(function: *const engine.bytecode.Bytecode, kind: function_def.FunctionKind) bool {
+    for (function.constants.values) |value| {
+        if (functionBytecodeFromValue(value)) |fb| {
+            if (functionBytecodeHasKind(fb, kind)) return true;
+        }
+    }
+    return false;
+}
+
+fn expectFunctionKindRecursive(function: *const engine.bytecode.Bytecode, kind: function_def.FunctionKind) !void {
+    try std.testing.expect(functionHasKind(function, kind));
+}
+
+fn expectAtomOperandName(rt: *core.JSRuntime, function: *const engine.bytecode.Bytecode, expected: []const u8) !void {
+    for (function.atom_operands) |atom_id| {
+        if (rt.atoms.name(atom_id)) |name| {
+            if (std.mem.eql(u8, name, expected)) return;
+        }
+    }
+    return error.TestExpectedEqual;
+}
+
+fn expectNoLiveDynamicAtom(rt: *core.JSRuntime, kind: core.atom.AtomKind, bytes: []const u8) !void {
+    for (rt.atoms.entries) |entry| {
+        if (!entry.isLive() or entry.kind != kind) continue;
+        if (std.mem.eql(u8, entry.bytes, bytes)) {
+            std.debug.print("\n=== LEAKED ATOM FOUND: '{s}' kind={s} ref_count={d} ===\n", .{ entry.bytes, @tagName(entry.kind), entry.ref_count });
+        }
+        try std.testing.expect(!std.mem.eql(u8, entry.bytes, bytes));
+    }
+}
+
+
+
+
+
+
+
+test "syntax error deinit balances empty message allocation" {
+    var account = core.memory.MemoryAccount.init(std.testing.allocator);
+    var atoms = core.atom.AtomTable.init(&account);
+
+    var syntax_error = try frontend.source_pos.SyntaxError.create(&account, &atoms, core.atom.null_atom, .{}, "");
+    syntax_error.deinit();
+    atoms.deinit();
+
+    try std.testing.expect(!account.hasOutstandingAllocations());
+}
+
+test "source positions and syntax errors carry filename line and column" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = (\n1", .{ .mode = .script, .filename = "bad.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error != null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.syntax_error_guard, parsed.parse_path);
+    try std.testing.expectEqual(@as(u32, 2), parsed.syntax_error.?.position.line);
+    try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    try std.testing.expectEqualStrings("bad.js", rt.atoms.name(parsed.syntax_error.?.filename).?);
+}
+
+test "script parse mode emits bytecode metadata without AST execution" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "var x = 1; x + 2;", .{ .mode = .script, .filename = "script.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(!parsed.function.flags.is_strict);
+    try expectOpcode(parsed.function.code, qop.add);
+    try expectOpcode(parsed.function.code, qop.drop);
+    try std.testing.expect(countOpcode(parsed.function.code, qop.return_undef) + countOpcode(parsed.function.code, qop.return_async) > 0);
+    try std.testing.expectEqual(@as(usize, 0), parsed.function.constants.values.len);
+}
+
+test "assignment target scan ignores atom operand bytes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var held_atoms = std.ArrayList(core.Atom).empty;
+    defer {
+        for (held_atoms.items) |atom_id| rt.atoms.free(atom_id);
+        held_atoms.deinit(std.testing.allocator);
+    }
+
+    var index: u32 = 0;
+    while (true) : (index += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "operand_pad_{d}", .{index});
+        const atom_id = try rt.internAtom(name);
+        try held_atoms.append(std.testing.allocator, atom_id);
+        if ((atom_id & 0xff) == engine.bytecode.opcode.op.is_undefined_or_null - 1) break;
+    }
+
+    var parsed = try frontend.parser.parse(rt, "var count2 = 2; while (count2 -= 1) { 3; }", .{ .mode = .eval_direct, .filename = "eval" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+}
+
+test "print calls emit global lookup generic call and receiver-preserving property call bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    var get_var_count: usize = 0;
+    var get_prop_count: usize = 0;
+    var call_count: usize = 0;
+    var call_prop_count: usize = 0;
+    var mul_index: ?usize = null;
+    var add_index: ?usize = null;
+    var i: usize = 0;
+    while (i < parsed.function.code.len) {
+        const op_val = parsed.function.code[i];
+        if (op_val == engine.bytecode.opcode.op.mul) mul_index = mul_index orelse i;
+        if (op_val == engine.bytecode.opcode.op.add) add_index = add_index orelse i;
+        if (op_val == engine.bytecode.opcode.op.get_var) get_var_count += 1;
+        if (op_val == engine.bytecode.opcode.op.get_field) get_prop_count += 1;
+        if (op_val == engine.bytecode.opcode.op.call) call_count += 1;
+        if (op_val == engine.bytecode.opcode.op.call_method) call_prop_count += 1;
+        i += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), get_var_count);
+    try std.testing.expectEqual(@as(usize, 0), get_prop_count);
+    try std.testing.expect(call_count + countOpcode(parsed.function.code, engine.bytecode.opcode.op.call1) >= 1);
+    try std.testing.expectEqual(@as(usize, 1), call_prop_count);
+    try std.testing.expect(mul_index != null);
+    try std.testing.expect(add_index != null);
+    try std.testing.expect(mul_index.? < add_index.?);
+    try std.testing.expect(add_index.? < parsed.function.code.len);
+}
+
+test "simple variable assignments emit var bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let value = 5; value = value + 7; print(value);", .{ .mode = .script, .filename = "vars.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    var get_var_count: usize = 0;
+    var define_var_count: usize = 0;
+    for (parsed.function.code) |op_val| {
+        if (op_val == engine.bytecode.opcode.op.get_var) get_var_count += 1;
+        if (op_val == engine.bytecode.opcode.op.define_var) define_var_count += 1;
+    }
+    try std.testing.expect(get_var_count >= 1);
+    try std.testing.expect(define_var_count <= 2);
+}
+
+test "quick parser emits compound assignment and update statements" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = 1; x += 2; x++; print(x);", .{ .mode = .script, .filename = "quick-compound-update.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add);
+    const define_var_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.define_var);
+    try std.testing.expect(add_count >= 1);
+    try std.testing.expect(define_var_count <= 3);
+}
+
+test "quick parser emits arithmetic compound assignment operators" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = 10; x -= 3; x *= 2; x /= 7; x %= 2; print(x);", .{ .mode = .script, .filename = "quick-compound-arithmetic.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.sub));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.mul));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.div));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.mod));
+}
+
+test "quick parser does not claim update expression values" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "let x = 1; print(x++);", .{ .mode = .script, .filename = "quick-update-expression-fallback.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+}
+
+test "quick parser emits basic array and object literals" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; const obj = { a: arr[0], b: 2 }; print(obj.a + obj.b);", .{ .mode = .script, .filename = "quick-literals.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const new_array_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.array_from);
+    const new_object_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.object);
+    const get_index_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_array_el);
+    try std.testing.expect(new_array_count >= 1);
+    try std.testing.expect(new_object_count >= 1);
+    try std.testing.expect(get_index_count >= 1);
+}
+
+test "quick parser emits object property assignment" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", .{ .mode = .script, .filename = "quick-property-assignment.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field);
+    const set_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.put_field);
+    try std.testing.expect(get_prop_count >= 2);
+    try std.testing.expectEqual(@as(usize, 1), set_prop_count);
+}
+
+test "quick parser emits optional property access for object and nullish bases" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const obj = { a: { b: 42 } }; print(obj?.a?.b); print(obj?.x?.y); print(undefined?.a);", .{ .mode = .script, .filename = "quick-optional-property.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const optional_get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.is_undefined_or_null);
+    try std.testing.expectEqual(@as(usize, 5), optional_get_prop_count);
+}
+
+test "quick parser preserves parenthesized postfix bases" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const obj = { x: 1 }; print((obj).x); print(({ y: obj.x + 2 }).y); print(([3, 4])[1]); print(({ n: null })?.n);", .{ .mode = .script, .filename = "quick-parenthesized-postfix.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+
+    const get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field);
+    const optional_get_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.is_undefined_or_null);
+    const get_index_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_array_el);
+    try std.testing.expect(get_prop_count >= 3);
+    try std.testing.expectEqual(@as(usize, 1), optional_get_prop_count);
+    try std.testing.expectEqual(@as(usize, 1), get_index_count);
+}
+
+test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const text = JSON.stringify({ a: 1 }); print(JSON.parse(text).a);", .{ .mode = .script, .filename = "quick-json-domain.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countCalls(parsed.function.code) >= 1);
+}
+
+test "quick parser lowers Math calls to transitional Math bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "print(Math.abs(-5)); print(Math.pow(2, 3)); print(Math.min(1, 2, 3));", .{ .mode = .script, .filename = "quick-math-domain.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countCalls(parsed.function.code) >= 3);
+}
+
+test "quick parser lowers URI calls to transitional URI bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "console.log(encodeURI(\"a b?x=1&y=2#z\")); print(decodeURIComponent(\"a%20b%3Fx%3D1\"));", .{ .mode = .script, .filename = "quick-uri-domain.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countCalls(parsed.function.code) >= 2);
+}
+
+test "quick parser lowers Number parse helpers to transitional number bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "print(parseInt(\"0x10\")); print(parseInt(\"0x10\", 10)); print(parseFloat(\"1.5x\")); print(Number.parseInt(\"42\")); print(Number.parseFloat(\"3.14\")); print(Number.NaN); print(Number.POSITIVE_INFINITY); print(Number.NEGATIVE_INFINITY);",
+        .{ .mode = .script, .filename = "quick-number-parse-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countCalls(parsed.function.code) >= 5);
+}
+
+test "quick parser lowers supported Date helpers to receiver-preserving property calls" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "print(Date()); print(Date.UTC(2024, 0, 1)); print(Date.parse(\"2024-01-01T00:00:00Z\")); print(Date.now()); const d = new Date(0); print(d.getTime()); print(d.toISOString());",
+        .{ .mode = .script, .filename = "quick-date-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countCalls(parsed.function.code) >= 4);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 2);
+}
+
+test "quick parser lowers supported RegExp helpers to receiver-preserving property calls" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "const r = new RegExp(\"a\", \"g\"); print(r.toString()); print(r.test(\"a\")); print(r.exec(\"a\"));",
+        .{ .mode = .script, .filename = "quick-regexp-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 3);
+}
+
+test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        \\const p = new Promise((resolve, reject) => {
+        \\    resolve(1);
+        \\});
+        \\print(typeof p);
+        \\print(Promise.resolve(1));
+        \\print(Promise.all([1, 2]));
+        \\print(Promise.race([Promise.resolve(3), 4]));
+        \\print(Promise.reject(1));
+    ,
+        .{ .mode = .script, .filename = "quick-promise-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 4);
+}
+
+test "quick parser lowers supported collection helpers to receiver-preserving property calls" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        \\const map = new Map();
+        \\map.set("key", 1);
+        \\print(map.get("key"));
+        \\print(map.has("key"));
+        \\print(map.delete("key"));
+        \\map.clear();
+        \\const set = new Set();
+        \\set.add(1);
+        \\print(set.has(1));
+        \\print(set.delete(1));
+        \\set.clear();
+        \\const weakMap = new WeakMap();
+        \\const key = {};
+        \\weakMap.set(key, 2);
+        \\print(weakMap.get(key));
+        \\print(weakMap.has(key));
+        \\print(weakMap.delete(key));
+        \\const weakSet = new WeakSet();
+        \\const weakKey = {};
+        \\weakSet.add(weakKey);
+        \\print(weakSet.has(weakKey));
+        \\print(weakSet.delete(weakKey));
+    ,
+        .{ .mode = .script, .filename = "quick-collection-domain.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 4);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 16);
+}
+
+test "template interpolation emits string concatenation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", .{ .mode = .script, .filename = "template.js" });
+    defer parsed.deinit();
+
+    var add_count: usize = 0;
+    for (parsed.function.code) |op_val| {
+        if (op_val == engine.bytecode.opcode.op.add) add_count += 1;
+    }
+    try std.testing.expect(add_count >= 1);
+}
+
+test "simple arrays emit receiver-preserving property calls" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", .{ .mode = .script, .filename = "array.js" });
+    defer parsed.deinit();
+
+    const new_array_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.array_from);
+    const get_index_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_array_el);
+    const map_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field);
+    const call_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
+    try std.testing.expectEqual(@as(usize, 1), new_array_count);
+    try std.testing.expectEqual(@as(usize, 1), get_index_count);
+    try std.testing.expect(map_count >= 1 or call_prop_count >= 1);
+    try std.testing.expectEqual(@as(usize, 1), call_prop_count);
+}
+
+test "simple functions and arrows emit inline helper bytecode" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "function add(a, b) { return a + b; } print(add(2, 3)); const double = x => x * 2; print(double(21)); function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } print(fact(6));", .{ .mode = .script, .filename = "functions.js" });
+    defer parsed.deinit();
+
+    var add_count: usize = 0;
+    var mul_count: usize = 0;
+    var factorial_count: usize = 0;
+    for (parsed.function.code) |op_val| {
+        if (op_val == engine.bytecode.opcode.op.add) add_count += 1;
+        if (op_val == engine.bytecode.opcode.op.mul) mul_count += 1;
+        if (op_val == engine.bytecode.opcode.op.call) factorial_count += 1;
+    }
+    add_count += countOpcodeRecursive(&parsed.function, engine.bytecode.opcode.op.add);
+    mul_count += countOpcodeRecursive(&parsed.function, engine.bytecode.opcode.op.mul);
+    factorial_count += countOpcodeRecursive(&parsed.function, engine.bytecode.opcode.op.call);
+    try std.testing.expect(add_count >= 1);
+    try std.testing.expect(mul_count >= 1);
+    try std.testing.expect(factorial_count >= 1 or countOpcodeRecursive(&parsed.function, engine.bytecode.opcode.op.call1) >= 1);
+}
+
+test "unsupported spread call reports syntax guard" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+}
+
+test "test262 frontmatter does not affect quick parser behavior" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        "/*---\n" ++
+        "negative:\n" ++
+        "  phase: runtime\n" ++
+        "  type: Test262Error\n" ++
+        "---*/\n" ++
+        "assert.sameValue(1 + 1, 2);";
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "metadata.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_var));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+}
+
+test "arrow early errors reject non-simple strict and invalid rest parameters" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "0, ([element]) => { \"use strict\"; };",
+        "0, (x = 0, x) => {};",
+        "0, (...x = []) => {};",
+        "var f; f = ([...{ x } = []]) => {};",
+        "var f; f = ([...x, y]) => {};",
+        "var x = ({ def\\u{61}ult }) => {};",
+    };
+
+    for (cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "arrow-early-error.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+        try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
+}
+
+test "arrow early error checks do not reject valid nested rest destructuring" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "var f; f = ([...[...x]]) => {};", .{ .mode = .script, .filename = "arrow-valid-rest.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expect(countFunctionClosures(parsed.function.code) > 0);
+    const arrow = try expectFunctionConstant(&parsed.function, 0);
+    try std.testing.expect(arrow.is_arrow_function);
+    try std.testing.expectEqual(function_def.FunctionKind.normal, arrow.func_kind);
+    try expectOpcode(arrow.byte_code, qop.special_object);
+    try expectOpcode(arrow.byte_code, qop.return_undef);
+}
+
+test "assignment destructuring early errors reject invalid rest forms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "0, [...x, y] = [];",
+        "0, [...x = 1] = [];",
+        "0, [...[(x, y)]] = [[]];",
+        "0, [...{ get x() {} }] = [[]];",
+        "0, {...rest, b} = {};",
+        "0, [[(x, y)]] = [[]];",
+        "0, [{ get x() {} }] = [{}];",
+        "0, { x: [(x, y)] } = { x: [] };",
+        "0, { x: { get x() {} } } = { x: {} };",
+        "/*---\nfeatures: [optional-chaining, destructuring-binding]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n0, [x?.y = 42] = [23];",
+        "0, { default } = {};",
+        "0, { bre\\u0061k } = {};",
+        "0, { def\\u{61}ult } = {};",
+        "(function*() { 0, { yield } = {}; });",
+        "/*---\nflags: [generated, onlyStrict]\n---*/\n0, { eval } = {};",
+        "/*---\nflags: [generated, onlyStrict]\n---*/\n0, [arguments] = [];",
+        "/*---\nflags: [generated, onlyStrict]\n---*/\n(eval) = 20;",
+        "/*---\nflags: [generated, onlyStrict]\n---*/\n(arguments) = 20;",
+        "/*---\nflags: [generated, onlyStrict]\n---*/\n0, [ x = yield ] = [];",
+        "/*---\nflags: [generated, onlyStrict]\n---*/\n0, { x: x[yield] } = {};",
+    };
+
+    for (cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "assignment-early-error.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+        try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
+}
+
+test "assignment destructuring early errors allow reserved property names" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_]struct {
+        source: []const u8,
+        property: []const u8,
+    }{
+        .{ .source = "var y = { default: x } = { default: 42 };", .property = "default" },
+        .{ .source = "var y = { bre\\u0061k: x } = { break: 42 };", .property = "break" },
+        .{ .source = "var yield; var result; var vals = { yield: 3 }; result = { yield } = vals;", .property = "yield" },
+    };
+
+    for (cases) |case| {
+        var parsed = try frontend.parser.parse(rt, case.source, .{ .mode = .script, .filename = "assignment-valid-property-name.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+        try expectAtomOperandName(rt, &parsed.function, case.property);
+        try expectOpcode(parsed.function.code, qop.define_field);
+        try expectOpcode(parsed.function.code, qop.get_field);
+    }
+}
+
+test "assignment early errors reject invalid assignment target types" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\ninfo: |\n  Static Semantics AssignmentTargetType, Return invalid.\n---*/\nx + y = 1;",
+        "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\ninfo: |\n  It is an early Syntax Error if LeftHandSideExpression is neither an ObjectLiteral nor an ArrayLiteral and AssignmentTargetType of LeftHandSideExpression is invalid or strict.\n---*/\ntrue = 42;",
+        "/*---\nnegative:\n  phase: parse\n  type: SyntaxError\ninfo: |\n  Static Semantics AssignmentTargetType, Return invalid.\n---*/\n(() => {}) = 1;",
+    };
+
+    for (cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "assignment-target-type.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+        try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
+}
+
+test "async arrow early errors reject await-context parse negatives" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "/*---\nfeatures: [async-functions]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\nasync(await) => { }",
+        "/*---\nfeatures: [async-functions]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n\\u0061sync () => {}",
+    };
+
+    for (cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "async-arrow-early-error.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+        try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+    }
+}
+
+test "object computed property names parse async arrow and module await expressions" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var async_arrow = try frontend.parser.parse(rt, "let o = { [async () => {}]: 1 };", .{ .mode = .script, .filename = "computed-async-arrow.js" });
+    defer async_arrow.deinit();
+    try std.testing.expect(async_arrow.syntax_error == null);
+    try std.testing.expect(async_arrow.hasFeature(.expression));
+    try std.testing.expect(async_arrow.hasFeature(.function_));
+    try std.testing.expect(async_arrow.hasFeature(.arrow));
+    try std.testing.expect(async_arrow.hasFeature(.async_function));
+    try std.testing.expect(!async_arrow.hasFeature(.dynamic_import));
+    try expectOpcode(async_arrow.function.code, qop.to_propkey);
+    try expectOpcode(async_arrow.function.code, qop.define_array_el);
+    try std.testing.expect(countFunctionClosures(async_arrow.function.code) > 0);
+    try expectFunctionKindRecursive(&async_arrow.function, .async);
+
+    var module_await = try frontend.parser.parse(rt, "let o = { [await 9]: 9 };", .{ .mode = .module, .filename = "computed-await.js" });
+    defer module_await.deinit();
+    try std.testing.expect(module_await.syntax_error == null);
+    try std.testing.expect(module_await.hasFeature(.expression));
+    try std.testing.expect(module_await.hasFeature(.statement));
+    try std.testing.expect(!module_await.hasFeature(.dynamic_import));
+    try std.testing.expect(module_await.function.flags.is_module);
+    try expectOpcode(module_await.function.code, qop.await);
+    try expectOpcode(module_await.function.code, qop.to_propkey);
+    try expectOpcode(module_await.function.code, qop.define_array_el);
+}
+
+test "class early errors reject class parse negatives" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const source =
+        "/*---\n" ++
+        "features: [class]\n" ++
+        "negative:\n" ++
+        "  phase: parse\n" ++
+        "  type: SyntaxError\n" ++
+        "info: |\n" ++
+        "  ClassExpression\n" ++
+        "---*/\n" ++
+        "class static {}";
+
+    var parsed = try frontend.parser.parse(rt, source, .{ .mode = .script, .filename = "class-early-error.js" });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error != null);
+    try std.testing.expect(parsed.syntax_error.?.message.len > 0);
+}
+
+test "module parse mode records import export metadata and strict flag" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "import 'side'; import x, * as ns from 'm' with { type: \"json\" }; import { default as def, y, z as renamed, \"str\" as strLocal } from 'n'; export { x as default }; export { x }; export const c = 1; export const { d: dc, e } = {}; export let [arr] = []; export function f(){} export class C{} export async function af(){} export { y as yy } from 'n2'; export * from 's'; export * as ns2 from 's2'; await 0;",
+        .{ .mode = .module, .filename = "mod.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expect(parsed.function.flags.is_strict);
+    try expectOpcodeRecursive(&parsed.function, qop.await);
+    try expectOpcodeRecursive(&parsed.function, qop.define_class);
+    try std.testing.expect(countFunctionClosures(parsed.function.code) > 0);
+    const record = parsed.function.module_record.?;
+    try std.testing.expectEqual(@as(usize, 6), record.requests.len);
+    try std.testing.expectEqual(@as(usize, 6), record.imports.len);
+    try std.testing.expectEqual(@as(usize, 9), record.exports.len);
+    try std.testing.expectEqual(@as(usize, 1), record.indirect_exports.len);
+    try std.testing.expectEqual(@as(usize, 2), record.star_exports.len);
+    try std.testing.expectEqual(@as(usize, 1), record.import_attributes.len);
+    try std.testing.expect(record.has_top_level_await);
+}
+
+test "module import local names are compiled as module var refs" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "import x, { y as renamed } from 'dep'; import * as ns from 'ns'; function f(){ return renamed; } x; ns;",
+        .{ .mode = .module, .filename = "import-refs.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expect(parsed.function.var_ref_names.len >= 3);
+
+    const x = try rt.internAtom("x");
+    defer rt.atoms.free(x);
+    const renamed = try rt.internAtom("renamed");
+    defer rt.atoms.free(renamed);
+    const ns = try rt.internAtom("ns");
+    defer rt.atoms.free(ns);
+
+    try std.testing.expect(std.mem.indexOfScalar(core.Atom, parsed.function.var_ref_names, x) != null);
+    try std.testing.expect(std.mem.indexOfScalar(core.Atom, parsed.function.var_ref_names, renamed) != null);
+    try std.testing.expect(std.mem.indexOfScalar(core.Atom, parsed.function.var_ref_names, ns) != null);
+}
+
+test "module parser rejects duplicate exported names across export forms" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const cases = [_][]const u8{
+        "var x; export { x as z }; export * as z from './dep.js';",
+        "var x; export default x; export * as default from './dep.js';",
+        "export { x as z } from './a.js'; export * as z from './b.js';",
+    };
+
+    for (cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "dup-export.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
+test "module parser validates local export bindings after full body parse" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const valid_cases = [_][]const u8{
+        "export { x }; var x;",
+        "export { x }; const x = 1;",
+        "import { x } from './dep.js'; export { x };",
+    };
+    for (valid_cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "valid-local-export.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+
+    const invalid_cases = [_][]const u8{
+        "export { Number };",
+        "export { unresolvable };",
+    };
+    for (invalid_cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "invalid-local-export.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+}
+
+test "module parser rejects duplicate import attribute keys per with clause" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const invalid_cases = [_][]const u8{
+        "import x from './dep.js' with { type: 'json', 'typ\\u0065': '' };",
+        "import './dep.js' with { type: 'json', 'type': '' };",
+        "export * from './dep.js' with { type: 'json', 'typ\\u0065': '' };",
+    };
+    for (invalid_cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "dup-import-attr.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "import a from './a.js' with { type: 'json' }; import b from './b.js' with { type: 'json' };",
+        .{ .mode = .module, .filename = "valid-import-attr.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+}
+
+test "module parser accepts empty side-effect import attributes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "import './dep.js' with {};", .{ .mode = .module, .filename = "side-effect-import-attr.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.function.module_record.?.requests.len);
+}
+
+test "module parser validates string module export names" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const invalid_cases = [_][]const u8{
+        "export { \"foo\" as \"bar\" }; function foo() {}",
+        "export { Foo as \"\\uD83D\" }; function Foo() {}",
+        "export { \"ok\" as \"\\uD83D\" } from './dep.js';",
+        "export * as \"\\uD83D\" from './dep.js';",
+    };
+    for (invalid_cases) |source| {
+        var parsed = try frontend.parser.parse(rt, source, .{ .mode = .module, .filename = "invalid-string-export-name.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error != null);
+    }
+
+    var parsed = try frontend.parser.parse(rt, "export { \"ok\" as \"also-ok\" } from './dep.js';", .{ .mode = .module, .filename = "valid-string-export-name.js" });
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+}
+
+test "module parser rejects comma expression as default export expression" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var invalid = try frontend.parser.parse(rt, "export default null, null;", .{ .mode = .module, .filename = "invalid-default-export.js" });
+    defer invalid.deinit();
+    try std.testing.expect(invalid.syntax_error != null);
+
+    var valid = try frontend.parser.parse(rt, "export default (null, null);", .{ .mode = .module, .filename = "valid-default-export.js" });
+    defer valid.deinit();
+    try std.testing.expect(valid.syntax_error == null);
+}
+
+test "module parser accepts keyword module export and import names" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "var x; export { x as if, x as import, x as await }; import { if as if_, import as import_, await as await_ } from './dep.js';",
+        .{ .mode = .module, .filename = "keyword-module-names.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 3), parsed.function.module_record.?.exports.len);
+    try std.testing.expectEqual(@as(usize, 3), parsed.function.module_record.?.imports.len);
+}
+
+test "module parser allows duplicate top-level var declarations" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "var test262; var test262; for (var other; false;) {} for (var other; false;) {}", .{ .mode = .module, .filename = "dup-module-var.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+}
+
+test "parser accepts dynamic import call expressions" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var module_parsed = try frontend.parser.parse(rt, "try { await import('dep', { with: {} }); } catch (e) {}", .{ .mode = .module, .filename = "dynamic-import.mjs" });
+    defer module_parsed.deinit();
+    try std.testing.expect(module_parsed.syntax_error == null);
+
+    var script_parsed = try frontend.parser.parse(rt, "import('dep',);", .{ .mode = .script, .filename = "dynamic-import.js" });
+    defer script_parsed.deinit();
+    try std.testing.expect(script_parsed.syntax_error == null);
+
+    var import_meta_arg = try frontend.parser.parse(rt, "import(import.meta);", .{ .mode = .module, .filename = "dynamic-import-meta.mjs" });
+    defer import_meta_arg.deinit();
+    try std.testing.expect(import_meta_arg.syntax_error == null);
+
+    var import_in_arg = try frontend.parser.parse(rt, "for (promise = import('dep', 'x' in {}); false;) ;", .{ .mode = .script, .filename = "dynamic-import-in.js" });
+    defer import_in_arg.deinit();
+    try std.testing.expect(import_in_arg.syntax_error == null);
+}
+
+test "parser rejects invalid dynamic import call syntax" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var new_import = try frontend.parser.parse(rt, "new import('dep');", .{ .mode = .script, .filename = "bad-dynamic-import.js" });
+    defer new_import.deinit();
+    try std.testing.expect(new_import.syntax_error != null);
+
+    var escaped_import = try frontend.parser.parse(rt, "im\\u0070ort('dep');", .{ .mode = .script, .filename = "escaped-dynamic-import.js" });
+    defer escaped_import.deinit();
+    try std.testing.expect(escaped_import.syntax_error != null);
+}
+
+test "module parser accepts default as explicit namespace export name" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(rt, "export * as default from './dep.js';", .{ .mode = .module, .filename = "default-star.js" });
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.function.module_record.?.star_exports.len);
+}
+
+test "eval function class private destructuring spread async generator features are recorded" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var parsed = try frontend.parser.parse(
+        rt,
+        "async function *f(...args) { class C { #x; method(){ return args[0]; } } let {x} = args[0]; yield x; await x; import('m'); }",
+        .{ .mode = .eval_direct, .filename = "eval.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.direct_eval);
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
+    try std.testing.expect(parsed.hasFeature(.statement));
+    try std.testing.expect(parsed.hasFeature(.expression));
+    try std.testing.expect(parsed.hasFeature(.function_));
+    try std.testing.expect(parsed.hasFeature(.async_function));
+    try std.testing.expect(parsed.hasFeature(.generator));
+    try std.testing.expect(parsed.hasFeature(.async_generator));
+    try std.testing.expect(parsed.hasFeature(.class_));
+    try std.testing.expect(parsed.hasFeature(.private_name));
+    try std.testing.expect(parsed.hasFeature(.destructuring));
+    try std.testing.expect(parsed.hasFeature(.spread_rest));
+    try std.testing.expect(parsed.hasFeature(.dynamic_import));
+    try std.testing.expect(!parsed.hasFeature(.arrow));
+    try expectFunctionKindRecursive(&parsed.function, .async_generator);
+    try expectOpcodeRecursive(&parsed.function, qop.rest);
+    try expectOpcodeRecursive(&parsed.function, qop.define_class);
+    try expectOpcodeRecursive(&parsed.function, qop.define_field);
+    try expectOpcodeRecursive(&parsed.function, qop.define_method);
+    try expectOpcodeRecursive(&parsed.function, qop.yield);
+    try expectOpcodeRecursive(&parsed.function, qop.await);
+    try expectOpcodeRecursive(&parsed.function, qop.import);
+}
+
+test "bytecode constants retain values through Phase 4 structures" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("emit");
+    defer rt.atoms.free(name);
+
+    var function_bc = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function_bc.deinit(rt);
+
+    const text = try core.string.String.createAscii(rt, "hello");
+    const value = text.value();
+    const const_index = try function_bc.addConstant(value);
+    value.free(rt);
+
+    try std.testing.expectEqual(@as(u32, 0), const_index);
+    try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
+}
+
+// F1 — QuickJS-aligned lexer tests (separate file)

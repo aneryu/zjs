@@ -1,8 +1,5 @@
 const std = @import("std");
 
-pub const quickjs_opcode_path = "tests/fixtures/quickjs-opcode.h";
-pub const max_opcode_count = 320;
-
 pub const Format = enum {
     none,
     none_int,
@@ -55,115 +52,6 @@ pub const Metadata = struct {
         return @as(i16, self.n_push) - @as(i16, self.n_pop);
     }
 };
-
-pub const ParsedTable = struct {
-    entries: [max_opcode_count]Metadata = undefined,
-    count: usize = 0,
-    format_count: usize = 0,
-    op_count: usize = 0,
-    temp_start: usize = 0,
-    temp_end: usize = 0,
-    short_start: usize = 0,
-
-    pub fn all(self: *const ParsedTable) []const Metadata {
-        return self.entries[0..self.count];
-    }
-
-    pub fn at(self: *const ParsedTable, index: usize) ?Metadata {
-        if (index >= self.count) return null;
-        return self.entries[index];
-    }
-
-    pub fn find(self: *const ParsedTable, name: []const u8) ?Metadata {
-        for (self.all()) |entry| {
-            if (std.mem.eql(u8, entry.name, name)) return entry;
-        }
-        return null;
-    }
-
-    pub fn indexOf(self: *const ParsedTable, name: []const u8) ?usize {
-        for (self.all(), 0..) |entry, index| {
-            if (std.mem.eql(u8, entry.name, name)) return index;
-        }
-        return null;
-    }
-};
-
-pub fn parse(text: []const u8) ParsedTable {
-    @setEvalBranchQuota(100000);
-    var parsed = ParsedTable{};
-    var seen_temp = false;
-    var seen_short = false;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.startsWith(u8, trimmed, "FMT(")) {
-            parsed.format_count += 1;
-            continue;
-        }
-
-        const macro = if (std.mem.startsWith(u8, trimmed, "DEF("))
-            "DEF"
-        else if (std.mem.startsWith(u8, trimmed, "def("))
-            "def"
-        else
-            continue;
-
-        const start = std.mem.indexOfScalar(u8, trimmed, '(').? + 1;
-        const end = std.mem.indexOfScalarPos(u8, trimmed, start, ')').?;
-        const args_text = trimmed[start..end];
-        var args = std.mem.splitScalar(u8, args_text, ',');
-
-        const name = trimArg(args.next().?);
-        const size_text = trimArg(args.next().?);
-        const pop_text = trimArg(args.next().?);
-        const push_text = trimArg(args.next().?);
-        const format_text = trimArg(args.next().?);
-
-        const index = parsed.count;
-        var kind: Kind = .normal;
-        if (std.mem.eql(u8, macro, "def")) {
-            if (!seen_temp) parsed.temp_start = index;
-            seen_temp = true;
-            kind = .temp;
-        } else if (seen_temp) {
-            if (!seen_short) parsed.short_start = index;
-            seen_short = true;
-            kind = .short;
-        }
-
-        parsed.entries[index] = .{
-            .index = @intCast(index),
-            .name = name,
-            .size = parseU8(size_text),
-            .n_pop = parseU8(pop_text),
-            .n_push = parseU8(push_text),
-            .format = parseFormat(format_text),
-            .kind = kind,
-        };
-        parsed.count += 1;
-    }
-
-    parsed.temp_end = parsed.short_start;
-    parsed.op_count = parsed.temp_start;
-    return parsed;
-}
-
-fn trimArg(arg: []const u8) []const u8 {
-    return std.mem.trim(u8, arg, " \t\r");
-}
-
-fn parseU8(text: []const u8) u8 {
-    return std.fmt.parseInt(u8, text, 10) catch @panic("invalid QuickJS opcode integer metadata");
-}
-
-fn parseFormat(text: []const u8) Format {
-    inline for (@typeInfo(Format).@"enum".fields) |field| {
-        if (std.mem.eql(u8, field.name, text)) return @enumFromInt(field.value);
-    }
-    unreachable;
-}
 
 /// Import auto-generated opcode constants from quickjs-opcode.h.
 pub const op = @import("opcodes_generated.zig").op;
@@ -243,3 +131,29 @@ pub fn nPopOf(op_id: u8) u8 {
 pub fn nPushOf(op_id: u8) u8 {
     return opcode_n_push[op_id];
 }
+
+test "opcode metadata exposes size format and stack effects" {
+    try std.testing.expectEqual(@as(u8, 5), sizeOf(op.push_i32));
+    try std.testing.expectEqual(Format.i32, formatOf(op.push_i32));
+    try std.testing.expectEqual(@as(u8, 0), nPopOf(op.push_i32));
+    try std.testing.expectEqual(@as(u8, 1), nPushOf(op.push_i32));
+
+    try std.testing.expectEqual(Format.npop, formatOf(op.call));
+    try std.testing.expectEqual(@as(u8, 3), sizeOf(op.call));
+    try std.testing.expectEqual(@as(u8, 1), nPopOf(op.call));
+    try std.testing.expectEqual(@as(u8, 1), nPushOf(op.call));
+
+    try std.testing.expectEqual(Format.label, formatOf(op.goto));
+    try std.testing.expectEqual(@as(u8, 5), sizeOf(op.goto));
+
+    try std.testing.expectEqual(Format.none_int, formatOf(op.push_0));
+    try std.testing.expectEqual(@as(u8, 1), sizeOf(op.push_0));
+}
+
+test "QuickJS opcode table has no host print opcode names" {
+    inline for (@typeInfo(op).@"struct".decls) |decl| {
+        try std.testing.expect(!std.mem.eql(u8, decl.name, "host_print"));
+        try std.testing.expect(!std.mem.eql(u8, decl.name, "host_print_n"));
+    }
+}
+

@@ -2611,3 +2611,28 @@ fn findActiveCatchTargetForPc(function: *const bytecode.Bytecode, start_pc: usiz
     }
     return found;
 }
+
+test "engine eval host globals and throw intrinsic tear down cleanly" {
+    const exec = @import("root.zig");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    global.is_global = true;
+    defer global.value().free(rt);
+
+    try exec.call.installHostGlobals(rt, global);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+
+    const value = try ctx.eval("print(1);", .{ .output = &output });
+    defer value.free(rt);
+
+    try std.testing.expect(value.isUndefined());
+    try std.testing.expectEqualStrings("1\n", output.buffered());
+}
+

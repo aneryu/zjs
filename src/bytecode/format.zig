@@ -65,3 +65,13 @@ pub fn operandSize(operand: Operand) usize {
         .u32, .i32, .atom, .constant, .label => 4,
     };
 }
+
+test "format metadata computes immediate operand widths" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(usize, 0), describe(.none).immediateSize());
+    try std.testing.expectEqual(@as(usize, 4), describe(.i32).immediateSize());
+    try std.testing.expectEqual(@as(usize, 5), describe(.atom_u8).immediateSize());
+    try std.testing.expectEqual(@as(usize, 10), describe(.atom_label_u16).immediateSize());
+    try std.testing.expectEqual(@as(usize, 8), describe(.u32x2).immediateSize());
+}
+

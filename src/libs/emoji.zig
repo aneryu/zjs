@@ -419,3 +419,29 @@ fn codePointInSet(code_point: u21, singles: []const u21, ranges: []const [2]u21)
     }
     return false;
 }
+
+test "emoji functionality" {
+    const std = @import("std");
+
+    try std.testing.expect(isEmojiCodePoint(0x01f600));
+    try std.testing.expect(isEmojiPresentationCodePoint(0x01f600));
+    try std.testing.expect(!isEmojiPresentationCodePoint(0x260e));
+
+    const flag = [_]u16{ 0xd83c, 0xdde8, 0xd83c, 0xddf6 };
+    const flag_match = findRgiEmojiMatch(.{ .utf16 = &flag }, 0, false).?;
+    try std.testing.expectEqual(@as(usize, 0), flag_match.index);
+    try std.testing.expectEqual(@as(usize, flag.len), flag_match.len);
+    try std.testing.expect(rgiEmojiSequencesCover(.{ .utf16 = &flag }));
+
+    const phone_text = [_]u16{0x260e};
+    try std.testing.expect(!rgiEmojiSequencesCover(.{ .utf16 = &phone_text }));
+    const phone_emoji = [_]u16{ 0x260e, 0xfe0f };
+    try std.testing.expect(rgiEmojiSequencesCover(.{ .utf16 = &phone_emoji }));
+
+    const prefixed = [_]u16{ 'a', 0xd83c, 0xdde8, 0xd83c, 0xddf6 };
+    const prefixed_match = findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, false).?;
+    try std.testing.expectEqual(@as(usize, 1), prefixed_match.index);
+    try std.testing.expectEqual(@as(usize, 4), prefixed_match.len);
+    try std.testing.expect(findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, true) == null);
+}
+

@@ -710,3 +710,50 @@ fn toI128(value: BigInt) i128 {
     const signed: i128 = @intCast(out);
     return if (value.negative) -signed else signed;
 }
+
+test "bignum functionality" {
+    var forty = try parseBase10(std.testing.allocator, "40");
+    defer forty.deinit();
+    var two = try BigInt.fromInt(std.testing.allocator, 2);
+    defer two.deinit();
+    var big = try forty.add(two);
+    defer big.deinit();
+    const big_text = try big.formatBase10Alloc(std.testing.allocator);
+    defer std.testing.allocator.free(big_text);
+    try std.testing.expectEqualStrings("42", big_text);
+    var zero = try BigInt.fromInt(std.testing.allocator, 0);
+    defer zero.deinit();
+    try std.testing.expectError(error.DivisionByZero, big.div(zero));
+    var huge = try parseBase10(std.testing.allocator, "12345678901234567890123456789012345678901234567890");
+    defer huge.deinit();
+    const huge_text = try huge.formatBase10Alloc(std.testing.allocator);
+    defer std.testing.allocator.free(huge_text);
+    try std.testing.expectEqualStrings("12345678901234567890123456789012345678901234567890", huge_text);
+    var divisor = try BigInt.fromInt(std.testing.allocator, 97);
+    defer divisor.deinit();
+    var quotient = try huge.div(divisor);
+    defer quotient.deinit();
+    var remainder = try huge.rem(divisor);
+    defer remainder.deinit();
+    const quotient_text = try quotient.formatBase10Alloc(std.testing.allocator);
+    defer std.testing.allocator.free(quotient_text);
+    const remainder_text = try remainder.formatBase10Alloc(std.testing.allocator);
+    defer std.testing.allocator.free(remainder_text);
+    try std.testing.expectEqualStrings("127275040218913071032200585453735522462899325442", quotient_text);
+    try std.testing.expectEqualStrings("16", remainder_text);
+    var neg_seven = try BigInt.fromInt(std.testing.allocator, -7);
+    defer neg_seven.deinit();
+    var three = try BigInt.fromInt(std.testing.allocator, 3);
+    defer three.deinit();
+    var neg_q = try neg_seven.div(three);
+    defer neg_q.deinit();
+    var neg_r = try neg_seven.rem(three);
+    defer neg_r.deinit();
+    const neg_q_text = try neg_q.formatBase10Alloc(std.testing.allocator);
+    defer std.testing.allocator.free(neg_q_text);
+    const neg_r_text = try neg_r.formatBase10Alloc(std.testing.allocator);
+    defer std.testing.allocator.free(neg_r_text);
+    try std.testing.expectEqualStrings("-2", neg_q_text);
+    try std.testing.expectEqualStrings("-1", neg_r_text);
+}
+

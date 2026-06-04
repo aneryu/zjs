@@ -66,3 +66,55 @@ pub const domains = [_][]const u8{
     "Iterator",
     "Atomics",
 };
+
+test "intrinsic bootstrap registers global builtin domains through object properties" {
+    const std = @import("std");
+
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var intrinsics = try Intrinsics.init(rt);
+    defer intrinsics.deinit(rt);
+
+    for (domains) |name| {
+        const atom_id = try rt.internAtom(name);
+        defer rt.atoms.free(atom_id);
+        try std.testing.expect(intrinsics.global.hasOwnProperty(atom_id));
+        const desc = intrinsics.global.getOwnProperty(atom_id).?;
+        defer desc.destroy(rt);
+        try std.testing.expectEqual(true, desc.writable.?);
+        try std.testing.expectEqual(false, desc.enumerable.?);
+        try std.testing.expectEqual(true, desc.configurable.?);
+    }
+
+    const map_atom = try rt.internAtom("Map");
+    defer rt.atoms.free(map_atom);
+    const map_ctor = intrinsics.global.getProperty(map_atom);
+    defer map_ctor.free(rt);
+    try std.testing.expect(map_ctor.isObject());
+    const map_ctor_object: *core.Object = @fieldParentPtr("header", map_ctor.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.c_function, map_ctor_object.class_id);
+
+    const prototype_atom = try rt.internAtom("prototype");
+    defer rt.atoms.free(prototype_atom);
+    const prototype_desc = map_ctor_object.getOwnProperty(prototype_atom).?;
+    defer prototype_desc.destroy(rt);
+    try std.testing.expectEqual(false, prototype_desc.writable.?);
+    try std.testing.expectEqual(false, prototype_desc.enumerable.?);
+    try std.testing.expectEqual(false, prototype_desc.configurable.?);
+    try std.testing.expect(prototype_desc.value.isObject());
+    const map_proto: *core.Object = @fieldParentPtr("header", prototype_desc.value.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.object, map_proto.class_id);
+
+    const set_atom = try rt.internAtom("set");
+    defer rt.atoms.free(set_atom);
+    const set_desc = map_proto.getOwnProperty(set_atom).?;
+    defer set_desc.destroy(rt);
+    try std.testing.expectEqual(true, set_desc.writable.?);
+    try std.testing.expectEqual(false, set_desc.enumerable.?);
+    try std.testing.expectEqual(true, set_desc.configurable.?);
+    try std.testing.expect(set_desc.value.isObject());
+    const set_func_obj: *core.Object = @fieldParentPtr("header", set_desc.value.refHeader().?);
+    try std.testing.expectEqual(core.class.ids.c_function, set_func_obj.class_id);
+}
+

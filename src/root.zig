@@ -28,7 +28,7 @@ pub const ExternalHostCallFn = core.host_function.ExternalCallFn;
 pub const ExternalHostFinalizer = core.host_function.ExternalFinalizer;
 
 pub const harness = if (@import("builtin").is_test) struct {
-    pub const Engine = @import("tests/exec/exec_helpers.zig").TestEngine;
+    pub const Engine = @import("tests/exec.zig").helpers.TestEngine;
 } else struct {};
 
 test {

@@ -226,3 +226,104 @@ fn readSleb128(bytes: []const u8, i: *usize) !i32 {
         if (shift >= 32) return error.Pc2LineOverflow;
     }
 }
+
+test "pc2line: empty slot list produces empty buffer" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    var encoded = try encode(&account, &.{}, 1, 0);
+    defer encoded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), encoded.bytes.len);
+}
+
+test "pc2line: compact encoding for small line/pc deltas" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    // Two slots: same line, small pc delta. Compact form is one byte
+    // (line/pc compact) plus a sleb128 col diff.
+    const slots = [_]SourceLocSlot{
+        .{ .pc = 0, .line_num = 1, .col_num = 1 },
+        .{ .pc = 5, .line_num = 1, .col_num = 4 },
+    };
+    var encoded = try encode(&account, &slots, 1, 1);
+    defer encoded.deinit();
+
+    // First slot has diff_pc=0, diff_line=0, diff_col=0 from start (1,1) → skipped.
+    // Second slot has diff_pc=5, diff_line=0, diff_col=3 from previous.
+    // Compact byte = (0 - (-1)) + 5*5 + 1 = 1 + 25 + 1 = 27, then sleb128(3) = 0x03.
+    try std.testing.expectEqual(@as(usize, 2), encoded.bytes.len);
+    try std.testing.expectEqual(@as(u8, 27), encoded.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 3), encoded.bytes[1]);
+}
+
+test "pc2line: long encoding for large pc delta" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const slots = [_]SourceLocSlot{
+        .{ .pc = 100, .line_num = 2, .col_num = 1 },
+    };
+    var encoded = try encode(&account, &slots, 1, 1);
+    defer encoded.deinit();
+
+    // diff_pc=100 > MAX(50) → long form: 0, leb128(100), sleb128(1), sleb128(0).
+    try std.testing.expectEqual(@as(usize, 4), encoded.bytes.len);
+    try std.testing.expectEqual(@as(u8, 0), encoded.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 100), encoded.bytes[1]);
+    try std.testing.expectEqual(@as(u8, 1), encoded.bytes[2]); // sleb128(1) for diff_line
+    try std.testing.expectEqual(@as(u8, 0), encoded.bytes[3]); // sleb128(0) for diff_col
+}
+
+test "pc2line: encode/decode round-trip" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const input_slots = [_]SourceLocSlot{
+        .{ .pc = 5, .line_num = 1, .col_num = 4 },
+        .{ .pc = 10, .line_num = 2, .col_num = 1 },
+        .{ .pc = 200, .line_num = 5, .col_num = 12 },
+        .{ .pc = 250, .line_num = 5, .col_num = 25 },
+    };
+    var encoded = try encode(&account, &input_slots, 1, 1);
+    defer encoded.deinit();
+
+    const decoded = try decode(std.testing.allocator, encoded);
+    defer std.testing.allocator.free(decoded);
+
+    try std.testing.expectEqual(input_slots.len, decoded.len);
+    for (input_slots, decoded) |expected, actual| {
+        try std.testing.expectEqual(expected.pc, actual.pc);
+        try std.testing.expectEqual(expected.line_num, actual.line_num);
+        try std.testing.expectEqual(expected.col_num, actual.col_num);
+    }
+}
+
+test "pc2line: skips slots with no real change or backward pc" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const slots = [_]SourceLocSlot{
+        .{ .pc = 10, .line_num = 1, .col_num = 5 },
+        .{ .pc = 10, .line_num = 1, .col_num = 5 }, // duplicate → skipped
+        .{ .pc = 5, .line_num = 1, .col_num = 5 }, // backward pc → skipped
+        .{ .pc = 15, .line_num = -1, .col_num = 5 }, // line < 0 → skipped
+        .{ .pc = 20, .line_num = 1, .col_num = 8 }, // valid
+    };
+    var encoded = try encode(&account, &slots, 1, 1);
+    defer encoded.deinit();
+
+    const decoded = try decode(std.testing.allocator, encoded);
+    defer std.testing.allocator.free(decoded);
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.len);
+    try std.testing.expectEqual(@as(u32, 10), decoded[0].pc);
+    try std.testing.expectEqual(@as(u32, 20), decoded[1].pc);
+}
+
+test "pc2line: negative line delta encoded compactly" {
+    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const slots = [_]SourceLocSlot{
+        .{ .pc = 5, .line_num = 5, .col_num = 1 },
+        .{ .pc = 10, .line_num = 4, .col_num = 1 }, // diff_line = -1, in compact range
+    };
+    var encoded = try encode(&account, &slots, 1, 1);
+    defer encoded.deinit();
+
+    const decoded = try decode(std.testing.allocator, encoded);
+    defer std.testing.allocator.free(decoded);
+
+    try std.testing.expectEqual(@as(usize, 2), decoded.len);
+    try std.testing.expectEqual(@as(i32, 5), decoded[0].line_num);
+    try std.testing.expectEqual(@as(i32, 4), decoded[1].line_num);
+}

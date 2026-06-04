@@ -1641,3 +1641,11 @@ pub export fn mpb_get_bit(r: *const anyopaque, pos: c_int) callconv(.c) c_int {
     const mpb: *const MpbMax = @ptrCast(@alignCast(r));
     return mpbGetBit(mpb, pos);
 }
+
+test "dtoa functionality" {
+    const n = try parseNumber("12.5");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("12.5", try formatNumber(&buf, n));
+    try std.testing.expect(std.math.isPositiveInf(try parseNumber("+Infinity")));
+}
+

@@ -1249,3 +1249,51 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
     }
     return base;
 }
+
+test "unicode functionality" {
+    try std.testing.expect(isIdentifierStart('A'));
+    try std.testing.expect(isIdentifierStart(0x03c0));
+    try std.testing.expect(!isIdentifierStart(0x01f600));
+    try std.testing.expect(isIdentifierContinue('9'));
+    try std.testing.expect(isIdentifierContinue(0x200c));
+    try std.testing.expectEqual(@as(u8, 'A'), toUpperAscii('a'));
+    try std.testing.expect(equalsIgnoreAsciiCase("AbC", "aBc"));
+    try std.testing.expectEqual(@as(u21, 'k'), regexpCanonicalize(0x212a, true));
+    try std.testing.expectEqual(@as(u21, 's'), regexpCanonicalize(0x017f, true));
+
+    const nfc_input = [_]u32{ 0x1e9b, 0x0323 };
+    const nfc = try normalizeAlloc(std.testing.allocator, &nfc_input, .nfc);
+    defer std.testing.allocator.free(nfc);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 0x1e9b, 0x0323 }, nfc);
+    const nfd = try normalizeAlloc(std.testing.allocator, &nfc_input, .nfd);
+    defer std.testing.allocator.free(nfd);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 0x017f, 0x0323, 0x0307 }, nfd);
+    const nfkc = try normalizeAlloc(std.testing.allocator, &nfc_input, .nfkc);
+    defer std.testing.allocator.free(nfkc);
+    try std.testing.expectEqualSlices(u32, &[_]u32{0x1e69}, nfkc);
+    const nfkd = try normalizeAlloc(std.testing.allocator, &nfc_input, .nfkd);
+    defer std.testing.allocator.free(nfkd);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 0x0073, 0x0323, 0x0307 }, nfkd);
+
+    const ascii_ranges = try propertyRangesAlloc(std.testing.allocator, "ASCII", false);
+    defer std.testing.allocator.free(ascii_ranges);
+    try std.testing.expect(rangesContain(ascii_ranges, 'A'));
+    try std.testing.expect(!rangesContain(ascii_ranges, 0x80));
+    const non_ascii_ranges = try propertyRangesAlloc(std.testing.allocator, "ASCII", true);
+    defer std.testing.allocator.free(non_ascii_ranges);
+    try std.testing.expect(!rangesContain(non_ascii_ranges, 'A'));
+    try std.testing.expect(rangesContain(non_ascii_ranges, 0x80));
+    try std.testing.expect(rangesContain(non_ascii_ranges, 0x10ffff));
+    const greek_ranges = try propertyRangesAlloc(std.testing.allocator, "Script=Greek", false);
+    defer std.testing.allocator.free(greek_ranges);
+    try std.testing.expect(rangesContain(greek_ranges, 0x03c0));
+    try std.testing.expect(!rangesContain(greek_ranges, 'A'));
+}
+
+fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {
+    for (ranges) |range| {
+        if (code_point >= range.lo and code_point < range.hi) return true;
+    }
+    return false;
+}
+
