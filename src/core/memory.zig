@@ -53,6 +53,30 @@ pub const MemoryAccount = struct {
         self.persistent_allocator.free(slice);
     }
 
+    pub fn allocAlignedBytes(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+        if (byte_count == 0) return &.{};
+        try self.checkAllocation(byte_count);
+        const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, byte_count) catch return error.OutOfMemory;
+        if (self.trigger_gc_fn) |trigger| trigger(self.trigger_gc_ctx, byte_count);
+        const ptr = self.persistent_allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse return error.OutOfMemory;
+        self.allocated_bytes = next_allocated_bytes;
+        self.allocation_count += 1;
+        self.alloc_calls += 1;
+        self.updatePeak();
+        if (self.profile_alloc_count) |counter| counter.* +|= 1;
+        self.traceAlloc(1, byte_count, @intFromPtr(ptr));
+        return ptr[0..byte_count];
+    }
+
+    pub fn freeAlignedBytes(self: *MemoryAccount, bytes: []u8, alignment: std.mem.Alignment) void {
+        if (bytes.len == 0) return;
+        self.traceFree(@intFromPtr(bytes.ptr));
+        self.allocated_bytes -= bytes.len;
+        self.allocation_count -= 1;
+        self.free_calls += 1;
+        self.persistent_allocator.rawFree(bytes, alignment, @returnAddress());
+    }
+
     /// Returns owned memory. Caller must destroy it with `destroy`.
     pub fn create(self: *MemoryAccount, comptime T: type) !*T {
         const bytes = @sizeOf(T);

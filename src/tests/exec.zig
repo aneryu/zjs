@@ -197,8 +197,10 @@ pub const helpers = struct {
     const EvalOptions = core.context.ContextEvalOptions;
 
     pub const TestEngine = struct {
+        allocator: std.mem.Allocator,
         runtime: *core.JSRuntime,
         context: *core.JSContext,
+        event_loop: *engine.runtime.EventLoop,
 
         pub const HostHooks = module_graph.HostHooks;
 
@@ -216,17 +218,25 @@ pub const helpers = struct {
             errdefer rt.destroy();
             const ctx = try core.JSContext.create(rt);
             errdefer ctx.destroy();
+            const event_loop = try options.allocator.create(engine.runtime.EventLoop);
+            errdefer options.allocator.destroy(event_loop);
+            event_loop.* = engine.runtime.EventLoop.init(ctx, .{});
+            event_loop.install();
             return .{
+                .allocator = options.allocator,
                 .runtime = rt,
                 .context = ctx,
+                .event_loop = event_loop,
             };
         }
 
         pub fn deinit(self: *TestEngine) void {
             self.context.runJobs(null) catch {};
+            self.event_loop.deinit();
+            self.allocator.destroy(self.event_loop);
             engine.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
-            const test262_helpers = @import("../cli/test262_helpers.zig");
-            _ = test262_helpers.cleanupTest262Agents(self.runtime);
+            const run_test262 = @import("../cli/run_test262.zig");
+            _ = run_test262.cleanupTest262Agents(self.runtime);
             engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
             self.context.destroy();
             self.runtime.destroy();
@@ -255,9 +265,8 @@ pub const helpers = struct {
         pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void {
             if (self.context.global == null) {
                 const global_obj = try engine.exec.zjs_vm.contextGlobal(self.context);
-                try engine.exec.call.installTest262Globals(self.runtime, global_obj);
-                const test262_helpers = @import("../cli/test262_helpers.zig");
-                try test262_helpers.installTest262AgentGlobals(self.runtime, self.context, global_obj);
+                const run_test262 = @import("../cli/run_test262.zig");
+                try run_test262.installTest262Globals(self.runtime, self.context, global_obj);
             }
         }
 
@@ -923,10 +932,10 @@ test "closure helper stores closure state outside the VM" {
 }
 
 test "test262 helpers own SameValue assertions" {
-    const test262_helpers = @import("../cli/test262_helpers.zig");
-    const same_nan = try test262_helpers.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
+    const run_test262 = @import("../cli/run_test262.zig");
+    const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
     try std.testing.expect(same_nan.isUndefined());
-    try std.testing.expectError(error.Test262Error, test262_helpers.assertSameValue(core.JSValue.int32(1), core.JSValue.int32(2)));
+    try std.testing.expectError(error.JSException, run_test262.assertSameValue(core.JSValue.int32(1), core.JSValue.int32(2)));
 }
 
 test "call subsystem installs and invokes host globals" {
@@ -938,7 +947,8 @@ test "call subsystem installs and invokes host globals" {
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
     try engine.exec.call.installHostGlobals(rt, global);
-    try engine.exec.call.installTest262Globals(rt, global);
+    const run_test262 = @import("../cli/run_test262.zig");
+    try run_test262.installTest262Globals(rt, ctx, global);
 
     const print_key = try rt.internAtom("print");
     defer rt.atoms.free(print_key);
@@ -975,13 +985,15 @@ test "call subsystem installs and invokes host globals" {
     defer same_result.free(rt);
     try std.testing.expect(same_result.isUndefined());
     const mismatch_args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.int32(2) };
-    try std.testing.expectError(error.Test262Error, engine.exec.call.callValue(ctx, null, same_value, &mismatch_args));
+    try std.testing.expectError(error.JSException, engine.exec.call.callValue(ctx, null, same_value, &mismatch_args));
 
     const test262_key = try rt.internAtom("Test262Error");
     defer rt.atoms.free(test262_key);
     const test262_ctor = global.getProperty(test262_key);
     defer test262_ctor.free(rt);
-    try std.testing.expectError(error.Test262Error, engine.exec.call.callValue(ctx, null, test262_ctor, &.{}));
+    const test262_error = try engine.exec.call.callValue(ctx, null, test262_ctor, &.{});
+    defer test262_error.free(rt);
+    try std.testing.expect(test262_error.isObject());
 
     const map_value = try engine.builtins.collection.construct(rt, 1);
     defer map_value.free(rt);
@@ -2973,8 +2985,8 @@ test "Engine eval executes test262 helpers through generic call paths" {
     const result = try js.eval("assert.sameValue(1 + 1, 2, 'sum');");
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectError(error.Test262Error, js.eval("assert.sameValue(1, 2);"));
-    try std.testing.expectError(error.Test262Error, js.eval("throw new Test262Error('boom');"));
+    try std.testing.expectError(error.JSException, js.eval("assert.sameValue(1, 2);"));
+    try std.testing.expectError(error.JSException, js.eval("throw new Test262Error('boom');"));
 }
 
 test "Engine eval strips TypeScript source kind before execution" {
@@ -4027,10 +4039,7 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
     const callback = global.getProperty(callback_key);
     defer callback.free(js.runtime);
 
-    try js.context.ensureOsTimerCapacity(1);
-    const timer_index = js.context.os_timers.len;
-    js.context.os_timers = js.context.os_timers.ptr[0 .. timer_index + 1];
-    js.context.os_timers[timer_index] = try core.OsTimer.init(js.context, 1, callback, 0, 0, false);
+    try js.event_loop.enqueueTimer(js.context, 1, callback, 0, false);
 
     try js.runJobs();
     try std.testing.expect(js.context.hasException());

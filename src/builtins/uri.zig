@@ -27,7 +27,7 @@ pub fn methodId(name: []const u8) ?u32 {
 pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
     if (mode == 3 or mode == 4) {
         // Fast path: string inputs (the common case in real-world callers
-        // and in test262's tight 4-byte-UTF-8 sweep) avoid the
+        // and in tight 4-byte-UTF-8 URI sweeps) avoid the
         // `appendValueString` round-trip. We decode straight from the
         // string's owned bytes into a small stack buffer, falling back
         // to an `ArrayList` only when the result outgrows the buffer.
@@ -78,7 +78,7 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
 /// contain non-ASCII units, which need the QuickJS `\uXXXX`-widening
 /// stringification before decoding).
 ///
-/// The stack buffer is sized so that the test262 4-byte-UTF-8 sweep
+/// The stack buffer is sized so that 4-byte-UTF-8 URI sweeps
 /// (`decodeURI("%F0%9F%98%80")` and similar) never spills to the heap.
 /// Larger strings spill to an `ArrayList`.
 fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, component: bool) !?core.JSValue {

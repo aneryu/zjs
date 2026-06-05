@@ -2288,18 +2288,18 @@ pub fn handleCatchableRuntimeError(
     err: anytype,
 ) !bool {
     core.profile.recordSlowPath();
-    const error_info = exception_ops.runtimeErrorInfo(err) orelse return false;
+    const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
+    const error_info = if (is_pending_exception) null else exception_ops.runtimeErrorInfo(err) orelse return false;
     const target = catch_target.* orelse return false;
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, stack.values);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, frame.locals);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, frame.args);
     closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, frame.var_refs);
     try stack.reserveAdditional(1);
-    const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
     else
-        try createNamedError(ctx.runtime, global, error_info.name, error_info.message);
+        try createNamedError(ctx.runtime, global, error_info.?.name, error_info.?.message);
     var catch_value_owned = true;
     errdefer if (catch_value_owned) {
         if (is_pending_exception) {
@@ -2524,8 +2524,7 @@ pub fn callValueOrBytecodeClassMode(
         if (try qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
         if (isThrowTypeErrorIntrinsicObject(function_object)) return qjsThrowTypeErrorIntrinsic(ctx, global, function_object);
         // Borrow the internal dispatch-name bytes instead of allocating a
-        // fresh `[]u8` per call. Hot test262 loops (the `decodeURI`
-        // 4-byte-UTF-8 sweep, for example) call this path millions of
+        // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
         // times, and the previous round-trip alloc/free showed up clearly
         // on the profile. Native dispatch names are atom-backed ASCII
         // builtin names in practice; a `null` return here means there is
@@ -2594,7 +2593,7 @@ pub fn callValueOrBytecodeClassMode(
         // global builtins directly to their handlers, bypassing the long
         // `std.mem.eql` chain below. The previous chain walked ~95 checks
         // before reaching `qjsUriCallId` for `decodeURI` / `encodeURI`,
-        // which dominated tight-loop test262 benchmarks.
+        // which dominated tight-loop URI benchmarks.
         if (name.len != 0) {
             switch (name[0]) {
                 'A' => if (std.mem.eql(u8, name, "Array")) {
@@ -2819,7 +2818,6 @@ pub fn callValueOrBytecodeClassMode(
         if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
             if (try qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         }
-        if (std.mem.eql(u8, name, "evalScript")) return call_mod.qjsTest262EvalScript(ctx, output, global, function_object, args);
         if (std.mem.eql(u8, name, "eval")) {
             const eval_global = if (function_object.functionRealmGlobalSlot().*) |realm_value|
                 property_ops.expectObject(realm_value) catch global
@@ -7346,7 +7344,7 @@ pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, f
     const error_global = objectRealmGlobal(function_object) orelse global;
     const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "not a function");
     _ = ctx.throwValue(error_value);
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn toNumberForDateMethod(
@@ -7538,6 +7536,9 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
             return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
         }
+        if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+            return constructExternalHostFunction(ctx, output, global, function_object, args, caller_function, caller_frame, new_target);
+        }
         if (function_object.class_id == core.class.ids.c_function and !isBuiltinConstructorName(name)) return error.TypeError;
     }
     if (func.isFunctionBytecode()) {
@@ -7605,6 +7606,32 @@ pub fn constructValueOrBytecodeWithNewTarget(
         }
     }
     return construct_mod.constructValue(ctx.runtime, func, args, &.{});
+}
+
+fn constructExternalHostFunction(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) !core.JSValue {
+    if (!function_object.hasOwnProperty(core.atom.ids.prototype)) return error.TypeError;
+    const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
+    var instance_owned = true;
+    errdefer if (instance_owned) instance.free(ctx.runtime);
+
+    const result = (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, instance, args)) orelse return error.TypeError;
+    defer result.free(ctx.runtime);
+    if (result.isObject()) {
+        instance.free(ctx.runtime);
+        instance_owned = false;
+        return result.dup();
+    }
+    instance_owned = false;
+    return instance;
 }
 
 pub fn globalHostOutputAutoInit(global: *core.Object, atom_id: core.Atom) bool {
@@ -8142,12 +8169,10 @@ pub fn isBuiltinConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "SyntaxError") or
         std.mem.eql(u8, name, "TypeError") or
         std.mem.eql(u8, name, "URIError") or
-        std.mem.eql(u8, name, "Test262Error") or
         std.mem.eql(u8, name, "Iterator") or
         std.mem.eql(u8, name, "DisposableStack") or
         std.mem.eql(u8, name, "AsyncDisposableStack") or
         std.mem.eql(u8, name, "Promise") or
-        std.mem.eql(u8, name, "Test262Error") or
         std.mem.eql(u8, name, "Map") or
         std.mem.eql(u8, name, "Set") or
         std.mem.eql(u8, name, "WeakMap") or
@@ -8343,16 +8368,16 @@ pub fn qjsAssertThrows(
             if (try consumePendingExceptionIfMatchesConstructor(ctx, expected_name)) {
                 return core.JSValue.undefinedValue();
             }
-            return error.Test262Error;
+            return error.JSException;
         }
         if (call_mod.errorNameMatchesConstructorForVm(err, expected_name)) {
             ctx.clearException();
             return core.JSValue.undefinedValue();
         }
-        return error.Test262Error;
+        return error.JSException;
     };
     defer result.free(ctx.runtime);
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn callAssertThrowsCallback(
@@ -8952,7 +8977,7 @@ pub fn destructuringIteratorStep(
             if (promise.promiseIsRejected()) {
                 const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
                 _ = ctx.throwValue(reason);
-                return error.Test262Error;
+                return error.JSException;
             }
             const fulfilled = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             next_result_value.free(ctx.runtime);
@@ -9029,7 +9054,7 @@ pub fn iteratorStepValue(
             if (promise.promiseIsRejected()) {
                 const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
                 _ = ctx.throwValue(reason);
-                return error.Test262Error;
+                return error.JSException;
             }
             const fulfilled = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
             next_result_value.free(ctx.runtime);
@@ -13085,7 +13110,7 @@ pub fn qjsGeneratorThrow(
 
     object.generatorDoneSlot().* = true;
     _ = ctx.throwValue(thrown.dup());
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn generatorCatchResumeResultValue(result: core.JSValue) core.JSValue {
@@ -13806,194 +13831,33 @@ pub fn pollGCSafePoint(ctx: *core.JSContext) !void {
     };
 }
 
-pub fn enqueueOsTimer(ctx: *core.JSContext, id: i64, callback: core.JSValue, delay_ms: u64, repeats: bool) !void {
-    const index = ctx.os_timers.len;
-    try ctx.ensureOsTimerCapacity(index + 1);
-    const timer = try core.OsTimer.init(ctx, id, callback, nowMs() + delay_ms, delay_ms, repeats);
-    ctx.os_timers = ctx.os_timers.ptr[0 .. index + 1];
-    ctx.os_timers[index] = timer;
+pub fn enqueueOsTimer(ctx: *core.JSContext, id: i64, callback: core.JSValue, delay_ms: u64, repeats: bool) HostError!void {
+    const host_event_loop = ctx.hostEventLoop() orelse return error.TypeError;
+    host_event_loop.enqueueTimer(ctx, id, callback, delay_ms, repeats) catch |err| return @errorCast(err);
 }
 
 pub fn clearOsTimer(ctx: *core.JSContext, id: i64) void {
-    if (id <= 0) return;
-    var index: usize = 0;
-    while (index < ctx.os_timers.len) : (index += 1) {
-        if (ctx.os_timers[index].id != id) continue;
-        ctx.removeOsTimerAt(index);
-        return;
+    if (ctx.hostEventLoop()) |host_event_loop| {
+        host_event_loop.clearTimer(ctx, id);
     }
 }
 
-pub fn runNextOsTimer(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    if (ctx.os_timers.len == 0) return false;
-    const now = nowMs();
-    var next_delay: u64 = std.math.maxInt(u64);
-    for (ctx.os_timers, 0..) |timer, index| {
-        if (timer.timeout_ms > now) {
-            next_delay = @min(next_delay, timer.timeout_ms - now);
-            continue;
-        }
-        var callback = timer.callback.dup();
-        defer callback.free(ctx.runtime);
-        var callback_root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &callback },
-        };
-        const callback_root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &callback_root_values,
-        };
-        ctx.runtime.active_value_roots = &callback_root_frame;
-        defer ctx.runtime.active_value_roots = callback_root_frame.previous;
-        const timer_id = timer.id;
-        const repeats = timer.repeats;
-        const delay = timer.delay_ms;
-        if (repeats) {
-            ctx.os_timers[index].timeout_ms = now + delay;
-        } else {
-            ctx.removeOsTimerAt(index);
-        }
-        if (objectFromValue(callback)) |promise| {
-            if (promise.class_id == core.class.ids.promise) {
-                if (promise.promiseResultSlot().* == null) {
-                    try promise.setPromiseResult(ctx.runtime, core.JSValue.undefinedValue());
-                }
-                try settlePendingPromiseReaction(ctx, output, global, promise);
-                return true;
-            }
-        }
-        const result = try callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
-        result.free(ctx.runtime);
-        if (repeats and !osTimerExists(ctx, timer_id)) return true;
-        return true;
-    }
-    if (next_delay != std.math.maxInt(u64)) {
-        const sleep_ms: i64 = @intCast(@min(next_delay, @as(u64, @intCast(std.math.maxInt(i64)))));
-        std.Io.sleep(hostTimerIo(), std.Io.Duration.fromMilliseconds(sleep_ms), .awake) catch {};
-        return true;
+pub fn runNextOsTimer(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) HostError!bool {
+    if (ctx.hostEventLoop()) |host_event_loop| {
+        return host_event_loop.runNextTimer(ctx, output, global) catch |err| return @errorCast(err);
     }
     return false;
 }
 
-pub fn runNextOsRwHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    if (ctx.os_rw_handlers.len == 0) return false;
-    var pollfds = try ctx.runtime.memory.alloc(libc.struct_pollfd, ctx.os_rw_handlers.len);
-    defer ctx.runtime.memory.free(libc.struct_pollfd, pollfds);
-    var count: usize = 0;
-    for (ctx.os_rw_handlers) |handler| {
-        var events: c_short = 0;
-        if (!handler.read_callback.isNull()) events |= libc.POLLIN;
-        if (!handler.write_callback.isNull()) events |= libc.POLLOUT;
-        if (events == 0) continue;
-        pollfds[count] = .{ .fd = handler.fd, .events = events, .revents = 0 };
-        count += 1;
-    }
-    if (count == 0) return false;
-    var timeout_ms: c_int = 0;
-    const has_pending_jobs = (ctx.peekPendingPromiseJobSequence() != null or ctx.runtime.peekPendingFinalizationJobSequence() != null);
-    if (!has_pending_jobs) {
-        if (ctx.os_timers.len == 0) {
-            timeout_ms = -1;
-        } else {
-            const now = nowMs();
-            var next_delay: u64 = std.math.maxInt(u64);
-            for (ctx.os_timers) |timer| {
-                if (timer.timeout_ms > now) {
-                    next_delay = @min(next_delay, timer.timeout_ms - now);
-                } else {
-                    next_delay = 0;
-                }
-            }
-            if (next_delay == std.math.maxInt(u64)) {
-                timeout_ms = -1;
-            } else {
-                timeout_ms = @intCast(@min(next_delay, @as(u64, @intCast(std.math.maxInt(c_int)))));
-            }
-        }
-    }
-    const ready = libc.poll(pollfds.ptr, @intCast(count), timeout_ms);
-    if (ready <= 0) return false;
-    for (pollfds[0..count]) |pollfd| {
-        if (pollfd.revents == 0) continue;
-        var handler_index: usize = 0;
-        while (handler_index < ctx.os_rw_handlers.len) : (handler_index += 1) {
-            if (ctx.os_rw_handlers[handler_index].fd != pollfd.fd) continue;
-            const handler = ctx.os_rw_handlers[handler_index];
-            if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.isNull()) {
-                const callback = handler.read_callback.dup();
-                defer callback.free(ctx.runtime);
-                const result = try callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
-                result.free(ctx.runtime);
-                return true;
-            }
-            if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.isNull()) {
-                const callback = handler.write_callback.dup();
-                defer callback.free(ctx.runtime);
-                const result = try callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
-                result.free(ctx.runtime);
-                return true;
-            }
-        }
+pub fn runNextOsRwHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) HostError!bool {
+    if (ctx.hostEventLoop()) |host_event_loop| {
+        return host_event_loop.runNextRwHandler(ctx, output, global) catch |err| return @errorCast(err);
     }
     return false;
-}
-
-pub fn osTimerExists(ctx: *core.JSContext, id: i64) bool {
-    for (ctx.os_timers) |timer| {
-        if (timer.id == id) return true;
-    }
-    return false;
-}
-
-pub fn nowMs() u64 {
-    const ns = std.Io.Clock.Timestamp.now(hostTimerIo(), .awake).raw.toNanoseconds();
-    return @intCast(@divTrunc(ns, std.time.ns_per_ms));
-}
-
-pub fn hostTimerIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
 }
 
 pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !void {
     try enqueuePendingPromiseJob(ctx, callback);
-}
-
-test "runNextOsTimer roots one-shot function bytecode callback after dequeue" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    const ctx = try core.JSContext.create(rt);
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer {
-        global.value().free(rt);
-        ctx.destroy();
-        rt.destroy();
-    }
-
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    fb.func_kind = .generator;
-    try rt.gc.add(&fb.header);
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
-    fb.cpool = try rt.memory.alloc(core.JSValue, 1);
-    fb.cpool[0] = core.JSValue.symbol(symbol_atom);
-    fb.cpool_count = 1;
-
-    var callback = core.JSValue.functionBytecode(&fb.header);
-    var callback_alive = true;
-    defer if (callback_alive) callback.free(rt);
-
-    try enqueueOsTimer(ctx, 1, callback, 0, false);
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-    try std.testing.expect(try runNextOsTimer(ctx, null, global));
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-
-    callback.free(rt);
-    callback_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
@@ -14088,7 +13952,7 @@ pub fn qjsThrowTypeErrorIntrinsic(ctx: *core.JSContext, global: *core.Object, fu
     const error_global = objectRealmGlobal(function_object) orelse global;
     const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "invalid property access");
     _ = ctx.throwValue(error_value);
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
@@ -14131,6 +13995,9 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
             return isConstructorLike(ctx, target);
         }
         if (isDateConstructorRecord(function_object)) return true;
+        if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
+            return function_object.hasOwnProperty(core.atom.ids.prototype);
+        }
         if (function_object.class_id == core.class.ids.c_closure) return true;
         const name = call_mod.nativeFunctionNameForVm(ctx.runtime, function_object) catch return false;
         defer ctx.runtime.memory.allocator.free(name);

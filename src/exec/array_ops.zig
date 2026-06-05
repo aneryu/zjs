@@ -112,7 +112,6 @@ const uint8ArrayStringBytes = shared_vm.uint8ArrayStringBytes;
 const valueTruthy = shared_vm.valueTruthy;
 const valuesStrictEqual = shared_vm.valuesStrictEqual;
 
-
 pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
     while (stack.peek()) |marker| {
         defer marker.free(rt);
@@ -415,7 +414,7 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, 
         break :blk try createNamedErrorWithConstructor(ctx.runtime, ctor_value, "TypeError", "not a Date object");
     } else try createNamedError(ctx.runtime, global, "TypeError", "not a Date object");
     _ = ctx.throwValue(error_value);
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn simpleCaptureAtomsKnownDisjoint(first: SimpleCaptureSequenceAtom, second: SimpleCaptureSequenceAtom) bool {

@@ -762,7 +762,7 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     if (!expects.is_array or expects.length == 0) return error.TypeError;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
-    if (!@import("object.zig").sameValue(actual, expected)) return error.Test262Error;
+    if (!@import("object.zig").sameValue(actual, expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.length) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));
@@ -1182,7 +1182,7 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, rec
             try appendGlobalString(rt, globals, "observedOrder", "calling has");
             return valueStringEql(key, "a") or valueStringEql(key, "b") or valueStringEql(key, "c");
         },
-        2 => return error.Test262Error,
+        2 => return error.JSException,
         6 => {
             if (valueStringEql(key, "a")) try deleteStringFromSet(rt, receiver, "c");
             return valueStringEql(key, "x") or valueStringEql(key, "a") or valueStringEql(key, "b");
@@ -1198,7 +1198,7 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, rec
                 return false;
             }
             if (valueStringEql(key, "b")) return false;
-            return error.Test262Error;
+            return error.JSException;
         },
         8 => {
             const value = key.asInt32() orelse return false;

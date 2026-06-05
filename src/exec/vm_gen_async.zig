@@ -215,7 +215,7 @@ pub fn awaitValue(
     defer result.free(ctx.runtime);
     if (promise.promiseIsRejected()) {
         _ = ctx.throwValue(result.dup());
-        return error.Test262Error;
+        return error.JSException;
     }
     if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result, saveGeneratorExecutionState)) |suspended| return suspended;
     try stack.push(result);
@@ -305,4 +305,3 @@ fn testSetGeneratorYieldStarSuspended(rt: *core.JSRuntime, generator: *core.Obje
     _ = rt;
     generator.generatorYieldStarSuspendedSlot().* = value;
 }
-

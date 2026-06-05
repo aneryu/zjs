@@ -83,7 +83,6 @@ const toInt32BitsForAtomics = shared_vm.toInt32BitsForAtomics;
 const toNumberForAtomics = shared_vm.toNumberForAtomics;
 const valueTruthy = shared_vm.valueTruthy;
 
-
 pub fn closeForAwaitIteratorForPendingError(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -563,7 +562,6 @@ pub fn qjsAsyncDisposableStackContinue(
     }
     try qjsAsyncDisposableStackResolveStored(ctx, output, global, stack, core.JSValue.undefinedValue(), caller_function, caller_frame);
 }
-
 
 pub fn qjsAsyncDisposeResource(
     ctx: *core.JSContext,
@@ -1242,9 +1240,6 @@ pub fn qjsPromiseSettleValue(
         ctx.recordUnhandledPromiseRejection(promise.value(), value);
     }
 }
-
-
-
 
 test "qjsPromiseSettleValue handles result self-assignment" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -3397,7 +3392,7 @@ pub fn qjsPromiseFinallyCallbackCall(
         .throw_reason => {
             const payload = function_object.functionPromiseFinallyPayload() orelse return error.TypeError;
             _ = ctx.throwValue(payload.dup());
-            return error.Test262Error;
+            return error.JSException;
         },
         .fulfill, .reject => {
             const payload = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -3838,7 +3833,7 @@ pub fn finishAwaitedPromise(ctx: *core.JSContext, promise: *core.Object) !core.J
     errdefer result.free(ctx.runtime);
     if (promise.promiseIsRejected()) {
         _ = ctx.throwValue(result.dup());
-        return error.Test262Error;
+        return error.JSException;
     }
     return result;
 }

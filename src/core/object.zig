@@ -294,6 +294,8 @@ pub const SharedBufferStore = struct {
     ref_count: std.atomic.Value(usize) = .init(1),
     bytes: []u8 = &.{},
     external_memory: gc.ExternalMemoryToken = .{},
+    external_deinit: ?ExternalByteStorageDeinit = null,
+    external_context: ?*anyopaque = null,
 
     pub fn create(rt: *JSRuntime, byte_length: usize) !*SharedBufferStore {
         const allocator = std.heap.page_allocator;
@@ -312,6 +314,27 @@ pub const SharedBufferStore = struct {
         return store;
     }
 
+    pub fn createExternal(
+        rt: *JSRuntime,
+        bytes: []u8,
+        deinit_fn: ExternalByteStorageDeinit,
+        context: ?*anyopaque,
+    ) !*SharedBufferStore {
+        const allocator = std.heap.page_allocator;
+        const store = try allocator.create(SharedBufferStore);
+        errdefer allocator.destroy(store);
+        var external_memory = try rt.reportExternalAlloc(bytes.len);
+        errdefer external_memory.release();
+        store.* = .{
+            .ref_count = .init(1),
+            .bytes = bytes,
+            .external_memory = external_memory,
+            .external_deinit = deinit_fn,
+            .external_context = context,
+        };
+        return store;
+    }
+
     pub fn retain(self: *SharedBufferStore) void {
         _ = self.ref_count.fetchAdd(1, .monotonic);
     }
@@ -320,25 +343,44 @@ pub const SharedBufferStore = struct {
         if (self.ref_count.fetchSub(1, .acq_rel) != 1) return;
         const allocator = std.heap.page_allocator;
         const bytes = self.bytes;
+        const external_deinit = self.external_deinit;
+        const external_context = self.external_context;
         self.external_memory.release();
         self.bytes = &.{};
-        allocator.free(bytes);
+        self.external_deinit = null;
+        self.external_context = null;
+        if (external_deinit) |deinit_fn| {
+            deinit_fn(external_context, bytes);
+        } else {
+            allocator.free(bytes);
+        }
         allocator.destroy(self);
     }
 };
+
+pub const ExternalByteStorageDeinit = *const fn (context: ?*anyopaque, bytes: []u8) void;
 
 pub const BufferPayload = struct {
     bytes: []u8 = &.{},
     shared_store: ?*SharedBufferStore = null,
     external_memory: gc.ExternalMemoryToken = .{},
+    external_deinit: ?ExternalByteStorageDeinit = null,
+    external_context: ?*anyopaque = null,
     detached: bool = false,
     immutable: bool = false,
     max_byte_length: ?usize = null,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *BufferPayload, rt: *JSRuntime) void {
+        self.releaseStorage(rt);
+    }
+
+    fn releaseStorage(self: *BufferPayload, rt: *JSRuntime) void {
         if (self.shared_store) |store| {
             store.release();
+        } else if (self.external_deinit) |deinit| {
+            self.external_memory.release();
+            deinit(self.external_context, self.bytes);
         } else {
             self.external_memory.release();
             if (self.bytes.len != 0) rt.memory.free(u8, self.bytes);
@@ -346,6 +388,8 @@ pub const BufferPayload = struct {
         self.bytes = &.{};
         self.shared_store = null;
         self.external_memory = .{};
+        self.external_deinit = null;
+        self.external_context = null;
     }
 };
 
@@ -1026,13 +1070,18 @@ pub const Object = struct {
     exotic: ?ExoticMethods = null,
 
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
-        const self = try rt.memory.create(Object);
+        const class_record = rt.classes.record(class_id);
+        const inline_layout = inlineClassPayloadLayout(class_record);
+        const self = if (inline_layout) |layout| blk: {
+            const bytes = try rt.memory.allocAlignedBytes(layout.total_size, layout.allocation_alignment);
+            break :blk @as(*Object, @ptrCast(@alignCast(bytes.ptr)));
+        } else try rt.memory.create(Object);
         var initialized = false;
         errdefer {
             if (initialized) {
                 destroyFromHeader(rt, &self.header);
             } else {
-                rt.memory.destroy(Object, self);
+                freeObjectAllocation(rt, self, inline_layout);
             }
         }
         const proto_id = if (prototype) |proto| @intFromPtr(proto) else null;
@@ -1041,7 +1090,6 @@ pub const Object = struct {
         errdefer if (shape_owned) rt.shapes.release(shape_ref);
         var class_payload: class.Payload = .none;
         var class_payload_kind: class.PayloadKind = .none;
-        const class_record = rt.classes.record(class_id);
         const payload_kind = if (class_record) |record|
             record.payload_kind
         else
@@ -1175,10 +1223,14 @@ pub const Object = struct {
             },
             else => {},
         }
+        if (inline_layout) |layout| {
+            class_payload = .{ .external = inlineClassPayloadPtr(self, layout) };
+            class_payload_kind = .none;
+        }
         var reserved_class_payload_finalizer_slot = false;
         errdefer if (reserved_class_payload_finalizer_slot) rt.releaseDeferredClassPayloadFinalizerSlot();
         if (class_record) |record| {
-            if (record.payload_finalizer != null) {
+            if (record.payload_finalizer != null and !record.hasInlinePayload()) {
                 try rt.reserveDeferredClassPayloadFinalizerSlot();
                 reserved_class_payload_finalizer_slot = true;
             }
@@ -1206,6 +1258,46 @@ pub const Object = struct {
         try rt.writeBarrierObjectSlot(&self.header, &self.prototype);
         initialized = false;
         return self;
+    }
+
+    const InlineClassPayloadLayout = struct {
+        payload_offset: usize,
+        total_size: usize,
+        allocation_alignment: std.mem.Alignment,
+    };
+
+    fn inlineClassPayloadLayout(maybe_record: ?class.Record) ?InlineClassPayloadLayout {
+        const record = maybe_record orelse return null;
+        if (!record.hasInlinePayload()) return null;
+        const payload_align = std.mem.Alignment.fromByteUnits(record.inline_payload_align);
+        const object_align = std.mem.Alignment.of(Object);
+        const allocation_alignment = if (payload_align.compare(.gt, object_align)) payload_align else object_align;
+        const payload_offset = std.mem.alignForward(usize, @sizeOf(Object), payload_align.toByteUnits());
+        const total_size = std.math.add(usize, payload_offset, record.inline_payload_size) catch return null;
+        return .{
+            .payload_offset = payload_offset,
+            .total_size = total_size,
+            .allocation_alignment = allocation_alignment,
+        };
+    }
+
+    fn inlineClassPayloadPtr(self: *Object, layout: InlineClassPayloadLayout) *anyopaque {
+        const bytes: [*]u8 = @ptrCast(self);
+        return @ptrCast(bytes + layout.payload_offset);
+    }
+
+    fn freeObjectAllocation(rt: *JSRuntime, self: *Object, inline_layout: ?InlineClassPayloadLayout) void {
+        if (inline_layout) |layout| {
+            const bytes: [*]u8 = @ptrCast(self);
+            rt.memory.freeAlignedBytes(bytes[0..layout.total_size], layout.allocation_alignment);
+            return;
+        }
+        rt.memory.destroy(Object, self);
+    }
+
+    pub fn allocationSize(self: *const Object, rt: *JSRuntime) usize {
+        if (inlineClassPayloadLayout(rt.classes.record(self.class_id))) |layout| return layout.total_size;
+        return @sizeOf(Object);
     }
 
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
@@ -1256,6 +1348,28 @@ pub const Object = struct {
         self.class_payload = .{ .external = @ptrCast(payload) };
         self.class_payload_kind = .realm;
         return payload;
+    }
+
+    pub fn installExternalClassPayload(self: *Object, payload: *anyopaque) void {
+        std.debug.assert(self.class_payload == .none);
+        self.class_payload = .{ .external = payload };
+        self.class_payload_kind = .none;
+    }
+
+    pub fn externalClassPayload(self: *Object) ?*anyopaque {
+        if (self.class_payload_kind != .none) return null;
+        return switch (self.class_payload) {
+            .external => |payload| payload,
+            .none => null,
+        };
+    }
+
+    pub fn externalClassPayloadConst(self: *const Object) ?*anyopaque {
+        if (self.class_payload_kind != .none) return null;
+        return switch (self.class_payload) {
+            .external => |payload| payload,
+            .none => null,
+        };
     }
 
     pub fn cachedFunctionProtoSlot(self: *Object, rt: *JSRuntime) !*?*Object {
@@ -1360,7 +1474,7 @@ pub const Object = struct {
         rt.unregisterObject(self);
         clearBorrowedReferencesForDestroyedObject(rt, self);
         self.enqueueDeferredStdFileClose(rt);
-        self.enqueueClassPayloadFinalizer(rt);
+        if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
         const old_property_capacity = self.property_capacity;
         self.properties = &.{};
@@ -1408,7 +1522,21 @@ pub const Object = struct {
             if (rt.gc.phase != .deinit) proto.value().free(rt);
         }
         rt.shapes.release(self.shape_ref);
-        rt.memory.destroy(Object, self);
+        freeObjectAllocation(rt, self, inlineClassPayloadLayout(rt.classes.record(self.class_id)));
+    }
+
+    fn finalizeInlineClassPayload(self: *Object, rt: *JSRuntime) bool {
+        const record = rt.classes.record(self.class_id) orelse return false;
+        if (!record.hasInlinePayload()) return false;
+        const finalizer = record.payload_finalizer orelse {
+            self.class_payload = .none;
+            self.class_payload_kind = .none;
+            return true;
+        };
+        finalizer(@ptrCast(rt), @ptrCast(self), &self.class_payload);
+        self.class_payload = .none;
+        self.class_payload_kind = .none;
+        return true;
     }
 
     fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
@@ -2428,15 +2556,32 @@ pub const Object = struct {
     pub fn installByteStorage(self: *Object, rt: *JSRuntime, bytes: []u8) !void {
         if (self.bufferPayload()) |payload| {
             const external_memory = try rt.reportExternalAlloc(bytes.len);
-            if (payload.shared_store) |old_store| {
-                old_store.release();
-            } else {
-                payload.external_memory.release();
-                if (payload.bytes.len != 0) rt.memory.free(u8, payload.bytes);
-            }
+            payload.releaseStorage(rt);
             payload.shared_store = null;
             payload.bytes = bytes;
             payload.external_memory = external_memory;
+            payload.detached = false;
+            return;
+        }
+        std.debug.assert(self.class_payload_kind == .buffer);
+        unreachable;
+    }
+
+    pub fn installExternalByteStorage(
+        self: *Object,
+        rt: *JSRuntime,
+        bytes: []u8,
+        deinit_fn: ExternalByteStorageDeinit,
+        context: ?*anyopaque,
+    ) !void {
+        if (self.bufferPayload()) |payload| {
+            const external_memory = try rt.reportExternalAlloc(bytes.len);
+            payload.releaseStorage(rt);
+            payload.bytes = bytes;
+            payload.external_memory = external_memory;
+            payload.external_deinit = deinit_fn;
+            payload.external_context = context;
+            payload.detached = false;
             return;
         }
         std.debug.assert(self.class_payload_kind == .buffer);
@@ -2445,15 +2590,8 @@ pub const Object = struct {
 
     pub fn detachByteStorage(self: *Object, rt: *JSRuntime) void {
         if (self.bufferPayload()) |payload| {
-            if (payload.shared_store) |old_store| {
-                old_store.release();
-                payload.shared_store = null;
-            } else {
-                payload.external_memory.release();
-                if (payload.bytes.len != 0) rt.memory.free(u8, payload.bytes);
-            }
-            payload.bytes = &.{};
-            payload.external_memory = .{};
+            if (payload.shared_store != null) return;
+            payload.releaseStorage(rt);
             payload.detached = true;
             return;
         }
@@ -2468,15 +2606,11 @@ pub const Object = struct {
 
     pub fn installSharedByteStorage(self: *Object, rt: *JSRuntime, store: *SharedBufferStore) void {
         if (self.bufferPayload()) |payload| {
-            if (payload.shared_store) |old_store| {
-                old_store.release();
-            } else {
-                payload.external_memory.release();
-                if (payload.bytes.len != 0) rt.memory.free(u8, payload.bytes);
-            }
+            payload.releaseStorage(rt);
             payload.shared_store = store;
             payload.bytes = store.bytes;
             payload.external_memory = .{};
+            payload.detached = false;
             return;
         }
         std.debug.assert(self.class_payload_kind == .buffer);
@@ -6930,10 +7064,6 @@ pub const Object = struct {
             const materialized = materializeConsoleAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
-        if (info.kind == .assert) {
-            const materialized = materializeAssertAutoInit(info) orelse return JSValue.undefinedValue();
-            return self.finishMaterializedAutoInit(index, info, materialized);
-        }
         if (info.kind == .math_namespace or
             info.kind == .json_namespace or
             info.kind == .reflect_namespace or
@@ -7240,36 +7370,6 @@ pub const Object = struct {
             false,
             realm_global,
         );
-    }
-
-    fn materializeAssertAutoInit(info: property.AutoInit) ?JSValue {
-        const rt = info.rt;
-        if (info.host_function_kind != host_function.ids.test262_assert) return null;
-        const assert_value = materializeHostFunctionAutoInit(info) orelse return null;
-        const assert_object = objectFromValue(assert_value) orelse {
-            assert_value.free(rt);
-            return null;
-        };
-        assert_object.reserveOwnPropertyCapacityAssumingPlain(rt, 6) catch {
-            assert_value.free(rt);
-            return null;
-        };
-        const methods = [_]struct {
-            name: []const u8,
-            kind: i32,
-        }{
-            .{ .name = "sameValue", .kind = host_function.ids.test262_same_value },
-            .{ .name = "notSameValue", .kind = host_function.ids.test262_not_same_value },
-            .{ .name = "compareArray", .kind = host_function.ids.test262_compare_array },
-            .{ .name = "throws", .kind = host_function.ids.test262_throws },
-        };
-        for (methods) |method| {
-            defineHostAutoInitDataPropertyByName(rt, assert_object, method.name, 2, method.kind, null) catch {
-                assert_value.free(rt);
-                return null;
-            };
-        }
-        return assert_value;
     }
 
     fn materializeConsoleAutoInit(info: property.AutoInit) ?JSValue {
@@ -7749,30 +7849,6 @@ pub const Object = struct {
                 .length = 0,
                 .rt = rt,
                 .kind = .console,
-                .host_function_kind = host_function_kind,
-            } },
-        });
-    }
-
-    pub fn defineAssertAutoInitProperty(
-        self: *Object,
-        rt: *JSRuntime,
-        atom_id: atom.Atom,
-        flags: property.Flags,
-        host_function_kind: i32,
-    ) !void {
-        std.debug.assert(host_function_kind == host_function.ids.test262_assert);
-        std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "assert",
-                .length = 1,
-                .rt = rt,
-                .kind = .assert,
                 .host_function_kind = host_function_kind,
             } },
         });

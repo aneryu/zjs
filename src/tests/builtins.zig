@@ -16,10 +16,7 @@ const countJobArgs = helpers.countJobArgs;
 const objectFromValue = helpers.objectFromValue;
 const expectActiveSetStrings = helpers.expectActiveSetStrings;
 
-
 // ================== builtins_async.zig ==================
-
-
 
 test "Engine eval executes allocator-backed wide Math min max calls" {
     const js = helpers.sharedTestEngine();
@@ -1072,9 +1069,6 @@ test "host print call keeps aliasing and override semantics" {
 
 // ================== collection_typedarray.zig ==================
 
-
-
-
 test "TypedArray array-like construction does not replay coercions after fast path bailout" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -1728,7 +1722,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
     defer globals[0].value.free(rt);
     defer globals[1].value.free(rt);
 
-    try std.testing.expectError(error.Test262Error, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.JSException, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
 
     try std.testing.expectEqual(@as(usize, 9), map_object.weakCollectionEntries().len);
     const get_result = try engine.builtins.collection.methodCall(rt, map_value, 2, &.{mutation_key.value()});

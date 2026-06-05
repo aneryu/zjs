@@ -14,21 +14,20 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
-    const test262_engine_fast_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+    const internal_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
-    test262_engine_fast_mod.addOptions("build_options", engine_options);
+    internal_fast_mod.addOptions("build_options", engine_options);
     const zjs_cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "zjs", .module = test262_engine_fast_mod },
-            .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
+            .{ .name = "zjs_internal", .module = internal_fast_mod },
         },
     });
     const zjs_exe = b.addExecutable(.{
@@ -48,8 +47,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "quickjs_zig_engine", .module = test262_engine_fast_mod },
-                .{ .name = "zjs", .module = test262_engine_fast_mod },
+                .{ .name = "zjs_internal", .module = internal_fast_mod },
             },
         }),
     });

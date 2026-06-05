@@ -43,7 +43,6 @@ pub const Accessor = struct {
 
 pub const AutoInitKind = enum(u8) {
     native_function,
-    assert,
     console,
     math_namespace,
     json_namespace,
@@ -51,7 +50,6 @@ pub const AutoInitKind = enum(u8) {
     atomics_namespace,
     navigator,
     performance,
-    test262_namespace,
     array_unscopables,
     number_constant,
     int32_constant,

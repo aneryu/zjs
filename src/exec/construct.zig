@@ -469,8 +469,7 @@ pub fn isErrorConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "ReferenceError") or
         std.mem.eql(u8, name, "SyntaxError") or
         std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError") or
-        std.mem.eql(u8, name, "Test262Error");
+        std.mem.eql(u8, name, "URIError");
 }
 
 fn constructOrdinaryInstance(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {

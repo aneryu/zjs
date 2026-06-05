@@ -57,7 +57,7 @@ pub const RuntimeError = error{
     StackUnderflow,
     SyntaxError,
     SystemError,
-    Test262Error,
+    JSException,
     Timeout,
     TooManyJobArgs,
     TypeError,

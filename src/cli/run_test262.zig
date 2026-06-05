@@ -1,8 +1,17 @@
 const std = @import("std");
-const zjs = @import("zjs");
-const core = zjs.internal.core;
-const exec = zjs.internal.exec;
-const test262_helpers = @import("test262_helpers.zig");
+const builtin = @import("builtin");
+const internal = if (builtin.is_test) @import("zjs") else @import("zjs_internal");
+const builtins = internal.builtins;
+const core = internal.core;
+const exec = internal.exec;
+const frontend = internal.frontend;
+const runtime_layer = internal.runtime;
+const value_ops = exec.value_ops;
+const property_ops = exec.property_ops;
+const stack_mod = exec.stack;
+const zjs_vm = exec.zjs_vm;
+const shared_vm = exec.shared;
+const call_vm = exec.call;
 
 extern "c" fn getpid() c_int;
 
@@ -1674,19 +1683,22 @@ fn runEmbeddedEngine(
     errdefer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     errdefer ctx.destroy();
+    var output_buffer: [64 * 1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var event_loop = runtime_layer.EventLoop.init(ctx, .{ .output = &output });
+    event_loop.install();
+    errdefer event_loop.deinit();
     const global_obj = try exec.zjs_vm.contextGlobal(ctx);
-    try exec.call.installTest262Globals(rt, global_obj);
-    try test262_helpers.installTest262AgentGlobals(rt, ctx, global_obj);
+    try installTest262Globals(rt, ctx, global_obj);
     defer {
+        event_loop.deinit();
         exec.zjs_vm.cleanupWorkersForRuntime(rt);
-        _ = test262_helpers.cleanupTest262Agents(rt);
+        _ = cleanupTest262Agents(rt);
         exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx);
         ctx.destroy();
         rt.destroy();
     }
     rt.setCanBlock(can_block);
-    var output_buffer: [64 * 1024]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
     var value = (if (run_as_module)
         exec.module_graph.evalFileModuleGraphWithOutput(rt, ctx, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
@@ -1695,7 +1707,7 @@ fn runEmbeddedEngine(
             .output = &output,
             .discard_script_result = true,
         })) catch |err| failed: {
-        if (err == error.Test262Error) {
+        if (err == error.JSException) {
             if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
                 stderr_out.* = name;
                 break :failed core.JSValue.exception();
@@ -2366,12 +2378,1231 @@ fn pathRelativeToBase(base_dir: []const u8, path: []const u8) []const u8 {
     return path;
 }
 
+pub const ErrorKind = enum {
+    test262,
+    eval,
+    reference,
+    syntax,
+    range,
+};
+
+pub fn raise(kind: ErrorKind) error{ JSException, EvalError, ReferenceError, SyntaxError, RangeError } {
+    return switch (kind) {
+        .test262 => error.JSException,
+        .eval => error.EvalError,
+        .reference => error.ReferenceError,
+        .syntax => error.SyntaxError,
+        .range => error.RangeError,
+    };
+}
+
+pub fn assertSameValue(actual: core.JSValue, expected: core.JSValue) !core.JSValue {
+    if (!builtins.object.sameValue(actual, expected)) return error.JSException;
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262EvalScript(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    if (args.len == 0) return core.JSValue.undefinedValue();
+    if (!args[0].isString()) return error.TypeError;
+    const eval_global = shared_vm.objectRealmGlobal(function_object) orelse global;
+    var source = std.ArrayList(u8).empty;
+    defer source.deinit(ctx.runtime.memory.allocator);
+    try shared_vm.appendSourceStringUtf8(ctx.runtime, &source, args[0]);
+    return exec.call.qjsEvalGlobalScriptSource(ctx, output, eval_global, source.items, "<evalScript>");
+}
+
+pub const Test262Agent = struct {
+    source: []u8,
+    owner_runtime: *core.JSRuntime,
+    agent_runtime: ?*core.JSRuntime = null,
+    broadcast_store: ?*core.object.SharedBufferStore = null,
+    broadcast_max_byte_length: ?usize = null,
+    done: bool = false,
+    thread_done: bool = false,
+};
+
+pub const Test262AgentReportEntry = struct {
+    owner_runtime: *core.JSRuntime,
+    bytes: []u8,
+};
+
+pub const Test262AgentCoordinator = struct {
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
+    agents: []*Test262Agent = &.{},
+    agents_capacity: usize = 0,
+    reports: []Test262AgentReportEntry = &.{},
+    reports_capacity: usize = 0,
+};
+
+pub var test262_agents = Test262AgentCoordinator{};
+pub threadlocal var current_test262_agent: ?*Test262Agent = null;
+
+pub var test262_gpa = std.heap.DebugAllocator(.{
+    .safety = false,
+    .stack_trace_frames = 0,
+    .thread_safe = true,
+    .retain_metadata = true,
+}){};
+
+pub fn test262PageAllocator() std.mem.Allocator {
+    return test262_gpa.allocator();
+}
+
+pub fn test262AgentIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+pub fn test262AgentAppend(agent: *Test262Agent) !void {
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    _ = test262AgentSweepCompletedLocked(agent.owner_runtime);
+    try test262AgentEnsureAgentCapacityLocked(test262_agents.agents.len + 1);
+    test262_agents.agents = test262_agents.agents.ptr[0 .. test262_agents.agents.len + 1];
+    test262_agents.agents[test262_agents.agents.len - 1] = agent;
+}
+
+pub fn test262AgentEnqueueReport(owner_runtime: *core.JSRuntime, bytes: []u8) !void {
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    try test262AgentEnsureReportCapacityLocked(test262_agents.reports.len + 1);
+    test262_agents.reports = test262_agents.reports.ptr[0 .. test262_agents.reports.len + 1];
+    test262_agents.reports[test262_agents.reports.len - 1] = .{ .owner_runtime = owner_runtime, .bytes = bytes };
+    test262_agents.cond.broadcast(io);
+}
+
+pub fn test262AgentDestroy(agent: *Test262Agent) void {
+    const allocator = test262PageAllocator();
+    allocator.free(agent.source);
+    if (agent.broadcast_store) |store| {
+        store.release();
+        agent.broadcast_store = null;
+    }
+    allocator.destroy(agent);
+}
+
+pub fn test262AgentEnsureAgentCapacityLocked(min_capacity: usize) !void {
+    if (test262_agents.agents_capacity >= min_capacity) return;
+    const allocator = test262PageAllocator();
+    var next_capacity = if (test262_agents.agents_capacity == 0) @as(usize, 4) else test262_agents.agents_capacity * 2;
+    while (next_capacity < min_capacity) : (next_capacity *= 2) {}
+    const next = try allocator.alloc(*Test262Agent, next_capacity);
+    @memcpy(next[0..test262_agents.agents.len], test262_agents.agents);
+    if (test262_agents.agents_capacity != 0) allocator.free(test262_agents.agents.ptr[0..test262_agents.agents_capacity]);
+    test262_agents.agents = next[0..test262_agents.agents.len];
+    test262_agents.agents_capacity = next_capacity;
+}
+
+pub fn test262AgentEnsureReportCapacityLocked(min_capacity: usize) !void {
+    if (test262_agents.reports_capacity >= min_capacity) return;
+    const allocator = test262PageAllocator();
+    var next_capacity = if (test262_agents.reports_capacity == 0) @as(usize, 4) else test262_agents.reports_capacity * 2;
+    while (next_capacity < min_capacity) : (next_capacity *= 2) {}
+    const next = try allocator.alloc(Test262AgentReportEntry, next_capacity);
+    @memcpy(next[0..test262_agents.reports.len], test262_agents.reports);
+    if (test262_agents.reports_capacity != 0) allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
+    test262_agents.reports = next[0..test262_agents.reports.len];
+    test262_agents.reports_capacity = next_capacity;
+}
+
+pub fn test262AgentRemoveAtLocked(index: usize) void {
+    std.debug.assert(index < test262_agents.agents.len);
+    const agent = test262_agents.agents[index];
+    const old_len = test262_agents.agents.len;
+    if (index + 1 < old_len) {
+        @memmove(test262_agents.agents[index .. old_len - 1], test262_agents.agents[index + 1 .. old_len]);
+    }
+    test262_agents.agents = test262_agents.agents.ptr[0 .. old_len - 1];
+    if (test262_agents.agents.len == 0 and test262_agents.agents_capacity != 0) {
+        const allocator = test262PageAllocator();
+        allocator.free(test262_agents.agents.ptr[0..test262_agents.agents_capacity]);
+        test262_agents.agents = &.{};
+        test262_agents.agents_capacity = 0;
+    }
+    test262AgentDestroy(agent);
+}
+
+pub fn test262AgentRemove(agent: *Test262Agent) void {
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    var index: usize = 0;
+    while (index < test262_agents.agents.len) : (index += 1) {
+        if (test262_agents.agents[index] != agent) continue;
+        test262AgentRemoveAtLocked(index);
+        return;
+    }
+}
+
+pub fn test262AgentSweepCompletedLocked(rt: *core.JSRuntime) usize {
+    var removed: usize = 0;
+    var index: usize = 0;
+    while (index < test262_agents.agents.len) {
+        const agent = test262_agents.agents[index];
+        if (agent.owner_runtime != rt) {
+            index += 1;
+            continue;
+        }
+        if (!agent.thread_done) {
+            index += 1;
+            continue;
+        }
+        test262AgentRemoveAtLocked(index);
+        removed += 1;
+    }
+    return removed;
+}
+
+pub fn test262AgentTakeReportLocked(rt: *core.JSRuntime) ?[]u8 {
+    for (test262_agents.reports, 0..) |entry, index| {
+        if (entry.owner_runtime == rt) {
+            const report = entry.bytes;
+            const old_len = test262_agents.reports.len;
+            if (old_len == 1) {
+                const allocator = test262PageAllocator();
+                allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
+                test262_agents.reports = &.{};
+                test262_agents.reports_capacity = 0;
+                return report;
+            }
+            if (index + 1 < old_len) {
+                @memmove(test262_agents.reports[index .. old_len - 1], test262_agents.reports[index + 1 .. old_len]);
+            }
+            test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
+            return report;
+        }
+    }
+    return null;
+}
+
+pub fn test262AgentSweepReportsLocked(rt: *core.JSRuntime) void {
+    const allocator = test262PageAllocator();
+    var index: usize = 0;
+    while (index < test262_agents.reports.len) {
+        const entry = test262_agents.reports[index];
+        if (entry.owner_runtime == rt) {
+            allocator.free(entry.bytes);
+            const old_len = test262_agents.reports.len;
+            if (old_len == 1) {
+                allocator.free(test262_agents.reports.ptr[0..test262_agents.reports_capacity]);
+                test262_agents.reports = &.{};
+                test262_agents.reports_capacity = 0;
+                break;
+            }
+            if (index + 1 < old_len) {
+                @memmove(test262_agents.reports[index .. old_len - 1], test262_agents.reports[index + 1 .. old_len]);
+            }
+            test262_agents.reports = test262_agents.reports.ptr[0 .. old_len - 1];
+        } else {
+            index += 1;
+        }
+    }
+}
+
+pub fn cleanupTest262Agents(rt: *core.JSRuntime) usize {
+    const io = test262AgentIo();
+
+    var agent_runtimes_buf: [16]*core.JSRuntime = undefined;
+    var agent_runtimes_count: usize = 0;
+
+    test262_agents.mutex.lockUncancelable(io);
+    for (test262_agents.agents) |agent| {
+        if (agent.owner_runtime == rt) {
+            agent.done = true;
+            if (agent.agent_runtime) |art| {
+                if (agent_runtimes_count < agent_runtimes_buf.len) {
+                    agent_runtimes_buf[agent_runtimes_count] = art;
+                    agent_runtimes_count += 1;
+                }
+            }
+        }
+    }
+    test262_agents.cond.broadcast(io);
+    test262_agents.mutex.unlock(io);
+
+    const waiter_io = shared_vm.atomicsWaiterIo();
+    shared_vm.atomics_waiter_mutex.lockUncancelable(waiter_io);
+    var cursor = shared_vm.atomics_waiters;
+    while (cursor) |waiter| {
+        if (waiter.ctx) |w_ctx| {
+            var wake_up = false;
+            if (w_ctx.runtime == rt) {
+                wake_up = true;
+            } else {
+                for (agent_runtimes_buf[0..agent_runtimes_count]) |art| {
+                    if (w_ctx.runtime == art) {
+                        wake_up = true;
+                        break;
+                    }
+                }
+            }
+            if (wake_up) {
+                waiter.notified = true;
+                waiter.cond.broadcast(waiter_io);
+            }
+        }
+        cursor = waiter.next;
+    }
+    shared_vm.atomics_waiter_mutex.unlock(waiter_io);
+
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        test262_agents.mutex.lockUncancelable(io);
+        var all_done = true;
+        for (test262_agents.agents) |agent| {
+            if (agent.owner_runtime == rt and !agent.thread_done) {
+                all_done = false;
+                break;
+            }
+        }
+        test262_agents.mutex.unlock(io);
+        if (all_done) break;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    test262AgentSweepReportsLocked(rt);
+    return test262AgentSweepCompletedLocked(rt);
+}
+
+pub fn test262AgentRecordCountForTests() usize {
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    return test262_agents.agents.len;
+}
+
+pub fn test262AgentInterruptHandler(rt: *core.JSRuntime, context: ?*anyopaque) bool {
+    _ = rt;
+    const agent: *Test262Agent = @ptrCast(@alignCast(context orelse return false));
+    return agent.done;
+}
+
+pub fn test262AgentRun(agent: *Test262Agent) void {
+    current_test262_agent = agent;
+    defer current_test262_agent = null;
+    defer {
+        const io = test262AgentIo();
+        test262_agents.mutex.lockUncancelable(io);
+        agent.done = true;
+        agent.thread_done = true;
+        if (agent.broadcast_store) |store| {
+            store.release();
+            agent.broadcast_store = null;
+        }
+        test262_agents.cond.broadcast(io);
+        test262_agents.mutex.unlock(io);
+    }
+
+    const allocator = test262PageAllocator();
+    const rt = core.JSRuntime.create(allocator) catch return;
+    defer rt.destroy();
+    rt.setCanBlock(true);
+    rt.setInterruptHandler(test262AgentInterruptHandler, agent);
+
+    {
+        const io = test262AgentIo();
+        test262_agents.mutex.lockUncancelable(io);
+        agent.agent_runtime = rt;
+        test262_agents.mutex.unlock(io);
+    }
+
+    const ctx = core.JSContext.create(rt) catch return;
+    defer ctx.destroy();
+    var event_loop = runtime_layer.EventLoop.init(ctx, .{});
+    event_loop.install();
+    defer event_loop.deinit();
+    defer zjs_vm.cleanupAtomicsWaitersForContext(ctx);
+    const global = zjs_vm.contextGlobal(ctx) catch return;
+    installTest262Globals(rt, ctx, global) catch return;
+    var compiled = frontend.parser.parse(rt, agent.source, .{ .mode = .script, .filename = "<test262-agent>" }) catch return;
+    defer compiled.deinit();
+    if (compiled.syntax_error != null) return;
+    var stack = stack_mod.Stack.init(&rt.memory, rt.stack_size);
+    defer stack.deinit(rt);
+    const result = zjs_vm.runWithOutput(ctx, &stack, &compiled.function, null) catch return;
+    result.free(rt);
+    shared_vm.drainPendingPromiseJobs(ctx, null, global) catch {};
+    while (!test262AgentIsDone(agent)) {
+        std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+        shared_vm.drainPendingPromiseJobs(ctx, null, global) catch return;
+    }
+}
+
+pub fn test262AgentIsDone(agent: *Test262Agent) bool {
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    return agent.done;
+}
+
+pub fn qjsTest262AgentStart(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    if (args.len == 0) return error.TypeError;
+    const source = try test262AgentStringValue(ctx.runtime, args[0]);
+    var source_owned = true;
+    errdefer if (source_owned) test262PageAllocator().free(source);
+    const agent = try test262PageAllocator().create(Test262Agent);
+    agent.* = .{ .source = source, .owner_runtime = ctx.runtime };
+    source_owned = false;
+    var agent_owned = true;
+    var agent_registered = false;
+    errdefer if (agent_registered) {
+        test262AgentRemove(agent);
+    } else if (agent_owned) {
+        test262AgentDestroy(agent);
+    };
+    try test262AgentAppend(agent);
+    agent_registered = true;
+    const thread = try std.Thread.spawn(.{}, test262AgentRun, .{agent});
+    thread.detach();
+    agent_owned = false;
+    agent_registered = false;
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262AgentBroadcast(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    if (args.len == 0) return error.TypeError;
+    const buffer = shared_vm.objectFromValue(args[0]) orelse return error.TypeError;
+    if (buffer.class_id != core.class.ids.shared_array_buffer) return error.TypeError;
+    const store = buffer.sharedByteStorageStore() orelse return error.TypeError;
+    const max_byte_length = buffer.arrayBufferMaxByteLength();
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    defer test262_agents.mutex.unlock(io);
+    _ = test262AgentSweepCompletedLocked(ctx.runtime);
+    for (test262_agents.agents) |agent| {
+        if (agent.owner_runtime != ctx.runtime) continue;
+        if (agent.done) continue;
+        if (agent.broadcast_store) |old| old.release();
+        store.retain();
+        agent.broadcast_store = store;
+        agent.broadcast_max_byte_length = max_byte_length;
+    }
+    test262_agents.cond.broadcast(io);
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262AgentReceiveBroadcast(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const agent = current_test262_agent orelse return error.TypeError;
+    if (args.len == 0 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
+
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    while (agent.broadcast_store == null and !agent.done) {
+        test262_agents.cond.waitUncancelable(io, &test262_agents.mutex);
+    }
+    const store = agent.broadcast_store orelse {
+        test262_agents.mutex.unlock(io);
+        return core.JSValue.undefinedValue();
+    };
+    const max_byte_length = agent.broadcast_max_byte_length;
+    agent.broadcast_store = null;
+    agent.broadcast_max_byte_length = null;
+    test262_agents.mutex.unlock(io);
+    defer store.release();
+
+    const sab = try builtins.buffer.sharedArrayBufferFromStore(ctx.runtime, store, max_byte_length, null);
+    defer sab.free(ctx.runtime);
+    const callback_result = try shared_vm.callValueOrBytecode(ctx, output, global orelse try zjs_vm.contextGlobal(ctx), core.JSValue.undefinedValue(), args[0], &.{sab}, null, null);
+    callback_result.free(ctx.runtime);
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262AgentReport(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const bytes = try test262AgentStringValue(ctx.runtime, value);
+    errdefer test262PageAllocator().free(bytes);
+    const owner_runtime = if (current_test262_agent) |agent| agent.owner_runtime else ctx.runtime;
+    try test262AgentEnqueueReport(owner_runtime, bytes);
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262AgentGetReport(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    _ = args;
+    const allocator = test262PageAllocator();
+    const io = test262AgentIo();
+    test262_agents.mutex.lockUncancelable(io);
+    _ = test262AgentSweepCompletedLocked(ctx.runtime);
+    const report = test262AgentTakeReportLocked(ctx.runtime) orelse {
+        test262_agents.mutex.unlock(io);
+        return core.JSValue.nullValue();
+    };
+    test262_agents.mutex.unlock(io);
+    defer allocator.free(report);
+    return value_ops.createStringValue(ctx.runtime, report);
+}
+
+pub fn qjsTest262AgentLeaving(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = ctx;
+    _ = output;
+    _ = global;
+    _ = args;
+    if (current_test262_agent) |agent| {
+        const io = test262AgentIo();
+        test262_agents.mutex.lockUncancelable(io);
+        agent.done = true;
+        test262_agents.cond.broadcast(io);
+        test262_agents.mutex.unlock(io);
+    }
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262AgentSleep(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    const value = if (args.len >= 1) args[0] else core.JSValue.int32(0);
+    const number = value_ops.numberValue(value) orelse 0;
+    if (number > 0) {
+        const ms: i64 = @intFromFloat(@min(number, 60_000));
+        std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
+    }
+    _ = ctx;
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsTest262AgentMonotonicNow(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = ctx;
+    _ = output;
+    _ = global;
+    _ = args;
+    const now = std.Io.Timestamp.now(test262AgentIo(), .awake);
+    return core.JSValue.float64(@as(f64, @floatFromInt(now.nanoseconds)) / std.time.ns_per_ms);
+}
+
+pub fn installTest262Globals(rt: *core.JSRuntime, ctx: *core.JSContext, global: *core.Object) !void {
+    try defineGlobalExternalHostFunction(rt, ctx, global, "Test262Error", 1, wrapExternal(hostCallTest262Error), true);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyProperty", 3, wrapExternal(hostCallVerifyProperty), false);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyCallableProperty", 4, wrapExternal(hostCallVerifyCallableProperty), false);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyNotWritable", 2, wrapExternal(hostCallVerifyNotWritable), false);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyNotEnumerable", 2, wrapExternal(hostCallVerifyNotEnumerable), false);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "verifyConfigurable", 2, wrapExternal(hostCallVerifyConfigurable), false);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "isConstructor", 1, wrapExternal(hostCallIsConstructor), false);
+    try defineGlobalExternalHostFunction(rt, ctx, global, "setTimeout", 2, wrapExternal(hostCallSetTimeout), false);
+    try installAssertObject(rt, ctx, global);
+
+    const ns_key = try rt.internAtom("$262");
+    defer rt.atoms.free(ns_key);
+
+    const ns_val = global.getProperty(ns_key);
+    defer ns_val.free(rt);
+
+    const ns_obj = if (ns_val.isObject())
+        shared_vm.objectFromValue(ns_val).?
+    else result: {
+        const obj = try core.Object.create(rt, core.class.ids.object, null);
+        const obj_val = obj.value();
+        defer obj_val.free(rt);
+        try global.defineOwnProperty(rt, ns_key, core.Descriptor.data(obj_val, true, true, true));
+        break :result obj;
+    };
+
+    const agent_obj = try core.Object.create(rt, core.class.ids.object, null);
+    const agent_val = agent_obj.value();
+    defer agent_val.free(rt);
+
+    const agent_methods = [_]struct {
+        name: []const u8,
+        length: i32,
+        call: core.host_function.ExternalCallFn,
+    }{
+        .{ .name = "start", .length = 1, .call = wrapExternal(qjsTest262AgentStart) },
+        .{ .name = "broadcast", .length = 1, .call = wrapExternal(qjsTest262AgentBroadcast) },
+        .{ .name = "receiveBroadcast", .length = 0, .call = wrapExternal(qjsTest262AgentReceiveBroadcast) },
+        .{ .name = "report", .length = 1, .call = wrapExternal(qjsTest262AgentReport) },
+        .{ .name = "getReport", .length = 0, .call = wrapExternal(qjsTest262AgentGetReport) },
+        .{ .name = "leaving", .length = 0, .call = wrapExternal(qjsTest262AgentLeaving) },
+        .{ .name = "sleep", .length = 1, .call = wrapExternal(qjsTest262AgentSleep) },
+        .{ .name = "monotonicNow", .length = 0, .call = wrapExternal(qjsTest262AgentMonotonicNow) },
+    };
+
+    inline for (agent_methods) |m| {
+        const func_val = try createExternalHostFunction(rt, ctx, m.name, m.length, m.call);
+        defer func_val.free(rt);
+        try defineDataProperty(rt, agent_obj, m.name, func_val, true, false, true);
+    }
+
+    try defineDataProperty(rt, ns_obj, "agent", agent_val, true, false, true);
+
+    // Register evalScript on $262
+    {
+        const func_val = try createExternalHostFunction(rt, ctx, "evalScript", 1, wrapExternalWithFunc(qjsTest262EvalScript));
+        defer func_val.free(rt);
+        try defineDataProperty(rt, ns_obj, "evalScript", func_val, true, false, true);
+    }
+
+    // Register IsHTMLDDA on $262
+    {
+        const func_val = try createExternalHostFunction(rt, ctx, "IsHTMLDDA", 0, wrapExternal(hostCallIsHtmlDda));
+        defer func_val.free(rt);
+        const is_html_dda_obj = shared_vm.objectFromValue(func_val).?;
+        is_html_dda_obj.is_html_dda = true;
+
+        try defineDataProperty(rt, ns_obj, "IsHTMLDDA", func_val, true, false, true);
+    }
+
+    // Register createRealm on $262
+    {
+        const func_val = try createExternalHostFunction(rt, ctx, "createRealm", 0, wrapExternal(qjsTest262CreateRealm));
+        defer func_val.free(rt);
+        try defineDataProperty(rt, ns_obj, "createRealm", func_val, true, false, true);
+    }
+
+    // Register detachArrayBuffer on $262
+    {
+        const func_val = try createExternalHostFunction(rt, ctx, "detachArrayBuffer", 1, wrapExternal(qjsTest262DetachArrayBuffer));
+        defer func_val.free(rt);
+        try defineDataProperty(rt, ns_obj, "detachArrayBuffer", func_val, true, false, true);
+    }
+
+    // Register gc on $262
+    {
+        const func_val = try createExternalHostFunction(rt, ctx, "gc", 0, wrapExternal(qjsTest262Gc));
+        defer func_val.free(rt);
+        try defineDataProperty(rt, ns_obj, "gc", func_val, true, false, true);
+    }
+}
+
+fn installAssertObject(rt: *core.JSRuntime, ctx: *core.JSContext, global: *core.Object) !void {
+    const assert_val = try createExternalHostFunction(rt, ctx, "assert", 1, wrapExternal(hostCallAssertTrue));
+    defer assert_val.free(rt);
+    const assert_obj = try property_ops.expectObject(assert_val);
+    const methods = [_]struct {
+        name: []const u8,
+        length: i32,
+        call: core.host_function.ExternalCallFn,
+    }{
+        .{ .name = "sameValue", .length = 2, .call = wrapExternal(hostCallAssertSameValue) },
+        .{ .name = "notSameValue", .length = 2, .call = wrapExternal(hostCallAssertNotSameValue) },
+        .{ .name = "compareArray", .length = 2, .call = wrapExternal(hostCallCompareArray) },
+        .{ .name = "throws", .length = 2, .call = wrapExternal(hostCallAssertThrows) },
+    };
+    inline for (methods) |method| {
+        const method_val = try createExternalHostFunction(rt, ctx, method.name, method.length, method.call);
+        defer method_val.free(rt);
+        try defineDataProperty(rt, assert_obj, method.name, method_val, true, true, true);
+    }
+    try defineDataProperty(rt, global, "assert", assert_val, true, true, true);
+}
+
+fn defineGlobalExternalHostFunction(
+    rt: *core.JSRuntime,
+    ctx: *core.JSContext,
+    global: *core.Object,
+    name: []const u8,
+    length: i32,
+    call: core.host_function.ExternalCallFn,
+    with_prototype: bool,
+) !void {
+    const func_val = try createExternalHostFunctionWithRealm(rt, ctx, name, length, call, with_prototype, global);
+    defer func_val.free(rt);
+    try defineDataProperty(rt, global, name, func_val, true, true, true);
+}
+
+fn defineDataProperty(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    name: []const u8,
+    value: core.JSValue,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+) !void {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, writable, enumerable, configurable));
+}
+
+fn hostCallTest262Error(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    const message = if (args.len > 0) try stringBytes(ctx.runtime, args[0]) else "";
+    defer if (args.len > 0) ctx.runtime.memory.allocator.free(message);
+    return createTest262ErrorValue(ctx, global, message);
+}
+
+fn hostCallAssertSameValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = ctx;
+    _ = output;
+    _ = global;
+    return assertSameValueArgs(args);
+}
+
+fn hostCallAssertTrue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = ctx;
+    _ = output;
+    _ = global;
+    if (args.len < 1 or args[0].asBool() != true) return error.JSException;
+    return core.JSValue.undefinedValue();
+}
+
+fn hostCallAssertNotSameValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = ctx;
+    _ = output;
+    _ = global;
+    if (args.len < 2) return error.TypeError;
+    if (builtins.object.sameValue(args[0], args[1])) return error.JSException;
+    return core.JSValue.undefinedValue();
+}
+
+fn hostCallAssertThrows(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    if (args.len < 2) return error.TypeError;
+    const expected = try property_ops.expectObject(args[0]);
+    const expected_name = try call_vm.nativeFunctionNameForVm(ctx.runtime, expected);
+    defer ctx.runtime.memory.allocator.free(expected_name);
+    const result = call_vm.callValueWithThisGlobalsAndGlobal(
+        ctx,
+        output,
+        global,
+        &.{},
+        core.JSValue.undefinedValue(),
+        args[1],
+        &.{},
+    ) catch |err| {
+        if (err == error.JSException and ctx.hasException()) {
+            if (try shared_vm.consumePendingExceptionIfMatchesConstructor(ctx, expected_name)) {
+                return core.JSValue.undefinedValue();
+            }
+            return error.JSException;
+        }
+        if (errorNameMatchesConstructor(err, expected_name)) {
+            ctx.clearException();
+            return core.JSValue.undefinedValue();
+        }
+        return error.JSException;
+    };
+    defer result.free(ctx.runtime);
+    return error.JSException;
+}
+
+fn hostCallVerifyProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    return hostVerifyProperty(ctx.runtime, args, false);
+}
+
+fn hostCallVerifyCallableProperty(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    return hostVerifyProperty(ctx.runtime, args, true);
+}
+
+fn hostCallIsConstructor(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    if (args.len < 1) return error.TypeError;
+    const object = shared_vm.objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
+    if (!value_ops.isFunctionObject(args[0])) return core.JSValue.boolean(false);
+    const name = call_vm.nativeFunctionNameForVm(ctx.runtime, object) catch return core.JSValue.boolean(false);
+    defer ctx.runtime.memory.allocator.free(name);
+    return core.JSValue.boolean(shared_vm.isBuiltinConstructorName(name));
+}
+
+fn hostCallVerifyNotWritable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    return hostVerifyPropertyFlag(ctx.runtime, args, .not_writable);
+}
+
+fn hostCallVerifyNotEnumerable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    return hostVerifyPropertyFlag(ctx.runtime, args, .not_enumerable);
+}
+
+fn hostCallVerifyConfigurable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    return hostVerifyPropertyFlag(ctx.runtime, args, .configurable);
+}
+
+fn hostCallCompareArray(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    if (args.len < 2) return error.TypeError;
+    const actual = try property_ops.expectObject(args[0]);
+    const expected = try property_ops.expectObject(args[1]);
+    if (!actual.is_array or !expected.is_array) return error.JSException;
+    if (actual.length != expected.length) return error.JSException;
+    var index: u32 = 0;
+    while (index < actual.length) : (index += 1) {
+        const key = core.atom.atomFromUInt32(index);
+        const lhs = actual.getProperty(key);
+        defer lhs.free(ctx.runtime);
+        const rhs = expected.getProperty(key);
+        defer rhs.free(ctx.runtime);
+        if (!builtins.object.sameValue(lhs, rhs)) return error.JSException;
+    }
+    return core.JSValue.undefinedValue();
+}
+
+fn hostCallSetTimeout(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    const active_global = global orelse ctx.global orelse return error.TypeError;
+    const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (!shared_vm.isCallableValue(callback)) return try shared_vm.throwTypeErrorMessage(ctx, active_global, "not a function");
+    var delay = try test262Int64Arg(ctx.runtime, args, 1);
+    if (delay < 1) delay = 1;
+    const host_event_loop = ctx.hostEventLoop() orelse return error.TypeError;
+    const id = host_event_loop.nextTimerId();
+    try shared_vm.enqueueOsTimer(ctx, id, callback, @intCast(delay), false);
+    return int64ResultValue(id);
+}
+
+fn assertSameValueArgs(values: []const core.JSValue) !core.JSValue {
+    if (values.len < 2) return error.TypeError;
+    if (!builtins.object.sameValue(values[0], values[1])) return error.JSException;
+    return core.JSValue.undefinedValue();
+}
+
+fn hostVerifyProperty(rt: *core.JSRuntime, values: []const core.JSValue, callable: bool) !core.JSValue {
+    const desc_index: usize = if (callable) 4 else 2;
+    if ((!callable and values.len <= desc_index) or (callable and values.len < 4)) return error.TypeError;
+    const object = try property_ops.expectObject(values[0]);
+    const key = try property_ops.propertyKeyAtom(rt, values[1]);
+    defer rt.atoms.free(key);
+
+    var original = object.getOwnProperty(key) orelse if (object.is_global and value_ops.atomNameEql(rt, key, "globalThis")) core.Descriptor.data(object.value().dup(), true, false, true) else {
+        if (values[desc_index].isUndefined()) return core.JSValue.boolean(true);
+        return error.JSException;
+    };
+    try call_vm.materializeMappedArgumentsDescriptorValueForVm(rt, object, key, &original);
+    defer original.destroy(rt);
+
+    if (callable) {
+        const actual = object.getProperty(key);
+        defer actual.free(rt);
+        if (!value_ops.isFunctionObject(actual)) return error.JSException;
+        const expected_name = try stringBytes(rt, values[2]);
+        defer rt.memory.allocator.free(expected_name);
+        const function_object = try property_ops.expectObject(actual);
+        const actual_name = try call_vm.nativeFunctionNameForVm(rt, function_object);
+        defer rt.memory.allocator.free(actual_name);
+        if (!std.mem.eql(u8, expected_name, actual_name)) return error.JSException;
+        const expected_length = values[3].asInt32() orelse return error.JSException;
+        const length_value = function_object.getProperty(core.atom.ids.length);
+        defer length_value.free(rt);
+        if (length_value.asInt32() != expected_length) return error.JSException;
+        if (values.len <= desc_index or values[desc_index].isUndefined()) return core.JSValue.boolean(true);
+    }
+
+    const expected_object = try property_ops.expectObject(values[desc_index]);
+    try verifyDescriptorObject(rt, original, expected_object);
+    return core.JSValue.boolean(true);
+}
+
+const VerifyFlag = enum {
+    not_writable,
+    not_enumerable,
+    configurable,
+};
+
+fn hostVerifyPropertyFlag(rt: *core.JSRuntime, values: []const core.JSValue, flag: VerifyFlag) !core.JSValue {
+    if (values.len < 2) return error.TypeError;
+    const object = try property_ops.expectObject(values[0]);
+    const key = try property_ops.propertyKeyAtom(rt, values[1]);
+    defer rt.atoms.free(key);
+    const desc = object.getOwnProperty(key) orelse return error.JSException;
+    defer desc.destroy(rt);
+    switch (flag) {
+        .not_writable => if (desc.kind == .data and (desc.writable orelse false)) return error.JSException,
+        .not_enumerable => if (desc.enumerable orelse false) return error.JSException,
+        .configurable => if (!(desc.configurable orelse false)) return error.JSException,
+    }
+    return core.JSValue.undefinedValue();
+}
+
+fn verifyDescriptorObject(rt: *core.JSRuntime, actual: core.Descriptor, expected: *core.Object) !void {
+    if (try expectedHas(rt, expected, "value")) {
+        const expected_value = try expectedValue(rt, expected, "value");
+        defer expected_value.free(rt);
+        if (!builtins.object.sameValue(actual.value, expected_value)) return error.JSException;
+    }
+    if (try expectedHas(rt, expected, "writable")) {
+        const writable_value = try expectedValue(rt, expected, "writable");
+        defer writable_value.free(rt);
+        const expected_writable = writable_value.asBool() orelse return error.JSException;
+        if (actual.writable != expected_writable) return error.JSException;
+    }
+    if (try expectedHas(rt, expected, "enumerable")) {
+        const enumerable_value = try expectedValue(rt, expected, "enumerable");
+        defer enumerable_value.free(rt);
+        const expected_enumerable = enumerable_value.asBool() orelse return error.JSException;
+        if (actual.enumerable != expected_enumerable) return error.JSException;
+    }
+    if (try expectedHas(rt, expected, "configurable")) {
+        const configurable_value = try expectedValue(rt, expected, "configurable");
+        defer configurable_value.free(rt);
+        const expected_configurable = configurable_value.asBool() orelse return error.JSException;
+        if (actual.configurable != expected_configurable) return error.JSException;
+    }
+    if (try expectedHas(rt, expected, "get")) {
+        const expected_getter = try expectedValue(rt, expected, "get");
+        defer expected_getter.free(rt);
+        if (!builtins.object.sameValue(actual.getter, expected_getter)) return error.JSException;
+    }
+    if (try expectedHas(rt, expected, "set")) {
+        const expected_setter = try expectedValue(rt, expected, "set");
+        defer expected_setter.free(rt);
+        if (!builtins.object.sameValue(actual.setter, expected_setter)) return error.JSException;
+    }
+}
+
+fn expectedHas(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !bool {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    return object.hasProperty(key);
+}
+
+fn expectedValue(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !core.JSValue {
+    const key = try rt.internAtom(name);
+    defer rt.atoms.free(key);
+    return object.getProperty(key);
+}
+
+fn stringBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
+    if (!value.isString()) return error.TypeError;
+    var buffer = std.ArrayList(u8).empty;
+    errdefer buffer.deinit(rt.memory.allocator);
+    try value_ops.appendRawString(rt, &buffer, value);
+    return buffer.toOwnedSlice(rt.memory.allocator);
+}
+
+fn errorNameMatchesConstructor(err: anytype, constructor_name: []const u8) bool {
+    const err_name = @errorName(err);
+    return (std.mem.eql(u8, err_name, "TypeError") and std.mem.eql(u8, constructor_name, "TypeError")) or
+        (std.mem.eql(u8, err_name, "SyntaxError") and std.mem.eql(u8, constructor_name, "SyntaxError")) or
+        (std.mem.eql(u8, err_name, "RangeError") and std.mem.eql(u8, constructor_name, "RangeError")) or
+        (std.mem.eql(u8, err_name, "EvalError") and std.mem.eql(u8, constructor_name, "EvalError")) or
+        (std.mem.eql(u8, err_name, "ReferenceError") and std.mem.eql(u8, constructor_name, "ReferenceError"));
+}
+
+fn test262Int64Arg(rt: *core.JSRuntime, args: []const core.JSValue, index: usize) !i64 {
+    const value = if (index < args.len) args[index] else core.JSValue.undefinedValue();
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
+    if (!std.math.isFinite(number) or std.math.isNan(number)) return 0;
+    const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
+    return @intFromFloat(integer);
+}
+
+fn int64ResultValue(value: i64) core.JSValue {
+    if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32)) {
+        return core.JSValue.int32(@intCast(value));
+    }
+    return value_ops.numberToValue(@floatFromInt(value));
+}
+
+fn hostCallIsHtmlDda(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = ctx;
+    _ = output;
+    _ = global;
+    _ = args;
+    return core.JSValue.undefinedValue();
+}
+
+fn qjsTest262CreateRealm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    _ = args;
+    const realm_value = try call_vm.createRealmObject(ctx.runtime);
+    errdefer realm_value.free(ctx.runtime);
+    const realm = try property_ops.expectObject(realm_value);
+    const global_key = try ctx.runtime.internAtom("global");
+    defer ctx.runtime.atoms.free(global_key);
+    const realm_global_value = realm.getProperty(global_key);
+    defer realm_global_value.free(ctx.runtime);
+    const realm_global = try property_ops.expectObject(realm_global_value);
+    const eval_func = try createExternalHostFunctionWithRealm(ctx.runtime, ctx, "evalScript", 1, wrapExternalWithFunc(qjsTest262EvalScript), false, realm_global);
+    defer eval_func.free(ctx.runtime);
+    try defineDataProperty(ctx.runtime, realm, "evalScript", eval_func, true, true, true);
+    return realm_value;
+}
+
+fn qjsTest262DetachArrayBuffer(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    if (args.len < 1) return error.TypeError;
+    return try builtins.buffer.detachArrayBuffer(ctx.runtime, args[0]);
+}
+
+fn qjsTest262Gc(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    _ = output;
+    _ = global;
+    _ = args;
+    _ = ctx.runtime.runObjectCycleRemoval();
+    return core.JSValue.undefinedValue();
+}
+
+fn wrapExternal(comptime f: anytype) core.host_function.ExternalCallFn {
+    return struct {
+        fn call(ptr: *anyopaque, c: core.host_function.ExternalCall) anyerror!core.JSValue {
+            _ = ptr;
+            const ctx: *core.JSContext = @ptrCast(@alignCast(c.ctx));
+            return f(ctx, c.output, c.global, c.args) catch |err| {
+                try ensureTest262HarnessException(ctx, c.global, err);
+                return err;
+            };
+        }
+    }.call;
+}
+
+fn wrapExternalWithFunc(comptime f: anytype) core.host_function.ExternalCallFn {
+    return struct {
+        fn call(ptr: *anyopaque, c: core.host_function.ExternalCall) anyerror!core.JSValue {
+            _ = ptr;
+            const ctx: *core.JSContext = @ptrCast(@alignCast(c.ctx));
+            const global = c.global orelse c.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
+            return f(ctx, c.output, global, c.func_obj, c.args) catch |err| {
+                try ensureTest262HarnessException(ctx, global, err);
+                return err;
+            };
+        }
+    }.call;
+}
+
+fn ensureTest262HarnessException(ctx: *core.JSContext, global: ?*core.Object, err: anyerror) !void {
+    if (err != error.JSException or ctx.hasException()) return;
+    _ = throwTest262HarnessError(ctx, global, "") catch |throw_err| switch (throw_err) {
+        error.JSException => return,
+        else => return throw_err,
+    };
+}
+
+fn throwTest262HarnessError(ctx: *core.JSContext, global: ?*core.Object, message: []const u8) !core.JSValue {
+    const error_value = try createTest262ErrorValue(ctx, global, message);
+    var error_value_owned = true;
+    errdefer if (error_value_owned) error_value.free(ctx.runtime);
+    _ = ctx.throwValue(error_value);
+    error_value_owned = false;
+    return error.JSException;
+}
+
+fn createTest262ErrorValue(ctx: *core.JSContext, global: ?*core.Object, message: []const u8) !core.JSValue {
+    const active_global = global orelse try zjs_vm.contextGlobal(ctx);
+    const error_value = try shared_vm.createNamedError(ctx.runtime, active_global, "Test262Error", message);
+    errdefer error_value.free(ctx.runtime);
+    try shared_vm.attachStackToErrorValue(ctx, active_global, error_value);
+    return error_value;
+}
+
+fn createExternalHostFunction(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    name: []const u8,
+    length: i32,
+    call: core.host_function.ExternalCallFn,
+) !core.JSValue {
+    return createExternalHostFunctionWithRealm(runtime, context, name, length, call, false, null);
+}
+
+fn createExternalHostFunctionWithRealm(
+    runtime: *core.JSRuntime,
+    context: *core.JSContext,
+    name: []const u8,
+    length: i32,
+    call: core.host_function.ExternalCallFn,
+    with_prototype: bool,
+    realm_global: ?*core.Object,
+) !core.JSValue {
+    const id = try runtime.registerExternalHostFunction(.{
+        .ptr = undefined,
+        .call = call,
+        .finalizer = null,
+    });
+    const function_value = try builtins.function.nativeFunction(runtime, name, length);
+    errdefer function_value.free(runtime);
+
+    const function_object = try exec.property_ops.expectObject(function_value);
+    function_object.hostFunctionKindSlot().* = core.host_function.ids.external_host;
+    function_object.externalHostFunctionIdSlot().* = id;
+    const global_object = realm_global orelse try zjs_vm.contextGlobal(context);
+    try function_object.setFunctionRealmGlobalPtr(runtime, global_object);
+    if (with_prototype) {
+        const prototype = try core.Object.create(runtime, core.class.ids.object, null);
+        const prototype_value = prototype.value();
+        defer prototype_value.free(runtime);
+        try function_object.defineOwnProperty(runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, true, true));
+    }
+    return function_value;
+}
+
+fn test262AgentStringArg(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
+    var bytes = std.ArrayList(u8).empty;
+    errdefer bytes.deinit(rt.memory.allocator);
+    try value_ops.appendValueString(rt, &bytes, value);
+    return bytes.toOwnedSlice(rt.memory.allocator);
+}
+
+pub fn test262AgentStringValue(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
+    const local = try test262AgentStringArg(rt, value);
+    defer rt.memory.allocator.free(local);
+    return try test262PageAllocator().dupe(u8, local);
+}
+
 test "test262 args parse QuickJS-shaped config and root" {
     const config = try parseArgs(&.{ "-c", "test262.conf", "-m", "-t", "1", "test262/test" });
     try std.testing.expectEqualStrings("test262.conf", config.config_path.?);
     try std.testing.expect(config.module);
     try std.testing.expectEqual(@as(u32, 1), config.threads);
     try std.testing.expectEqualStrings("test262/test", config.test_root.?);
+}
+
+test "test262 globals release local namespace object reference" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+    const global = try zjs_vm.contextGlobal(ctx);
+
+    try installTest262Globals(rt, ctx, global);
+
+    const ns_key = try rt.internAtom("$262");
+    defer rt.atoms.free(ns_key);
+    const ns_val = global.getProperty(ns_key);
+    defer ns_val.free(rt);
+    const ns_obj = shared_vm.objectFromValue(ns_val).?;
+
+    try std.testing.expectEqual(@as(i32, 2), ns_obj.header.rc);
 }
 
 test "test262 args parse timeout and verbose levels" {

@@ -15,7 +15,7 @@
 //!
 //! This parser emits real QuickJS opcode ids (`bytecode.opcode.op.<name>`)
 //! into the bytecode buffer and is validated against QuickJS semantics through
-//! focused smoke and test262 slices.
+//! focused conformance and regression slices.
 //!
 //! This module coexists with the legacy `frontend/parser.zig`
 //! (QuickParser) until the remaining legacy callers are retired.
@@ -817,8 +817,8 @@ pub const ParseState = struct {
     }
 
     /// Enable expression-statement completion capture without changing script
-    /// declaration semantics. Test262's `$262.evalScript` evaluates as global
-    /// script code, not eval code, but still returns the script completion.
+    /// declaration semantics. This supports global script execution that returns
+    /// the script completion without switching to eval code semantics.
     pub fn enableReturnCompletion(self: *ParseState) Error!void {
         const idx = try self.addScopeVar(eval_ret_atom, .normal, false, false);
         self.eval_ret_idx = idx;

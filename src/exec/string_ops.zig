@@ -368,7 +368,6 @@ const updateRegExpLegacyStaticsNoCaptures = shared_vm.updateRegExpLegacyStaticsN
 const valueTruthy = shared_vm.valueTruthy;
 const valuesStrictEqual = shared_vm.valuesStrictEqual;
 
-
 pub fn toStringForAnnexB(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4424,7 +4423,6 @@ pub fn consumePendingExceptionIfMatchesConstructor(ctx: *core.JSContext, expecte
     return matches;
 }
 
-
 pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSValue, expected_name: []const u8) !bool {
     if (!thrown_value.isObject()) return false;
     const thrown_object = property_ops.expectObject(thrown_value) catch return false;
@@ -4692,8 +4690,6 @@ pub const KeywordMatch = struct {
     keyword: []const u8,
 };
 
-
-
 pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, atom_id: core.Atom, value: core.JSValue) void {
     const count = @min(frame.function.var_ref_names.len, frame.var_refs.len);
     for (frame.function.var_ref_names[0..count], 0..) |name, idx| {
@@ -4867,8 +4863,8 @@ pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: co
     const unit = string_value.codeUnitAt(index);
     if (unit <= 0x7f) {
         // ASCII fast path: reuse the runtime's cached single-byte
-        // strings. Hot loops like `decimalToPercentHexString` (test262's
-        // URI sweep) hit this path thousands of times per inner
+        // strings. Hot loops like `decimalToPercentHexString` in URI sweeps
+        // hit this path thousands of times per inner
         // iteration, and avoiding the per-call header+bytes allocation
         // pair is a major speedup.
         const cached = (try rt.singleByteString(@intCast(unit))).?;

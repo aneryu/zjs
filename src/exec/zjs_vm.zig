@@ -1,6 +1,6 @@
 //! QuickJS-aligned VM dispatcher for bytecode produced by
-//! `frontend/zjs_parser.zig`, tracked by the current test262-driven
-//! and post-terminal alignment plans.
+//! `frontend/zjs_parser.zig`, tracked by the current semantic
+//! alignment plans.
 //!
 //! This is the only VM dispatcher after the parser-rewrite M2 swap.
 //!
@@ -123,9 +123,8 @@ pub fn runModuleWithOutputAndVarRefsState(
 /// `JS_Eval` shares the per-context globals across invocations.
 /// Building the global object eagerly installs every standard
 /// constructor (Object, Array, String, ..., 43 specs and ~362
-/// methods) plus the host helpers (`print`, Test262 helpers,
-/// `console`, `assert`); keeping it cached avoids paying that cost
-/// on every eval call.
+/// methods) plus generic host helpers such as `print` and `console`;
+/// keeping it cached avoids paying that cost on every eval call.
 pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     if (ctx.global) |existing| return existing;
     const global_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
@@ -160,7 +159,7 @@ pub fn runWithArgs(
     input_eval_var_refs: []const core.JSValue,
 ) !core.JSValue {
     return runWithArgsState(ctx, stack, function, initial_this_value, args, var_refs, output, global, break_var_ref_cycles_on_exit, strict_unresolved_get_var, stop_on_yield, eval_local_names, eval_local_slots, eval_var_ref_names, input_eval_var_refs, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
-        if (!ctx.preserve_uncaught_exception and err != error.Test262Error and ctx.hasException()) ctx.clearException();
+        if (!ctx.preserve_uncaught_exception and err != error.JSException and ctx.hasException()) ctx.clearException();
         return err;
     };
 }
@@ -415,8 +414,8 @@ pub fn runWithArgsState(
         } else {
             try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         }
-        if (!(try handleCatchableRuntimeError(ctx, stack, &frame, &catch_target, global, error.Test262Error))) {
-            return error.Test262Error;
+        if (!(try handleCatchableRuntimeError(ctx, stack, &frame, &catch_target, global, error.JSException))) {
+            return error.JSException;
         }
     }
     const check_interrupts = ctx.runtime.hasInterruptHandler();
@@ -1749,7 +1748,6 @@ const functionHasNonLexicalLocal = shared_vm.functionHasNonLexicalLocal;
 const freeAtomSlice = shared_vm.freeAtomSlice;
 const freeValueSlice = shared_vm.freeValueSlice;
 const publishDirectEvalVarRefs = shared_vm.publishDirectEvalVarRefs;
-const qjsTest262EvalScript = shared_vm.qjsTest262EvalScript;
 const replaceFrameVarRefBinding = shared_vm.replaceFrameVarRefBinding;
 const indirectEval = shared_vm.indirectEval;
 const appendSourceStringUtf8 = shared_vm.appendSourceStringUtf8;
@@ -2635,4 +2633,3 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
     try std.testing.expect(value.isUndefined());
     try std.testing.expectEqualStrings("1\n", output.buffered());
 }
-

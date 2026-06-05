@@ -22,6 +22,8 @@ pub const memory = @import("memory.zig");
 pub const profile = @import("profile.zig");
 
 pub const JSValue = value.JSValue;
+pub const JSString = JSValue.String;
+pub const JSBytes = JSValue.Bytes;
 pub const Tag = value.Tag;
 pub const Atom = atom.Atom;
 pub const AtomTable = atom.AtomTable;
@@ -49,7 +51,4 @@ pub const EvalTiming = context.ContextEvalTiming;
 pub const BacktraceFrame = context.BacktraceFrame;
 pub const BacktraceLocation = context.BacktraceLocation;
 pub const BacktraceLocationResolver = context.BacktraceLocationResolver;
-pub const OsTimer = context.OsTimer;
-pub const OsRwHandler = context.OsRwHandler;
-pub const OsSignalHandler = context.OsSignalHandler;
 pub const OpcodeProfile = profile.OpcodeProfile;

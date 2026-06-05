@@ -307,7 +307,7 @@ pub fn fromCharCode(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVal
     }
 
     // Most call sites pass 1-2 code points (notably the `String.fromCharCode(H, L)`
-    // surrogate-pair pattern that drives test262's URI sweeps), so keep the
+    // surrogate-pair pattern that drives URI sweeps), so keep the
     // working buffer on the stack.
     var stack_buf: [16]u16 = undefined;
     var heap_buf: []u16 = &.{};

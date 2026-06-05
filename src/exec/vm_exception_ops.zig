@@ -82,8 +82,7 @@ test "createNamedErrorWithConstructor roots direct symbol constructor while crea
 }
 
 /// Throw the canonical `ReferenceError` for a TDZ violation.
-/// Returns `error.ReferenceError` to align with the legacy VM
-/// convention (`exec/test262_helpers.raise(.reference)`).
+/// Returns `error.ReferenceError` to align with the VM sentinel convention.
 pub fn throwTdzReference(ctx: *core.JSContext) error{ReferenceError} {
     const rt = ctx.runtime;
 
@@ -159,7 +158,6 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
     return value;
 }
 
-
 pub fn qjsPromiseAggregateError(rt: *core.JSRuntime, global: *core.Object, errors: *core.Object) !core.JSValue {
     const aggregate_error = try createNamedError(rt, global, "AggregateError", "");
     errdefer aggregate_error.free(rt);
@@ -194,7 +192,6 @@ pub fn rejectedPromiseForRuntimeError(
     return promise;
 }
 
-
 pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
     _ = rt;
     return object.isCallSite();
@@ -220,8 +217,7 @@ pub fn isErrorConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "ReferenceError") or
         std.mem.eql(u8, name, "SyntaxError") or
         std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError") or
-        std.mem.eql(u8, name, "Test262Error");
+        std.mem.eql(u8, name, "URIError");
 }
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
@@ -237,7 +233,7 @@ pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
 
 pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     if (!ctx.hasException()) return false;
-    if (std.mem.eql(u8, @errorName(err), "Test262Error")) return true;
+    if (std.mem.eql(u8, @errorName(err), "JSException")) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
     const object = objectFromValue(ctx.exception_slot.value) orelse return false;
     const name_value = object.getProperty(core.atom.ids.name);
@@ -259,7 +255,6 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
 
 pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
     const name = @errorName(err);
-    if (std.mem.eql(u8, name, "Test262Error")) return .{ .name = "Test262Error", .message = "" };
     if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "expecting hex digit" };
     if (std.mem.eql(u8, name, "TypeError") or std.mem.eql(u8, name, "NotExtensible")) return .{ .name = "TypeError", .message = "not a Date object" };
     if (std.mem.eql(u8, name, "InvalidCharacterError")) return .{ .name = "InvalidCharacterError", .message = "" };
@@ -281,7 +276,6 @@ pub fn promiseErrorInfo(err: anytype) ErrorInfo {
 
 fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
     const name = @errorName(err);
-    if (std.mem.eql(u8, name, "Test262Error")) return "Test262Error";
     if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return "URIError";
     if (std.mem.eql(u8, name, "TypeError")) return "TypeError";
     if (std.mem.eql(u8, name, "InvalidCharacterError")) return "InvalidCharacterError";

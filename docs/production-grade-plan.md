@@ -3,11 +3,14 @@
 本文是 `zjs` 成为 production-grade embeddable JavaScript engine 的总路线图。
 它定义目标、完成标准和长期 TODO。更细的契约和发布检查保留在对应文档中：
 
-- API 契约：[engine-api-v1.md](engine-api-v1.md)
+- 当前 API / 边界契约：[ADR 0001](adr/0001-zig-kernel-api-and-runtime-boundary.md)
 - 兼容性边界：[compatibility-v1.md](compatibility-v1.md)
 - 安全边界：[security-boundary.md](security-boundary.md)
 - 嵌入示例：[embedding-cookbook.md](embedding-cookbook.md)
 - 发布检查：[release-checklist.md](release-checklist.md)
+
+Note: earlier Engine-facade API items in this roadmap are legacy direction.
+Current public API work follows the low-level kernel surface in ADR 0001.
 
 ## 目标
 

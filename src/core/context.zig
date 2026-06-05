@@ -2,6 +2,7 @@ const std = @import("std");
 
 const atom = @import("atom.zig");
 const bytecode = @import("../bytecode/root.zig");
+const class = @import("class.zig");
 const exec = @import("../exec/root.zig");
 const parser = @import("../frontend/parser.zig");
 const Object = @import("object.zig").Object;
@@ -135,7 +136,7 @@ pub const DynamicImportError = error{
     SystemError,
     SystemFdQuotaExceeded,
     SystemResources,
-    Test262Error,
+    JSException,
     ThreadQuotaExceeded,
     Timeout,
     TooManyJobArgs,
@@ -197,125 +198,81 @@ pub const ContextEvalOptions = struct {
 
 pub const EvalOptions = ContextEvalOptions;
 
-pub const OsTimer = struct {
-    id: i64,
-    callback: JSValue,
-    timeout_ms: u64,
-    delay_ms: u64,
-    repeats: bool,
-    callback_symbol_rooted: bool = false,
-
-    pub fn init(ctx: *JSContext, id: i64, callback: JSValue, timeout_ms: u64, delay_ms: u64, repeats: bool) !OsTimer {
-        var timer = OsTimer{
-            .id = id,
-            .callback = callback.dup(),
-            .timeout_ms = timeout_ms,
-            .delay_ms = delay_ms,
-            .repeats = repeats,
-        };
-        errdefer timer.callback.free(ctx.runtime);
-        timer.callback_symbol_rooted = try ctx.runtime.registerExternalValueSymbolRoot(callback);
-        return timer;
-    }
-
-    pub fn deinit(self: OsTimer, rt: *JSRuntime) void {
-        if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
-        self.callback.free(rt);
-    }
-
-    pub fn traceRoots(self: *OsTimer, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.callback);
-    }
+pub const SignalDisposition = enum {
+    default,
+    ignore,
 };
 
-pub const OsRwHandler = struct {
-    fd: i32,
-    read_callback: JSValue = JSValue.nullValue(),
-    write_callback: JSValue = JSValue.nullValue(),
-    symbol_root_mask: u2 = 0,
+pub const HostEventLoop = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
 
-    pub fn deinit(self: OsRwHandler, rt: *JSRuntime) void {
-        if ((self.symbol_root_mask & 0b01) != 0) rt.unregisterExternalValueSymbolRoot(self.read_callback);
-        if ((self.symbol_root_mask & 0b10) != 0) rt.unregisterExternalValueSymbolRoot(self.write_callback);
-        self.read_callback.free(rt);
-        self.write_callback.free(rt);
+    pub const VTable = struct {
+        traceRoots: *const fn (*anyopaque, *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void,
+        setExitCode: *const fn (*anyopaque, u8) void,
+        exitCode: *const fn (*anyopaque) ?u8,
+        nextTimerId: *const fn (*anyopaque) i64,
+        enqueueTimer: *const fn (*anyopaque, *JSContext, i64, JSValue, u64, bool) anyerror!void,
+        clearTimer: *const fn (*anyopaque, *JSContext, i64) void,
+        runNextTimer: *const fn (*anyopaque, *JSContext, ?*std.Io.Writer, *Object) anyerror!bool,
+        setRwHandler: *const fn (*anyopaque, *JSContext, i32, bool, JSValue) anyerror!void,
+        clearRwHandler: *const fn (*anyopaque, *JSContext, i32, bool) void,
+        runNextRwHandler: *const fn (*anyopaque, *JSContext, ?*std.Io.Writer, *Object) anyerror!bool,
+        setSignalHandler: *const fn (*anyopaque, *JSContext, u32, JSValue) anyerror!void,
+        clearSignalHandler: *const fn (*anyopaque, *JSContext, u32, SignalDisposition) void,
+        runNextSignalHandler: *const fn (*anyopaque, *JSContext, ?*std.Io.Writer, *Object) anyerror!bool,
+    };
+
+    pub fn traceRoots(self: HostEventLoop, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        try self.vtable.traceRoots(self.ptr, visitor);
     }
 
-    pub fn setCallback(self: *OsRwHandler, rt: *JSRuntime, write_handler: bool, callback: JSValue) !void {
-        const next_callback = callback.dup();
-        var next_rooted = false;
-        errdefer next_callback.free(rt);
-        next_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        errdefer if (next_rooted) rt.unregisterExternalValueSymbolRoot(next_callback);
-
-        const bit: u2 = if (write_handler) 0b10 else 0b01;
-        const slot = if (write_handler) &self.write_callback else &self.read_callback;
-        const old_callback = slot.*;
-        const old_rooted = (self.symbol_root_mask & bit) != 0;
-        slot.* = next_callback;
-        if (next_rooted) {
-            self.symbol_root_mask |= bit;
-        } else {
-            self.symbol_root_mask &= ~bit;
-        }
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
-        old_callback.free(rt);
+    pub fn setExitCode(self: HostEventLoop, code: u8) void {
+        self.vtable.setExitCode(self.ptr, code);
     }
 
-    pub fn clearCallback(self: *OsRwHandler, rt: *JSRuntime, write_handler: bool) void {
-        const bit: u2 = if (write_handler) 0b10 else 0b01;
-        const slot = if (write_handler) &self.write_callback else &self.read_callback;
-        const old_callback = slot.*;
-        const old_rooted = (self.symbol_root_mask & bit) != 0;
-        slot.* = JSValue.nullValue();
-        self.symbol_root_mask &= ~bit;
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
-        old_callback.free(rt);
+    pub fn exitCode(self: HostEventLoop) ?u8 {
+        return self.vtable.exitCode(self.ptr);
     }
 
-    pub fn traceRoots(self: *OsRwHandler, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.read_callback);
-        try visitor.value(&self.write_callback);
-    }
-};
-
-pub const OsSignalHandler = struct {
-    sig: u32,
-    callback: JSValue,
-    callback_symbol_rooted: bool = false,
-
-    pub fn deinit(self: OsSignalHandler, rt: *JSRuntime) void {
-        if (self.callback_symbol_rooted) rt.unregisterExternalValueSymbolRoot(self.callback);
-        self.callback.free(rt);
+    pub fn nextTimerId(self: HostEventLoop) i64 {
+        return self.vtable.nextTimerId(self.ptr);
     }
 
-    pub fn init(ctx: *JSContext, sig: u32, callback: JSValue) !OsSignalHandler {
-        var handler = OsSignalHandler{
-            .sig = sig,
-            .callback = callback.dup(),
-        };
-        errdefer handler.callback.free(ctx.runtime);
-        handler.callback_symbol_rooted = try ctx.runtime.registerExternalValueSymbolRoot(callback);
-        return handler;
+    pub fn enqueueTimer(self: HostEventLoop, ctx: *JSContext, id: i64, callback: JSValue, delay_ms: u64, repeats: bool) !void {
+        try self.vtable.enqueueTimer(self.ptr, ctx, id, callback, delay_ms, repeats);
     }
 
-    pub fn setCallback(self: *OsSignalHandler, rt: *JSRuntime, callback: JSValue) !void {
-        const next_callback = callback.dup();
-        var next_rooted = false;
-        errdefer next_callback.free(rt);
-        next_rooted = try rt.registerExternalValueSymbolRoot(callback);
-        errdefer if (next_rooted) rt.unregisterExternalValueSymbolRoot(next_callback);
-
-        const old_callback = self.callback;
-        const old_rooted = self.callback_symbol_rooted;
-        self.callback = next_callback;
-        self.callback_symbol_rooted = next_rooted;
-        if (old_rooted) rt.unregisterExternalValueSymbolRoot(old_callback);
-        old_callback.free(rt);
+    pub fn clearTimer(self: HostEventLoop, ctx: *JSContext, id: i64) void {
+        self.vtable.clearTimer(self.ptr, ctx, id);
     }
 
-    pub fn traceRoots(self: *OsSignalHandler, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try visitor.value(&self.callback);
+    pub fn runNextTimer(self: HostEventLoop, ctx: *JSContext, output: ?*std.Io.Writer, global: *Object) !bool {
+        return self.vtable.runNextTimer(self.ptr, ctx, output, global);
+    }
+
+    pub fn setRwHandler(self: HostEventLoop, ctx: *JSContext, fd: i32, write_handler: bool, callback: JSValue) !void {
+        try self.vtable.setRwHandler(self.ptr, ctx, fd, write_handler, callback);
+    }
+
+    pub fn clearRwHandler(self: HostEventLoop, ctx: *JSContext, fd: i32, write_handler: bool) void {
+        self.vtable.clearRwHandler(self.ptr, ctx, fd, write_handler);
+    }
+
+    pub fn runNextRwHandler(self: HostEventLoop, ctx: *JSContext, output: ?*std.Io.Writer, global: *Object) !bool {
+        return self.vtable.runNextRwHandler(self.ptr, ctx, output, global);
+    }
+
+    pub fn setSignalHandler(self: HostEventLoop, ctx: *JSContext, sig: u32, callback: JSValue) !void {
+        try self.vtable.setSignalHandler(self.ptr, ctx, sig, callback);
+    }
+
+    pub fn clearSignalHandler(self: HostEventLoop, ctx: *JSContext, sig: u32, disposition: SignalDisposition) void {
+        self.vtable.clearSignalHandler(self.ptr, ctx, sig, disposition);
+    }
+
+    pub fn runNextSignalHandler(self: HostEventLoop, ctx: *JSContext, output: ?*std.Io.Writer, global: *Object) !bool {
+        return self.vtable.runNextSignalHandler(self.ptr, ctx, output, global);
     }
 };
 
@@ -357,7 +314,7 @@ pub const JSContext = struct {
     call_depth: usize = 0,
     preserve_uncaught_exception: bool = false,
     /// Host-controlled QuickJS-style unhandled rejection tracking. Normal CLI
-    /// contexts enable it; test262 and embedding-style contexts keep it off.
+    /// contexts enable it; validation and embedding-style contexts keep it off.
     track_unhandled_rejections: bool = false,
     formatting_error_stack: bool = false,
     backtrace_frames: []BacktraceFrame = &.{},
@@ -378,16 +335,9 @@ pub const JSContext = struct {
     eval_function: JSValue = JSValue.nullValue(),
     dynamic_import_callback: ?DynamicImportCallback = null,
     dynamic_import_userdata: ?*anyopaque = null,
+    host_event_loop: ?HostEventLoop = null,
     pending_promise_jobs: []PendingPromiseJob = &.{},
     pending_promise_jobs_capacity: usize = 0,
-    os_timers: []OsTimer = &.{},
-    os_timers_capacity: usize = 0,
-    os_rw_handlers: []OsRwHandler = &.{},
-    os_rw_handlers_capacity: usize = 0,
-    os_signal_handlers: []OsSignalHandler = &.{},
-    os_signal_handlers_capacity: usize = 0,
-    next_os_timer_id: i64 = 1,
-    exit_code: ?u8 = null,
 
     /// Returns an owned context. Caller must release it with `destroy`.
     pub fn create(rt: *JSRuntime) !*JSContext {
@@ -424,9 +374,63 @@ pub const JSContext = struct {
         provider_registered = true;
     }
 
+    pub fn runtimePtr(self: *JSContext) *JSRuntime {
+        return self.runtime;
+    }
+
+    pub fn setHostEventLoop(self: *JSContext, host_event_loop: HostEventLoop) void {
+        self.host_event_loop = host_event_loop;
+    }
+
+    pub fn clearHostEventLoop(self: *JSContext, ptr: *anyopaque) void {
+        if (self.host_event_loop) |host_event_loop| {
+            if (host_event_loop.ptr == ptr) self.host_event_loop = null;
+        }
+    }
+
+    pub fn hostEventLoop(self: *JSContext) ?HostEventLoop {
+        return self.host_event_loop;
+    }
+
+    pub fn ensureClassPrototypeSlot(self: *JSContext, class_id: class.ClassId) !*JSValue {
+        const index: usize = @intCast(class_id);
+        if (index >= self.class_prototypes.len) {
+            var next_len = if (self.class_prototypes.len == 0) @as(usize, 1) else self.class_prototypes.len + self.class_prototypes.len / 2;
+            while (next_len <= index) : (next_len += next_len / 2 + 1) {}
+
+            const next = try self.runtime.memory.alloc(JSValue, next_len);
+            errdefer self.runtime.memory.free(JSValue, next);
+            @memcpy(next[0..self.class_prototypes.len], self.class_prototypes);
+            @memset(next[self.class_prototypes.len..], JSValue.nullValue());
+
+            const old = self.class_prototypes;
+            self.class_prototypes = next;
+            if (old.len != 0) self.runtime.memory.free(JSValue, old);
+        }
+        return &self.class_prototypes[index];
+    }
+
+    pub fn setClassPrototype(self: *JSContext, class_id: class.ClassId, prototype: *Object) !void {
+        const slot = try self.ensureClassPrototypeSlot(class_id);
+        const old = slot.*;
+        slot.* = prototype.value().dup();
+        old.free(self.runtime);
+    }
+
+    pub fn classPrototypeObject(self: *JSContext, class_id: class.ClassId) ?*Object {
+        const index: usize = @intCast(class_id);
+        if (index >= self.class_prototypes.len) return null;
+        const value = self.class_prototypes[index];
+        if (!value.isObject()) return null;
+        const header = value.refHeader() orelse return null;
+        if (header.kind != .object) return null;
+        return @fieldParentPtr("header", header);
+    }
+
     pub fn deinit(self: *JSContext) void {
         const rt = self.runtime;
         rt.unregisterRootProvider(self.rootProvider());
+        self.host_event_loop = null;
         self.exception_slot.clear(rt);
         self.unhandled_rejection_slot.clear(rt);
         self.unhandled_rejection_promise_slot.clear(rt);
@@ -445,24 +449,6 @@ pub const JSContext = struct {
         self.pending_promise_jobs_capacity = 0;
         for (pending_promise_jobs) |job| job.deinit(rt);
         if (pending_promise_jobs_capacity != 0) rt.memory.free(PendingPromiseJob, pending_promise_jobs.ptr[0..pending_promise_jobs_capacity]);
-        const os_timers = self.os_timers;
-        const os_timers_capacity = self.os_timers_capacity;
-        self.os_timers = &.{};
-        self.os_timers_capacity = 0;
-        for (os_timers) |timer| timer.deinit(rt);
-        if (os_timers_capacity != 0) rt.memory.free(OsTimer, os_timers.ptr[0..os_timers_capacity]);
-        const os_rw_handlers = self.os_rw_handlers;
-        const os_rw_handlers_capacity = self.os_rw_handlers_capacity;
-        self.os_rw_handlers = &.{};
-        self.os_rw_handlers_capacity = 0;
-        for (os_rw_handlers) |handler| handler.deinit(rt);
-        if (os_rw_handlers_capacity != 0) rt.memory.free(OsRwHandler, os_rw_handlers.ptr[0..os_rw_handlers_capacity]);
-        const os_signal_handlers = self.os_signal_handlers;
-        const os_signal_handlers_capacity = self.os_signal_handlers_capacity;
-        self.os_signal_handlers = &.{};
-        self.os_signal_handlers_capacity = 0;
-        for (os_signal_handlers) |handler| handler.deinit(rt);
-        if (os_signal_handlers_capacity != 0) rt.memory.free(OsSignalHandler, os_signal_handlers.ptr[0..os_signal_handlers_capacity]);
         const backtrace_frames = self.backtrace_frames;
         const backtrace_capacity = self.backtrace_capacity;
         self.backtrace_frames = &.{};
@@ -515,19 +501,22 @@ pub const JSContext = struct {
         for (self.pending_promise_jobs) |*job| {
             try job.traceRoots(visitor);
         }
-        for (self.os_timers) |*timer| {
-            try timer.traceRoots(visitor);
-        }
-        for (self.os_rw_handlers) |*handler| {
-            try handler.traceRoots(visitor);
-        }
-        for (self.os_signal_handlers) |*handler| {
-            try handler.traceRoots(visitor);
+        if (self.host_event_loop) |host_event_loop| {
+            try host_event_loop.traceRoots(visitor);
         }
     }
 
     pub fn globalObject(self: *JSContext) !*Object {
         return exec.zjs_vm.contextGlobal(self);
+    }
+
+    pub fn toString(self: *JSContext, value: JSValue) !JSValue {
+        const global = try self.globalObject();
+        return exec.shared.toStringForAnnexB(self, null, global, value, null, null);
+    }
+
+    pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
+        return store.toArrayBuffer(self);
     }
 
     pub fn eval(self: *JSContext, source_text: []const u8, options: ContextEvalOptions) !JSValue {
@@ -718,105 +707,6 @@ pub const JSContext = struct {
         @memmove(self.pending_promise_jobs[0 .. old_len - 1], self.pending_promise_jobs[1..old_len]);
         self.pending_promise_jobs = self.pending_promise_jobs.ptr[0 .. old_len - 1];
         return job;
-    }
-
-    pub fn ensureOsTimerCapacity(self: *JSContext, min_capacity: usize) !void {
-        if (self.os_timers_capacity >= min_capacity) return;
-        var next_capacity = if (self.os_timers_capacity == 0) @as(usize, 2) else self.os_timers_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.runtime.memory.alloc(OsTimer, next_capacity);
-        errdefer self.runtime.memory.free(OsTimer, next);
-        const old_timers = self.os_timers;
-        const old_capacity = self.os_timers_capacity;
-        @memcpy(next[0..old_timers.len], old_timers);
-        self.os_timers = next[0..old_timers.len];
-        self.os_timers_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.runtime.memory.free(OsTimer, old_timers.ptr[0..old_capacity]);
-        }
-    }
-
-    pub fn removeOsTimerAt(self: *JSContext, index: usize) void {
-        std.debug.assert(index < self.os_timers.len);
-        const old_len = self.os_timers.len;
-        const removed = self.os_timers[index];
-        if (index + 1 < old_len) {
-            @memmove(self.os_timers[index .. old_len - 1], self.os_timers[index + 1 .. old_len]);
-        }
-        self.os_timers = self.os_timers.ptr[0 .. old_len - 1];
-        if (self.os_timers.len == 0 and self.os_timers_capacity != 0) {
-            const old_timers = self.os_timers.ptr[0..self.os_timers_capacity];
-            self.os_timers = &.{};
-            self.os_timers_capacity = 0;
-            self.runtime.memory.free(OsTimer, old_timers);
-        }
-        removed.deinit(self.runtime);
-    }
-
-    pub fn ensureOsRwHandlerCapacity(self: *JSContext, min_capacity: usize) !void {
-        if (self.os_rw_handlers_capacity >= min_capacity) return;
-        var next_capacity = if (self.os_rw_handlers_capacity == 0) @as(usize, 2) else self.os_rw_handlers_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.runtime.memory.alloc(OsRwHandler, next_capacity);
-        errdefer self.runtime.memory.free(OsRwHandler, next);
-        const old_handlers = self.os_rw_handlers;
-        const old_capacity = self.os_rw_handlers_capacity;
-        @memcpy(next[0..old_handlers.len], old_handlers);
-        self.os_rw_handlers = next[0..old_handlers.len];
-        self.os_rw_handlers_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.runtime.memory.free(OsRwHandler, old_handlers.ptr[0..old_capacity]);
-        }
-    }
-
-    pub fn removeOsRwHandlerAt(self: *JSContext, index: usize) void {
-        std.debug.assert(index < self.os_rw_handlers.len);
-        const old_len = self.os_rw_handlers.len;
-        const removed = self.os_rw_handlers[index];
-        if (index + 1 < old_len) {
-            @memmove(self.os_rw_handlers[index .. old_len - 1], self.os_rw_handlers[index + 1 .. old_len]);
-        }
-        self.os_rw_handlers = self.os_rw_handlers.ptr[0 .. old_len - 1];
-        if (self.os_rw_handlers.len == 0 and self.os_rw_handlers_capacity != 0) {
-            const old_handlers = self.os_rw_handlers.ptr[0..self.os_rw_handlers_capacity];
-            self.os_rw_handlers = &.{};
-            self.os_rw_handlers_capacity = 0;
-            self.runtime.memory.free(OsRwHandler, old_handlers);
-        }
-        removed.deinit(self.runtime);
-    }
-
-    pub fn ensureOsSignalHandlerCapacity(self: *JSContext, min_capacity: usize) !void {
-        if (self.os_signal_handlers_capacity >= min_capacity) return;
-        var next_capacity = if (self.os_signal_handlers_capacity == 0) @as(usize, 2) else self.os_signal_handlers_capacity * 2;
-        while (next_capacity < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.runtime.memory.alloc(OsSignalHandler, next_capacity);
-        errdefer self.runtime.memory.free(OsSignalHandler, next);
-        const old_handlers = self.os_signal_handlers;
-        const old_capacity = self.os_signal_handlers_capacity;
-        @memcpy(next[0..old_handlers.len], old_handlers);
-        self.os_signal_handlers = next[0..old_handlers.len];
-        self.os_signal_handlers_capacity = next_capacity;
-        if (old_capacity != 0) {
-            self.runtime.memory.free(OsSignalHandler, old_handlers.ptr[0..old_capacity]);
-        }
-    }
-
-    pub fn removeOsSignalHandlerAt(self: *JSContext, index: usize) void {
-        std.debug.assert(index < self.os_signal_handlers.len);
-        const old_len = self.os_signal_handlers.len;
-        const removed = self.os_signal_handlers[index];
-        if (index + 1 < old_len) {
-            @memmove(self.os_signal_handlers[index .. old_len - 1], self.os_signal_handlers[index + 1 .. old_len]);
-        }
-        self.os_signal_handlers = self.os_signal_handlers.ptr[0 .. old_len - 1];
-        if (self.os_signal_handlers.len == 0 and self.os_signal_handlers_capacity != 0) {
-            const old_handlers = self.os_signal_handlers.ptr[0..self.os_signal_handlers_capacity];
-            self.os_signal_handlers = &.{};
-            self.os_signal_handlers_capacity = 0;
-            self.runtime.memory.free(OsSignalHandler, old_handlers);
-        }
-        removed.deinit(self.runtime);
     }
 
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {

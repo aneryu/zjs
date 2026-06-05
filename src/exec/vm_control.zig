@@ -107,7 +107,7 @@ pub fn throwTop(
     }
     _ = ctx.throwValue(value);
     value_owned = false;
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn throwError(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) ThrowError {

@@ -111,116 +111,6 @@ test "context takes pending promise jobs without allocation" {
     try std.testing.expect(ctx.takePendingPromiseJob() == null);
 }
 
-test "context removes os timers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    try ctx.ensureOsTimerCapacity(2);
-    ctx.os_timers = ctx.os_timers.ptr[0..2];
-    ctx.os_timers[0] = .{
-        .id = 10,
-        .callback = core.JSValue.int32(1),
-        .timeout_ms = 100,
-        .delay_ms = 0,
-        .repeats = false,
-    };
-    ctx.os_timers[1] = .{
-        .id = 11,
-        .callback = core.JSValue.int32(2),
-        .timeout_ms = 200,
-        .delay_ms = 5,
-        .repeats = true,
-    };
-
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
-    ctx.removeOsTimerAt(0);
-    rt.setMemoryLimit(null);
-
-    try std.testing.expectEqual(@as(usize, 1), ctx.os_timers.len);
-    try std.testing.expectEqual(@as(usize, 2), ctx.os_timers_capacity);
-    try std.testing.expectEqual(@as(i64, 11), ctx.os_timers[0].id);
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
-
-    ctx.removeOsTimerAt(0);
-    try std.testing.expectEqual(@as(usize, 0), ctx.os_timers.len);
-    try std.testing.expectEqual(@as(usize, 0), ctx.os_timers_capacity);
-}
-
-test "context removes os rw handlers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    try ctx.ensureOsRwHandlerCapacity(2);
-    ctx.os_rw_handlers = ctx.os_rw_handlers.ptr[0..2];
-    ctx.os_rw_handlers[0] = .{
-        .fd = 10,
-        .read_callback = core.JSValue.int32(1),
-        .write_callback = core.JSValue.nullValue(),
-    };
-    ctx.os_rw_handlers[1] = .{
-        .fd = 11,
-        .read_callback = core.JSValue.int32(2),
-        .write_callback = core.JSValue.nullValue(),
-    };
-
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
-    ctx.removeOsRwHandlerAt(0);
-    rt.setMemoryLimit(null);
-
-    try std.testing.expectEqual(@as(usize, 1), ctx.os_rw_handlers.len);
-    try std.testing.expectEqual(@as(usize, 2), ctx.os_rw_handlers_capacity);
-    try std.testing.expectEqual(@as(i32, 11), ctx.os_rw_handlers[0].fd);
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
-
-    ctx.removeOsRwHandlerAt(0);
-    try std.testing.expectEqual(@as(usize, 0), ctx.os_rw_handlers.len);
-    try std.testing.expectEqual(@as(usize, 0), ctx.os_rw_handlers_capacity);
-}
-
-test "context removes os signal handlers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    try ctx.ensureOsSignalHandlerCapacity(2);
-    ctx.os_signal_handlers = ctx.os_signal_handlers.ptr[0..2];
-    ctx.os_signal_handlers[0] = .{
-        .sig = 1,
-        .callback = core.JSValue.int32(1),
-    };
-    ctx.os_signal_handlers[1] = .{
-        .sig = 2,
-        .callback = core.JSValue.int32(2),
-    };
-
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
-    ctx.removeOsSignalHandlerAt(0);
-    rt.setMemoryLimit(null);
-
-    try std.testing.expectEqual(@as(usize, 1), ctx.os_signal_handlers.len);
-    try std.testing.expectEqual(@as(usize, 2), ctx.os_signal_handlers_capacity);
-    try std.testing.expectEqual(@as(u32, 2), ctx.os_signal_handlers[0].sig);
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
-
-    ctx.removeOsSignalHandlerAt(0);
-    try std.testing.expectEqual(@as(usize, 0), ctx.os_signal_handlers.len);
-    try std.testing.expectEqual(@as(usize, 0), ctx.os_signal_handlers_capacity);
-}
-
 fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.BacktraceLocation {
     return .{ .line_num = @intCast(pc), .col_num = @intCast(pc + 10) };
 }
@@ -306,8 +196,9 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 1), core.atom.ids.null_);
     try std.testing.expectEqual(@as(core.Atom, 2), core.atom.ids.false_);
     try std.testing.expectEqual(@as(core.Atom, 3), core.atom.ids.true_);
-    // F1.5: public predefined atom layout matches quickjs-atom.h row-for-row.
-    // last_keyword == ATOM_await (46) and last_strict_keyword == ATOM_yield (45).
+    // The core predefined atom layout keeps QuickJS keyword/symbol ordering and
+    // excludes CLI/test262 harness names, which are installed dynamically by the
+    // runner layer.
     try std.testing.expectEqual(@as(core.Atom, 46), core.atom.last_keyword);
     try std.testing.expectEqual(@as(core.Atom, 45), core.atom.last_strict_keyword);
     try std.testing.expectEqual(@as(core.Atom, 229), core.atom.ids.Symbol_asyncIterator);
@@ -319,8 +210,8 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 381), core.atom.ids.zjs_last_global_setup_name);
     try std.testing.expectEqual(@as(core.Atom, 419), core.atom.ids.zjs_last_global_extra_name);
     try std.testing.expectEqual(@as(core.Atom, 586), core.atom.ids.zjs_last_registry_extra_name);
-    try std.testing.expectEqual(@as(core.Atom, 634), core.atom.ids.zjs_last_startup_name);
-    try std.testing.expectEqual(@as(usize, 634), core.atom.predefined_count);
+    try std.testing.expectEqual(@as(core.Atom, 625), core.atom.ids.zjs_last_startup_name);
+    try std.testing.expectEqual(@as(usize, 625), core.atom.predefined_count);
 
     const brand = core.atom.predefinedById(core.atom.ids.Private_brand).?;
     try std.testing.expectEqual(core.atom.AtomKind.private, brand.kind);
@@ -566,7 +457,7 @@ test "GC keeps context lexical object unique symbol atoms" {
     try std.testing.expect(rt.atoms.name(lexical_symbol) == null);
 }
 
-test "GC keeps context dynamic queue unique symbol atoms until release" {
+test "GC keeps context pending promise job unique symbol atoms until release" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -578,43 +469,14 @@ test "GC keeps context dynamic queue unique symbol atoms until release" {
     ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
     ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(ctx, 1, core.JSValue.symbol(pending_symbol));
 
-    const timer_symbol = try rt.atoms.newValueSymbol("gc-context-timer-symbol");
-    try ctx.ensureOsTimerCapacity(1);
-    ctx.os_timers = ctx.os_timers.ptr[0..1];
-    ctx.os_timers[0] = try core.OsTimer.init(ctx, 1, core.JSValue.symbol(timer_symbol), 0, 0, false);
-
-    const rw_read_symbol = try rt.atoms.newValueSymbol("gc-context-rw-read-symbol");
-    const rw_write_symbol = try rt.atoms.newValueSymbol("gc-context-rw-write-symbol");
-    try ctx.ensureOsRwHandlerCapacity(1);
-    ctx.os_rw_handlers = ctx.os_rw_handlers.ptr[0..1];
-    ctx.os_rw_handlers[0] = .{ .fd = 1 };
-    try ctx.os_rw_handlers[0].setCallback(rt, false, core.JSValue.symbol(rw_read_symbol));
-    try ctx.os_rw_handlers[0].setCallback(rt, true, core.JSValue.symbol(rw_write_symbol));
-
-    const signal_symbol = try rt.atoms.newValueSymbol("gc-context-signal-symbol");
-    try ctx.ensureOsSignalHandlerCapacity(1);
-    ctx.os_signal_handlers = ctx.os_signal_handlers.ptr[0..1];
-    ctx.os_signal_handlers[0] = try core.OsSignalHandler.init(ctx, 2, core.JSValue.symbol(signal_symbol));
-
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(pending_symbol) != null);
-    try std.testing.expect(rt.atoms.name(timer_symbol) != null);
-    try std.testing.expect(rt.atoms.name(rw_read_symbol) != null);
-    try std.testing.expect(rt.atoms.name(rw_write_symbol) != null);
-    try std.testing.expect(rt.atoms.name(signal_symbol) != null);
 
     var pending = ctx.takePendingPromiseJob().?;
     pending.deinit(rt);
-    ctx.removeOsTimerAt(0);
-    ctx.removeOsRwHandlerAt(0);
-    ctx.removeOsSignalHandlerAt(0);
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(pending_symbol) == null);
-    try std.testing.expect(rt.atoms.name(timer_symbol) == null);
-    try std.testing.expect(rt.atoms.name(rw_read_symbol) == null);
-    try std.testing.expect(rt.atoms.name(rw_write_symbol) == null);
-    try std.testing.expect(rt.atoms.name(signal_symbol) == null);
 }
 
 test "GC keeps finalization job unique symbol atoms after dequeue until release" {
@@ -1836,7 +1698,7 @@ test "shared buffer store reports external memory for its owner runtime" {
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
 }
 
-test "runtime root tracer visits async and host-held roots" {
+test "runtime root tracer visits async roots" {
     var rt: core.JSRuntime = undefined;
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
@@ -1848,20 +1710,6 @@ test "runtime root tracer visits async and host-held roots" {
     try ctx.ensurePendingPromiseJobCapacity(1);
     ctx.pending_promise_jobs = ctx.pending_promise_jobs.ptr[0..1];
     ctx.pending_promise_jobs[0] = try core.context.PendingPromiseJob.init(&ctx, 1, core.JSValue.int32(101));
-
-    try ctx.ensureOsTimerCapacity(1);
-    ctx.os_timers = ctx.os_timers.ptr[0..1];
-    ctx.os_timers[0] = try core.OsTimer.init(&ctx, 1, core.JSValue.int32(102), 0, 0, false);
-
-    try ctx.ensureOsRwHandlerCapacity(1);
-    ctx.os_rw_handlers = ctx.os_rw_handlers.ptr[0..1];
-    ctx.os_rw_handlers[0] = .{ .fd = 1 };
-    try ctx.os_rw_handlers[0].setCallback(&rt, false, core.JSValue.int32(103));
-    try ctx.os_rw_handlers[0].setCallback(&rt, true, core.JSValue.int32(104));
-
-    try ctx.ensureOsSignalHandlerCapacity(1);
-    ctx.os_signal_handlers = ctx.os_signal_handlers.ptr[0..1];
-    ctx.os_signal_handlers[0] = try core.OsSignalHandler.init(&ctx, 2, core.JSValue.int32(105));
 
     const TestJob = struct {
         fn run(_: *core.JSContext, _: []const core.JSValue) core.JSValue {
@@ -1877,7 +1725,7 @@ test "runtime root tracer visits async and host-held roots" {
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (slot.asInt32()) |value| {
-                if (value >= 101 and value <= 108) self.count += 1;
+                if (value == 101 or (value >= 106 and value <= 108)) self.count += 1;
             }
         }
 
@@ -1894,7 +1742,7 @@ test "runtime root tracer visits async and host-held roots" {
     };
     try rt.traceActiveRoots(&visitor);
 
-    try std.testing.expectEqual(@as(usize, 8), counter.count);
+    try std.testing.expectEqual(@as(usize, 4), counter.count);
 }
 
 test "runtime root frame slots are mutable" {

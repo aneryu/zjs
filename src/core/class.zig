@@ -134,7 +134,10 @@ pub const Call = *const fn () void;
 
 pub const Definition = struct {
     class_name: []const u8,
+    binding_identity: ?[]const u8 = null,
     payload_kind: PayloadKind = .none,
+    inline_payload_size: u32 = 0,
+    inline_payload_align: u16 = 1,
     finalizer: ?LegacyFinalizer = null,
     payload_finalizer: ?PayloadFinalizer = null,
     payload_mark: ?PayloadMark = null,
@@ -145,7 +148,10 @@ pub const Definition = struct {
 pub const Record = struct {
     id: ClassId = invalid_class_id,
     class_name: atom.Atom = atom.null_atom,
+    binding_identity: ?[]const u8 = null,
     payload_kind: PayloadKind = .none,
+    inline_payload_size: u32 = 0,
+    inline_payload_align: u16 = 1,
     finalizer: ?LegacyFinalizer = null,
     payload_finalizer: ?PayloadFinalizer = null,
     payload_mark: ?PayloadMark = null,
@@ -154,6 +160,10 @@ pub const Record = struct {
 
     pub fn isRegistered(self: Record) bool {
         return self.id != invalid_class_id;
+    }
+
+    pub fn hasInlinePayload(self: Record) bool {
+        return self.inline_payload_size != 0;
     }
 };
 
@@ -208,6 +218,24 @@ pub const Table = struct {
         return self.atoms.dup(self.records[id].class_name);
     }
 
+    pub fn findByName(self: *const Table, name: []const u8) ?ClassId {
+        for (self.records) |rec| {
+            if (!rec.isRegistered()) continue;
+            const stored = self.atoms.name(rec.class_name) orelse continue;
+            if (std.mem.eql(u8, stored, name)) return rec.id;
+        }
+        return null;
+    }
+
+    pub fn findByIdentity(self: *const Table, identity: []const u8) ?ClassId {
+        for (self.records) |rec| {
+            if (!rec.isRegistered()) continue;
+            const stored = rec.binding_identity orelse continue;
+            if (std.mem.eql(u8, stored, identity)) return rec.id;
+        }
+        return null;
+    }
+
     pub fn record(self: *const Table, id: ClassId) ?Record {
         if (id >= self.records.len) return null;
         const rec = self.records[id];
@@ -257,7 +285,10 @@ pub const Table = struct {
         self.records[id] = .{
             .id = id,
             .class_name = self.atoms.dup(name_atom),
+            .binding_identity = def.binding_identity,
             .payload_kind = def.payload_kind,
+            .inline_payload_size = def.inline_payload_size,
+            .inline_payload_align = def.inline_payload_align,
             .finalizer = def.finalizer,
             .payload_finalizer = def.payload_finalizer,
             .payload_mark = def.payload_mark,

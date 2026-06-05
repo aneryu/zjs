@@ -63,11 +63,10 @@ Missing or invalid arguments print usage and exit non-zero.
 Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
 and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
 
-The engine-only Production v1 roadmap and contract are tracked in
-[docs/production-grade-plan.md](docs/production-grade-plan.md),
-[docs/engine-api-v1.md](docs/engine-api-v1.md),
-[docs/compatibility-v1.md](docs/compatibility-v1.md), and
-[docs/release-checklist.md](docs/release-checklist.md).
+The current kernel/runtime boundary is tracked in
+[docs/adr/0001-zig-kernel-api-and-runtime-boundary.md](docs/adr/0001-zig-kernel-api-and-runtime-boundary.md).
+Older Production v1 notes remain in [docs/production-grade-plan.md](docs/production-grade-plan.md)
+and related documents, but the former Engine facade direction is legacy.
 
 The full direct test262 invocation is:
 

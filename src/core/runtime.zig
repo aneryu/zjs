@@ -509,15 +509,15 @@ pub const JSRuntime = struct {
     /// torn down on `JSRuntime.destroy`.
     ///
     /// Hot paths like `getStringIndexValue` (`hex[i]`-style indexing in
-    /// the test262 `decodeURI` sweep) call this thousands of times per
+    /// URI decode sweeps) call this thousands of times per
     /// inner iteration; reusing cached instances eliminates two heap
     /// allocations per call.
     single_byte_strings: [128]?*string.String = @splat(null),
     /// Lazy cache for the immutable empty string. This shows up during
     /// standard global setup and in common `String`/JSON paths.
     empty_string: ?*string.String = null,
-    /// Single-entry cache for hot two-code-unit strings. The terminal
-    /// test262 URI sweep compares `decodeURI("%F0...")` against
+    /// Single-entry cache for hot two-code-unit strings. URI stress loops
+    /// compare `decodeURI("%F0...")` against
     /// `String.fromCharCode(H, L)` for each non-BMP code point; keeping
     /// the most recent pair lets both calls share one immutable string
     /// without retaining the whole sweep.
@@ -530,8 +530,8 @@ pub const JSRuntime = struct {
     regexp_simple_class_alternation_cache: [8]?RegExpSimpleClassAlternationCacheEntry = @splat(null),
     regexp_simple_class_alternation_cache_next: usize = 0,
     /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
-    /// This is a general URI hot-path cache, not a test fixture shortcut:
-    /// ECMAScript URI helpers and the test262 decimal-to-percent harness both
+    /// This is a general URI hot-path cache, not a fixture shortcut:
+    /// ECMAScript URI helpers and decimal-to-percent harnesses both
     /// repeatedly construct these immutable three-byte strings.
     percent_hex_strings: [256]?*string.String = @splat(null),
     /// Lazy cache for small integer strings ("0".."255").
@@ -794,7 +794,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
-        try self.gc.addWithGeneration(&object.header, self.initialObjectGeneration(object), @sizeOf(Object));
+        try self.gc.addWithGeneration(&object.header, self.initialObjectGeneration(object), object.allocationSize(self));
         if (self.gc.hasPendingMajorRequest() or self.memory.allocated_bytes > self.malloc_gc_threshold) {
             _ = self.pollGC(self.active_value_roots, .normal) catch {};
         }

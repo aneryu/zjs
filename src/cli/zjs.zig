@@ -1,15 +1,20 @@
 const std = @import("std");
-const zjs = @import("zjs");
-const core = zjs.internal.core;
-const frontend = zjs.internal.frontend;
-const exec = zjs.internal.exec;
-const bytecode = zjs.internal.bytecode;
+const builtin = @import("builtin");
+const internal = if (builtin.is_test) @import("zjs") else @import("zjs_internal");
+const zjs = internal.kernel;
+const core = internal.core;
+const frontend = internal.frontend;
+const exec = internal.exec;
+const bytecode = internal.bytecode;
+const runtime_layer = internal.runtime;
 
 const Runtime = struct {
     runtime: *zjs.JSRuntime,
     context: *zjs.JSContext,
+    event_loop: runtime_layer.EventLoop,
 
     pub fn deinit(self: *Runtime) void {
+        self.event_loop.deinit();
         self.context.destroy();
         self.runtime.destroy();
     }
@@ -176,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     var opcode_profile = core.profile.OpcodeProfile{};
-    var eval_timing = zjs.EvalTiming{};
+    var eval_timing = core.context.EvalTiming{};
     var include_ns: u64 = 0;
     var setup_ns: u64 = 0;
     var eval_ns: u64 = 0;
@@ -197,7 +202,13 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     errdefer ctx.destroy();
-    var runtime = Runtime{ .runtime = rt, .context = ctx };
+    var runtime = Runtime{
+        .runtime = rt,
+        .context = ctx,
+        .event_loop = runtime_layer.EventLoop.init(ctx, .{ .output = &stdout_writer.interface }),
+    };
+    runtime.event_loop.install();
+    errdefer runtime.event_loop.deinit();
 
     const runtime_create_ns = elapsedNanosSince(runtime_start);
     const setup_start = monotonicNanos();
@@ -279,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const jobs_start = monotonicNanos();
-    try runtime.context.runJobs(&stdout_writer.interface);
+    _ = try runtime.event_loop.runUntilIdle();
     jobs_ns = elapsedNanosSince(jobs_start);
     if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
         const exception = takePendingRejectionOrException(&runtime);
@@ -354,7 +365,7 @@ fn applyRuntimeOptions(runtime: *Runtime, options: RuntimeOptions) void {
 
 fn exitIfRequested(runtime: *Runtime, output: *std.Io.Writer, err: anyerror) !void {
     if (err != error.ProcessExit) return;
-    const code = runtime.context.exit_code orelse return;
+    const code = runtime.event_loop.exitCode() orelse return;
     try output.flush();
     std.process.exit(code);
 }
@@ -552,7 +563,7 @@ const PerfJsonTimings = struct {
     include_ns: u64,
     eval_ns: u64,
     jobs_ns: u64,
-    zjs: zjs.EvalTiming,
+    zjs: core.context.EvalTiming,
 };
 
 fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?*const core.profile.OpcodeProfile, timings: PerfJsonTimings) !void {

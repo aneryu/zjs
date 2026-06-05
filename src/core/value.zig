@@ -21,6 +21,13 @@ pub const Tag = struct {
 };
 
 pub const JSValue = extern struct {
+    pub const Scope = @import("runtime.zig").HandleScope;
+    pub const Local = @import("runtime.zig").LocalHandle;
+    pub const Persistent = @import("runtime.zig").JSValueHandle;
+    pub const Weak = @import("runtime.zig").WeakPersistentValue;
+    pub const String = @import("string_view.zig").JSString(JSValue);
+    pub const Bytes = @import("bytes_view.zig").JSBytes(JSValue);
+
     payload: u64,
     tag: i32,
     padding: i32 = 0,
@@ -176,6 +183,15 @@ pub const JSValue = extern struct {
     pub fn asCatchOffset(self: JSValue) ?i32 {
         if (self.tag == Tag.catch_offset) return payloadAsI32(self.payload);
         return null;
+    }
+
+    pub fn asString(self: JSValue) ?String {
+        return String.fromValue(self);
+    }
+
+    pub fn asBytes(self: JSValue, ctx: anytype) Bytes.Error!Bytes {
+        _ = ctx;
+        return Bytes.fromValue(self);
     }
 
     pub fn refHeader(self: JSValue) ?*gc.Header {

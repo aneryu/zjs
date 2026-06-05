@@ -148,9 +148,6 @@ const unicodePropertyRunCodePointMatches = shared_vm.unicodePropertyRunCodePoint
 const valueTruthy = shared_vm.valueTruthy;
 const varRefCellFromValue = shared_vm.varRefCellFromValue;
 
-
-
-
 pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Object);
 }
@@ -3074,7 +3071,7 @@ pub fn throwPrimitivePrototypeTypeError(
     const error_global = objectRealmGlobal(function_object) orelse global;
     const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "");
     _ = ctx.throwValue(error_value);
-    return error.Test262Error;
+    return error.JSException;
 }
 
 pub fn getNumberPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Object) ?u32 {
@@ -6196,8 +6193,6 @@ pub fn sameObjectIdentity(a: core.JSValue, b: core.JSValue) bool {
     return a_header == b_header;
 }
 
-
-
 pub fn remapPrivateAtomFromObject(rt: *core.JSRuntime, object: *const core.Object, atom_id: core.Atom) core.Atom {
     if (rt.atoms.kind(atom_id) != .private) return atom_id;
     for (object.privateRemapFrom(), 0..) |old_atom, idx| {
@@ -6439,9 +6434,6 @@ pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
 }
 
 // --- Combined from class.zig ---
-
-
-
 
 pub fn getSuper(
     ctx: *core.JSContext,
@@ -7069,11 +7061,7 @@ test "private brand creation does not allocate atom for non-extensible home obje
     try std.testing.expectEqual(before_entries, rt.atoms.entries.len);
 }
 
-
 // --- Combined from proxy_ops.zig ---
-
-
-
 
 pub fn proxySetTrapForErrorStackSetter(
     ctx: *core.JSContext,

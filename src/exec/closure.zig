@@ -61,7 +61,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         9 => return error.RangeError,
         10 => return error.EvalError,
         11 => return error.ReferenceError,
-        12 => return error.Test262Error,
+        12 => return error.JSException,
         13 => return core.JSValue.undefinedValue(),
         14 => return core.JSValue.nullValue(),
         15 => {
@@ -106,7 +106,7 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         32 => {
             try incrementGlobalInt(rt, globals, "count");
-            return error.Test262Error;
+            return error.JSException;
         },
         33 => {
             if (args.len < 1) return error.TypeError;
@@ -118,21 +118,21 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         36 => return try value_ops.createStringValue(rt, "string"),
         37 => {
             try incrementGlobalInt(rt, globals, "callbackCalls");
-            return error.Test262Error;
+            return error.JSException;
         },
         38 => {
             try setGlobalMapString(rt, globals, 1, "mutated");
-            return error.Test262Error;
+            return error.JSException;
         },
         39 => {
             try setGlobalMapString(rt, globals, 3, "mutated");
-            return error.Test262Error;
+            return error.JSException;
         },
         40 => {
             try incrementGlobalInt(rt, globals, "count");
             return core.JSValue.undefinedValue();
         },
-        41 => return error.Test262Error,
+        41 => return error.JSException,
         42 => return iteratorNextValueGetterThrows(rt, closure),
         43 => return iteratorNextGlobalValue(rt, closure, globals, "nextItem"),
         44 => return iteratorNextGlobalValue(rt, closure, globals, "item"),
@@ -144,10 +144,10 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         54 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.Test262Error;
+            const value = args[0].asInt32() orelse return error.JSException;
             if (value == 1) return core.JSValue.boolean(false);
             if (value == 2) return core.JSValue.boolean(true);
-            return error.Test262Error;
+            return error.JSException;
         },
         55 => {
             try incrementGlobalInt(rt, globals, "coercionCalls");
@@ -181,19 +181,19 @@ pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value
         },
         61 => {
             try incrementGlobalInt(rt, globals, "counter");
-            return error.Test262Error;
+            return error.JSException;
         },
         62 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.Test262Error;
+            const value = args[0].asInt32() orelse return error.JSException;
             if (value == 1 or value == 2) return core.JSValue.boolean(true);
-            return error.Test262Error;
+            return error.JSException;
         },
         63 => {
             if (args.len < 1) return error.TypeError;
-            const value = args[0].asInt32() orelse return error.Test262Error;
+            const value = args[0].asInt32() orelse return error.JSException;
             if (value == 1 or value == 2) return core.JSValue.boolean(false);
-            return error.Test262Error;
+            return error.JSException;
         },
         64 => {
             if (args.len < 1) return error.TypeError;
@@ -855,10 +855,10 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     defer expects_value.free(rt);
     const expects = try expectArray(expects_value);
-    if (expects.length == 0) return error.Test262Error;
+    if (expects.length == 0) return error.JSException;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
-    if (!object_builtin.sameValue(actual, expected)) return error.Test262Error;
+    if (!object_builtin.sameValue(actual, expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.length) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));

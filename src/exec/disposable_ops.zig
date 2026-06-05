@@ -164,7 +164,7 @@ pub fn qjsDisposeDisposableStackResources(
     if (stack.disposableStackDisposed()) {
         if (initial_error) |value| {
             _ = ctx.throwValue(value.dup());
-            return error.Test262Error;
+            return error.JSException;
         }
         return core.JSValue.undefinedValue();
     }
@@ -184,7 +184,7 @@ pub fn qjsDisposeDisposableStackResources(
     if (pending_error) |value| {
         pending_error = null;
         _ = ctx.throwValue(value);
-        return error.Test262Error;
+        return error.JSException;
     }
     return core.JSValue.undefinedValue();
 }

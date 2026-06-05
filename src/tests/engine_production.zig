@@ -115,7 +115,7 @@ test "production embedding takeException captures exception snapshot without lea
     defer ctx.destroy();
 
     _ = ctx.eval("throw new Error('test exception snapshot');", .{}) catch |err| {
-        try std.testing.expectEqual(error.Test262Error, err);
+        try std.testing.expectEqual(error.JSException, err);
         const thrown = ctx.takePendingException();
         defer thrown.free(rt);
         try std.testing.expect(thrown.isObject());

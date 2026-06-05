@@ -48,8 +48,8 @@ pub fn nativeFunction(rt: *core.JSRuntime, name: []const u8, length: i32) !core.
     try function_object.defineOwnPropertyAssumingNew(rt, length_key, core.Descriptor.data(core.JSValue.int32(length), false, false, true));
 
     // ASCII fast path: every standard-globals / host-helpers entry
-    // passes plain ASCII (`hasOwnProperty`, `toLocaleString`,
-    // `Test262Error`, ...). `createUtf8` would scan the bytes twice
+    // passes plain ASCII (`hasOwnProperty`, `toLocaleString`, ...).
+    // `createUtf8` would scan the bytes twice
     // (once to plan width, once to decode); ASCII names skip both
     // scans and just memcpy + hash. Falls back to `createUtf8` for
     // names that contain a non-ASCII byte so any callers passing
