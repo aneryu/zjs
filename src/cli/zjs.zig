@@ -1,6 +1,6 @@
 const std = @import("std");
 const public_api = @import("zjs");
-const zjs = public_api.kernel;
+const zjs = public_api;
 const runtime_layer = public_api.runtime;
 
 const Runtime = struct {
@@ -57,6 +57,7 @@ pub const EvalCommand = struct {
 
 pub const FileCommand = struct {
     path: []const u8,
+    script_args: []const []const u8,
     mode: zjs.EvalMode = .script,
     options: RuntimeOptions = .{},
 };
@@ -124,12 +125,11 @@ pub fn parseArgs(args: []const []const u8) CliError!Command {
         return .{ .eval = .{ .source = rest[1], .options = options } };
     }
     if (std.mem.eql(u8, rest[0], "-m")) {
-        if (rest.len != 2) return error.Usage;
-        return .{ .file = .{ .path = rest[1], .mode = .module, .options = options } };
+        if (rest.len < 2) return error.Usage;
+        return .{ .file = .{ .path = rest[1], .script_args = rest[1..], .mode = .module, .options = options } };
     }
     if (rest[0].len != 0 and rest[0][0] != '-') {
-        if (rest.len != 1) return error.Usage;
-        return .{ .file = .{ .path = rest[0], .options = options } };
+        return .{ .file = .{ .path = rest[0], .script_args = rest[0..], .options = options } };
     }
     return error.Usage;
 }
@@ -215,6 +215,18 @@ pub fn main(init: std.process.Init) !void {
     } else if (runtime_options.perf_json) {
         _ = zjs.activateOpcodeProfile(&opcode_profile);
     }
+    zjs.host.defineArgvGlobals(runtime.context, args[0], args) catch |err| {
+        try printError(io, "zjs: argv setup failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    zjs.host.defineScriptArgs(runtime.context, commandScriptArgs(command)) catch |err| {
+        try printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    zjs.host.installTest262HostGlobals(runtime.context) catch |err| {
+        try printError(io, "zjs: test host setup failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
     runtime.context.setPreserveUncaughtException(true);
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
@@ -346,6 +358,13 @@ fn commandRuntimeOptions(command: Command) RuntimeOptions {
 fn commandTracksUnhandledRejections(command: Command) bool {
     return switch (command) {
         .eval, .file => true,
+    };
+}
+
+fn commandScriptArgs(command: Command) []const []const u8 {
+    return switch (command) {
+        .eval => &.{},
+        .file => |file| file.script_args,
     };
 }
 
@@ -833,8 +852,12 @@ test "zjs args accept one file" {
     try std.testing.expectEqualStrings("input.js", command.file.path);
 }
 
-test "zjs args reject file script arguments" {
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "input.js", "empty_loop" }));
+test "zjs args accept file script arguments" {
+    const command = try parseArgs(&.{ "input.js", "empty_loop" });
+    try std.testing.expectEqualStrings("input.js", command.file.path);
+    try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
+    try std.testing.expectEqualStrings("input.js", command.file.script_args[0]);
+    try std.testing.expectEqualStrings("empty_loop", command.file.script_args[1]);
 }
 
 test "zjs args accept runtime limits" {
@@ -914,8 +937,13 @@ test "zjs args accept module file" {
     try std.testing.expectEqual(zjs.EvalMode.module, command.file.mode);
 }
 
-test "zjs args reject module file script arguments" {
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "-m", "input.mjs", "arg" }));
+test "zjs args accept module file script arguments" {
+    const command = try parseArgs(&.{ "-m", "input.mjs", "arg" });
+    try std.testing.expectEqualStrings("input.mjs", command.file.path);
+    try std.testing.expectEqual(zjs.EvalMode.module, command.file.mode);
+    try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
+    try std.testing.expectEqualStrings("input.mjs", command.file.script_args[0]);
+    try std.testing.expectEqualStrings("arg", command.file.script_args[1]);
 }
 
 test "zjs detects module mode from extension and static syntax" {

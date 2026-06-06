@@ -1,6 +1,6 @@
 const std = @import("std");
 const public_api = @import("zjs");
-const zjs = public_api.kernel;
+const zjs = public_api;
 const runtime_layer = public_api.runtime;
 
 extern "c" fn getpid() c_int;

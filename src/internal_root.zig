@@ -1,7 +1,7 @@
 const kernel_api = @import("root.zig");
 
 pub const public_api = kernel_api;
-pub const kernel = kernel_api.kernel;
+pub const kernel = @import("kernel/root.zig");
 
 pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;

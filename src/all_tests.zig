@@ -3,7 +3,7 @@ const std = @import("std");
 const kernel_api = @import("root.zig");
 
 pub const public_api = kernel_api;
-pub const kernel = kernel_api.kernel;
+pub const kernel = @import("kernel/root.zig");
 pub const core = @import("core/root.zig");
 pub const frontend = @import("frontend/root.zig");
 pub const bytecode = @import("bytecode/root.zig");
@@ -15,6 +15,7 @@ pub const RuntimeError = exec.exceptions.RuntimeError;
 pub const HostError = exec.exceptions.HostError;
 pub const JSRuntime = kernel_api.JSRuntime;
 pub const JSContext = kernel_api.JSContext;
+pub const Object = kernel_api.Object;
 pub const JSValue = kernel_api.JSValue;
 pub const JSValueHandle = kernel_api.JSValueHandle;
 pub const LocalHandle = kernel_api.LocalHandle;
@@ -53,6 +54,13 @@ pub const JSBytes = kernel_api.JSBytes;
 pub const binding = kernel_api.binding;
 pub const ffi = kernel_api.ffi;
 pub const activateOpcodeProfile = kernel_api.activateOpcodeProfile;
+pub const value = kernel_api.value;
+pub const host = kernel_api.host;
+pub const object = kernel_api.object;
+pub const module = kernel_api.module;
+pub const compile = kernel_api.compile;
+pub const @"error" = kernel_api.@"error";
+pub const job = kernel_api.job;
 
 fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) void {
     @setEvalBranchQuota(200000);

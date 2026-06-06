@@ -836,8 +836,22 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
     try std.testing.expectEqual(@as(i32, 7), result.asInt32().?);
 }
 
+fn testFixturePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return std.fs.path.resolve(allocator, &.{ "../..", path }),
+        else => return err,
+    };
+    file.close(io);
+    return allocator.dupe(u8, path);
+}
+
 test "runtime Plugin loads a dynamic library and installs its binding" {
-    var plugin = try Plugin.load(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    const fixture_path = try testFixturePath(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    defer std.testing.allocator.free(fixture_path);
+
+    var plugin = try Plugin.load(std.testing.allocator, fixture_path);
     defer plugin.deinit();
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -864,14 +878,17 @@ test "runtime Plugin loads a dynamic library and installs its binding" {
 }
 
 test "runtime Plugin load owns a path copy independent from caller storage" {
-    const caller_path = try std.testing.allocator.dupe(u8, build_options.runtime_plugin_fixture_path);
+    const fixture_path = try testFixturePath(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    defer std.testing.allocator.free(fixture_path);
+
+    const caller_path = try std.testing.allocator.dupe(u8, fixture_path);
     defer std.testing.allocator.free(caller_path);
 
     var plugin = try Plugin.load(std.testing.allocator, caller_path);
     defer plugin.deinit();
 
     @memset(caller_path, '#');
-    try std.testing.expectEqualStrings(build_options.runtime_plugin_fixture_path, plugin.path);
+    try std.testing.expectEqualStrings(fixture_path, plugin.path);
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -895,9 +912,12 @@ test "runtime Plugin load owns a path copy independent from caller storage" {
 }
 
 test "runtime Plugin treats repeated loads of the same path as independent installs" {
-    var first = try Plugin.load(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    const fixture_path = try testFixturePath(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    defer std.testing.allocator.free(fixture_path);
+
+    var first = try Plugin.load(std.testing.allocator, fixture_path);
     defer first.deinit();
-    var second = try Plugin.load(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    var second = try Plugin.load(std.testing.allocator, fixture_path);
     defer second.deinit();
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -931,7 +951,10 @@ test "runtime Plugin treats repeated loads of the same path as independent insta
 }
 
 test "runtime Plugin accepts empty descriptors as no-op installs" {
-    var plugin = try Plugin.load(std.testing.allocator, build_options.runtime_empty_plugin_fixture_path);
+    const fixture_path = try testFixturePath(std.testing.allocator, build_options.runtime_empty_plugin_fixture_path);
+    defer std.testing.allocator.free(fixture_path);
+
+    var plugin = try Plugin.load(std.testing.allocator, fixture_path);
     defer plugin.deinit();
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -961,7 +984,10 @@ test "runtime Plugin accepts empty descriptors as no-op installs" {
 }
 
 test "runtime Plugin install consumes the loaded handle even when install fails" {
-    var plugin = try Plugin.load(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    const fixture_path = try testFixturePath(std.testing.allocator, build_options.runtime_plugin_fixture_path);
+    defer std.testing.allocator.free(fixture_path);
+
+    var plugin = try Plugin.load(std.testing.allocator, fixture_path);
     defer plugin.deinit();
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
