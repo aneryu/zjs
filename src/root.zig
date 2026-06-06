@@ -182,6 +182,29 @@ pub const host = struct {
         });
     }
 
+    pub fn evalGlobalScriptSource(
+        ctx: *JSContext,
+        output: ?*std.Io.Writer,
+        global: *Object,
+        source: []const u8,
+        filename: []const u8,
+    ) !value.Value {
+        return zjs_exec.call.qjsEvalGlobalScriptSource(ctx, output, global, source, filename);
+    }
+
+    pub fn evalGlobalScriptValue(
+        ctx: *JSContext,
+        output: ?*std.Io.Writer,
+        global: *Object,
+        source_value: value.Value,
+        filename: []const u8,
+    ) !value.Value {
+        if (!source_value.isString()) return error.TypeError;
+        const source = try value.toOwnedString(ctx.runtimePtr(), source_value);
+        defer ctx.runtimePtr().memory.allocator.free(source);
+        return evalGlobalScriptSource(ctx, output, global, source, filename);
+    }
+
     fn wrapExternal(comptime function: anytype) Function {
         return struct {
             fn call(_: *anyopaque, host_call: Call) anyerror!value.Value {
@@ -211,11 +234,7 @@ pub const host = struct {
         if (args.len == 0) return value.undefinedValue();
         if (!args[0].isString()) return error.TypeError;
         const eval_global = (try ctx.functionRealmGlobal(function_object.value())) orelse global;
-        return ctx.evalScriptValue(args[0], .{
-            .output = output,
-            .realm_global = eval_global,
-            .filename = "<evalScript>",
-        });
+        return evalGlobalScriptValue(ctx, output, eval_global, args[0], "<evalScript>");
     }
 
     fn test262CreateRealm(

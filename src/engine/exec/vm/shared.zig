@@ -47290,6 +47290,7 @@ pub fn isConstructorLike(ctx: *core.Context, value: core.Value) bool {
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
         }
+        if (function_object.is_html_dda) return false;
         if (isDateConstructorRecord(function_object)) return true;
         if (function_object.class_id == core.class.ids.c_closure) return true;
         const name = call_mod.nativeFunctionNameForVm(ctx.runtime, function_object) catch return false;

@@ -1156,8 +1156,7 @@ fn xorCaseProp(allocator: std.mem.Allocator, case_mask: u32, prop_idx: usize) Un
 }
 
 fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: bool) UnicodeError!RangeSet {
-    const found = findName(data.unicode_script_name_table[0..], script_name) orelse return error.InvalidProperty;
-    const script_idx: u32 = @intCast(found + data.Script.Unknown + 1);
+    const script_idx = scriptIndex(script_name) orelse return error.InvalidProperty;
     const is_common = script_idx == data.Script.Common or script_idx == data.Script.Inherited;
 
     var base = RangeSet.init(allocator);
@@ -1187,6 +1186,7 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
         if (v == script_idx) try base.addInterval(c, c1);
         c = c1;
     }
+    if (script_idx == data.Script.Unknown) try base.addInterval(c, unicode_limit);
 
     if (!is_ext) return base;
 
@@ -1232,4 +1232,10 @@ fn scriptRanges(allocator: std.mem.Allocator, script_name: []const u8, is_ext: b
         try base.unionWith(&ext);
     }
     return base;
+}
+
+fn scriptIndex(script_name: []const u8) ?u32 {
+    if (std.mem.eql(u8, script_name, "Unknown") or std.mem.eql(u8, script_name, "Zzzz")) return data.Script.Unknown;
+    const found = findName(data.unicode_script_name_table[0..], script_name) orelse return null;
+    return @intCast(found + data.Script.Unknown + 1);
 }

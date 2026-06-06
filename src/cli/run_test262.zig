@@ -1,7 +1,7 @@
 const std = @import("std");
-const public_api = @import("zjs");
-const zjs = public_api;
-const runtime_layer = public_api.runtime;
+const test262_root = @import("zjs");
+const zjs = test262_root.kernel;
+const runtime_layer = test262_root.runtime;
 
 extern "c" fn getpid() c_int;
 
@@ -1724,7 +1724,48 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
     if (!ctx.hasException()) return null;
     const thrown = ctx.takePendingException();
     defer thrown.free(rt);
-    if (!thrown.isObject()) return null;
+
+    if (thrown.isObject()) {
+        var owned_name: ?[]u8 = null;
+        defer if (owned_name) |name| rt.memory.allocator.free(name);
+
+        if (try exceptionStringProperty(rt, ctx, thrown, "name")) |name| {
+            if (name.len != 0) {
+                owned_name = name;
+            } else {
+                rt.memory.allocator.free(name);
+            }
+        }
+
+        if (owned_name == null) {
+            const ctor = ctx.getProperty(thrown, "constructor") catch null;
+            if (ctor) |constructor| {
+                defer constructor.free(rt);
+                if (ctx.isCallable(constructor)) {
+                    const maybe_name: ?[]u8 = ctx.functionName(constructor, rt.memory.allocator) catch |err| switch (err) {
+                        error.OutOfMemory => return err,
+                        else => null,
+                    };
+                    if (maybe_name) |name| {
+                        if (name.len != 0 and !std.mem.eql(u8, name, "Object")) {
+                            owned_name = name;
+                        } else {
+                            rt.memory.allocator.free(name);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (owned_name) |name| {
+            if (try exceptionStringProperty(rt, ctx, thrown, "message")) |message| {
+                defer rt.memory.allocator.free(message);
+                if (message.len != 0) return try std.fmt.bufPrint(storage, "{s}: {s}", .{ name, message });
+            }
+            return try std.fmt.bufPrint(storage, "{s}", .{name});
+        }
+    }
+
     const formatted = try ctx.formatException(thrown, rt.memory.allocator);
     defer rt.memory.allocator.free(formatted);
     const name = if (std.mem.indexOfScalar(u8, formatted, ':')) |colon|
@@ -1733,6 +1774,14 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
         formatted;
     if (name.len == 0) return null;
     return try std.fmt.bufPrint(storage, "{s}", .{name});
+}
+
+fn exceptionStringProperty(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, value: zjs.JSValue, name: []const u8) !?[]u8 {
+    const property = ctx.getProperty(value, name) catch return null;
+    defer property.free(rt);
+    if (!property.isString()) return null;
+    const bytes = try ctx.toOwnedUtf8(property, rt.memory.allocator);
+    return bytes;
 }
 
 fn runExternalEngine(
@@ -3314,7 +3363,7 @@ fn hostCallIsHtmlDda(
     _ = output;
     _ = global;
     _ = args;
-    return zjs.JSValue.undefinedValue();
+    return zjs.JSValue.nullValue();
 }
 
 fn qjsTest262CreateRealm(
@@ -3751,6 +3800,24 @@ test "selected known failure that now passes is counted as fixed" {
     try std.testing.expectEqual(@as(usize, 0), summary.failed);
     try std.testing.expectEqual(@as(usize, 1), summary.fixed);
     try std.testing.expectEqual(@as(usize, 0), current.items.len);
+}
+
+test "embedded runner reports thrown proxy constructors as test failures" {
+    var stderr_storage: [stderr_storage_len]u8 = undefined;
+    var stderr: []const u8 = "";
+    const passed = try runEmbeddedEngine(
+        std.testing.allocator,
+        std.testing.io,
+        "throw { constructor: new Proxy(function(){}, {}) };",
+        "proxy-constructor-throw.js",
+        false,
+        false,
+        &stderr_storage,
+        &stderr,
+    );
+
+    try std.testing.expect(!passed);
+    try std.testing.expect(stderr.len != 0);
 }
 
 test "test262 metadata parses includes in order plus features flags and negative data" {

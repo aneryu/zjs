@@ -118,7 +118,7 @@ pub fn dynamicImport(
     }
 
     if (ctx.dynamic_import_callback) |callback| {
-        const referrer_path = ctx.runtime.atoms.name(function.name) orelse "";
+        const referrer_path = ctx.runtime.atoms.name(function.filename) orelse "";
         var specifier_bytes = std.ArrayList(u8).empty;
         defer specifier_bytes.deinit(ctx.runtime.memory.allocator);
         try value_ops.appendRawString(ctx.runtime, &specifier_bytes, specifier_string);

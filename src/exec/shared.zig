@@ -13994,6 +13994,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
         }
+        if (function_object.is_html_dda) return false;
         if (isDateConstructorRecord(function_object)) return true;
         if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);

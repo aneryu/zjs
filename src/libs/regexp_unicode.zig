@@ -2,6 +2,7 @@
 // Completely refactored to use compact binary tables and comptime-optimized routing.
 const std = @import("std");
 const data = @import("unicode_data.zig");
+const max_code_point: u21 = 0x10ffff;
 
 // --- Compact Binary Tables (preserved from C QuickJS translation) ---
 
@@ -439,7 +440,7 @@ fn parseNameTableComptime(comptime table: []const u8) []const MapEntry {
             var len_to_null: usize = 0;
             while (len_to_null < p.len and p[len_to_null] != 0) : (len_to_null += 1) {}
             const group = p[0..len_to_null];
-            
+
             var start: usize = 0;
             var i: usize = 0;
             while (i <= group.len) : (i += 1) {
@@ -451,8 +452,8 @@ fn parseNameTableComptime(comptime table: []const u8) []const MapEntry {
                     start = i + 1;
                 }
             }
-            
-            p = p[len_to_null + 1..];
+
+            p = p[len_to_null + 1 ..];
             pos += 1;
         }
         return entries;
@@ -462,6 +463,12 @@ fn parseNameTableComptime(comptime table: []const u8) []const MapEntry {
 const ScriptMap = std.StaticStringMap(usize).initComptime(parseNameTableComptime(&unicode_script_name_table));
 const GcMap = std.StaticStringMap(usize).initComptime(parseNameTableComptime(&unicode_gc_name_table));
 const PropMap = std.StaticStringMap(usize).initComptime(parseNameTableComptime(&data.unicode_prop_name_table));
+
+fn scriptIndex(script_name: []const u8) ?u32 {
+    if (std.mem.eql(u8, script_name, "Unknown") or std.mem.eql(u8, script_name, "Zzzz")) return data.Script.Unknown;
+    const found = ScriptMap.get(script_name) orelse return null;
+    return @intCast(found + data.Script.Unknown + 1);
+}
 
 // --- Runtime Zero-Allocation Evaluators ---
 
@@ -540,7 +547,7 @@ fn isCodePointInGcMask(code_point: u21, gc_mask: u32) bool {
         p = p[1..];
         var n: u32 = b >> 5;
         const v: u32 = b & 0x1f;
-        
+
         if (n == 7) {
             const next_b = p[0];
             p = p[1..];
@@ -559,10 +566,10 @@ fn isCodePointInGcMask(code_point: u21, gc_mask: u32) bool {
                 n += 7 + 128 + (1 << 14);
             }
         }
-        
+
         const c0 = c;
         c += n + 1;
-        
+
         if (code_point >= c0 and code_point < c) {
             if (v == 31) {
                 const upper_lower = gc_mask & (lu_mask | ll_mask);
@@ -724,10 +731,11 @@ fn isCodePointInProperty(code_point: u21, prop_idx: usize) bool {
 }
 
 fn unicode_script(code_point: u21, script_idx: u32, is_ext: bool) bool {
-    const is_common = (script_idx == 26 or script_idx == 72); // Common: 26, Inherited: 72
+    const is_common = script_idx == data.Script.Common or script_idx == data.Script.Inherited;
     var p: []const u8 = &data.unicode_script_table;
     var c: u32 = 0;
     var primary_match = false;
+    var found_range = false;
     while (p.len > 0) {
         const b = p[0];
         p = p[1..];
@@ -747,15 +755,16 @@ fn unicode_script(code_point: u21, script_idx: u32, is_ext: bool) bool {
             p = p[2..];
             n += 96 + (1 << 12);
         }
-        
+
         var v: u32 = 0;
         if (type_bit != 0) {
             v = p[0];
             p = p[1..];
         }
-        
+
         const c1 = c + n + 1;
         if (code_point >= c and code_point < c1) {
+            found_range = true;
             if (v == script_idx) {
                 primary_match = true;
             }
@@ -763,11 +772,14 @@ fn unicode_script(code_point: u21, script_idx: u32, is_ext: bool) bool {
         }
         c = c1;
     }
-    
+    if (!found_range and code_point >= c and code_point <= max_code_point and script_idx == data.Script.Unknown) {
+        primary_match = true;
+    }
+
     if (!is_ext) {
         return primary_match;
     }
-    
+
     var p_ext: []const u8 = &unicode_script_ext_table;
     c = 0;
     var ext_match = false;
@@ -790,11 +802,11 @@ fn unicode_script(code_point: u21, script_idx: u32, is_ext: bool) bool {
             p_ext = p_ext[2..];
             n += 128 + (1 << 14);
         }
-        
+
         const c1 = c + n + 1;
         const v_len = p_ext[0];
         p_ext = p_ext[1..];
-        
+
         if (code_point >= c and code_point < c1) {
             if (is_common) {
                 if (v_len != 0) {
@@ -810,11 +822,11 @@ fn unicode_script(code_point: u21, script_idx: u32, is_ext: bool) bool {
             }
             break;
         }
-        
+
         p_ext = p_ext[v_len..];
         c = c1;
     }
-    
+
     if (is_common) {
         return primary_match and !ext_has_any;
     } else {
@@ -829,7 +841,7 @@ pub fn isUnicodePropertyMatches(code_point: u21, name: []const u8) bool {
     if (exactScriptExtensionsAliasTarget(name)) |target| {
         return isUnicodePropertyMatches(code_point, target);
     }
-    
+
     // 2. Parse property category prefixes
     var is_script = false;
     var is_ext = false;
@@ -849,14 +861,14 @@ pub fn isUnicodePropertyMatches(code_point: u21, name: []const u8) bool {
         is_ext = true;
         name_str = name[4..];
     }
-    
+
     if (is_script) {
-        if (ScriptMap.get(name_str)) |script_idx| {
-            return unicode_script(code_point, @intCast(script_idx), is_ext);
+        if (scriptIndex(name_str)) |script_idx| {
+            return unicode_script(code_point, script_idx, is_ext);
         }
         return false;
     }
-    
+
     var is_gc = false;
     if (std.mem.startsWith(u8, name, "General_Category=")) {
         is_gc = true;
@@ -865,36 +877,36 @@ pub fn isUnicodePropertyMatches(code_point: u21, name: []const u8) bool {
         is_gc = true;
         name_str = name[3..];
     }
-    
+
     if (is_gc) {
         if (GcMap.get(name_str)) |gc_idx| {
-            const mask = if (gc_idx < data.GC.LC) 
-                @as(u32, 1) << @intCast(gc_idx) 
-            else 
+            const mask = if (gc_idx < data.GC.LC)
+                @as(u32, 1) << @intCast(gc_idx)
+            else
                 gc_mask_table[gc_idx - data.GC.LC];
             return isCodePointInGcMask(code_point, mask);
         }
         return false;
     }
-    
+
     // 3. Fallback: bare property names (order of preference: GC, bare Script as scx, Binary Prop)
     if (GcMap.get(name)) |gc_idx| {
-        const mask = if (gc_idx < data.GC.LC) 
-            @as(u32, 1) << @intCast(gc_idx) 
-        else 
+        const mask = if (gc_idx < data.GC.LC)
+            @as(u32, 1) << @intCast(gc_idx)
+        else
             gc_mask_table[gc_idx - data.GC.LC];
         return isCodePointInGcMask(code_point, mask);
     }
-    
-    if (ScriptMap.get(name)) |script_idx| {
-        return unicode_script(code_point, @intCast(script_idx), true);
+
+    if (scriptIndex(name)) |script_idx| {
+        return unicode_script(code_point, script_idx, true);
     }
-    
+
     if (PropMap.get(name)) |found| {
         const prop_idx = found + data.Prop.ASCII_Hex_Digit;
         return isCodePointInProperty(code_point, prop_idx);
     }
-    
+
     return false;
 }
 
@@ -905,7 +917,7 @@ pub fn exactScriptExtensionsAliasTarget(name: []const u8) ?[]const u8 {
         name["scx=".len..]
     else
         return null;
-        
+
     if (std.mem.eql(u8, value, "Anatolian_Hieroglyphs") or std.mem.eql(u8, value, "Hluw")) return "Script=Anatolian_Hieroglyphs";
     if (std.mem.eql(u8, value, "Balinese") or std.mem.eql(u8, value, "Bali")) return "Script=Balinese";
     if (std.mem.eql(u8, value, "Bamum") or std.mem.eql(u8, value, "Bamu")) return "Script=Bamum";
@@ -974,4 +986,29 @@ pub fn exactScriptExtensionsAliasTarget(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, value, "Warang_Citi") or std.mem.eql(u8, value, "Wara")) return "Script=Warang_Citi";
     if (std.mem.eql(u8, value, "Zanabazar_Square") or std.mem.eql(u8, value, "Zanb")) return "Script=Zanabazar_Square";
     return null;
+}
+
+test "regexp unicode script properties include Unknown sentinel" {
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script=Zzzz"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "sc=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "sc=Zzzz"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script_Extensions=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "Script_Extensions=Zzzz"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "scx=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x038b, "scx=Zzzz"));
+    try std.testing.expect(isUnicodePropertyMatches(0x0e01f0, "Script=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x10ffff, "Script=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x0e01f0, "Script_Extensions=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x10ffff, "Script_Extensions=Unknown"));
+
+    try std.testing.expect(!isUnicodePropertyMatches(0x03c0, "Script=Unknown"));
+    try std.testing.expect(!isUnicodePropertyMatches(0x03c0, "Script_Extensions=Unknown"));
+    try std.testing.expect(isUnicodePropertyMatches(0x03c0, "Script=Greek"));
+    try std.testing.expect(isUnicodePropertyMatches(0x03c0, "Script_Extensions=Greek"));
+}
+
+test "regexp unicode script extensions exclude explicit Inherited extensions" {
+    try std.testing.expect(isUnicodePropertyMatches(0x0300, "Script=Inherited"));
+    try std.testing.expect(!isUnicodePropertyMatches(0x0300, "Script_Extensions=Inherited"));
 }

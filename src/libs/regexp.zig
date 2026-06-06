@@ -1081,15 +1081,12 @@ test "QuickJS regexp bytecode VM executes core opcodes" {
 
 const regex_bytecode = @This();
 
-
-
 pub const CompileError = std.mem.Allocator.Error || error{
     InvalidPattern,
     Unsupported,
 };
 
 const max_code_point: u21 = 0x10ffff;
-
 
 const Atom = struct {
     start: usize,
@@ -2859,6 +2856,19 @@ test "Zig regexp compiler emits bytecode for common ASCII patterns" {
     try std.testing.expectEqual(.match, escaped_astral_status.result);
     try std.testing.expectEqual(@as(usize, 0), escaped_astral_status.match.start);
     try std.testing.expectEqual(@as(usize, 2), escaped_astral_status.match.end);
+
+    const unknown_script_property = try compile(allocator, "\\p{Script=Unknown}", "u");
+    defer allocator.free(unknown_script_property);
+    const unknown_input = [_]u16{0x038b};
+    const unknown_script_property_status = try regex_bytecode.exec(allocator, unknown_script_property, .{ .utf16 = &unknown_input }, 0);
+    try std.testing.expectEqual(.match, unknown_script_property_status.result);
+    try std.testing.expectEqual(@as(usize, 1), unknown_script_property_status.match.end);
+
+    const unknown_script_ext_property = try compile(allocator, "\\p{Script_Extensions=Unknown}", "u");
+    defer allocator.free(unknown_script_ext_property);
+    const unknown_script_ext_property_status = try regex_bytecode.exec(allocator, unknown_script_ext_property, .{ .utf16 = &unknown_input }, 0);
+    try std.testing.expectEqual(.match, unknown_script_ext_property_status.result);
+    try std.testing.expectEqual(@as(usize, 1), unknown_script_ext_property_status.match.end);
 
     const lookahead = try compile(allocator, "foo(?=bar)", "");
     defer allocator.free(lookahead);

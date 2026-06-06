@@ -71,6 +71,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     public_fast_mod.addOptions("build_options", engine_options);
+    const internal_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/test262_internal_root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    internal_fast_mod.addOptions("build_options", engine_options);
     const zjs_cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
@@ -97,7 +104,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "zjs", .module = public_fast_mod },
+                .{ .name = "zjs", .module = internal_fast_mod },
             },
         }),
     });
