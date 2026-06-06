@@ -14,20 +14,59 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", engine_options);
-    const internal_fast_mod = b.createModule(.{
-        .root_source_file = b.path("src/internal_root.zig"),
+
+    const plugin_fixture_options = b.addOptions();
+    plugin_fixture_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
+    const plugin_fixture_zjs_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    plugin_fixture_zjs_mod.addOptions("build_options", plugin_fixture_options);
+    const runtime_plugin_fixture_mod = b.createModule(.{
+        .root_source_file = b.path("tests/fixtures/runtime_plugin_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = plugin_fixture_zjs_mod },
+        },
+    });
+    const runtime_plugin_fixture = b.addLibrary(.{
+        .name = "zjs-runtime-plugin-fixture",
+        .linkage = .dynamic,
+        .root_module = runtime_plugin_fixture_mod,
+    });
+    const runtime_empty_plugin_fixture_mod = b.createModule(.{
+        .root_source_file = b.path("tests/fixtures/runtime_empty_plugin_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = plugin_fixture_zjs_mod },
+        },
+    });
+    const runtime_empty_plugin_fixture = b.addLibrary(.{
+        .name = "zjs-runtime-empty-plugin-fixture",
+        .linkage = .dynamic,
+        .root_module = runtime_empty_plugin_fixture_mod,
+    });
+
+    const public_fast_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
     });
-    internal_fast_mod.addOptions("build_options", engine_options);
+    public_fast_mod.addOptions("build_options", engine_options);
     const zjs_cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/zjs.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "zjs_internal", .module = internal_fast_mod },
+            .{ .name = "zjs", .module = public_fast_mod },
         },
     });
     const zjs_exe = b.addExecutable(.{
@@ -47,7 +86,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "zjs_internal", .module = internal_fast_mod },
+                .{ .name = "zjs", .module = public_fast_mod },
             },
         }),
     });
@@ -281,6 +320,38 @@ pub fn build(b: *std.Build) void {
     const perf_compare_step = b.step("perf-compare", "Refresh checked-in performance report environment, top-10, and diff summaries");
     perf_compare_step.dependOn(&run_perf_diff.step);
 
+    const run_architecture_deps = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_deps.js",
+    });
+
+    const architecture_public_api_mod = b.createModule(.{
+        .root_source_file = b.path("tools/architecture/check_public_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = engine_mod },
+        },
+    });
+    const architecture_public_api = b.addExecutable(.{
+        .name = "check-public-api",
+        .root_module = architecture_public_api_mod,
+    });
+    const run_architecture_public_api = b.addRunArtifact(architecture_public_api);
+    run_architecture_public_api.addArg("reports/api/public-symbols.txt");
+
+    const update_architecture_public_api = b.addRunArtifact(architecture_public_api);
+    update_architecture_public_api.addArg("--write");
+    update_architecture_public_api.addArg("reports/api/public-symbols.txt");
+
+    const architecture_check_step = b.step("architecture-check", "Check architecture dependency rules and public API snapshot");
+    architecture_check_step.dependOn(&run_architecture_deps.step);
+    architecture_check_step.dependOn(&run_architecture_public_api.step);
+
+    const architecture_snapshot_step = b.step("architecture-update-api-snapshot", "Refresh the public API snapshot");
+    architecture_snapshot_step.dependOn(&update_architecture_public_api.step);
+
     // Unified tests (runs all tests in one single binary, using src/all_tests.zig as compile root)
     const unified_tests = b.addTest(.{
         .name = "unified-tests",
@@ -295,9 +366,13 @@ pub fn build(b: *std.Build) void {
         .path = b.path("tools/timing_test_runner.zig"),
         .mode = .simple,
     };
+    const test_options = b.addOptions();
+    test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
+    test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
+    test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
     unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
-    unified_tests.root_module.addOptions("build_options", engine_options);
+    unified_tests.root_module.addOptions("build_options", test_options);
     const run_unified_tests = b.addRunArtifact(unified_tests);
 
     // User-facing steps to expose

@@ -131,10 +131,13 @@ pub const LegacyFinalizer = *const fn () void;
 pub const PayloadFinalizer = *const fn (runtime: *anyopaque, object: *anyopaque, payload: *Payload) void;
 pub const PayloadMark = *const fn (runtime: *anyopaque, object: *anyopaque, payload: *Payload, visitor: *PayloadVisitor) void;
 pub const Call = *const fn () void;
+pub const BindingDataFinalizer = *const fn (data: *anyopaque) void;
 
 pub const Definition = struct {
     class_name: []const u8,
     binding_identity: ?[]const u8 = null,
+    binding_data: ?*anyopaque = null,
+    binding_data_finalizer: ?BindingDataFinalizer = null,
     payload_kind: PayloadKind = .none,
     inline_payload_size: u32 = 0,
     inline_payload_align: u16 = 1,
@@ -149,6 +152,8 @@ pub const Record = struct {
     id: ClassId = invalid_class_id,
     class_name: atom.Atom = atom.null_atom,
     binding_identity: ?[]const u8 = null,
+    binding_data: ?*anyopaque = null,
+    binding_data_finalizer: ?BindingDataFinalizer = null,
     payload_kind: PayloadKind = .none,
     inline_payload_size: u32 = 0,
     inline_payload_align: u16 = 1,
@@ -164,6 +169,12 @@ pub const Record = struct {
 
     pub fn hasInlinePayload(self: Record) bool {
         return self.inline_payload_size != 0;
+    }
+
+    pub fn finalizeBindingData(self: Record) void {
+        const data = self.binding_data orelse return;
+        const finalizer = self.binding_data_finalizer orelse return;
+        finalizer(data);
     }
 };
 
@@ -190,7 +201,10 @@ pub const Table = struct {
         const records = self.records;
         self.records = &.{};
         for (records) |rec| {
-            if (rec.isRegistered()) self.atoms.free(rec.class_name);
+            if (rec.isRegistered()) {
+                rec.finalizeBindingData();
+                self.atoms.free(rec.class_name);
+            }
         }
         if (records.len != 0) self.memory.free(Record, records);
     }
@@ -206,6 +220,15 @@ pub const Table = struct {
         const name_atom = try self.atoms.internString(def.class_name);
         defer self.atoms.free(name_atom);
         try self.registerAtom(id, name_atom, def);
+    }
+
+    pub fn unregisterDynamic(self: *Table, id: ClassId) void {
+        if (id < ids.init_count or id >= self.records.len) return;
+        const rec = self.records[id];
+        if (!rec.isRegistered()) return;
+        rec.finalizeBindingData();
+        self.atoms.free(rec.class_name);
+        self.records[id] = .{};
     }
 
     pub fn isRegistered(self: Table, id: ClassId) bool {
@@ -286,6 +309,8 @@ pub const Table = struct {
             .id = id,
             .class_name = self.atoms.dup(name_atom),
             .binding_identity = def.binding_identity,
+            .binding_data = def.binding_data,
+            .binding_data_finalizer = def.binding_data_finalizer,
             .payload_kind = def.payload_kind,
             .inline_payload_size = def.inline_payload_size,
             .inline_payload_align = def.inline_payload_align,

@@ -17,6 +17,7 @@ pub const exceptions = @import("exceptions.zig");
 pub const exception_ops = @import("vm_exception_ops.zig");
 pub const iterator = @import("iterator.zig");
 pub const eval = @import("eval.zig");
+pub const eval_entry = @import("eval_entry.zig");
 pub const module = @import("module.zig");
 pub const module_graph = @import("module_graph.zig");
 pub const promise = @import("promise.zig");

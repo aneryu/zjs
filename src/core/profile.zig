@@ -3,6 +3,8 @@ const std = @import("std");
 pub const max_opcode_count = 256;
 
 pub const OpcodeProfile = struct {
+    pub const opcode_count = max_opcode_count;
+
     count: [max_opcode_count]u64 = @splat(0),
     nanos: [max_opcode_count]u64 = @splat(0),
     slow_count: [max_opcode_count]u64 = @splat(0),
@@ -50,6 +52,10 @@ pub const OpcodeProfile = struct {
 
     pub fn recordCallFrame(self: *OpcodeProfile) void {
         self.call_frame_count +|= 1;
+    }
+
+    pub fn opcodeName(opcode: u8) []const u8 {
+        return @import("../bytecode/opcode.zig").nameOf(opcode);
     }
 
     pub fn recordIcHit(self: *OpcodeProfile, opcode: ?u8) void {

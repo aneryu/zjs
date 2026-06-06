@@ -1995,6 +1995,15 @@ pub const Registry = struct {
         }
         return count;
     }
+
+    pub fn containsHeader(self: Registry, header: *const GCObjectHeader) bool {
+        var current = self.gc_obj_list_head;
+        while (current) |node| {
+            if (headerFromGcNode(node) == header) return true;
+            current = node.next;
+        }
+        return false;
+    }
 };
 
 /// 6.3 Header 反查与转换辅助

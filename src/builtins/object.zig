@@ -1,6 +1,5 @@
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode/root.zig");
-const bignum = @import("../libs/bignum.zig");
 const std = @import("std");
 
 pub const EntriesMode = enum {
@@ -282,14 +281,7 @@ pub fn ownEntriesArray(rt: *core.JSRuntime, value: core.JSValue, mode: EntriesMo
 }
 
 pub fn sameValue(a: core.JSValue, b: core.JSValue) bool {
-    if (numberValue(a)) |lhs| {
-        if (numberValue(b)) |rhs| {
-            if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
-            if (lhs == 0 and rhs == 0) return isNegativeZero(lhs) == isNegativeZero(rhs);
-            return lhs == rhs;
-        }
-    }
-    return valuesEqual(a, b);
+    return a.sameValue(b);
 }
 
 fn expectObject(value: core.JSValue) !*core.Object {
@@ -365,77 +357,4 @@ test "object entryArrayValue roots direct function bytecode value while creating
 
 fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
     return rt.atoms.toStringValue(rt, atom_id);
-}
-
-fn valuesEqual(a: core.JSValue, b: core.JSValue) bool {
-    if (a.isBigInt() and b.isBigInt()) {
-        return (compareBigIntValues(a, b) orelse return false) == .eq;
-    }
-    if (a.asInt32()) |ai| {
-        if (b.asInt32()) |bi| return ai == bi;
-    }
-    if (a.asBool()) |ab| {
-        if (b.asBool()) |bb| return ab == bb;
-    }
-    if (a.isNull() or a.isUndefined()) return a.same(b);
-    if (a.isString() and b.isString()) {
-        if (a.same(b)) return true;
-        return (compareStringValues(a, b) orelse 1) == 0;
-    }
-    return a.same(b);
-}
-
-fn compareBigIntValues(a: core.JSValue, b: core.JSValue) ?std.math.Order {
-    var lhs_scratch: [2]bignum.Limb = undefined;
-    var rhs_scratch: [2]bignum.Limb = undefined;
-    const lhs = bigIntParts(a, &lhs_scratch) orelse return null;
-    const rhs = bigIntParts(b, &rhs_scratch) orelse return null;
-    return bignum.compareParts(lhs.negative, lhs.limbs, rhs.negative, rhs.limbs);
-}
-
-const BigIntParts = struct {
-    negative: bool,
-    limbs: []const bignum.Limb,
-};
-
-fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
-    if (value.asShortBigInt()) |short| {
-        const signed: i128 = short;
-        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
-        var len: usize = 0;
-        while (magnitude != 0) {
-            scratch[len] = @truncate(magnitude);
-            magnitude >>= @bitSizeOf(bignum.Limb);
-            len += 1;
-        }
-        return .{
-            .negative = short < 0,
-            .limbs = scratch[0..len],
-        };
-    }
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return .{ .negative = big.value.negative, .limbs = big.value.limbs };
-    }
-    return null;
-}
-
-fn compareStringValues(a: core.JSValue, b: core.JSValue) ?i32 {
-    if (!a.isString() or !b.isString()) return null;
-    const a_header = a.refHeader() orelse return null;
-    const b_header = b.refHeader() orelse return null;
-    const a_string: *core.string.String = @fieldParentPtr("header", a_header);
-    const b_string: *core.string.String = @fieldParentPtr("header", b_header);
-    return a_string.compare(b_string.*);
-}
-
-fn numberValue(value: core.JSValue) ?f64 {
-    if (value.asInt32()) |v| return @floatFromInt(v);
-    if (value.asFloat64()) |v| return v;
-    return null;
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
 }

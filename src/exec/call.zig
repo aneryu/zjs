@@ -149,23 +149,30 @@ pub fn returnThis(this_value: core.JSValue) core.JSValue {
 /// host callables installed for the CLI-visible global object.
 pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, 99);
-    try definePredefinedHostFunction(rt, global, "print", .output);
+    const output_external_id = try registerOutputExternalHostFunction(rt);
+    try definePredefinedExternalHostFunction(rt, global, "print", hostFunctionLength(.output), output_external_id);
     try installStandardGlobals(rt, global);
     try defineGlobalThisProperty(rt, global);
     try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
     try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
     try defineConstantPropertyAssumingNew(rt, global, "undefined", core.JSValue.undefinedValue());
 
-    try defineConsoleObject(rt, global);
+    try defineConsoleObject(rt, global, output_external_id);
 }
 
 fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try builtins.registry.installStandardGlobals(rt, global);
 }
 
-fn defineConsoleObject(rt: *core.JSRuntime, global: *core.Object) !void {
+fn defineConsoleObject(rt: *core.JSRuntime, global: *core.Object, output_external_id: u32) !void {
     const key = predefinedStringAtom("console");
-    try global.defineConsoleAutoInitProperty(rt, key, core.property.Flags.data(true, true, true), @intFromEnum(HostFunction.output));
+    try global.defineConsoleAutoInitProperty(
+        rt,
+        key,
+        core.property.Flags.data(true, true, true),
+        core.host_function.ids.external_host,
+        output_external_id,
+    );
 }
 
 pub fn callValue(
@@ -353,6 +360,10 @@ pub fn forEachArrayPrint(rt: *core.JSRuntime, output: ?*std.Io.Writer, array_val
     return core.JSValue.undefinedValue();
 }
 
+// The std/os entries mirror QuickJS-shaped host modules kept for legacy
+// internal paths. They are not installed by the default zjs/embedding global
+// surface; see ADR 0001's implementation status before treating them as a
+// product runtime API.
 const HostFunction = enum(i32) {
     output = core.host_function.ids.output,
     std_load_file = 23,
@@ -819,6 +830,26 @@ fn hostFunctionCanDispatchFromVmWithoutGlobals(kind: i32) bool {
 
 fn definePredefinedHostFunction(rt: *core.JSRuntime, target: *core.Object, comptime name: []const u8, kind: HostFunction) !void {
     try defineHostFunctionWithAtom(rt, target, predefinedStringAtom(name), name, kind, false, null);
+}
+
+fn definePredefinedExternalHostFunction(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    comptime name: []const u8,
+    length: i32,
+    external_id: u32,
+) !void {
+    try target.defineHostAutoInitPropertyWithExternalId(
+        rt,
+        predefinedStringAtom(name),
+        name,
+        length,
+        core.property.Flags.data(true, true, true),
+        core.host_function.ids.external_host,
+        false,
+        null,
+        external_id,
+    );
 }
 
 fn definePredefinedHostConstructorFunction(rt: *core.JSRuntime, target: *core.Object, comptime name: []const u8, kind: HostFunction) !void {
@@ -5504,6 +5535,20 @@ fn hostOutputValues(rt: *core.JSRuntime, output: ?*std.Io.Writer, values: []cons
         try writer.writeByte('\n');
     }
     return core.JSValue.undefinedValue();
+}
+
+var output_external_host_context: u8 = 0;
+
+fn registerOutputExternalHostFunction(rt: *core.JSRuntime) !u32 {
+    return rt.registerExternalHostFunction(.{
+        .ptr = @ptrCast(&output_external_host_context),
+        .call = externalHostOutput,
+    });
+}
+
+fn externalHostOutput(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
+    const ctx: *core.JSContext = @ptrCast(@alignCast(call.ctx));
+    return hostOutputValues(ctx.runtime, call.output, call.args);
 }
 
 fn hostCallOutput(call: HostCall) HostError!core.JSValue {

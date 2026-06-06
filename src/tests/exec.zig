@@ -258,7 +258,7 @@ pub const helpers = struct {
             return self.evalHandleWithOptions(source_text, .{ .mode = .module });
         }
 
-        pub fn evalMode(self: *TestEngine, source_text: []const u8, mode: engine.frontend.parser.Mode) RuntimeError!core.JSValue {
+        pub fn evalMode(self: *TestEngine, source_text: []const u8, mode: core.EvalMode) RuntimeError!core.JSValue {
             return self.evalWithOptions(source_text, .{ .mode = mode });
         }
 
@@ -300,19 +300,19 @@ pub const helpers = struct {
             return self.evalWithOptions(source_text, .{ .output = output });
         }
 
-        pub fn evalWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: engine.frontend.parser.Mode) RuntimeError!core.JSValue {
+        pub fn evalWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode) RuntimeError!core.JSValue {
             return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = "<eval>" });
         }
 
-        pub fn evalFileWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: engine.frontend.parser.Mode, filename: []const u8) RuntimeError!core.JSValue {
+        pub fn evalFileWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8) RuntimeError!core.JSValue {
             return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename });
         }
 
-        pub fn evalFileWithOutputModeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: engine.frontend.parser.Mode, filename: []const u8, strict: bool) RuntimeError!core.JSValue {
+        pub fn evalFileWithOutputModeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8, strict: bool) RuntimeError!core.JSValue {
             return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename, .parse_strict = strict, .runtime_strict = strict });
         }
 
-        pub fn evalFileWithOutputModeRuntimeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: engine.frontend.parser.Mode, filename: []const u8, runtime_strict: bool) RuntimeError!core.JSValue {
+        pub fn evalFileWithOutputModeRuntimeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8, runtime_strict: bool) RuntimeError!core.JSValue {
             return self.evalWithOptions(source_text, .{ .output = output, .mode = mode, .filename = filename, .runtime_strict = runtime_strict });
         }
 
@@ -958,7 +958,8 @@ test "call subsystem installs and invokes host globals" {
     const host_function_key = try rt.internAtom("__host_function");
     defer rt.atoms.free(host_function_key);
     try std.testing.expect(print_object.getOwnProperty(host_function_key) == null);
-    try std.testing.expect(print_object.hostFunctionKindSlot().* != 0);
+    try std.testing.expectEqual(core.host_function.ids.external_host, print_object.hostFunctionKindSlot().*);
+    try std.testing.expect(print_object.externalHostFunctionId() != 0);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
@@ -968,6 +969,25 @@ test "call subsystem installs and invokes host globals" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("1 true\n", stream.buffered());
+
+    const console_key = try rt.internAtom("console");
+    defer rt.atoms.free(console_key);
+    const log_key = try rt.internAtom("log");
+    defer rt.atoms.free(log_key);
+    const console_value = global.getProperty(console_key);
+    defer console_value.free(rt);
+    const console_object: *core.Object = @fieldParentPtr("header", console_value.refHeader().?);
+    const log = console_object.getProperty(log_key);
+    defer log.free(rt);
+    const log_object: *core.Object = @fieldParentPtr("header", log.refHeader().?);
+    try std.testing.expectEqual(core.host_function.ids.external_host, log_object.hostFunctionKindSlot().*);
+    try std.testing.expectEqual(print_object.externalHostFunctionId(), log_object.externalHostFunctionId());
+
+    const log_args = [_]core.JSValue{ core.JSValue.int32(2), core.JSValue.boolean(false) };
+    const log_result = try engine.exec.call.callValue(ctx, &stream, log, &log_args);
+    defer log_result.free(rt);
+    try std.testing.expect(log_result.isUndefined());
+    try std.testing.expectEqualStrings("1 true\n2 false\n", stream.buffered());
 
     const assert_key = try rt.internAtom("assert");
     defer rt.atoms.free(assert_key);

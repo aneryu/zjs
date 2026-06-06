@@ -71,7 +71,7 @@ pub fn JSBytes(comptime Value: type) type {
             };
 
             pub const SharedOptions = struct {
-                deinit: ?DeinitFn = null,
+                deinit: DeinitFn,
                 context: ?*anyopaque = null,
             };
 
@@ -259,6 +259,21 @@ test "JSBytes.Store invokes owned deinit once" {
     store.release();
 
     try std.testing.expectEqual(@as(usize, 1), state.calls);
+}
+
+test "JSBytes.Store shared options require an explicit release hook" {
+    const core = @import("root.zig");
+    const Hooks = struct {
+        fn deinit(context: ?*anyopaque, bytes: []u8) void {
+            _ = context;
+            _ = bytes;
+        }
+    };
+
+    const options = core.JSValue.Bytes.Store.SharedOptions{
+        .deinit = Hooks.deinit,
+    };
+    try std.testing.expect(@TypeOf(options.deinit) == core.JSValue.Bytes.Store.DeinitFn);
 }
 
 test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {

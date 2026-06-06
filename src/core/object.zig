@@ -7299,6 +7299,13 @@ pub const Object = struct {
         const function_object = Object.create(rt, class.ids.c_function, null) catch return null;
         const function_value = function_object.value();
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
+        if (info.external_host_function_id != 0) {
+            if (info.host_function_kind != host_function.ids.external_host) {
+                function_value.free(rt);
+                return null;
+            }
+            function_object.externalHostFunctionIdSlot().* = info.external_host_function_id;
+        }
         if (info.host_function_realm_global != 0) {
             function_object.setFunctionRealmGlobalPtr(rt, @ptrFromInt(info.host_function_realm_global)) catch {
                 function_value.free(rt);
@@ -7356,11 +7363,12 @@ pub const Object = struct {
         name: []const u8,
         length: i32,
         host_function_kind: i32,
+        external_host_function_id: u32,
         realm_global: ?*Object,
     ) !void {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        try target.defineHostAutoInitProperty(
+        try target.defineHostAutoInitPropertyWithExternalId(
             rt,
             key,
             name,
@@ -7369,6 +7377,7 @@ pub const Object = struct {
             host_function_kind,
             false,
             realm_global,
+            external_host_function_id,
         );
     }
 
@@ -7383,7 +7392,7 @@ pub const Object = struct {
         };
         const methods = [_][]const u8{ "log", "warn", "error" };
         for (methods) |name| {
-            defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, null) catch {
+            defineHostAutoInitDataPropertyByName(rt, console, name, 1, info.host_function_kind, info.external_host_function_id, null) catch {
                 console_value.free(rt);
                 return null;
             };
@@ -7836,8 +7845,10 @@ pub const Object = struct {
         atom_id: atom.Atom,
         flags: property.Flags,
         host_function_kind: i32,
+        external_host_function_id: u32,
     ) !void {
         std.debug.assert(host_function_kind != 0);
+        std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(self.exotic == null);
         std.debug.assert(!self.is_array);
         std.debug.assert(self.extensible);
@@ -7850,6 +7861,7 @@ pub const Object = struct {
                 .rt = rt,
                 .kind = .console,
                 .host_function_kind = host_function_kind,
+                .external_host_function_id = external_host_function_id,
             } },
         });
     }
@@ -7990,7 +8002,33 @@ pub const Object = struct {
         host_function_prototype: bool,
         host_function_realm_global: ?*Object,
     ) !void {
+        try self.defineHostAutoInitPropertyWithExternalId(
+            rt,
+            atom_id,
+            name,
+            length,
+            flags,
+            host_function_kind,
+            host_function_prototype,
+            host_function_realm_global,
+            0,
+        );
+    }
+
+    pub fn defineHostAutoInitPropertyWithExternalId(
+        self: *Object,
+        rt: *JSRuntime,
+        atom_id: atom.Atom,
+        name: []const u8,
+        length: i32,
+        flags: property.Flags,
+        host_function_kind: i32,
+        host_function_prototype: bool,
+        host_function_realm_global: ?*Object,
+        external_host_function_id: u32,
+    ) !void {
         std.debug.assert(host_function_kind != 0);
+        std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(self.exotic == null);
         std.debug.assert(!self.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
@@ -8009,6 +8047,7 @@ pub const Object = struct {
                 .length = length,
                 .rt = rt,
                 .host_function_kind = host_function_kind,
+                .external_host_function_id = external_host_function_id,
                 .host_function_prototype = host_function_prototype,
                 .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
             } },
@@ -8497,7 +8536,7 @@ pub const Object = struct {
         if (desc.writable) |writable| {
             if (!writable) return error.IncompatibleDescriptor;
         }
-        if (desc.kind == .data and desc.value_present and !sameValue(current, desc.value)) {
+        if (desc.kind == .data and desc.value_present and !current.sameValue(desc.value)) {
             return error.ReadOnly;
         }
         return true;
@@ -8732,7 +8771,7 @@ pub const Object = struct {
         }
         if (!last_index_writable.*) {
             if (desc.writable orelse false) return error.IncompatibleDescriptor;
-            if (desc.value_present and !sameValue(last_index.*.?, desc.value)) return error.ReadOnly;
+            if (desc.value_present and !last_index.*.?.sameValue(desc.value)) return error.ReadOnly;
             return;
         }
         if (desc.value_present) {
@@ -9142,11 +9181,11 @@ fn isCompatible(current: property.Entry, desc: descriptor.Descriptor) bool {
     if ((desc.kind == .accessor) != current_is_accessor) return false;
     if (!current_is_accessor and !current.flags.writable) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !sameValue(current.slot.data, desc.value)) return false;
+        if (desc.kind == .data and desc.value_present and !current.slot.data.sameValue(desc.value)) return false;
     }
     if (current_is_accessor and desc.kind == .accessor) {
-        if (desc.getter_present and !sameValue(current.slot.accessor.getter, desc.getter)) return false;
-        if (desc.setter_present and !sameValue(current.slot.accessor.setter, desc.setter)) return false;
+        if (desc.getter_present and !current.slot.accessor.getter.sameValue(desc.getter)) return false;
+        if (desc.setter_present and !current.slot.accessor.setter.sameValue(desc.setter)) return false;
     }
     return true;
 }
@@ -9196,35 +9235,6 @@ fn mergeDescriptor(current: property.Entry, desc: descriptor.Descriptor) descrip
             desc.configurable orelse current.flags.configurable,
         ),
     };
-}
-
-fn sameValue(a: JSValue, b: JSValue) bool {
-    if (numberValue(a)) |lhs| {
-        if (numberValue(b)) |rhs| {
-            if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
-            if (lhs == 0 and rhs == 0) return isNegativeZero(lhs) == isNegativeZero(rhs);
-            return lhs == rhs;
-        }
-    }
-    if (a.isString() and b.isString()) {
-        if (a.same(b)) return true;
-        const a_header = a.refHeader() orelse return false;
-        const b_header = b.refHeader() orelse return false;
-        const a_string: *const @import("string.zig").String = @fieldParentPtr("header", a_header);
-        const b_string: *const @import("string.zig").String = @fieldParentPtr("header", b_header);
-        return a_string.eqlString(b_string.*);
-    }
-    return a.same(b);
-}
-
-fn numberValue(value: JSValue) ?f64 {
-    if (value.asInt32()) |int_value| return @floatFromInt(int_value);
-    if (value.asFloat64()) |float_value| return float_value;
-    return null;
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.signbit(value);
 }
 
 fn arrayLengthValue(length: u32) JSValue {

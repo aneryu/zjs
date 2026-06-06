@@ -2,7 +2,7 @@ const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode/root.zig");
 const function_builtin = @import("function.zig");
 const object_builtin = @import("object.zig");
-const jobs = @import("../exec/jobs.zig");
+const jobs = @import("../core/jobs.zig");
 const std = @import("std");
 
 /// QuickJS source map: narrow Promise constructor payload used by transitional
@@ -761,5 +761,3 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
 pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {
     try ctx.runtime.job_queue.enqueueFunc(ctx, job, args);
 }
-
-

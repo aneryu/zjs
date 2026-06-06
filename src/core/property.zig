@@ -95,6 +95,7 @@ pub const AutoInit = struct {
     rt: *JSRuntime,
     kind: AutoInitKind = .native_function,
     host_function_kind: i32 = 0,
+    external_host_function_id: u32 = 0,
     host_function_prototype: bool = false,
     host_function_realm_global: usize = 0,
     native_builtin_id: i32 = 0,

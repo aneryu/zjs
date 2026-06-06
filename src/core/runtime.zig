@@ -6,7 +6,7 @@ const atom = @import("atom.zig");
 const class = @import("class.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
-const job_mod = @import("../exec/jobs.zig");
+const job_mod = @import("jobs.zig");
 const bytecode_function = @import("../bytecode/function.zig");
 const module = @import("module.zig");
 const object_mod = @import("object.zig");
@@ -33,6 +33,29 @@ pub const RuntimeOptions = struct {
 };
 
 pub const Options = RuntimeOptions;
+
+pub const MemoryUsage = struct {
+    memory_limit: ?usize,
+    allocated_bytes: usize,
+    allocation_count: usize,
+    peak_allocated_bytes: usize,
+    peak_allocation_count: usize,
+    alloc_calls: usize,
+    free_calls: usize,
+    create_calls: usize,
+    destroy_calls: usize,
+    atom_count: usize,
+    atom_bytes: usize,
+    object_count: usize,
+    object_bytes: usize,
+    shape_count: usize,
+    shape_bytes: usize,
+    module_count: usize,
+    module_bytes: usize,
+    registered_class_count: usize,
+    class_record_count: usize,
+    class_bytes: usize,
+};
 
 pub const GCPollMode = enum {
     normal,
@@ -361,6 +384,21 @@ pub const NativePin = struct {
         self.release();
     }
 };
+
+pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
+    const header = value.refHeader() orelse value.objectHeader() orelse return null;
+    return try pinHeaderForNative(runtime, header);
+}
+
+pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
+    gc.retain(header);
+    errdefer gc.release(runtime, header);
+    try runtime.gc.pinHeader(header);
+    return .{
+        .runtime = runtime,
+        .header = header,
+    };
+}
 
 pub const DeferredWeakValueFree = struct {
     value: JSValue,
@@ -710,12 +748,13 @@ pub const JSRuntime = struct {
             slot.* = null;
             if (cached) |stored| stored.free(self);
         }
+        self.clearExternalHostFunctions();
+        self.drainDeferredNativeCleanups();
         self.clearLocalRootSlots();
         self.clearPersistentRootSlots();
         self.clearWeakRootSlots(false);
         self.clearExternalSymbolRoots();
         self.clearExternalValueRoots();
-        self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.modules.deinit(self);
@@ -1249,27 +1288,6 @@ pub const JSRuntime = struct {
         return WeakPersistentValue.init(self, value, callback, callback_context);
     }
 
-    pub fn pinValueForNative(self: *JSRuntime, value: JSValue) !?NativePin {
-        const header = value.refHeader() orelse value.objectHeader() orelse return null;
-        gc.retain(header);
-        errdefer gc.release(self, header);
-        try self.gc.pinHeader(header);
-        return NativePin{
-            .runtime = self,
-            .header = header,
-        };
-    }
-
-    pub fn pinHeaderForNative(self: *JSRuntime, header: *gc.Header) !NativePin {
-        gc.retain(header);
-        errdefer gc.release(self, header);
-        try self.gc.pinHeader(header);
-        return NativePin{
-            .runtime = self,
-            .header = header,
-        };
-    }
-
     pub fn unregisterExternalSymbolRoot(self: *JSRuntime, atom_id: atom.Atom) void {
         var found: ?usize = null;
         for (self.external_symbol_roots, 0..) |registered, index| {
@@ -1350,6 +1368,15 @@ pub const JSRuntime = struct {
         const index: usize = @intCast(id - 1);
         if (index >= self.external_host_functions.len) return null;
         return self.external_host_functions[index];
+    }
+
+    pub fn replaceExternalHostFunction(self: *JSRuntime, id: u32, record: host_function.ExternalRecord) ?host_function.ExternalRecord {
+        if (id == 0) return null;
+        const index: usize = @intCast(id - 1);
+        if (index >= self.external_host_functions.len) return null;
+        const old = self.external_host_functions[index];
+        self.external_host_functions[index] = record;
+        return old;
     }
 
     pub fn clearExternalHostFunctions(self: *JSRuntime) void {
@@ -1748,6 +1775,48 @@ pub const JSRuntime = struct {
         return self.memory.getLimit();
     }
 
+    pub fn memoryUsage(self: *const JSRuntime) MemoryUsage {
+        var live_dynamic_atoms: usize = 0;
+        var dynamic_atom_bytes: usize = 0;
+        for (self.atoms.entries) |entry| {
+            if (!entry.isLive()) continue;
+            live_dynamic_atoms += 1;
+            dynamic_atom_bytes += entry.bytes.len;
+        }
+
+        var registered_classes: usize = 0;
+        for (self.classes.records) |record| {
+            if (record.isRegistered()) registered_classes += 1;
+        }
+
+        const object_count = self.gc.liveCount();
+        const shape_count = self.shapes.shapes.len;
+        const module_count = self.modules.modules.len;
+        const class_record_count = self.classes.records.len;
+        return .{
+            .memory_limit = self.memoryLimit(),
+            .allocated_bytes = self.memory.allocated_bytes,
+            .allocation_count = self.memory.allocation_count,
+            .peak_allocated_bytes = self.memory.peak_allocated_bytes,
+            .peak_allocation_count = self.memory.peak_allocation_count,
+            .alloc_calls = self.memory.alloc_calls,
+            .free_calls = self.memory.free_calls,
+            .create_calls = self.memory.create_calls,
+            .destroy_calls = self.memory.destroy_calls,
+            .atom_count = atom.predefined_count + live_dynamic_atoms,
+            .atom_bytes = dynamic_atom_bytes,
+            .object_count = object_count,
+            .object_bytes = object_count * @sizeOf(Object),
+            .shape_count = shape_count,
+            .shape_bytes = shape_count * @sizeOf(shape.Shape),
+            .module_count = module_count,
+            .module_bytes = module_count * @sizeOf(module.ModuleRecord),
+            .registered_class_count = registered_classes,
+            .class_record_count = class_record_count,
+            .class_bytes = class_record_count * @sizeOf(class.Record),
+        };
+    }
+
     pub fn reportExternalAlloc(self: *JSRuntime, bytes: usize) !gc.ExternalMemoryToken {
         const token = try self.gc.reportExternalAlloc(bytes);
         if (self.gc.externalMemoryRequestReason()) |reason| {
@@ -1781,6 +1850,10 @@ pub const JSRuntime = struct {
         stats.rss_bytes = currentRssBytes();
         stats.cgroup_limit_bytes = cgroupLimitBytes();
         return stats;
+    }
+
+    pub fn ownsObject(self: JSRuntime, object: *const Object) bool {
+        return self.gc.containsHeader(&object.header);
     }
 
     fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {

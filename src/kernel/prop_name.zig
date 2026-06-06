@@ -5,11 +5,11 @@ const core = @import("../core/root.zig");
 ///
 /// Phase 1 treats this as a long-lived/static name owned by the caller. The
 /// caller must release it when the owning binding/runtime state is destroyed.
-pub const PropNameID = enum(core.Atom) {
-    _,
+pub const PropNameID = extern struct {
+    value: u32 = 0,
 
     pub fn internStatic(rt: *core.JSRuntime, name: []const u8) !PropNameID {
-        return @enumFromInt(try rt.internAtom(name));
+        return .{ .value = try rt.internAtom(name) };
     }
 
     pub fn release(self: PropNameID, rt: *core.JSRuntime) void {
@@ -17,7 +17,7 @@ pub const PropNameID = enum(core.Atom) {
     }
 
     pub fn eql(self: PropNameID, other: PropNameID) bool {
-        return self == other;
+        return self.value == other.value;
     }
 
     pub fn defineDataProperty(self: PropNameID, rt: *core.JSRuntime, object: *core.Object, descriptor: core.Descriptor) !void {
@@ -34,7 +34,7 @@ pub const PropNameID = enum(core.Atom) {
 };
 
 fn raw(id: PropNameID) core.Atom {
-    return @intFromEnum(id);
+    return id.value;
 }
 
 test "PropNameID interns and releases a static property name" {
@@ -45,6 +45,10 @@ test "PropNameID interns and releases a static property name" {
     defer name.release(rt);
 
     try std.testing.expect(name.eql(name));
-    try std.testing.expectEqual(@sizeOf(core.Atom), @sizeOf(PropNameID));
+    try std.testing.expectEqual(@sizeOf(u32), @sizeOf(PropNameID));
+    try std.testing.expect(switch (@typeInfo(PropNameID)) {
+        .@"struct" => true,
+        else => false,
+    });
     try std.testing.expectEqualStrings("kernelName", name.debugName(rt).?);
 }

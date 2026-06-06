@@ -1,12 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const internal = if (builtin.is_test) @import("zjs") else @import("zjs_internal");
-const zjs = internal.kernel;
-const core = internal.core;
-const frontend = internal.frontend;
-const exec = internal.exec;
-const bytecode = internal.bytecode;
-const runtime_layer = internal.runtime;
+const public_api = @import("zjs");
+const zjs = public_api.kernel;
+const runtime_layer = public_api.runtime;
 
 const Runtime = struct {
     runtime: *zjs.JSRuntime,
@@ -62,7 +57,7 @@ pub const EvalCommand = struct {
 
 pub const FileCommand = struct {
     path: []const u8,
-    mode: frontend.parser.Mode = .script,
+    mode: zjs.EvalMode = .script,
     options: RuntimeOptions = .{},
 };
 
@@ -148,7 +143,7 @@ fn runFileModule(
     allocator: std.mem.Allocator,
     max_size: usize,
 ) !zjs.JSValue {
-    return try exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtime, ctx, source_text, output, path, io, allocator, max_size);
+    return try runtime_layer.evalFileModuleGraphWithOutput(ctx, source_text, output, path, io, allocator, max_size);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -180,8 +175,8 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    var opcode_profile = core.profile.OpcodeProfile{};
-    var eval_timing = core.context.EvalTiming{};
+    var opcode_profile = zjs.OpcodeProfile{};
+    var eval_timing = zjs.EvalTiming{};
     var include_ns: u64 = 0;
     var setup_ns: u64 = 0;
     var eval_ns: u64 = 0;
@@ -190,8 +185,8 @@ pub fn main(init: std.process.Init) !void {
     const rt = zjs.JSRuntime.createWithOptions(allocator, .{
         .trace_writer = if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null,
         .memory_limit = commandRuntimeOptions(command).memory_limit,
-        .gc_threshold = core.runtime.default_gc_threshold,
-        .stack_size = commandRuntimeOptions(command).stack_size orelse core.runtime.default_stack_size,
+        .gc_threshold = zjs.default_gc_threshold,
+        .stack_size = commandRuntimeOptions(command).stack_size orelse zjs.default_stack_size,
     }) catch |err| {
         try printError(io, "zjs: engine init failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
@@ -213,14 +208,14 @@ pub fn main(init: std.process.Init) !void {
     const runtime_create_ns = elapsedNanosSince(runtime_start);
     const setup_start = monotonicNanos();
     applyRuntimeOptions(&runtime, commandRuntimeOptions(command));
-    runtime.context.track_unhandled_rejections = commandTracksUnhandledRejections(command);
+    runtime.context.setTrackUnhandledRejections(commandTracksUnhandledRejections(command));
     const runtime_options = commandRuntimeOptions(command);
     if (runtime_options.profile_opcodes) {
         runtime.runtime.setOpcodeProfile(&opcode_profile);
     } else if (runtime_options.perf_json) {
-        _ = core.profile.activate(&opcode_profile);
+        _ = zjs.activateOpcodeProfile(&opcode_profile);
     }
-    runtime.context.preserve_uncaught_exception = true;
+    runtime.context.setPreserveUncaughtException(true);
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
     // `JSRuntime.destroy` asserts that the runtime has no outstanding
@@ -359,7 +354,7 @@ fn applyRuntimeOptions(runtime: *Runtime, options: RuntimeOptions) void {
     if (options.memory_limit) |limit| runtime.runtime.setMemoryLimit(limit);
     if (options.stack_size) |size| {
         runtime.runtime.setStackSize(size);
-        runtime.context.stack_limit = size;
+        runtime.context.setStackLimit(size);
     }
 }
 
@@ -407,7 +402,7 @@ fn monotonicNanos() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
-fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: frontend.parser.Mode) frontend.parser.Mode {
+fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.EvalMode) zjs.EvalMode {
     if (explicit_mode == .module) return .module;
     if (std.mem.endsWith(u8, path, ".mjs")) return .module;
     return if (sourceLooksLikeModule(source)) .module else .script;
@@ -524,35 +519,22 @@ fn isIdentifierContinue(byte: u8) bool {
 }
 
 fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *Runtime) !void {
-    const rt = runtime.runtime;
-    var live_dynamic_atoms: usize = 0;
-    var dynamic_atom_bytes: usize = 0;
-    for (rt.atoms.entries) |entry| {
-        if (!entry.isLive()) continue;
-        live_dynamic_atoms += 1;
-        dynamic_atom_bytes += entry.bytes.len;
-    }
-
-    var registered_classes: usize = 0;
-    for (rt.classes.records) |record| {
-        if (record.isRegistered()) registered_classes += 1;
-    }
+    const memory = runtime.runtime.memoryUsage();
 
     try output.print("\nZJS memory usage\n", .{});
     try output.print("  memory limit: ", .{});
-    if (rt.memoryLimit()) |limit| {
+    if (memory.memory_limit) |limit| {
         try output.print("{d}\n", .{limit});
     } else {
         try output.print("0\n", .{});
     }
     try output.print("\nNAME                    COUNT     SIZE\n", .{});
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "memory allocated", rt.memory.allocation_count, rt.memory.allocated_bytes });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "atoms", core.atom.predefined_count + live_dynamic_atoms, dynamic_atom_bytes });
-    const object_count = rt.gc.liveCount();
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "objects", object_count, object_count * @sizeOf(core.Object) });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "shapes", rt.shapes.shapes.len, rt.shapes.shapes.len * @sizeOf(core.Shape) });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "modules", rt.modules.modules.len, rt.modules.modules.len * @sizeOf(core.ModuleRecord) });
-    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "classes", registered_classes, rt.classes.records.len * @sizeOf(core.class.Record) });
+    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "memory allocated", memory.allocation_count, memory.allocated_bytes });
+    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "atoms", memory.atom_count, memory.atom_bytes });
+    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "objects", memory.object_count, memory.object_bytes });
+    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "shapes", memory.shape_count, memory.shape_bytes });
+    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "modules", memory.module_count, memory.module_bytes });
+    try output.print("{s:<22} {d:>5} {d:>8}\n", .{ "classes", memory.registered_class_count, memory.class_bytes });
 }
 
 const PerfJsonTimings = struct {
@@ -563,14 +545,14 @@ const PerfJsonTimings = struct {
     include_ns: u64,
     eval_ns: u64,
     jobs_ns: u64,
-    zjs: core.context.EvalTiming,
+    zjs: zjs.EvalTiming,
 };
 
-fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?*const core.profile.OpcodeProfile, timings: PerfJsonTimings) !void {
+fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?*const zjs.OpcodeProfile, timings: PerfJsonTimings) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
-    const rt = runtime.runtime;
+    const memory = runtime.runtime.memoryUsage();
 
     try stderr.print("{{\n  \"file\": ", .{});
     try writeJsonString(stderr, commandPerfFile(command));
@@ -588,14 +570,14 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     try stderr.print("  \"promise_jobs_ns\": {d},\n", .{timings.zjs.promise_jobs_ns});
     try stderr.print("  \"jobs_ns\": {d},\n", .{timings.jobs_ns});
     try stderr.print("  \"memory\": {{\n", .{});
-    try stderr.print("    \"allocated_bytes\": {d},\n", .{rt.memory.allocated_bytes});
-    try stderr.print("    \"allocation_count\": {d},\n", .{rt.memory.allocation_count});
-    try stderr.print("    \"allocated_bytes_peak\": {d},\n", .{rt.memory.peak_allocated_bytes});
-    try stderr.print("    \"allocation_count_peak\": {d},\n", .{rt.memory.peak_allocation_count});
-    try stderr.print("    \"alloc_calls\": {d},\n", .{rt.memory.alloc_calls});
-    try stderr.print("    \"free_calls\": {d},\n", .{rt.memory.free_calls});
-    try stderr.print("    \"create_calls\": {d},\n", .{rt.memory.create_calls});
-    try stderr.print("    \"destroy_calls\": {d}\n", .{rt.memory.destroy_calls});
+    try stderr.print("    \"allocated_bytes\": {d},\n", .{memory.allocated_bytes});
+    try stderr.print("    \"allocation_count\": {d},\n", .{memory.allocation_count});
+    try stderr.print("    \"allocated_bytes_peak\": {d},\n", .{memory.peak_allocated_bytes});
+    try stderr.print("    \"allocation_count_peak\": {d},\n", .{memory.peak_allocation_count});
+    try stderr.print("    \"alloc_calls\": {d},\n", .{memory.alloc_calls});
+    try stderr.print("    \"free_calls\": {d},\n", .{memory.free_calls});
+    try stderr.print("    \"create_calls\": {d},\n", .{memory.create_calls});
+    try stderr.print("    \"destroy_calls\": {d}\n", .{memory.destroy_calls});
     try stderr.print("  }}", .{});
     if (perf_profile) |profile| {
         try stderr.print(",\n", .{});
@@ -607,8 +589,8 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
     try stderr.flush();
 }
 
-fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const core.profile.OpcodeProfile) !void {
-    var rows: [core.profile.max_opcode_count]OpcodeProfileRow = undefined;
+fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
+    var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
     var row_count: usize = 0;
     for (profile.count, 0..) |count, opcode| {
         if (count == 0) continue;
@@ -633,7 +615,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const core.profil
     try output.writeAll("    \"opcodes\": [");
     for (rows[0..row_count], 0..) |row, index| {
         if (index != 0) try output.writeByte(',');
-        const name = bytecode.opcode.nameOf(row.opcode);
+        const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
         try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
@@ -644,7 +626,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const core.profil
     try output.writeAll("    ]\n  }");
 }
 
-fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const core.profile.OpcodeProfile) !void {
+fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
     try output.print("  \"ic\": {{\n", .{});
     try output.print("    \"hit\": {d},\n", .{profile.totalIcHit()});
     try output.print("    \"miss\": {d},\n", .{profile.totalIcMiss()});
@@ -664,7 +646,7 @@ fn dumpPerfJsonIc(output: *std.Io.Writer, profile: *const core.profile.OpcodePro
     try writeJsonU64Array(output, &profile.ic_promote_mega);
 }
 
-fn writeJsonU64Array(output: *std.Io.Writer, values: *const [core.profile.max_opcode_count]u64) !void {
+fn writeJsonU64Array(output: *std.Io.Writer, values: *const [zjs.OpcodeProfile.opcode_count]u64) !void {
     try output.writeByte('[');
     for (values.*, 0..) |value, index| {
         if (index != 0) try output.writeByte(',');
@@ -707,8 +689,8 @@ const OpcodeProfileRow = struct {
     nanos: u64,
 };
 
-fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const core.profile.OpcodeProfile) !void {
-    var rows: [core.profile.max_opcode_count]OpcodeProfileRow = undefined;
+fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
+    var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
     var row_count: usize = 0;
     for (profile.count, 0..) |count, opcode| {
         if (count == 0) continue;
@@ -740,7 +722,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const core.profile.Opcode
 
     const limit = @min(row_count, 40);
     for (rows[0..limit]) |row| {
-        const name = bytecode.opcode.nameOf(row.opcode);
+        const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
         try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
@@ -781,98 +763,32 @@ fn printEvaluationError(io: std.Io, runtime: *Runtime, err: anyerror) !void {
 
 fn printExceptionValue(stderr: *std.Io.Writer, runtime: *Runtime, value: zjs.JSValue) !bool {
     const rt = runtime.runtime;
-    const object = objectFromValue(value) orelse return false;
-    if (try printStringProperty(stderr, rt, object, "name")) {
-        const message_key = core.atom.predefinedId("message", .string).?;
-        const message_value = object.getProperty(message_key);
-        defer message_value.free(rt);
-        if (stringFromValue(message_value)) |message| {
-            if (!isEmptyString(message)) {
-                try stderr.print(": ", .{});
-                try writeString(stderr, message);
-            }
-        }
-        try stderr.print("\n", .{});
-    } else {
+    if (!value.isObject()) return false;
+
+    const header = try runtime.context.formatException(value, rt.memory.allocator);
+    defer rt.memory.allocator.free(header);
+    if (header.len == 0) {
         try stderr.print("Error\n", .{});
+    } else {
+        try stderr.print("{s}\n", .{header});
     }
 
-    const stack_key = try rt.internAtom("stack");
-    defer rt.atoms.free(stack_key);
-    const stack_value = if (runtime.context.global) |global|
-        exec.zjs_vm.getValueProperty(runtime.context, null, global, value, stack_key, null, null) catch |err| blk: {
-            if (runtime.context.hasException()) {
-                runtime.context.clearException();
-                break :blk zjs.JSValue.undefinedValue();
-            }
-            return err;
+    const stack = runtime.context.formatExceptionStack(value, rt.memory.allocator) catch |err| blk: {
+        if (runtime.context.hasException()) {
+            runtime.context.clearException();
+            break :blk null;
         }
-    else
-        object.getProperty(stack_key);
-    defer stack_value.free(rt);
-    if (stringFromValue(stack_value)) |stack| {
-        if (!isEmptyString(stack)) {
-            try writeString(stderr, stack);
-            if (!stringEndsWithLinefeed(stack)) try stderr.print("\n", .{});
+        return err;
+    };
+    defer if (stack) |bytes| rt.memory.allocator.free(bytes);
+    if (stack) |bytes| {
+        if (bytes.len != 0) {
+            try stderr.writeAll(bytes);
+            if (bytes[bytes.len - 1] != '\n') try stderr.print("\n", .{});
         }
     }
     try stderr.flush();
     return true;
-}
-
-fn printStringProperty(stderr: *std.Io.Writer, rt: *zjs.JSRuntime, object: *core.Object, name: []const u8) !bool {
-    const key = try rt.internAtom(name);
-    defer rt.atoms.free(key);
-    const value = object.getProperty(key);
-    defer value.free(rt);
-    const string = stringFromValue(value) orelse return false;
-    try writeString(stderr, string);
-    return true;
-}
-
-fn printErrorObjectName(stderr: *std.Io.Writer, rt: *zjs.JSRuntime, value: zjs.JSValue) !bool {
-    const object = objectFromValue(value) orelse return false;
-    const name_value = object.getProperty(core.atom.ids.name);
-    defer name_value.free(rt);
-    const name_string = stringFromValue(name_value) orelse return false;
-    try writeString(stderr, name_string);
-    return true;
-}
-
-fn writeString(stderr: *std.Io.Writer, string: *core.string.String) !void {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| try stderr.print("{s}", .{bytes}),
-        .utf16 => |units| for (units) |unit| {
-            if (unit > 0x7f) return;
-            try stderr.writeByte(@intCast(unit));
-        },
-    }
-}
-
-fn isEmptyString(string: *core.string.String) bool {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| return bytes.len == 0,
-        .utf16 => |units| return units.len == 0,
-    }
-}
-
-fn stringEndsWithLinefeed(string: *core.string.String) bool {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| return bytes.len != 0 and bytes[bytes.len - 1] == '\n',
-        .utf16 => |units| return units.len != 0 and units[units.len - 1] == '\n',
-    }
-}
-
-fn objectFromValue(value: zjs.JSValue) ?*core.Object {
-    const header = value.refHeader() orelse return null;
-    if (header.kind != .object) return null;
-    return @fieldParentPtr("header", header);
-}
-
-fn stringFromValue(value: zjs.JSValue) ?*core.string.String {
-    const header = value.refHeader() orelse return null;
-    if (header.kind != .string) return null;
-    return @fieldParentPtr("header", header);
 }
 
 fn printUnhandledRejection(io: std.Io, runtime: *Runtime, value: zjs.JSValue) !void {
@@ -971,9 +887,9 @@ test "zjs args accept perf json flag for eval and files only" {
 }
 
 test "zjs perf json opcode profile includes counters and rows" {
-    var profile = core.profile.OpcodeProfile{};
-    profile.recordOpcode(bytecode.opcode.op.get_var, 17);
-    profile.recordOpcode(bytecode.opcode.op.push_i16, 5);
+    var profile = zjs.OpcodeProfile{};
+    profile.recordOpcode(56, 17);
+    profile.recordOpcode(189, 5);
     profile.recordValueDup();
     profile.recordValueFree();
     profile.recordGlobalLookup();
@@ -995,7 +911,7 @@ test "zjs perf json opcode profile includes counters and rows" {
 test "zjs args accept module file" {
     const command = try parseArgs(&.{ "-m", "input.mjs" });
     try std.testing.expectEqualStrings("input.mjs", command.file.path);
-    try std.testing.expectEqual(frontend.parser.Mode.module, command.file.mode);
+    try std.testing.expectEqual(zjs.EvalMode.module, command.file.mode);
 }
 
 test "zjs args reject module file script arguments" {
@@ -1003,19 +919,19 @@ test "zjs args reject module file script arguments" {
 }
 
 test "zjs detects module mode from extension and static syntax" {
-    try std.testing.expectEqual(frontend.parser.Mode.module, detectFileMode("input.mjs", "console.log(1)", .script));
-    try std.testing.expectEqual(frontend.parser.Mode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
-    try std.testing.expectEqual(frontend.parser.Mode.module, detectFileMode("input.js", "export const value = 1;", .script));
-    try std.testing.expectEqual(frontend.parser.Mode.module, detectFileMode("input.js", "console.log(import.meta.url)", .script));
-    try std.testing.expectEqual(frontend.parser.Mode.script, detectFileMode("input.js", "const s = 'import x from y';\nimport('./dep.mjs')", .script));
-    try std.testing.expectEqual(frontend.parser.Mode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
+    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.mjs", "console.log(1)", .script));
+    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
+    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.js", "export const value = 1;", .script));
+    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.js", "console.log(import.meta.url)", .script));
+    try std.testing.expectEqual(zjs.EvalMode.script, detectFileMode("input.js", "const s = 'import x from y';\nimport('./dep.mjs')", .script));
+    try std.testing.expectEqual(zjs.EvalMode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
 }
 
 test "zjs module specifier resolver uses referrer directory" {
-    const resolved = try exec.module.resolveModuleSpecifier(std.testing.allocator, "tests/fixtures/main.mjs", "./dep.mjs");
+    const resolved = try runtime_layer.resolveModuleSpecifier(std.testing.allocator, "tests/fixtures/main.mjs", "./dep.mjs");
     defer std.testing.allocator.free(resolved);
     try std.testing.expectEqualStrings("tests/fixtures/dep.mjs", resolved);
-    try std.testing.expectError(error.ModuleNotFound, exec.module.resolveModuleSpecifier(std.testing.allocator, "main.mjs", "bare"));
+    try std.testing.expectError(error.ModuleNotFound, runtime_layer.resolveModuleSpecifier(std.testing.allocator, "main.mjs", "bare"));
 }
 
 test "zjs args reject missing source" {

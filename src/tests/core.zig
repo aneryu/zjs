@@ -737,6 +737,13 @@ test "class table registers QuickJS standard classes and dynamic classes" {
     try std.testing.expectEqualStrings("HostThing", rt.atoms.name(dynamic_name).?);
 
     try std.testing.expectError(error.DuplicateClass, rt.classes.register(dynamic_id, .{ .class_name = "Again" }));
+    rt.classes.unregisterDynamic(core.class.ids.object);
+    try std.testing.expect(rt.classes.isRegistered(core.class.ids.object));
+    rt.classes.unregisterDynamic(dynamic_id);
+    try std.testing.expect(!rt.classes.isRegistered(dynamic_id));
+    try std.testing.expect(rt.classes.className(dynamic_id) == null);
+    try rt.classes.register(dynamic_id, .{ .class_name = "Again" });
+    try std.testing.expect(rt.classes.isRegistered(dynamic_id));
 
     try std.testing.expectEqual(core.class.PayloadKind.ordinary, rt.classes.record(core.class.ids.object).?.payload_kind);
     try std.testing.expectEqual(core.class.PayloadKind.array, rt.classes.record(core.class.ids.array).?.payload_kind);
@@ -986,6 +993,14 @@ test "class finalizers and context prototype slots are wired" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
     try std.testing.expect(ctx.classPrototypeSlotCount() >= dynamic_id + 1);
+
+    const prototype = try core.Object.create(rt, core.class.ids.object, null);
+    const prototype_value = prototype.value();
+    defer prototype_value.free(rt);
+    try ctx.setClassPrototype(dynamic_id, prototype);
+    try std.testing.expectEqual(prototype, ctx.classPrototypeObject(dynamic_id).?);
+    ctx.clearClassPrototype(dynamic_id);
+    try std.testing.expect(ctx.classPrototypeObject(dynamic_id) == null);
 
     finalizer_calls = 0;
     try std.testing.expect(rt.classes.runFinalizer(dynamic_id));
@@ -1528,6 +1543,65 @@ test "runtime cycle removal follows class payload mark hooks" {
     try std.testing.expectEqual(@as(usize, 2), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 2), rt.runDeferredClassPayloadFinalizerBudgeted(2));
     try std.testing.expectEqual(@as(usize, 2), payload_finalizer_calls);
+}
+
+test "pending class payload finalizers trace payload value roots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const external_id = rt.newClassId(core.class.invalid_class_id);
+    try rt.classes.register(external_id, .{
+        .class_name = "PendingExternalPayloadRoot",
+        .payload_finalizer = finalizeTestExternalPayload,
+        .payload_mark = markTestExternalPayload,
+    });
+
+    const wrapper = try core.Object.create(rt, external_id, null);
+    const child = try core.Object.create(rt, core.class.ids.object, null);
+    const child_header = &child.header;
+
+    const payload = try rt.memory.create(TestExternalPayload);
+    payload.* = .{ .value = child.value().dup() };
+    wrapper.class_payload = .{ .external = @ptrCast(payload) };
+
+    child.value().free(rt);
+    payload_finalizer_calls = 0;
+    payload_mark_calls = 0;
+
+    wrapper.value().free(rt);
+    try expectOneDeferredClassPayloadFinalizer(rt);
+
+    const Counter = struct {
+        expected: *core.gc.Header,
+        count: usize = 0,
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.refHeader()) |header| {
+                if (header == self.expected) self.count += 1;
+            }
+        }
+
+        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+            _ = context;
+            _ = slot;
+        }
+    };
+
+    var counter = Counter{ .expected = child_header };
+    var visitor = core.runtime.RootVisitor{
+        .context = &counter,
+        .visit_value = Counter.visitValue,
+        .visit_object = Counter.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+
+    try std.testing.expectEqual(@as(usize, 1), counter.count);
+    try std.testing.expect(payload_mark_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), payload_finalizer_calls);
+
+    try runOneDeferredClassPayloadFinalizer(rt);
+    try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
 }
 
 test "runtime cycle removal clears class payload object slots before finalizers" {
@@ -4411,7 +4485,7 @@ test "gc heap accounting verifier catches pinned header flag drift" {
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     const value = obj.value();
-    var pin = (try rt.pinValueForNative(value)).?;
+    var pin = (try core.runtime.pinValueForNative(rt, value)).?;
     defer pin.release();
     value.free(rt);
 
@@ -4646,8 +4720,8 @@ test "native pin retains direct object and counts nested pins" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const value = object.value();
 
-    var first_pin = (try rt.pinValueForNative(value)).?;
-    var second_pin = try rt.pinHeaderForNative(&object.header);
+    var first_pin = (try core.runtime.pinValueForNative(rt, value)).?;
+    var second_pin = try core.runtime.pinHeaderForNative(rt, &object.header);
 
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().pinned_cell_count);
@@ -4685,7 +4759,7 @@ test "native pin promotes young object out of nursery tracking" {
     try std.testing.expectEqual(@as(usize, 1), rt.gcStats().nursery_object_count);
     try std.testing.expectEqual(@as(usize, @sizeOf(core.Object)), rt.gcStats().young_live_bytes);
 
-    var pin = (try rt.pinValueForNative(value)).?;
+    var pin = (try core.runtime.pinValueForNative(&rt, value)).?;
     try std.testing.expect(object.header.pinned());
     try std.testing.expectEqual(core.gc.Generation.old, object.header.generation());
     try std.testing.expectEqual(@as(usize, 0), rt.gcStats().nursery_object_count);

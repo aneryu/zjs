@@ -218,6 +218,30 @@ test "JSValue.asString views latin1 units without allocation" {
     try std.testing.expectEqualStrings("hello", utf8);
 }
 
+test "JSString.units views sliced backing without flattening" {
+    const core = @import("root.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const parent = try core.string.String.createUtf8(rt, "prefix-needle-suffix");
+    const parent_value = parent.value();
+    defer parent_value.free(rt);
+
+    const slice = try core.string.String.createSlice(rt, parent, "prefix-".len, "needle".len);
+    const slice_value = slice.value();
+    defer slice_value.free(rt);
+
+    const parent_units = parent_value.asString().?.units().?.latin1;
+    const slice_units = slice_value.asString().?.units().?.latin1;
+    try std.testing.expectEqualStrings("needle", slice_units);
+    try std.testing.expect(slice_units.ptr == parent_units.ptr + "prefix-".len);
+
+    var utf8 = try slice_value.asString().?.toUtf8(std.testing.allocator);
+    defer utf8.deinit();
+    try std.testing.expect(utf8.isBorrowed());
+    try std.testing.expect(utf8.slice().ptr == slice_units.ptr);
+}
+
 test "JSString converts utf16 surrogate pairs to owned utf8" {
     const core = @import("root.zig");
     const rt = try core.JSRuntime.create(std.testing.allocator);

@@ -1,3 +1,6 @@
+const std = @import("std");
+
+const bignum = @import("../libs/bignum.zig");
 const gc = @import("gc.zig");
 
 pub const Tag = struct {
@@ -38,6 +41,16 @@ pub const JSValue = extern struct {
 
     pub fn float64(v: f64) JSValue {
         return .{ .payload = @bitCast(v), .tag = Tag.float64 };
+    }
+
+    pub fn number(v: f64) JSValue {
+        if (v >= std.math.minInt(i32) and v <= std.math.maxInt(i32)) {
+            const int_val: i32 = @intFromFloat(v);
+            if (@as(f64, @floatFromInt(int_val)) == v and !isNegativeZero(v)) {
+                return int32(int_val);
+            }
+        }
+        return float64(v);
     }
 
     pub fn boolean(v: bool) JSValue {
@@ -165,6 +178,10 @@ pub const JSValue = extern struct {
         return null;
     }
 
+    pub fn asNumber(self: JSValue) ?f64 {
+        return numberValue(self);
+    }
+
     pub fn asBool(self: JSValue) ?bool {
         if (self.tag == Tag.boolean) return self.payload != 0;
         return null;
@@ -236,7 +253,87 @@ pub const JSValue = extern struct {
             else => unreachable,
         };
     }
+
+    pub fn sameValue(self: JSValue, other: JSValue) bool {
+        if (numberValue(self)) |lhs| {
+            if (numberValue(other)) |rhs| {
+                if (std.math.isNan(lhs) and std.math.isNan(rhs)) return true;
+                if (lhs == 0 and rhs == 0) return isNegativeZero(lhs) == isNegativeZero(rhs);
+                return lhs == rhs;
+            }
+        }
+        if (self.isBigInt() and other.isBigInt()) {
+            return (compareBigIntValues(self, other) orelse return false) == .eq;
+        }
+        if (self.asInt32()) |lhs| {
+            if (other.asInt32()) |rhs| return lhs == rhs;
+        }
+        if (self.asBool()) |lhs| {
+            if (other.asBool()) |rhs| return lhs == rhs;
+        }
+        if (self.isNull() or self.isUndefined()) return self.same(other);
+        if (self.isString() and other.isString()) {
+            if (self.same(other)) return true;
+            return (compareStringValues(self, other) orelse 1) == 0;
+        }
+        return self.same(other);
+    }
 };
+
+fn numberValue(value: JSValue) ?f64 {
+    if (value.asInt32()) |int_value| return @floatFromInt(int_value);
+    if (value.asFloat64()) |float_value| return float_value;
+    return null;
+}
+
+fn isNegativeZero(value: f64) bool {
+    return value == 0 and std.math.isNegativeInf(1.0 / value);
+}
+
+fn compareStringValues(a: JSValue, b: JSValue) ?i32 {
+    if (!a.isString() or !b.isString()) return null;
+    const a_header = a.refHeader() orelse return null;
+    const b_header = b.refHeader() orelse return null;
+    const a_string: *const @import("string.zig").String = @fieldParentPtr("header", a_header);
+    const b_string: *const @import("string.zig").String = @fieldParentPtr("header", b_header);
+    return a_string.compare(b_string.*);
+}
+
+fn compareBigIntValues(a: JSValue, b: JSValue) ?std.math.Order {
+    var lhs_scratch: [2]bignum.Limb = undefined;
+    var rhs_scratch: [2]bignum.Limb = undefined;
+    const lhs = bigIntParts(a, &lhs_scratch) orelse return null;
+    const rhs = bigIntParts(b, &rhs_scratch) orelse return null;
+    return bignum.compareParts(lhs.negative, lhs.limbs, rhs.negative, rhs.limbs);
+}
+
+const BigIntParts = struct {
+    negative: bool,
+    limbs: []const bignum.Limb,
+};
+
+fn bigIntParts(value: JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
+    if (value.asShortBigInt()) |short| {
+        const signed: i128 = short;
+        var magnitude: u128 = if (signed < 0) @intCast(-signed) else @intCast(signed);
+        var len: usize = 0;
+        while (magnitude != 0) {
+            scratch[len] = @truncate(magnitude);
+            magnitude >>= @bitSizeOf(bignum.Limb);
+            len += 1;
+        }
+        return .{
+            .negative = short < 0,
+            .limbs = scratch[0..len],
+        };
+    }
+    if (value.isBigInt() and value.refHeader() != null) {
+        const header = value.refHeader().?;
+        const big: *@import("bigint.zig").BigInt = @alignCast(@fieldParentPtr("header", header));
+        return .{ .negative = big.value.negative, .limbs = big.value.limbs };
+    }
+    return null;
+}
 
 fn payloadFromI32(value: i32) u64 {
     const bits: u32 = @bitCast(value);

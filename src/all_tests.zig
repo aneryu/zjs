@@ -2,6 +2,7 @@ const std = @import("std");
 
 const kernel_api = @import("root.zig");
 
+pub const public_api = kernel_api;
 pub const kernel = kernel_api.kernel;
 pub const core = @import("core/root.zig");
 pub const frontend = @import("frontend/root.zig");
@@ -20,16 +21,38 @@ pub const LocalHandle = kernel_api.LocalHandle;
 pub const HandleScope = kernel_api.HandleScope;
 pub const WeakPersistent = kernel_api.WeakPersistent;
 pub const WeakPersistentValue = kernel_api.WeakPersistentValue;
+pub const NativePin = core.NativePin;
+pub const RuntimeOptions = kernel_api.RuntimeOptions;
+pub const RuntimeMemoryUsage = kernel_api.RuntimeMemoryUsage;
+pub const ContextOptions = kernel_api.ContextOptions;
 pub const GCPolicy = core.GCPolicy;
 pub const GCStats = core.GCStats;
 pub const harness = struct {
     pub const Engine = @import("tests/exec.zig").helpers.TestEngine;
 };
-pub const EvalOptions = core.context.EvalOptions;
-pub const EvalTiming = core.context.EvalTiming;
-pub const ExternalHostCall = core.host_function.ExternalCall;
-pub const ExternalHostCallFn = core.host_function.ExternalCallFn;
-pub const ExternalHostFinalizer = core.host_function.ExternalFinalizer;
+pub const EvalOptions = kernel_api.EvalOptions;
+pub const EvalMode = kernel_api.EvalMode;
+pub const EvalTiming = kernel_api.EvalTiming;
+pub const DataPropertyOptions = kernel_api.DataPropertyOptions;
+pub const PropertyAccessOptions = kernel_api.PropertyAccessOptions;
+pub const PropertyDescriptor = kernel_api.PropertyDescriptor;
+pub const ExternalFunctionOptions = kernel_api.ExternalFunctionOptions;
+pub const FunctionCallOptions = kernel_api.FunctionCallOptions;
+pub const ErrorOptions = kernel_api.ErrorOptions;
+pub const ScriptEvalOptions = kernel_api.ScriptEvalOptions;
+pub const SharedArrayBufferRef = kernel_api.SharedArrayBufferRef;
+pub const ExternalHostCall = kernel_api.ExternalHostCall;
+pub const ExternalHostCallFn = kernel_api.ExternalHostCallFn;
+pub const ExternalHostFinalizer = kernel_api.ExternalHostFinalizer;
+pub const OpcodeProfile = kernel_api.OpcodeProfile;
+pub const default_stack_size = kernel_api.default_stack_size;
+pub const default_gc_threshold = kernel_api.default_gc_threshold;
+pub const PropNameID = kernel_api.PropNameID;
+pub const JSString = kernel_api.JSString;
+pub const JSBytes = kernel_api.JSBytes;
+pub const binding = kernel_api.binding;
+pub const ffi = kernel_api.ffi;
+pub const activateOpcodeProfile = kernel_api.activateOpcodeProfile;
 
 fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) void {
     @setEvalBranchQuota(200000);

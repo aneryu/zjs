@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("../core/root.zig");
-const PropNameID = @import("prop_name.zig").PropNameID;
+pub const PropNameID = @import("prop_name.zig").PropNameID;
 
 pub const abi_version: u32 = 1;
 pub const magic: u32 = 0x5a_4a_53_46; // ZJSF
@@ -25,6 +25,7 @@ pub fn featureBit(comptime feature: Feature) u64 {
 pub const Endian = enum(u8) {
     little = 0,
     big = 1,
+    _,
 };
 
 pub const Target = extern struct {
@@ -79,8 +80,12 @@ pub const ValidationError = error{
     MissingBindingCall,
     MissingHostObjectName,
     InvalidHostTypeId,
+    InvalidHostObjectOwner,
+    DuplicateHostObjectType,
     MissingHostObjectFinalizer,
+    HostObjectFinalizerNotAllowed,
     MissingPropName,
+    MissingRequiredFeatureFlags,
 };
 
 pub fn validateHeader(header: *const DescriptorHeader, comptime Descriptor: type, supported: u64) ValidationError!void {
@@ -253,6 +258,10 @@ pub const OpaqueHostObject = extern struct {
             .type_id = type_id,
         };
     }
+
+    pub fn fromNullable(ptr: ?*anyopaque, type_id: HostTypeId) ?OpaqueHostObject {
+        return from(ptr orelse return null, type_id);
+    }
 };
 
 pub const HostTraceVisitor = extern struct {
@@ -271,6 +280,7 @@ pub const HostObjectTracer = *const fn (context: ?*anyopaque, object: OpaqueHost
 pub const HostObjectOwner = enum(u32) {
     host = 1,
     js = 2,
+    _,
 };
 
 pub const HostObjectOptions = struct {
@@ -352,14 +362,69 @@ pub const Status = enum(u32) {
     unsupported = 5,
     syntax_error = 6,
     generic_error = 7,
+    reference_error = 8,
+    eval_error = 9,
+    uri_error = 10,
+    _,
+};
+
+pub const CreateOpaqueObjectFn = *const fn (frame: *CallFrame, object: OpaqueHostObject, out: *core.JSValue) callconv(.c) Status;
+pub const UnwrapOpaqueObjectFn = *const fn (frame: *CallFrame, value: core.JSValue, expected_type_id: HostTypeId, out: *OpaqueHostObject) callconv(.c) Status;
+pub const GetPropNameFn = *const fn (frame: *CallFrame, index: u32, out: *PropNameID) callconv(.c) Status;
+
+pub const OpaqueObjectServices = struct {
+    create: CreateOpaqueObjectFn,
+    unwrap: UnwrapOpaqueObjectFn,
+};
+
+pub const PropNameServices = struct {
+    get: GetPropNameFn,
+};
+
+pub const HostServices = extern struct {
+    size: u32 = @sizeOf(HostServices),
+    feature_flags: u64 = 0,
+    create_opaque_object: ?CreateOpaqueObjectFn = null,
+    unwrap_opaque_object: ?UnwrapOpaqueObjectFn = null,
+    get_prop_name: ?GetPropNameFn = null,
+
+    pub fn hasFeature(self: *const HostServices, comptime feature: Feature) bool {
+        if (!self.hasField(u64, "feature_flags")) return false;
+        return (self.feature_flags & featureBit(feature)) != 0;
+    }
+
+    pub fn opaqueObjectServices(self: *const HostServices) ?OpaqueObjectServices {
+        if (!self.hasFeature(.opaque_host_object)) return null;
+        if (!self.hasField(?CreateOpaqueObjectFn, "create_opaque_object")) return null;
+        if (!self.hasField(?UnwrapOpaqueObjectFn, "unwrap_opaque_object")) return null;
+        return .{
+            .create = self.create_opaque_object orelse return null,
+            .unwrap = self.unwrap_opaque_object orelse return null,
+        };
+    }
+
+    pub fn propNameServices(self: *const HostServices) ?PropNameServices {
+        if (!self.hasFeature(.prop_name_id)) return null;
+        if (!self.hasField(?GetPropNameFn, "get_prop_name")) return null;
+        return .{
+            .get = self.get_prop_name orelse return null,
+        };
+    }
+
+    fn hasField(self: *const HostServices, comptime Field: type, comptime field_name: []const u8) bool {
+        return self.size >= @as(u32, @intCast(@offsetOf(HostServices, field_name) + @sizeOf(Field)));
+    }
 };
 
 pub const CallFrame = extern struct {
     ctx: ?*anyopaque = null,
+    services: ?*const HostServices = null,
+    host_context: ?*anyopaque = null,
     this_value: core.JSValue = core.JSValue.undefinedValue(),
     args: JSValueSlice = .{},
     result: core.JSValue = core.JSValue.undefinedValue(),
     error_status: Status = .ok,
+    error_message: BorrowedBytes = .{},
 };
 
 pub const Trampoline = *const fn (frame: *CallFrame) callconv(.c) Status;
@@ -390,11 +455,20 @@ pub fn trampoline(comptime call: anytype) Trampoline {
     }.invoke;
 }
 
+pub const BindingOptions = struct {
+    length: u32 = 0,
+};
+
 pub fn binding(comptime name: []const u8, comptime call: anytype) BindingDescriptor {
+    return bindingWithOptions(name, call, .{});
+}
+
+pub fn bindingWithOptions(comptime name: []const u8, comptime call: anytype, comptime options: BindingOptions) BindingDescriptor {
     return .{
         .name = BorrowedBytes.from(name),
         .feature_flags = featureBit(.zig_slice_views),
         .call = trampoline(call),
+        .length = options.length,
     };
 }
 
@@ -402,6 +476,7 @@ pub const BindingDescriptor = extern struct {
     name: BorrowedBytes = .{},
     feature_flags: u64 = 0,
     call: ?Trampoline = null,
+    length: u32 = 0,
 };
 
 pub const PluginDescriptor = extern struct {
@@ -437,25 +512,27 @@ pub fn Plugin(comptime plugin_name: []const u8, comptime entries: anytype) type 
         else => @compileError("zjs.ffi.Plugin bindings must be a tuple, for example .{ zjs.ffi.binding(\"read\", read) }"),
     };
     if (!info.is_tuple) @compileError("zjs.ffi.Plugin bindings must be a tuple, for example .{ zjs.ffi.binding(\"read\", read) }");
-    const binding_count = info.fields.len;
+    const binding_count = countEntries(entries, BindingDescriptor);
+    const host_object_count = countEntries(entries, HostObjectDescriptor);
+    const prop_name_count = countEntries(entries, PropNameDescriptor);
 
     return struct {
-        pub const bindings: [binding_count]BindingDescriptor = blk: {
-            var table: [binding_count]BindingDescriptor = undefined;
-            for (entries, 0..) |entry, index| {
-                table[index] = entry;
-            }
-            break :blk table;
-        };
+        pub const bindings: [binding_count]BindingDescriptor = collectEntries(entries, BindingDescriptor, binding_count);
+        pub const host_objects: [host_object_count]HostObjectDescriptor = collectEntries(entries, HostObjectDescriptor, host_object_count);
+        pub const prop_names: [prop_name_count]PropNameDescriptor = collectEntries(entries, PropNameDescriptor, prop_name_count);
 
         pub const descriptor_value = PluginDescriptor{
             .header = .{
                 .descriptor_size = @sizeOf(PluginDescriptor),
-                .feature_flags = supported_features,
+                .feature_flags = inferRequiredFeatures(entries),
             },
             .name = BorrowedBytes.from(plugin_name),
             .binding_count = @intCast(binding_count),
             .bindings = if (binding_count == 0) null else &bindings,
+            .host_object_count = @intCast(host_object_count),
+            .host_objects = if (host_object_count == 0) null else &host_objects,
+            .prop_name_count = @intCast(prop_name_count),
+            .prop_names = if (prop_name_count == 0) null else &prop_names,
         };
 
         pub fn descriptor() *const PluginDescriptor {
@@ -468,27 +545,83 @@ pub fn Plugin(comptime plugin_name: []const u8, comptime entries: anytype) type 
     };
 }
 
+fn countEntries(comptime entries: anytype, comptime Entry: type) usize {
+    var count: usize = 0;
+    inline for (entries) |entry| {
+        validatePluginEntryType(@TypeOf(entry));
+        if (@TypeOf(entry) == Entry) count += 1;
+    }
+    return count;
+}
+
+fn collectEntries(comptime entries: anytype, comptime Entry: type, comptime count: usize) [count]Entry {
+    var table: [count]Entry = undefined;
+    var index: usize = 0;
+    inline for (entries) |entry| {
+        validatePluginEntryType(@TypeOf(entry));
+        if (@TypeOf(entry) == Entry) {
+            table[index] = entry;
+            index += 1;
+        }
+    }
+    return table;
+}
+
+fn inferRequiredFeatures(comptime entries: anytype) u64 {
+    var flags: u64 = 0;
+    inline for (entries) |entry| {
+        const Entry = @TypeOf(entry);
+        validatePluginEntryType(Entry);
+        if (Entry == BindingDescriptor) {
+            flags |= entry.feature_flags;
+        } else if (Entry == HostObjectDescriptor) {
+            flags |= featureBit(.opaque_host_object);
+        } else if (Entry == PropNameDescriptor) {
+            flags |= featureBit(.prop_name_id);
+        }
+    }
+    return flags;
+}
+
+fn validatePluginEntryType(comptime Entry: type) void {
+    if (Entry == BindingDescriptor or Entry == HostObjectDescriptor or Entry == PropNameDescriptor) return;
+    @compileError("zjs.ffi.Plugin entries must be zjs.ffi.binding(...), zjs.ffi.hostObject(...), or zjs.ffi.propName(...) descriptors");
+}
+
 pub fn validatePlugin(descriptor: *const PluginDescriptor) ValidationError!void {
     try validateHeader(&descriptor.header, PluginDescriptor, supported_features);
     if (descriptor.binding_count != 0 and descriptor.bindings == null) return error.DescriptorTooSmall;
     if (descriptor.host_object_count != 0 and descriptor.host_objects == null) return error.DescriptorTooSmall;
     if (descriptor.prop_name_count != 0 and descriptor.prop_names == null) return error.DescriptorTooSmall;
+    var required_features: u64 = 0;
     for (descriptor.bindingSlice()) |entry| {
         if (entry.name.len == 0 or entry.name.ptr == null) return error.MissingBindingName;
         if (entry.call == null) return error.MissingBindingCall;
+        required_features |= featureBit(.zig_slice_views) | entry.feature_flags;
     }
-    for (descriptor.hostObjectSlice()) |entry| {
+    for (descriptor.hostObjectSlice(), 0..) |entry, index| {
         try validateHostObject(entry);
+        for (descriptor.hostObjectSlice()[0..index]) |existing| {
+            if (existing.type_id.value == entry.type_id.value) return error.DuplicateHostObjectType;
+        }
+        required_features |= featureBit(.opaque_host_object);
     }
     for (descriptor.propNameSlice()) |entry| {
         try validatePropName(entry);
+        required_features |= featureBit(.prop_name_id);
     }
+    if ((required_features & ~supported_features) != 0) return error.UnsupportedFeatureFlags;
+    if ((required_features & ~descriptor.header.feature_flags) != 0) return error.MissingRequiredFeatureFlags;
 }
 
 pub fn validateHostObject(descriptor: HostObjectDescriptor) ValidationError!void {
     if (descriptor.name.len == 0 or descriptor.name.ptr == null) return error.MissingHostObjectName;
     if (!descriptor.type_id.isValid()) return error.InvalidHostTypeId;
-    if (descriptor.owner == .js and descriptor.finalizer == null) return error.MissingHostObjectFinalizer;
+    switch (descriptor.owner) {
+        .js => if (descriptor.finalizer == null) return error.MissingHostObjectFinalizer,
+        .host => if (descriptor.finalizer != null) return error.HostObjectFinalizerNotAllowed,
+        _ => return error.InvalidHostObjectOwner,
+    }
 }
 
 pub fn validatePropName(descriptor: PropNameDescriptor) ValidationError!void {
@@ -537,6 +670,9 @@ pub fn statusFromError(err: anyerror) Status {
         error.TypeError => .type_error,
         error.RangeError => .range_error,
         error.SyntaxError => .syntax_error,
+        error.ReferenceError => .reference_error,
+        error.EvalError => .eval_error,
+        error.URIError => .uri_error,
         error.PendingException => .pending_exception,
         error.Unsupported => .unsupported,
         else => .generic_error,
@@ -544,6 +680,15 @@ pub fn statusFromError(err: anyerror) Status {
 }
 
 fn invokeTrampoline(comptime call: anytype, frame: *CallFrame) Status {
+    if (comptime isRawCallFrameTrampoline(@TypeOf(call))) {
+        const status = @call(.auto, call, .{frame});
+        if (status != .ok) {
+            frame.error_status = status;
+            if (frame.result.isUndefined()) frame.result = core.JSValue.exception();
+        }
+        return status;
+    }
+
     const result = invokeZig(call, frame) catch |err| {
         const status = statusFromError(err);
         frame.result = core.JSValue.exception();
@@ -582,6 +727,13 @@ fn invokeZig(comptime call: anytype, frame: *CallFrame) anyerror!core.JSValue {
     }
 
     unreachable;
+}
+
+fn isRawCallFrameTrampoline(comptime Call: type) bool {
+    const info = @typeInfo(Call).@"fn";
+    if (info.params.len != 1) return false;
+    const Param = info.params[0].type orelse return false;
+    return Param == *CallFrame;
 }
 
 fn resultToValue(result: anytype) anyerror!core.JSValue {
@@ -693,6 +845,67 @@ test "FFI descriptor validates current target and JSValue layout" {
     try validatePlugin(&descriptor);
 }
 
+test "FFI descriptor header rejects mismatched ABI fields and accepts append-only size" {
+    var descriptor = PluginDescriptor{
+        .header = .{
+            .descriptor_size = @sizeOf(PluginDescriptor),
+        },
+        .name = BorrowedBytes.from("plugin"),
+    };
+    try validatePlugin(&descriptor);
+
+    descriptor.header.magic = 0;
+    try std.testing.expectError(error.BadMagic, validatePlugin(&descriptor));
+    descriptor.header.magic = magic;
+
+    descriptor.header.abi_version = abi_version + 1;
+    try std.testing.expectError(error.UnsupportedAbiVersion, validatePlugin(&descriptor));
+    descriptor.header.abi_version = abi_version;
+
+    descriptor.header.target = Target.native();
+    descriptor.header.target.arch +%= 1;
+    try std.testing.expectError(error.TargetMismatch, validatePlugin(&descriptor));
+
+    descriptor.header.target = Target.native();
+    descriptor.header.target.os +%= 1;
+    try std.testing.expectError(error.TargetMismatch, validatePlugin(&descriptor));
+
+    descriptor.header.target = Target.native();
+    descriptor.header.target.abi +%= 1;
+    try std.testing.expectError(error.TargetMismatch, validatePlugin(&descriptor));
+
+    descriptor.header.target = Target.native();
+    descriptor.header.target.pointer_bits += 1;
+    try std.testing.expectError(error.TargetMismatch, validatePlugin(&descriptor));
+
+    descriptor.header.target = Target.native();
+    descriptor.header.target.endian = switch (descriptor.header.target.endian) {
+        .little => .big,
+        .big => .little,
+        _ => unreachable,
+    };
+    try std.testing.expectError(error.TargetMismatch, validatePlugin(&descriptor));
+
+    descriptor.header.target = Target.native();
+    descriptor.header.target.endian = @enumFromInt(99);
+    try std.testing.expectError(error.TargetMismatch, validatePlugin(&descriptor));
+    descriptor.header.target = Target.native();
+
+    descriptor.header.js_value_align += 1;
+    try std.testing.expectError(error.JSValueLayoutMismatch, validatePlugin(&descriptor));
+    descriptor.header.js_value_align = @alignOf(core.JSValue);
+
+    descriptor.header.js_value_layout_hash +%= 1;
+    try std.testing.expectError(error.JSValueLayoutMismatch, validatePlugin(&descriptor));
+    descriptor.header.js_value_layout_hash = js_value_layout_hash;
+
+    descriptor.header.descriptor_size = @sizeOf(PluginDescriptor) - 1;
+    try std.testing.expectError(error.DescriptorTooSmall, validatePlugin(&descriptor));
+
+    descriptor.header.descriptor_size = @sizeOf(PluginDescriptor) + 16;
+    try validatePlugin(&descriptor);
+}
+
 test "FFI descriptor rejects unsupported features" {
     var descriptor = PluginDescriptor{
         .header = .{
@@ -713,9 +926,14 @@ test "FFI descriptor validates binding names and trampolines" {
         }
     };
     var valid_binding = binding("valid", Impl.noop);
+    try std.testing.expectEqual(@as(u32, 0), valid_binding.length);
+    const length_binding = bindingWithOptions("withLength", Impl.noop, .{ .length = 2 });
+    try std.testing.expectEqual(@as(u32, 2), length_binding.length);
+
     var descriptor = PluginDescriptor{
         .header = .{
             .descriptor_size = @sizeOf(PluginDescriptor),
+            .feature_flags = featureBit(.zig_slice_views),
         },
         .binding_count = 1,
         .bindings = @ptrCast(&valid_binding),
@@ -723,12 +941,47 @@ test "FFI descriptor validates binding names and trampolines" {
     try validatePlugin(&descriptor);
     try std.testing.expectEqual(@as(usize, 1), descriptor.bindingSlice().len);
 
+    descriptor.header.feature_flags = 0;
+    try std.testing.expectError(error.MissingRequiredFeatureFlags, validatePlugin(&descriptor));
+    descriptor.header.feature_flags = featureBit(.zig_slice_views);
+
+    valid_binding.feature_flags = 0;
+    try validatePlugin(&descriptor);
+    descriptor.header.feature_flags = 0;
+    try std.testing.expectError(error.MissingRequiredFeatureFlags, validatePlugin(&descriptor));
+    descriptor.header.feature_flags = featureBit(.zig_slice_views);
+    valid_binding.feature_flags = featureBit(.zig_slice_views);
+
+    valid_binding.feature_flags = @as(u64, 1) << 63;
+    try std.testing.expectError(error.UnsupportedFeatureFlags, validatePlugin(&descriptor));
+    valid_binding.feature_flags = featureBit(.zig_slice_views);
+
     valid_binding.name = .{};
     try std.testing.expectError(error.MissingBindingName, validatePlugin(&descriptor));
 
     valid_binding.name = BorrowedBytes.from("valid");
     valid_binding.call = null;
     try std.testing.expectError(error.MissingBindingCall, validatePlugin(&descriptor));
+}
+
+test "FFI descriptor rejects non-empty tables with null pointers" {
+    var descriptor = PluginDescriptor{
+        .header = .{
+            .descriptor_size = @sizeOf(PluginDescriptor),
+            .feature_flags = supported_features,
+        },
+    };
+
+    descriptor.binding_count = 1;
+    try std.testing.expectError(error.DescriptorTooSmall, validatePlugin(&descriptor));
+    descriptor.binding_count = 0;
+
+    descriptor.host_object_count = 1;
+    try std.testing.expectError(error.DescriptorTooSmall, validatePlugin(&descriptor));
+    descriptor.host_object_count = 0;
+
+    descriptor.prop_name_count = 1;
+    try std.testing.expectError(error.DescriptorTooSmall, validatePlugin(&descriptor));
 }
 
 test "FFI string lifetime descriptors are explicit" {
@@ -807,8 +1060,27 @@ test "FFI host object descriptors validate type id and required finalizer" {
     descriptor.finalizer = null;
     try std.testing.expectError(error.MissingHostObjectFinalizer, validatePlugin(&plugin));
 
+    descriptor.finalizer = Hooks.finalize;
     descriptor.owner = .host;
+    try std.testing.expectError(error.HostObjectFinalizerNotAllowed, validatePlugin(&plugin));
+
+    descriptor.owner = @enumFromInt(99);
+    try std.testing.expectError(error.InvalidHostObjectOwner, validatePlugin(&plugin));
+
+    descriptor.owner = .host;
+    descriptor.finalizer = null;
     try validatePlugin(&plugin);
+}
+
+test "FFI opaque host object nullable helper maps null to no wrapper payload" {
+    const type_id = HostTypeId.named("test.NullableHostObject");
+    var native: u8 = 0;
+
+    try std.testing.expect(OpaqueHostObject.fromNullable(null, type_id) == null);
+
+    const object = OpaqueHostObject.fromNullable(@ptrCast(&native), type_id).?;
+    try std.testing.expect(object.ptr == @as(*anyopaque, @ptrCast(&native)));
+    try std.testing.expectEqual(type_id.value, object.type_id.value);
 }
 
 test "FFI opaque host object finalizer and tracer preserve pointer identity" {
@@ -863,6 +1135,96 @@ test "FFI opaque host object finalizer and tracer preserve pointer identity" {
     try std.testing.expectEqual(@as(usize, 1), state.slot_visits);
     try std.testing.expect(state.seen_object == @as(*anyopaque, @ptrCast(&state)));
     try std.testing.expectEqual(type_id.value, state.seen_type.value);
+}
+
+test "FFI plugin rejects duplicate host object type ids in one descriptor" {
+    const Hooks = struct {
+        fn finalize(context: ?*anyopaque, object: OpaqueHostObject) callconv(.c) void {
+            _ = context;
+            _ = object;
+        }
+    };
+    const type_id = HostTypeId.named("test.DuplicateHostObjectType");
+    var descriptors = [_]HostObjectDescriptor{
+        hostObject("FirstHostType", type_id, .{ .owner = .js, .finalizer = Hooks.finalize }),
+        hostObject("SecondHostType", type_id, .{ .owner = .js, .finalizer = Hooks.finalize }),
+    };
+    const plugin = PluginDescriptor{
+        .header = .{
+            .descriptor_size = @sizeOf(PluginDescriptor),
+            .feature_flags = featureBit(.opaque_host_object),
+        },
+        .host_object_count = descriptors.len,
+        .host_objects = &descriptors,
+    };
+    try std.testing.expectError(error.DuplicateHostObjectType, validatePlugin(&plugin));
+}
+
+test "FFI HostServices helper checks size features and function pointers" {
+    const Hooks = struct {
+        var native: u8 = 0;
+
+        fn create(frame: *CallFrame, object: OpaqueHostObject, out: *core.JSValue) callconv(.c) Status {
+            _ = frame;
+            _ = object;
+            out.* = core.JSValue.undefinedValue();
+            return .ok;
+        }
+
+        fn unwrap(frame: *CallFrame, value: core.JSValue, expected_type_id: HostTypeId, out: *OpaqueHostObject) callconv(.c) Status {
+            _ = frame;
+            _ = value;
+            out.* = OpaqueHostObject.from(@ptrCast(&native), expected_type_id);
+            return .ok;
+        }
+
+        fn propName(frame: *CallFrame, index: u32, out: *PropNameID) callconv(.c) Status {
+            _ = frame;
+            _ = index;
+            out.* = .{ .value = 77 };
+            return .ok;
+        }
+    };
+
+    var services = HostServices{};
+    try std.testing.expect(!services.hasFeature(.opaque_host_object));
+    try std.testing.expect(services.opaqueObjectServices() == null);
+    try std.testing.expect(!services.hasFeature(.prop_name_id));
+    try std.testing.expect(services.propNameServices() == null);
+
+    services.feature_flags = featureBit(.opaque_host_object);
+    try std.testing.expect(services.hasFeature(.opaque_host_object));
+    try std.testing.expect(services.opaqueObjectServices() == null);
+
+    services.create_opaque_object = Hooks.create;
+    try std.testing.expect(services.opaqueObjectServices() == null);
+
+    services.unwrap_opaque_object = Hooks.unwrap;
+    const complete = services.opaqueObjectServices() orelse return error.TestExpectedEqual;
+    var frame = CallFrame{};
+    var out_value = core.JSValue.int32(1);
+    try std.testing.expectEqual(Status.ok, complete.create(&frame, .{}, &out_value));
+    try std.testing.expect(out_value.isUndefined());
+
+    services.size = @intCast(@offsetOf(HostServices, "unwrap_opaque_object"));
+    try std.testing.expect(services.opaqueObjectServices() == null);
+
+    services.size = @sizeOf(HostServices);
+    services.feature_flags |= featureBit(.prop_name_id);
+    try std.testing.expect(services.hasFeature(.prop_name_id));
+    try std.testing.expect(services.propNameServices() == null);
+    services.get_prop_name = Hooks.propName;
+    const prop_names = services.propNameServices() orelse return error.TestExpectedEqual;
+    var prop_name = PropNameID{};
+    try std.testing.expectEqual(Status.ok, prop_names.get(&frame, 0, &prop_name));
+    try std.testing.expectEqual(@as(u32, 77), prop_name.value);
+
+    services.size = @intCast(@offsetOf(HostServices, "get_prop_name"));
+    try std.testing.expect(services.propNameServices() == null);
+
+    services.size = @intCast(@offsetOf(HostServices, "feature_flags"));
+    try std.testing.expect(!services.hasFeature(.opaque_host_object));
+    try std.testing.expect(!services.hasFeature(.prop_name_id));
 }
 
 test "FFI prop name descriptors validate and resolve to interned PropNameID" {
@@ -978,23 +1340,96 @@ test "FFI trampoline supports explicit context signature and maps errors" {
     try std.testing.expect(frame.result.isException());
 }
 
-test "FFI Plugin builds descriptor table with generated trampolines" {
+test "FFI raw CallFrame trampoline preserves returned status and error message" {
+    const Impl = struct {
+        fn fail(frame: *CallFrame) Status {
+            frame.error_message = BorrowedBytes.from("raw failure");
+            return .reference_error;
+        }
+    };
+
+    var frame = CallFrame{};
+    try std.testing.expectEqual(Status.reference_error, trampoline(Impl.fail)(&frame));
+    try std.testing.expectEqual(Status.reference_error, frame.error_status);
+    try std.testing.expect(frame.result.isException());
+    try std.testing.expectEqualStrings("raw failure", frame.error_message.slice());
+}
+
+test "FFI raw CallFrame trampoline preserves explicit error_status on ok return" {
+    const Impl = struct {
+        fn fail(frame: *CallFrame) Status {
+            frame.error_status = .range_error;
+            frame.error_message = BorrowedBytes.from("explicit failure");
+            return .ok;
+        }
+    };
+
+    var frame = CallFrame{};
+    try std.testing.expectEqual(Status.ok, trampoline(Impl.fail)(&frame));
+    try std.testing.expectEqual(Status.range_error, frame.error_status);
+    try std.testing.expectEqualStrings("explicit failure", frame.error_message.slice());
+}
+
+test "FFI status maps JavaScript error classes" {
+    try std.testing.expectEqual(Status.reference_error, statusFromError(error.ReferenceError));
+    try std.testing.expectEqual(Status.eval_error, statusFromError(error.EvalError));
+    try std.testing.expectEqual(Status.uri_error, statusFromError(error.URIError));
+}
+
+test "FFI Plugin builds descriptor tables and infers required features" {
     const Impl = struct {
         fn noop(call: ZigCall) void {
             _ = call;
         }
     };
+    const type_id = comptime HostTypeId.named("test.PluginHost");
     const TestPlugin = Plugin("test-plugin", .{
-        binding("noop", Impl.noop),
+        bindingWithOptions("noop", Impl.noop, .{ .length = 2 }),
+        hostObject("PluginHost", type_id, .{ .owner = .host }),
+        propName("cachedName"),
     });
 
     const descriptor = TestPlugin.descriptor();
     try validatePlugin(descriptor);
     try std.testing.expectEqualStrings("test-plugin", descriptor.name.slice());
+    try std.testing.expectEqual(featureBit(.zig_slice_views) | featureBit(.opaque_host_object) | featureBit(.prop_name_id), descriptor.header.feature_flags);
     try std.testing.expectEqual(@as(u32, 1), descriptor.binding_count);
+    try std.testing.expectEqual(@as(u32, 1), descriptor.host_object_count);
+    try std.testing.expectEqual(@as(u32, 1), descriptor.prop_name_count);
     const bindings = descriptor.bindings.?;
     try std.testing.expectEqualStrings("noop", bindings[0].name.slice());
     try std.testing.expect(bindings[0].call != null);
+    try std.testing.expectEqual(@as(u32, 2), bindings[0].length);
+    try std.testing.expectEqualStrings("PluginHost", descriptor.host_objects.?[0].name.slice());
+    try std.testing.expectEqual(type_id.value, descriptor.host_objects.?[0].type_id.value);
+    try std.testing.expectEqualStrings("cachedName", descriptor.prop_names.?[0].name.slice());
+}
+
+test "FFI Plugin feature flags describe only required descriptor features" {
+    const Impl = struct {
+        fn noop(call: ZigCall) void {
+            _ = call;
+        }
+    };
+    const type_id = comptime HostTypeId.named("test.MinimalFeatureHost");
+
+    const EmptyPlugin = Plugin("empty-feature-test", .{});
+    try std.testing.expectEqual(@as(u64, 0), EmptyPlugin.descriptor().header.feature_flags);
+
+    const BindingPlugin = Plugin("binding-feature-test", .{
+        binding("noop", Impl.noop),
+    });
+    try std.testing.expectEqual(featureBit(.zig_slice_views), BindingPlugin.descriptor().header.feature_flags);
+
+    const HostPlugin = Plugin("host-feature-test", .{
+        hostObject("MinimalFeatureHost", type_id, .{ .owner = .host }),
+    });
+    try std.testing.expectEqual(featureBit(.opaque_host_object), HostPlugin.descriptor().header.feature_flags);
+
+    const PropNamePlugin = Plugin("prop-name-feature-test", .{
+        propName("cachedName"),
+    });
+    try std.testing.expectEqual(featureBit(.prop_name_id), PropNamePlugin.descriptor().header.feature_flags);
 }
 
 test "FFI descriptor export validates generated plugin descriptor" {

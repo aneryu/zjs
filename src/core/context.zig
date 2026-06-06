@@ -1,13 +1,14 @@
 const std = @import("std");
 
 const atom = @import("atom.zig");
-const bytecode = @import("../bytecode/root.zig");
 const class = @import("class.zig");
 const exec = @import("../exec/root.zig");
-const parser = @import("../frontend/parser.zig");
-const Object = @import("object.zig").Object;
+const object_mod = @import("object.zig");
+const Object = object_mod.Object;
+const Descriptor = @import("descriptor.zig").Descriptor;
 const exception = @import("exception.zig");
 const runtime_mod = @import("runtime.zig");
+const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
@@ -184,10 +185,23 @@ pub const ContextEvalTiming = struct {
 
 pub const EvalTiming = ContextEvalTiming;
 
+pub const EvalMode = enum {
+    script,
+    module,
+    eval_direct,
+    eval_indirect,
+};
+
+pub const EvalSourceKind = enum {
+    auto,
+    javascript,
+    typescript,
+};
+
 pub const ContextEvalOptions = struct {
-    mode: parser.Mode = .script,
+    mode: EvalMode = .script,
     filename: []const u8 = "<eval>",
-    source_kind: parser.SourceKind = .auto,
+    source_kind: EvalSourceKind = .auto,
     output: ?*std.Io.Writer = null,
     parse_strict: bool = false,
     runtime_strict: bool = false,
@@ -197,6 +211,64 @@ pub const ContextEvalOptions = struct {
 };
 
 pub const EvalOptions = ContextEvalOptions;
+
+pub const ExternalFunctionOptions = struct {
+    with_prototype: bool = false,
+    realm_global: ?*Object = null,
+};
+
+pub const DataPropertyOptions = struct {
+    writable: bool = true,
+    enumerable: bool = true,
+    configurable: bool = true,
+};
+
+pub const PropertyAccessOptions = struct {
+    output: ?*std.Io.Writer = null,
+    realm_global: ?*Object = null,
+};
+
+pub const PropertyDescriptor = Descriptor;
+
+pub const FunctionCallOptions = struct {
+    this_value: ?JSValue = null,
+    output: ?*std.Io.Writer = null,
+    realm_global: ?*Object = null,
+};
+
+pub const ErrorOptions = struct {
+    realm_global: ?*Object = null,
+    capture_stack: bool = true,
+};
+
+pub const ScriptEvalOptions = struct {
+    output: ?*std.Io.Writer = null,
+    realm_global: ?*Object = null,
+    filename: []const u8 = "<evalScript>",
+};
+
+pub const SharedArrayBufferRef = struct {
+    store: ?*anyopaque = null,
+    max_byte_length: ?usize = null,
+
+    pub fn retain(self: SharedArrayBufferRef) SharedArrayBufferRef {
+        const store = self.sharedStore() orelse return .{};
+        store.retain();
+        return self;
+    }
+
+    pub fn release(self: *SharedArrayBufferRef) void {
+        const store = self.sharedStore() orelse return;
+        self.store = null;
+        self.max_byte_length = null;
+        store.release();
+    }
+
+    fn sharedStore(self: SharedArrayBufferRef) ?*object_mod.SharedBufferStore {
+        const ptr = self.store orelse return null;
+        return @ptrCast(@alignCast(ptr));
+    }
+};
 
 pub const SignalDisposition = enum {
     default,
@@ -378,6 +450,30 @@ pub const JSContext = struct {
         return self.runtime;
     }
 
+    pub fn setStackLimit(self: *JSContext, size: usize) void {
+        self.stack_limit = size;
+    }
+
+    pub fn stackLimit(self: JSContext) usize {
+        return self.stack_limit;
+    }
+
+    pub fn setTrackUnhandledRejections(self: *JSContext, enabled: bool) void {
+        self.track_unhandled_rejections = enabled;
+    }
+
+    pub fn tracksUnhandledRejections(self: JSContext) bool {
+        return self.track_unhandled_rejections;
+    }
+
+    pub fn setPreserveUncaughtException(self: *JSContext, enabled: bool) void {
+        self.preserve_uncaught_exception = enabled;
+    }
+
+    pub fn preservesUncaughtException(self: JSContext) bool {
+        return self.preserve_uncaught_exception;
+    }
+
     pub fn setHostEventLoop(self: *JSContext, host_event_loop: HostEventLoop) void {
         self.host_event_loop = host_event_loop;
     }
@@ -414,6 +510,14 @@ pub const JSContext = struct {
         const slot = try self.ensureClassPrototypeSlot(class_id);
         const old = slot.*;
         slot.* = prototype.value().dup();
+        old.free(self.runtime);
+    }
+
+    pub fn clearClassPrototype(self: *JSContext, class_id: class.ClassId) void {
+        const index: usize = @intCast(class_id);
+        if (index >= self.class_prototypes.len) return;
+        const old = self.class_prototypes[index];
+        self.class_prototypes[index] = JSValue.nullValue();
         old.free(self.runtime);
     }
 
@@ -510,154 +614,278 @@ pub const JSContext = struct {
         return exec.zjs_vm.contextGlobal(self);
     }
 
+    pub fn createObject(self: *JSContext) !JSValue {
+        const object = try Object.create(self.runtime, class.ids.object, null);
+        return object.value();
+    }
+
+    pub fn createString(self: *JSContext, bytes: []const u8) !JSValue {
+        if (bytes.len == 0) {
+            const cached = try self.runtime.emptyString();
+            return cached.value().dup();
+        }
+        const created = if (isAsciiBytes(bytes))
+            try string.String.createAscii(self.runtime, bytes)
+        else
+            try string.String.createUtf8(self.runtime, bytes);
+        return created.value();
+    }
+
+    pub fn defineDataProperty(
+        self: *JSContext,
+        target: JSValue,
+        property_name: []const u8,
+        value: JSValue,
+        options: DataPropertyOptions,
+    ) !void {
+        const object = try exec.property_ops.expectObject(target);
+        const key = try self.runtime.internAtom(property_name);
+        defer self.runtime.atoms.free(key);
+        try object.defineOwnProperty(self.runtime, key, @import("descriptor.zig").Descriptor.data(value, options.writable, options.enumerable, options.configurable));
+    }
+
+    pub fn getPropertyAtom(self: *JSContext, value: JSValue, property_name: atom.Atom) !JSValue {
+        const global = try self.globalObject();
+        return exec.zjs_vm.getValueProperty(self, null, global, value, property_name, null, null);
+    }
+
+    pub fn getProperty(self: *JSContext, value: JSValue, property_name: []const u8) !JSValue {
+        const key = try self.runtime.internAtom(property_name);
+        defer self.runtime.atoms.free(key);
+        return self.getPropertyAtom(value, key);
+    }
+
+    pub fn getPropertyKey(self: *JSContext, value: JSValue, property_key: JSValue, options: PropertyAccessOptions) !JSValue {
+        const global = options.realm_global orelse try self.globalObject();
+        const key = try exec.shared.toPropertyKeyAtom(self, options.output, global, property_key, null, null);
+        defer self.runtime.atoms.free(key);
+        return exec.shared.getValueProperty(self, options.output, global, value, key, null, null);
+    }
+
+    pub fn deleteProperty(self: *JSContext, value: JSValue, property_name: []const u8) !bool {
+        const key = try self.runtime.internAtom(property_name);
+        defer self.runtime.atoms.free(key);
+        return self.deletePropertyAtom(value, key, .{});
+    }
+
+    pub fn deletePropertyKey(self: *JSContext, value: JSValue, property_key: JSValue, options: PropertyAccessOptions) !bool {
+        const global = options.realm_global orelse try self.globalObject();
+        const key = try exec.shared.toPropertyKeyAtom(self, options.output, global, property_key, null, null);
+        defer self.runtime.atoms.free(key);
+        return self.deletePropertyAtom(value, key, .{ .output = options.output, .realm_global = global });
+    }
+
+    pub fn hasOwnProperty(self: *JSContext, value: JSValue, property_name: []const u8) !bool {
+        const key = try self.runtime.internAtom(property_name);
+        defer self.runtime.atoms.free(key);
+        return self.hasOwnPropertyAtom(value, key, .{});
+    }
+
+    pub fn hasOwnPropertyKey(self: *JSContext, value: JSValue, property_key: JSValue, options: PropertyAccessOptions) !bool {
+        const global = options.realm_global orelse try self.globalObject();
+        const key = try exec.shared.toPropertyKeyAtom(self, options.output, global, property_key, null, null);
+        defer self.runtime.atoms.free(key);
+        return self.hasOwnPropertyAtom(value, key, .{ .output = options.output, .realm_global = global });
+    }
+
+    pub fn ownPropertyDescriptor(self: *JSContext, value: JSValue, property_key: JSValue, options: PropertyAccessOptions) !?PropertyDescriptor {
+        const global = options.realm_global orelse try self.globalObject();
+        const key = try exec.shared.toPropertyKeyAtom(self, options.output, global, property_key, null, null);
+        defer self.runtime.atoms.free(key);
+        return self.ownPropertyDescriptorAtom(value, key, .{ .output = options.output, .realm_global = global });
+    }
+
     pub fn toString(self: *JSContext, value: JSValue) !JSValue {
         const global = try self.globalObject();
         return exec.shared.toStringForAnnexB(self, null, global, value, null, null);
+    }
+
+    pub fn toOwnedUtf8(self: *JSContext, value: JSValue, allocator: std.mem.Allocator) ![]u8 {
+        const string_value = try self.toString(value);
+        defer string_value.free(self.runtime);
+        const string_view = string_value.asString() orelse return error.TypeError;
+        return string_view.toOwnedUtf8(allocator);
+    }
+
+    pub fn toNumber(self: *JSContext, value: JSValue) !f64 {
+        const global = try self.globalObject();
+        const primitive = try exec.shared.toPrimitiveForNumber(self, null, global, value);
+        defer primitive.free(self.runtime);
+        if (primitive.isBigInt()) return error.TypeError;
+        const number_value = try exec.value_ops.toNumberValue(self.runtime, primitive);
+        defer number_value.free(self.runtime);
+        return number_value.asNumber() orelse std.math.nan(f64);
+    }
+
+    pub fn toIntegerOrInfinity(self: *JSContext, value: JSValue) !f64 {
+        const number_value = try self.toNumber(value);
+        if (std.math.isNan(number_value) or number_value == 0) return 0;
+        if (!std.math.isFinite(number_value)) return number_value;
+        return if (number_value < 0) -@floor(@abs(number_value)) else @floor(number_value);
+    }
+
+    pub fn isCallable(self: *JSContext, value: JSValue) bool {
+        _ = self;
+        return exec.shared.isCallableValue(value);
+    }
+
+    pub fn isConstructor(self: *JSContext, value: JSValue) bool {
+        return exec.shared.isConstructorLike(self, value);
+    }
+
+    pub fn functionName(self: *JSContext, value: JSValue, allocator: std.mem.Allocator) ![]u8 {
+        const object = try exec.property_ops.expectObject(value);
+        const runtime_name = try exec.call.nativeFunctionNameForVm(self.runtime, object);
+        defer self.runtime.memory.allocator.free(runtime_name);
+        return allocator.dupe(u8, runtime_name);
+    }
+
+    pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: FunctionCallOptions) !JSValue {
+        const global = options.realm_global orelse try self.globalObject();
+        const this_value = options.this_value orelse JSValue.undefinedValue();
+        return exec.shared.callValueOrBytecode(self, options.output, global, this_value, callee, args, null, null);
+    }
+
+    pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: ErrorOptions) !JSValue {
+        const global = options.realm_global orelse try self.globalObject();
+        const error_value = try exec.shared.createNamedError(self.runtime, global, name, message);
+        errdefer error_value.free(self.runtime);
+        if (options.capture_stack) try exec.shared.attachStackToErrorValue(self, global, error_value);
+        return error_value;
+    }
+
+    pub fn throwError(self: *JSContext, name: []const u8, message: []const u8, options: ErrorOptions) !JSValue {
+        const error_value = try self.createError(name, message, options);
+        var error_value_owned = true;
+        errdefer if (error_value_owned) error_value.free(self.runtime);
+        _ = self.throwValue(error_value);
+        error_value_owned = false;
+        return error.JSException;
+    }
+
+    pub fn pendingExceptionMatchesErrorName(self: *JSContext, expected_name: []const u8) !bool {
+        if (!self.hasException()) return false;
+        return exec.shared.thrownValueMatchesConstructor(self.runtime, self.exception_slot.value, expected_name);
+    }
+
+    pub fn consumePendingExceptionIfErrorName(self: *JSContext, expected_name: []const u8) !bool {
+        if (!self.hasException()) return false;
+        const matches = try self.pendingExceptionMatchesErrorName(expected_name);
+        self.clearException();
+        return matches;
+    }
+
+    pub fn runtimeErrorMatchesErrorName(self: *JSContext, err: anyerror, expected_name: []const u8) bool {
+        _ = self;
+        if (exec.exception_ops.runtimeErrorInfo(err)) |info| {
+            return std.mem.eql(u8, info.name, expected_name);
+        }
+        const err_name = @errorName(err);
+        return std.mem.eql(u8, err_name, expected_name) and exec.exception_ops.isErrorConstructorName(expected_name);
+    }
+
+    pub fn createRealm(self: *JSContext) !JSValue {
+        return exec.call.createRealmObject(self.runtime);
+    }
+
+    pub fn realmGlobal(self: *JSContext, realm: JSValue) !JSValue {
+        return self.getProperty(realm, "global");
+    }
+
+    pub fn realmGlobalObject(self: *JSContext, realm: JSValue) !*Object {
+        const global_value = try self.realmGlobal(realm);
+        defer global_value.free(self.runtime);
+        return exec.property_ops.expectObject(global_value);
+    }
+
+    pub fn isArray(self: *JSContext, value: JSValue) !bool {
+        _ = self;
+        const object = try arrayObjectFromValue(value);
+        return object != null;
+    }
+
+    pub fn arrayLength(self: *JSContext, value: JSValue) !u32 {
+        _ = self;
+        const object = (try arrayObjectFromValue(value)) orelse return error.TypeError;
+        return object.length;
+    }
+
+    pub fn getIndex(self: *JSContext, value: JSValue, index: u32) !JSValue {
+        return self.getPropertyAtom(value, atom.atomFromUInt32(index));
+    }
+
+    fn hasOwnPropertyAtom(self: *JSContext, value: JSValue, property_name: atom.Atom, options: PropertyAccessOptions) !bool {
+        var desc = (try self.ownPropertyDescriptorAtom(value, property_name, options)) orelse return false;
+        defer desc.destroy(self.runtime);
+        return true;
+    }
+
+    fn deletePropertyAtom(self: *JSContext, value: JSValue, property_name: atom.Atom, options: PropertyAccessOptions) !bool {
+        const object = try exec.property_ops.expectObject(value);
+        const global = options.realm_global orelse try self.globalObject();
+        return exec.shared.deleteValueProperty(self, options.output, global, value, object, property_name, null, null);
+    }
+
+    fn ownPropertyDescriptorAtom(self: *JSContext, value: JSValue, property_name: atom.Atom, options: PropertyAccessOptions) !?PropertyDescriptor {
+        const object = try exec.property_ops.expectObject(value);
+        const global = options.realm_global orelse try self.globalObject();
+        var desc = try exec.shared.proxyAwareOwnPropertyDescriptor(self, options.output, global, object, property_name, null, null) orelse {
+            if (object.is_global and exec.value_ops.atomNameEql(self.runtime, property_name, "globalThis")) {
+                return Descriptor.data(object.value().dup(), true, false, true);
+            }
+            return null;
+        };
+        errdefer desc.destroy(self.runtime);
+        try exec.call.materializeMappedArgumentsDescriptorValueForVm(self.runtime, object, property_name, &desc);
+        return desc;
     }
 
     pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
         return store.toArrayBuffer(self);
     }
 
-    pub fn eval(self: *JSContext, source_text: []const u8, options: ContextEvalOptions) !JSValue {
-        const rt = self.runtime;
-        const parse_start = monotonicNanos();
-        var compiled = try parser.parse(rt, source_text, .{
-            .mode = options.mode,
-            .filename = options.filename,
-            .source_kind = options.source_kind,
-            .strict = options.parse_strict,
-            .return_completion = options.mode == .script and options.return_completion,
-        });
-        if (options.timing) |timing| timing.parse_ns += elapsedNanosSince(parse_start);
-        defer compiled.deinit();
-        if (compiled.syntax_error) |err| {
-            if (options.mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return JSValue.undefinedValue();
-            const exception_ops = @import("../exec/vm_exception_ops.zig");
-            const global = try self.globalObject();
-            var msg_buf = std.ArrayList(u8).empty;
-            defer msg_buf.deinit(rt.memory.allocator);
-            try msg_buf.print(rt.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ options.filename, err.position.line, err.position.column, err.message });
-            const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
-            _ = self.throwValue(error_val);
-            return error.SyntaxError;
-        }
-        if (options.runtime_strict and options.mode == .script) forceRuntimeStrict(&compiled.function);
-
-        var module_name: atom.Atom = atom.null_atom;
-        var has_module_record = false;
-        defer if (has_module_record) rt.atoms.free(module_name);
-        if (options.mode == .module and compiled.function.module_record != null) {
-            var module_name_buf: [64]u8 = undefined;
-            const module_name_bytes = if (std.mem.eql(u8, options.filename, "<eval>"))
-                try std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{rt.modules.modules.len})
-            else
-                options.filename;
-            module_name = try rt.internAtom(module_name_bytes);
-            has_module_record = true;
-            const referrer_path: ?[]const u8 = if (std.mem.eql(u8, options.filename, "<eval>")) null else options.filename;
-            _ = try exec.module.instantiateParsedRecordWithReferrer(rt, module_name, &compiled.function, referrer_path);
-            if (rt.modules.find(module_name)) |record| record.import_meta_main = true;
-            rt.modules.linkModule(rt, module_name) catch |err| {
-                const exception_ops = @import("../exec/vm_exception_ops.zig");
-                const global = try self.globalObject();
-                var msg_buf = std.ArrayList(u8).empty;
-                defer msg_buf.deinit(rt.memory.allocator);
-                try msg_buf.print(rt.memory.allocator, "LINK ERROR for module {s}: {s}", .{ options.filename, @errorName(err) });
-                const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
-                _ = self.throwValue(error_val);
-                return moduleResolutionError(err);
-            };
-        }
-
-        var module_var_refs: []JSValue = &.{};
-        if (has_module_record) {
-            module_var_refs = try exec.module.buildModuleVarRefs(self, module_name, &compiled.function);
-        }
-        defer exec.module.freeModuleVarRefs(rt, module_var_refs);
-
-        const result = if (has_module_record)
-            try self.runEvalModuleWithVarRefs(&compiled.function, options.output, module_var_refs, options.timing)
-        else blk: {
-            const vm_start = monotonicNanos();
-            const value = if (options.output) |writer| blk_output: {
-                var vm_instance = exec.Vm.initWithOutput(self, writer);
-                defer vm_instance.deinit();
-                break :blk_output try vm_instance.run(&compiled.function);
-            } else blk_no_output: {
-                var vm_instance = exec.Vm.init(self);
-                defer vm_instance.deinit();
-                break :blk_no_output try vm_instance.run(&compiled.function);
-            };
-            if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
-            break :blk value;
+    pub fn retainSharedArrayBuffer(self: *JSContext, value: JSValue) !SharedArrayBufferRef {
+        _ = self;
+        const object = try exec.property_ops.expectObject(value);
+        if (object.class_id != class.ids.shared_array_buffer) return error.TypeError;
+        const store = object.sharedByteStorageStore() orelse return error.TypeError;
+        store.retain();
+        return .{
+            .store = store,
+            .max_byte_length = object.arrayBufferMaxByteLength(),
         };
-
-        const global_object = try exec.zjs_vm.contextGlobal(self);
-        const jobs_start = monotonicNanos();
-        try exec.zjs_vm.drainPendingPromiseJobs(self, options.output, global_object);
-        if (options.timing) |timing| timing.promise_jobs_ns += elapsedNanosSince(jobs_start);
-
-        if (options.mode == .script and options.discard_script_result) {
-            result.free(rt);
-            return JSValue.undefinedValue();
-        }
-        return result;
     }
 
-    fn runEvalModuleWithVarRefs(
-        self: *JSContext,
-        function: *const bytecode.Bytecode,
-        output: ?*std.Io.Writer,
-        module_var_refs: []const JSValue,
-        timing: ?*ContextEvalTiming,
-    ) !JSValue {
-        const rt = self.runtime;
-        var continuation_value = (try Object.create(rt, @import("class.zig").ids.generator, null)).value();
-        defer continuation_value.free(rt);
-        const continuation = try exec.property_ops.expectObject(continuation_value);
-        var resume_value: ?JSValue = null;
-        var resume_value_symbol_rooted = false;
-        defer if (resume_value) |value| {
-            if (resume_value_symbol_rooted) rt.unregisterExternalValueSymbolRoot(value);
-            value.free(rt);
-        };
-
-        while (true) {
-            var stack = exec.stack.Stack.init(&rt.memory, self.stack_limit);
-            defer stack.deinit(rt);
-            const vm_start = monotonicNanos();
-            const result = exec.zjs_vm.runModuleWithOutputAndVarRefsState(
-                self,
-                &stack,
-                function,
-                output,
-                module_var_refs,
-                continuation,
-                resume_value,
-            ) catch |err| return moduleResolutionError(err);
-            if (timing) |item| item.vm_run_ns += elapsedNanosSince(vm_start);
-            if (resume_value) |value| {
-                if (resume_value_symbol_rooted) {
-                    rt.unregisterExternalValueSymbolRoot(value);
-                    resume_value_symbol_rooted = false;
-                }
-                value.free(rt);
-                resume_value = null;
-            }
-
-            if (continuation.generatorJustYielded() and !continuation.generatorDone()) {
-                resume_value = result;
-                resume_value_symbol_rooted = try rt.registerExternalValueSymbolRoot(result);
-                const global_object = try exec.zjs_vm.contextGlobal(self);
-                const jobs_start = monotonicNanos();
-                try exec.zjs_vm.drainPendingPromiseJobs(self, output, global_object);
-                if (timing) |item| item.promise_jobs_ns += elapsedNanosSince(jobs_start);
-                continue;
-            }
-
-            return result;
+    pub fn sharedArrayBufferFromRef(self: *JSContext, ref: SharedArrayBufferRef) !JSValue {
+        const store = ref.sharedStore() orelse return error.TypeError;
+        if (ref.max_byte_length) |max_byte_length| {
+            if (max_byte_length < store.bytes.len) return error.RangeError;
         }
+        store.retain();
+        errdefer store.release();
+        const object = try Object.create(self.runtime, class.ids.shared_array_buffer, null);
+        errdefer Object.destroyFromHeader(self.runtime, &object.header);
+        object.installSharedByteStorage(self.runtime, store);
+        object.arrayBufferMaxByteLengthSlot().* = ref.max_byte_length;
+        return object.value();
+    }
+
+    pub fn functionRealmGlobal(self: *JSContext, function_value: JSValue) !?*Object {
+        _ = self;
+        const function_object = try exec.property_ops.expectObject(function_value);
+        return exec.shared.objectRealmGlobal(function_object);
+    }
+
+    pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: ScriptEvalOptions) !JSValue {
+        return exec.eval_entry.evalScriptSource(self, source_text, options);
+    }
+
+    pub fn evalScriptValue(self: *JSContext, source_value: JSValue, options: ScriptEvalOptions) !JSValue {
+        return exec.eval_entry.evalScriptValue(self, source_value, options);
+    }
+
+    pub fn eval(self: *JSContext, source_text: []const u8, options: ContextEvalOptions) !JSValue {
+        return exec.eval_entry.eval(self, source_text, options);
     }
 
     fn rootProvider(self: *JSContext) runtime_mod.RootProvider {
@@ -859,7 +1087,24 @@ pub const JSContext = struct {
     ) !void {
         const rt = self.runtime;
         const global_object = try self.globalObject();
+        const function_value = try self.createExternalFunction(name, length, ptr, call, finalizer, .{ .realm_global = global_object });
+        defer function_value.free(rt);
 
+        const property_name = try rt.internAtom(name);
+        defer rt.atoms.free(property_name);
+        try global_object.defineOwnProperty(rt, property_name, @import("descriptor.zig").Descriptor.data(function_value, true, false, true));
+    }
+
+    pub fn createExternalFunction(
+        self: *JSContext,
+        name: []const u8,
+        length: i32,
+        ptr: *anyopaque,
+        call: @import("host_function.zig").ExternalCallFn,
+        finalizer: ?@import("host_function.zig").ExternalFinalizer,
+        options: ExternalFunctionOptions,
+    ) !JSValue {
+        const rt = self.runtime;
         const id = try rt.registerExternalHostFunction(.{
             .ptr = ptr,
             .call = call,
@@ -872,11 +1117,17 @@ pub const JSContext = struct {
         const function_object = try exec.property_ops.expectObject(function_value);
         function_object.hostFunctionKindSlot().* = @import("host_function.zig").ids.external_host;
         function_object.externalHostFunctionIdSlot().* = id;
-        try function_object.setFunctionRealmGlobalPtr(rt, global_object);
+        const realm_global = options.realm_global orelse try self.globalObject();
+        try function_object.setFunctionRealmGlobalPtr(rt, realm_global);
 
-        const property_name = try rt.internAtom(name);
-        defer rt.atoms.free(property_name);
-        try global_object.defineOwnProperty(rt, property_name, @import("descriptor.zig").Descriptor.data(function_value, true, false, true));
+        if (options.with_prototype) {
+            const prototype = try Object.create(rt, class.ids.object, null);
+            const prototype_value = prototype.value();
+            defer prototype_value.free(rt);
+            try function_object.defineOwnProperty(rt, atom.ids.prototype, @import("descriptor.zig").Descriptor.data(prototype_value, true, true, true));
+        }
+
+        return function_value;
     }
 
     pub fn formatException(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) ![]const u8 {
@@ -911,9 +1162,14 @@ pub const JSContext = struct {
     pub fn formatExceptionStack(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) !?[]const u8 {
         const rt = self.runtime;
         if (!exc.isObject()) return null;
-        const header = exc.refHeader() orelse return null;
-        const object: *Object = @fieldParentPtr("header", header);
-        return try getPropertyString(rt, object, "stack", allocator);
+        const val = try self.getProperty(exc, "stack");
+        defer val.free(rt);
+        if (!val.isString()) return null;
+
+        var temp_list = std.ArrayList(u8).empty;
+        defer temp_list.deinit(rt.memory.allocator);
+        try exec.value_ops.appendRawString(rt, &temp_list, val);
+        return try allocator.dupe(u8, temp_list.items);
     }
 };
 
@@ -930,49 +1186,20 @@ fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: 
     return try allocator.dupe(u8, temp_list.items);
 }
 
-fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError}) {
-    return switch (err) {
-        error.MissingExport, error.AmbiguousExport => error.SyntaxError,
-        else => err,
-    };
-}
-
-fn forceRuntimeStrict(function: *bytecode.Bytecode) void {
-    function.flags.runtime_strict = true;
-    for (function.constants.values) |value| forceFunctionBytecodeRuntimeStrict(value);
-}
-
-fn forceFunctionBytecodeRuntimeStrict(value: JSValue) void {
-    if (!value.isFunctionBytecode()) return;
-    const header = value.objectHeader() orelse return;
-    const function_bytecode: *bytecode.FunctionBytecode = @fieldParentPtr("header", header);
-    function_bytecode.runtime_strict_mode = true;
-    for (function_bytecode.cpool) |child| forceFunctionBytecodeRuntimeStrict(child);
-}
-
-fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {
-    var saw_digit = false;
-    var saw_space_after_digit = false;
-    for (source_text) |ch| {
-        if (std.ascii.isDigit(ch)) {
-            if (saw_space_after_digit) return true;
-            saw_digit = true;
-        } else if (std.ascii.isWhitespace(ch)) {
-            if (saw_digit) saw_space_after_digit = true;
-        } else {
-            return false;
-        }
+fn isAsciiBytes(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte >= 0x80) return false;
     }
-    return false;
+    return true;
 }
 
-fn elapsedNanosSince(start: u64) u64 {
-    const end = monotonicNanos();
-    return if (end > start) end - start else 0;
-}
-
-fn monotonicNanos() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+fn arrayObjectFromValue(value: JSValue) !?*Object {
+    if (!value.isObject()) return null;
+    const object = exec.property_ops.expectObject(value) catch return null;
+    if (object.is_proxy) {
+        if (object.proxyHandler() == null) return error.TypeError;
+        const target = object.proxyTarget() orelse return error.TypeError;
+        return arrayObjectFromValue(target);
+    }
+    return if (object.is_array) object else null;
 }
