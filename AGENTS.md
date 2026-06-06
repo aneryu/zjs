@@ -75,7 +75,11 @@ available only through git history.
 
 ### Regression
 
-- `zig build test --summary all` (defaults to Debug optimization; use for fast compilation during daily local development iteration; do NOT run ReleaseSafe tests repeatedly during minor edits to save time)
+- `zig build test --summary all` (Debug full unit/integration suite; during the
+  current large refactor, do NOT run this after every small edit. Prefer
+  targeted compile checks, focused unit tests, or changed-area slices while
+  iterating, and save the full Debug suite for meaningful checkpoints or before
+  handing off substantial code changes)
 - `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
 - `zig build test-oom --summary all` (不再执行 / No longer executed)
 - `zig build test-oom-exhaustive --summary all` (不再执行 / No longer executed)
@@ -110,7 +114,13 @@ Missing or invalid arguments should print usage and exit non-zero.
 - Fix one problem class at a time; do not mix unrelated semantic domains.
 - Compare semantic fixes against QuickJS reference behavior and record key
   evidence.
-- After changes, run at least `zig build test --summary all`.
+- During the current large refactor, do not automatically run the full
+  `zig build test --summary all` suite after every edit. Use the cheapest
+  validation that proves the changed surface: targeted compile commands,
+  changed-area unit tests, runner fixtures, or focused test262 slices. Run the
+  full Debug suite at meaningful checkpoints, before broad handoff, or when a
+  change touches shared runtime/core semantics and targeted evidence is not
+  strong enough.
 - Runner or test262 changes require the relevant runner fixture or target slice.
 - Keep non-trivial validation evidence close to the relevant code change,
   commit message, issue, or PR. Do not add broad status ledgers back to the
@@ -135,7 +145,9 @@ Missing or invalid arguments should print usage and exit non-zero.
 - The relevant failing case was reproduced and understood.
 - The change is limited to the minimum necessary files.
 - Related docs, tracking notes, or matrices are updated.
-- `zig build test --summary all` (daily development verification).
+- `zig build test --summary all` at a checkpoint or before handoff when the
+  change is code-bearing and broad enough to justify the cost; otherwise record
+  the focused validation that covers the change.
 - `zig build test -Doptimize=ReleaseSafe --summary all` (run ONLY once as a final pre-commit/pre-push gate verification).
 - `git diff --check` passes.
 - No noisy logs, temporary debug output, or unrelated build noise were added.
