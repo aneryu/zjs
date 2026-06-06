@@ -39,8 +39,8 @@ changed with a concrete implementation plan:
   are outside the current core-engine target.
 - Test262 features marked `=skip` include `Temporal`, `ShadowRealm`,
   `decorators`, `tail-call-optimization`, `host-gc-required`, `import-defer`,
-  source-phase imports, canonical time zone data, duplicate RegExp named
-  groups, and the Intl feature groups listed in `test262.conf`.
+  `import-bytes`, source-phase imports, canonical time zone data, duplicate
+  RegExp named groups, and the Intl feature groups listed in `test262.conf`.
 - Generated RegExp string-property and UnicodeSets cases that still exceed the
   current parity boundary are excluded individually.
 - Most `test262/test/staging/` tests are excluded by default, with selected

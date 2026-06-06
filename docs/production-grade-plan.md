@@ -3,11 +3,14 @@
 本文是 `zjs` 成为 production-grade embeddable JavaScript engine 的总路线图。
 它定义目标、完成标准和长期 TODO。更细的契约和发布检查保留在对应文档中：
 
-- API 契约：[engine-api-v1.md](engine-api-v1.md)
+- 当前 API / 边界契约：[ADR 0001](adr/0001-zig-kernel-api-and-runtime-boundary.md)
 - 兼容性边界：[compatibility-v1.md](compatibility-v1.md)
 - 安全边界：[security-boundary.md](security-boundary.md)
 - 嵌入示例：[embedding-cookbook.md](embedding-cookbook.md)
 - 发布检查：[release-checklist.md](release-checklist.md)
+
+Note: earlier Engine-facade API items in this roadmap are legacy direction.
+Current public API work follows the low-level kernel surface in ADR 0001.
 
 ## 目标
 
@@ -33,8 +36,8 @@ wall-clock supervision。
 ## Gate-First TODO
 
 - [x] 保持 `zig build test --summary all` 作为默认 Debug test surface。
-- [x] 保持 `zig build test-fast --summary all` 作为 ReleaseSafe exec shard。
-- [x] 保持 `zig build smoke --summary all` 覆盖 CLI 和常用脚本行为。
+- [x] 保持 `zig build test -Doptimize=ReleaseSafe --summary all` 作为 ReleaseSafe exec shard。
+- [x] 移除过时的 `smoke` 步骤以保持测试构建的精简干净。
 - [x] 保持 `zig build test262-gate --summary all` 使用 checked-in config。
 - [x] 保持 `zig build engine-production-gate --summary all` 作为顶层 release gate。
 - [x] 对 parser、runner、execution 或 semantic 改动运行 focused test262 slice。

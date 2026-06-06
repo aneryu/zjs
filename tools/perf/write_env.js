@@ -16,7 +16,7 @@ let notes = '';
 function usage() {
     console.log(`Usage: ${path.basename(process.argv[1] || 'write_env.js')} [options]
 
-Writes a benchmark environment note for reports/perf/baseline/env.md.
+Writes a benchmark environment note.
 
 Options:
   --output PATH     Output markdown path (default: ${outputPath})
@@ -80,7 +80,7 @@ const zigVersion = firstLine(commandOutput('zig', ['version'])) || 'unknown';
 const uname = firstLine(commandOutput('uname', ['-a'])) || `${os.type()} ${os.release()} ${os.arch()}`;
 const qjsVersion = qjs ? firstLine(commandOutput(qjs, ['--help'])) || 'unavailable' : 'not configured';
 
-const body = `# zjs performance baseline environment
+const body = `# zjs performance environment
 
 - Generated: ${new Date().toISOString()}
 - Zig version: ${zigVersion}

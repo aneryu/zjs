@@ -52,19 +52,17 @@ available only through git history.
 
 ## Repository Layout
 
-- `src/engine/root.zig`: public engine entrypoint.
-- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+- `src/root.zig`: public engine entrypoint.
+- `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, and core ownership.
-- `src/engine/frontend/`: lexer, parser, source positions, and frontend parsing.
-- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata, and
+- `src/frontend/`: lexer, parser, source positions, and frontend parsing.
+- `src/bytecode/`: bytecode, constants, scopes, module metadata, and
   emitter.
-- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
-- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
-- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
+- `src/builtins/`: ECMAScript built-in objects and constructors.
+- `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tools/`: smoke runner, test262 runner, and other tools.
 - `src/tests/`: Zig unit and integration test entrypoints.
-- `tests/zig-smoke/`: JavaScript smoke scripts, manifest, and golden output.
 - `test262/`: test262 checkout used by the local gate.
 - `tests/fixtures/`: fixture snapshots used by opcode and runner tests.
 
@@ -72,17 +70,20 @@ available only through git history.
 
 ### Build
 
-- `zig build qjs --summary all`
+- `zig build zjs --summary all`
 - `zig build run-test262 --summary all`
 
 ### Regression
 
-- `zig build test --summary all` (defaults to ReleaseSafe exec shards, fast warm runs)
-- `zig build test-debug --summary all` for slow Debug test runs with heavy allocator tracking.
-- `zig build test-oom --summary all` for sampled exec OOM fail-index coverage.
-- `zig build test-oom-exhaustive --summary all` for very slow full exec OOM
-  fail-index audits.
-- `zig build smoke --summary all`
+- `zig build test --summary all` (Debug full unit/integration suite; during the
+  current large refactor, do NOT run this after every small edit. Prefer
+  targeted compile checks, focused unit tests, or changed-area slices while
+  iterating, and save the full Debug suite for meaningful checkpoints or before
+  handing off substantial code changes)
+- `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
+- `zig build test-oom --summary all` (不再执行 / No longer executed)
+- `zig build test-oom-exhaustive --summary all` (不再执行 / No longer executed)
+
 - `git diff --check`
 
 ### test262
@@ -113,8 +114,13 @@ Missing or invalid arguments should print usage and exit non-zero.
 - Fix one problem class at a time; do not mix unrelated semantic domains.
 - Compare semantic fixes against QuickJS reference behavior and record key
   evidence.
-- After changes, run at least `zig build test --summary all` and
-  `zig build smoke --summary all`.
+- During the current large refactor, do not automatically run the full
+  `zig build test --summary all` suite after every edit. Use the cheapest
+  validation that proves the changed surface: targeted compile commands,
+  changed-area unit tests, runner fixtures, or focused test262 slices. Run the
+  full Debug suite at meaningful checkpoints, before broad handoff, or when a
+  change touches shared runtime/core semantics and targeted evidence is not
+  strong enough.
 - Runner or test262 changes require the relevant runner fixture or target slice.
 - Keep non-trivial validation evidence close to the relevant code change,
   commit message, issue, or PR. Do not add broad status ledgers back to the
@@ -123,22 +129,25 @@ Missing or invalid arguments should print usage and exit non-zero.
 ## Where To Look
 
 - Core values, runtime/context, atoms, strings, objects, properties, and arrays:
-  `src/engine/core/`.
-- Lexer, parser, and early errors: `src/engine/frontend/`.
-- Bytecode emission, scopes, and module metadata: `src/engine/bytecode/`.
+- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
+  `src/core/`.
+- Lexer, parser, and early errors: `src/frontend/`.
+- Bytecode emission, scopes, and module metadata: `src/bytecode/`.
 - Execution semantics, calls, exceptions, eval, and job queue:
-  `src/engine/exec/`.
-- Built-in object behavior: `src/engine/builtins/`.
-- RegExp, Unicode, BigInt, and number formatting: `src/engine/libs/`.
+  `src/exec/`.
+- Built-in object behavior: `src/builtins/`.
+- RegExp, Unicode, BigInt, and number formatting: `src/libs/`.
 - CLI behavior: `src/cli/`.
-- Smoke and test262 runner behavior: `src/tools/`.
+- test262 runner behavior: `src/cli/run_test262.zig`.
 
 ## Pre-Commit Checklist
 
 - The relevant failing case was reproduced and understood.
 - The change is limited to the minimum necessary files.
 - Related docs, tracking notes, or matrices are updated.
-- `zig build test --summary all` passes.
-- `zig build smoke --summary all` passes.
+- `zig build test --summary all` at a checkpoint or before handoff when the
+  change is code-bearing and broad enough to justify the cost; otherwise record
+  the focused validation that covers the change.
+- `zig build test -Doptimize=ReleaseSafe --summary all` (run ONLY once as a final pre-commit/pre-push gate verification).
 - `git diff --check` passes.
 - No noisy logs, temporary debug output, or unrelated build noise were added.

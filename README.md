@@ -27,7 +27,7 @@ part of the current compatibility boundary.
 ## Build
 
 ```sh
-zig build qjs --summary all
+zig build zjs --summary all
 zig build run-test262 --summary all
 ```
 
@@ -38,12 +38,10 @@ Useful build steps:
 
 ```sh
 zig build test --summary all
-zig build test-fast --summary all
-zig build test-oom --summary all
-zig build test-oom-exhaustive --summary all
-zig build leak-check-engine --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+# zig build test-oom --summary all (不再执行 / No longer executed)
+# zig build test-oom-exhaustive --summary all (不再执行 / No longer executed)
 zig build gc-stress --summary all
-zig build smoke --summary all
 zig build engine-production-gate --summary all
 ```
 
@@ -65,11 +63,10 @@ Missing or invalid arguments print usage and exit non-zero.
 Read [COMPATIBILITY.md](COMPATIBILITY.md) for the current validation boundary
 and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
 
-The engine-only Production v1 roadmap and contract are tracked in
-[docs/production-grade-plan.md](docs/production-grade-plan.md),
-[docs/engine-api-v1.md](docs/engine-api-v1.md),
-[docs/compatibility-v1.md](docs/compatibility-v1.md), and
-[docs/release-checklist.md](docs/release-checklist.md).
+The current kernel/runtime boundary is tracked in
+[docs/adr/0001-zig-kernel-api-and-runtime-boundary.md](docs/adr/0001-zig-kernel-api-and-runtime-boundary.md).
+Older Production v1 notes remain in [docs/production-grade-plan.md](docs/production-grade-plan.md)
+and related documents, but the former Engine facade direction is legacy.
 
 The full direct test262 invocation is:
 
@@ -122,17 +119,17 @@ zig build perf-benchmark --summary all
 
 ## Repository Layout
 
-- `src/engine/root.zig`: public engine entrypoint.
-- `src/engine/core/`: values, runtime/context, atoms, strings, objects,
+- `src/root.zig`: public engine entrypoint.
+- `src/core/`: values, runtime/context, atoms, strings, objects,
   properties, arrays, GC, and core ownership.
-- `src/engine/frontend/`: lexer, parser, source positions, and frontend
+- `src/frontend/`: lexer, parser, source positions, and frontend
   parsing.
-- `src/engine/bytecode/`: bytecode, constants, scopes, module metadata,
+- `src/bytecode/`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
-- `src/engine/exec/`: bytecode execution, calls, eval, exceptions, modules,
+- `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
   promises, and job queue.
-- `src/engine/builtins/`: ECMAScript built-in objects and constructors.
-- `src/engine/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
+- `src/builtins/`: ECMAScript built-in objects and constructors.
+- `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
 - `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.

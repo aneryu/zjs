@@ -5,10 +5,10 @@ completion ledger.
 
 Primary owners:
 
-- `src/engine/core/object.zig`
-- `src/engine/core/shape.zig`
-- `src/engine/core/property.zig`
-- property opcode handlers in `src/engine/exec/vm/property.zig`
+- `src/core/object.zig`
+- `src/core/shape.zig`
+- `src/core/property.zig`
+- property opcode handlers in `src/exec/vm/property.zig`
 
 ## Shape Model
 

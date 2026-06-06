@@ -1,5 +1,9 @@
 # Engine API v1 Contract
 
+Status: Legacy. This document is superseded by
+[ADR 0001: Zig Kernel API and Runtime Boundary](adr/0001-zig-kernel-api-and-runtime-boundary.md)
+for public API and kernel/runtime boundary decisions.
+
 This document defines the target public Zig API for the embeddable engine
 surface. It is a contract for Production v1 stabilization, not a claim that all
 items are complete today.
@@ -23,7 +27,7 @@ items are complete today.
 - `EvalOptions`: eval mode, filename, output writer, strictness, and timing.
 - `ValueHandle`: owned `Value` wrapper. Call `deinit` or `release`.
 - `EvalResult`: alias for `ValueHandle`.
-- `EngineError`: alias for the runtime error set exposed by the engine.
+- `RuntimeError`: the legacy Engine API exposed the runtime error set directly.
 - `ExceptionInfo`: owned exception snapshot wrapper. Call `deinit`.
 
 ## Ownership Rules

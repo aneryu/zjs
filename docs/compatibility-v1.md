@@ -18,8 +18,7 @@ Production v1 requires these gates to pass from a clean checkout:
 
 ```sh
 zig build test --summary all
-zig build test-fast --summary all
-zig build smoke --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 zig build test262-gate --summary all
 zig build engine-production-gate --summary all
 git diff --check

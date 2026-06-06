@@ -1,0 +1,454 @@
+// Auto-generated from the QuickJS opcode header snapshot.
+// DO NOT EDIT without updating tests/fixtures/quickjs-opcode.h.
+//
+// Layout mirrors QuickJS (`quickjs.c:1155`):
+//   - DEF entries get sequential ids 0..OP_COUNT-1.
+//   - def (temp) entries start at OP_nop+1 and OVERLAP with the short opcodes
+//     that share the same id range. Temp ops are stripped before
+//     resolve_labels; short ops appear afterwards. They never coexist in
+//     emitted bytecode, so sharing the id space is sound.
+
+pub const op = struct {
+    pub const invalid: u8 = 0;
+    pub const push_i32: u8 = 1;
+    pub const push_const: u8 = 2;
+    pub const fclosure: u8 = 3;
+    pub const push_atom_value: u8 = 4;
+    pub const private_symbol: u8 = 5;
+    pub const @"undefined": u8 = 6;
+    pub const @"null": u8 = 7;
+    pub const push_this: u8 = 8;
+    pub const push_false: u8 = 9;
+    pub const push_true: u8 = 10;
+    pub const object: u8 = 11;
+    pub const special_object: u8 = 12;
+    pub const rest: u8 = 13;
+    pub const drop: u8 = 14;
+    pub const nip: u8 = 15;
+    pub const nip1: u8 = 16;
+    pub const dup: u8 = 17;
+    pub const dup1: u8 = 18;
+    pub const dup2: u8 = 19;
+    pub const dup3: u8 = 20;
+    pub const insert2: u8 = 21;
+    pub const insert3: u8 = 22;
+    pub const insert4: u8 = 23;
+    pub const perm3: u8 = 24;
+    pub const perm4: u8 = 25;
+    pub const perm5: u8 = 26;
+    pub const swap: u8 = 27;
+    pub const swap2: u8 = 28;
+    pub const rot3l: u8 = 29;
+    pub const rot3r: u8 = 30;
+    pub const rot4l: u8 = 31;
+    pub const rot5l: u8 = 32;
+    pub const call_constructor: u8 = 33;
+    pub const call: u8 = 34;
+    pub const tail_call: u8 = 35;
+    pub const call_method: u8 = 36;
+    pub const tail_call_method: u8 = 37;
+    pub const array_from: u8 = 38;
+    pub const apply: u8 = 39;
+    pub const @"return": u8 = 40;
+    pub const return_undef: u8 = 41;
+    pub const check_ctor_return: u8 = 42;
+    pub const check_ctor: u8 = 43;
+    pub const init_ctor: u8 = 44;
+    pub const check_brand: u8 = 45;
+    pub const add_brand: u8 = 46;
+    pub const return_async: u8 = 47;
+    pub const throw: u8 = 48;
+    pub const throw_error: u8 = 49;
+    pub const eval: u8 = 50;
+    pub const apply_eval: u8 = 51;
+    pub const regexp: u8 = 52;
+    pub const get_super: u8 = 53;
+    pub const import: u8 = 54;
+    pub const get_var_undef: u8 = 55;
+    pub const get_var: u8 = 56;
+    pub const put_var: u8 = 57;
+    pub const put_var_init: u8 = 58;
+    pub const get_ref_value: u8 = 59;
+    pub const put_ref_value: u8 = 60;
+    pub const define_var: u8 = 61;
+    pub const check_define_var: u8 = 62;
+    pub const define_func: u8 = 63;
+    pub const get_field: u8 = 64;
+    pub const get_field2: u8 = 65;
+    pub const put_field: u8 = 66;
+    pub const get_private_field: u8 = 67;
+    pub const put_private_field: u8 = 68;
+    pub const define_private_field: u8 = 69;
+    pub const get_array_el: u8 = 70;
+    pub const get_array_el2: u8 = 71;
+    pub const put_array_el: u8 = 72;
+    pub const get_super_value: u8 = 73;
+    pub const put_super_value: u8 = 74;
+    pub const define_field: u8 = 75;
+    pub const set_name: u8 = 76;
+    pub const set_name_computed: u8 = 77;
+    pub const set_proto: u8 = 78;
+    pub const set_home_object: u8 = 79;
+    pub const define_array_el: u8 = 80;
+    pub const append: u8 = 81;
+    pub const copy_data_properties: u8 = 82;
+    pub const define_method: u8 = 83;
+    pub const define_method_computed: u8 = 84;
+    pub const define_class: u8 = 85;
+    pub const define_class_computed: u8 = 86;
+    pub const get_loc: u8 = 87;
+    pub const put_loc: u8 = 88;
+    pub const set_loc: u8 = 89;
+    pub const get_arg: u8 = 90;
+    pub const put_arg: u8 = 91;
+    pub const set_arg: u8 = 92;
+    pub const get_var_ref: u8 = 93;
+    pub const put_var_ref: u8 = 94;
+    pub const set_var_ref: u8 = 95;
+    pub const set_loc_uninitialized: u8 = 96;
+    pub const get_loc_check: u8 = 97;
+    pub const put_loc_check: u8 = 98;
+    pub const put_loc_check_init: u8 = 99;
+    pub const get_var_ref_check: u8 = 100;
+    pub const put_var_ref_check: u8 = 101;
+    pub const put_var_ref_check_init: u8 = 102;
+    pub const close_loc: u8 = 103;
+    pub const if_false: u8 = 104;
+    pub const if_true: u8 = 105;
+    pub const goto: u8 = 106;
+    pub const @"catch": u8 = 107;
+    pub const gosub: u8 = 108;
+    pub const ret: u8 = 109;
+    pub const nip_catch: u8 = 110;
+    pub const to_object: u8 = 111;
+    pub const to_propkey: u8 = 112;
+    pub const to_propkey2: u8 = 113;
+    pub const with_get_var: u8 = 114;
+    pub const with_put_var: u8 = 115;
+    pub const with_delete_var: u8 = 116;
+    pub const with_make_ref: u8 = 117;
+    pub const with_get_ref: u8 = 118;
+    pub const with_get_ref_undef: u8 = 119;
+    pub const make_loc_ref: u8 = 120;
+    pub const make_arg_ref: u8 = 121;
+    pub const make_var_ref_ref: u8 = 122;
+    pub const make_var_ref: u8 = 123;
+    pub const for_in_start: u8 = 124;
+    pub const for_of_start: u8 = 125;
+    pub const for_await_of_start: u8 = 126;
+    pub const for_in_next: u8 = 127;
+    pub const for_of_next: u8 = 128;
+    pub const iterator_check_object: u8 = 129;
+    pub const iterator_get_value_done: u8 = 130;
+    pub const iterator_close: u8 = 131;
+    pub const iterator_next: u8 = 132;
+    pub const iterator_call: u8 = 133;
+    pub const initial_yield: u8 = 134;
+    pub const yield: u8 = 135;
+    pub const yield_star: u8 = 136;
+    pub const async_yield_star: u8 = 137;
+    pub const await: u8 = 138;
+    pub const neg: u8 = 139;
+    pub const plus: u8 = 140;
+    pub const dec: u8 = 141;
+    pub const inc: u8 = 142;
+    pub const post_dec: u8 = 143;
+    pub const post_inc: u8 = 144;
+    pub const dec_loc: u8 = 145;
+    pub const inc_loc: u8 = 146;
+    pub const add_loc: u8 = 147;
+    pub const not: u8 = 148;
+    pub const lnot: u8 = 149;
+    pub const typeof: u8 = 150;
+    pub const delete: u8 = 151;
+    pub const delete_var: u8 = 152;
+    pub const mul: u8 = 153;
+    pub const div: u8 = 154;
+    pub const mod: u8 = 155;
+    pub const add: u8 = 156;
+    pub const sub: u8 = 157;
+    pub const shl: u8 = 158;
+    pub const sar: u8 = 159;
+    pub const shr: u8 = 160;
+    pub const @"and": u8 = 161;
+    pub const xor: u8 = 162;
+    pub const @"or": u8 = 163;
+    pub const pow: u8 = 164;
+    pub const lt: u8 = 165;
+    pub const lte: u8 = 166;
+    pub const gt: u8 = 167;
+    pub const gte: u8 = 168;
+    pub const instanceof: u8 = 169;
+    pub const in: u8 = 170;
+    pub const eq: u8 = 171;
+    pub const neq: u8 = 172;
+    pub const strict_eq: u8 = 173;
+    pub const strict_neq: u8 = 174;
+    pub const is_undefined_or_null: u8 = 175;
+    pub const private_in: u8 = 176;
+    pub const push_bigint_i32: u8 = 177;
+    pub const nop: u8 = 178;
+    pub const push_minus1: u8 = 179;
+    pub const push_0: u8 = 180;
+    pub const push_1: u8 = 181;
+    pub const push_2: u8 = 182;
+    pub const push_3: u8 = 183;
+    pub const push_4: u8 = 184;
+    pub const push_5: u8 = 185;
+    pub const push_6: u8 = 186;
+    pub const push_7: u8 = 187;
+    pub const push_i8: u8 = 188;
+    pub const push_i16: u8 = 189;
+    pub const push_const8: u8 = 190;
+    pub const fclosure8: u8 = 191;
+    pub const push_empty_string: u8 = 192;
+    pub const get_loc8: u8 = 193;
+    pub const put_loc8: u8 = 194;
+    pub const set_loc8: u8 = 195;
+    pub const get_loc0_loc1: u8 = 196;
+    pub const get_loc0: u8 = 197;
+    pub const get_loc1: u8 = 198;
+    pub const get_loc2: u8 = 199;
+    pub const get_loc3: u8 = 200;
+    pub const put_loc0: u8 = 201;
+    pub const put_loc1: u8 = 202;
+    pub const put_loc2: u8 = 203;
+    pub const put_loc3: u8 = 204;
+    pub const set_loc0: u8 = 205;
+    pub const set_loc1: u8 = 206;
+    pub const set_loc2: u8 = 207;
+    pub const set_loc3: u8 = 208;
+    pub const get_arg0: u8 = 209;
+    pub const get_arg1: u8 = 210;
+    pub const get_arg2: u8 = 211;
+    pub const get_arg3: u8 = 212;
+    pub const put_arg0: u8 = 213;
+    pub const put_arg1: u8 = 214;
+    pub const put_arg2: u8 = 215;
+    pub const put_arg3: u8 = 216;
+    pub const set_arg0: u8 = 217;
+    pub const set_arg1: u8 = 218;
+    pub const set_arg2: u8 = 219;
+    pub const set_arg3: u8 = 220;
+    pub const get_var_ref0: u8 = 221;
+    pub const get_var_ref1: u8 = 222;
+    pub const get_var_ref2: u8 = 223;
+    pub const get_var_ref3: u8 = 224;
+    pub const put_var_ref0: u8 = 225;
+    pub const put_var_ref1: u8 = 226;
+    pub const put_var_ref2: u8 = 227;
+    pub const put_var_ref3: u8 = 228;
+    pub const set_var_ref0: u8 = 229;
+    pub const set_var_ref1: u8 = 230;
+    pub const set_var_ref2: u8 = 231;
+    pub const set_var_ref3: u8 = 232;
+    pub const get_length: u8 = 233;
+    pub const if_false8: u8 = 234;
+    pub const if_true8: u8 = 235;
+    pub const goto8: u8 = 236;
+    pub const goto16: u8 = 237;
+    pub const call0: u8 = 238;
+    pub const call1: u8 = 239;
+    pub const call2: u8 = 240;
+    pub const call3: u8 = 241;
+    pub const is_undefined: u8 = 242;
+    pub const is_null: u8 = 243;
+    pub const typeof_is_undefined: u8 = 244;
+    pub const typeof_is_function: u8 = 245;
+
+    // Temporary opcodes (Phase 1 emit, Phase 2 erase). Ids overlap with
+    // the short opcodes above; the parser/emitter must not mix them.
+    pub const enter_scope: u8 = 179;
+    pub const leave_scope: u8 = 180;
+    pub const label: u8 = 181;
+    pub const scope_get_var_undef: u8 = 182;
+    pub const scope_get_var: u8 = 183;
+    pub const scope_put_var: u8 = 184;
+    pub const scope_delete_var: u8 = 185;
+    pub const scope_make_ref: u8 = 186;
+    pub const scope_get_ref: u8 = 187;
+    pub const scope_put_var_init: u8 = 188;
+    pub const scope_get_private_field: u8 = 189;
+    pub const scope_get_private_field2: u8 = 190;
+    pub const scope_put_private_field: u8 = 191;
+    pub const scope_in_private_field: u8 = 192;
+    pub const get_field_opt_chain: u8 = 193;
+    pub const get_array_el_opt_chain: u8 = 194;
+    pub const set_class_name: u8 = 195;
+    pub const source_loc: u8 = 196;
+
+    pub const op_count: u16 = 246;
+    pub const op_temp_start: u8 = 179;
+    pub const op_temp_end: u8 = 197;
+};
+
+// Total byte length (opcode + operands) indexed by opcode id.
+// Driven from `quickjs-opcode.h` so the pipeline stays in sync
+// without hand-maintained switches. Zero means no entry claims
+// that id (callers should treat such bytes as pass-through).
+pub const opcode_size: [256]u8 = .{
+    1, 5, 5,  5,  5,  5,  1,  1,  1, 1, 1, 1, 2, 3, 1, 1,
+    1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 3, 3,  3,  3,  3,  3,  3,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 6, 5,  3,  1,  1,  1,  5,  5, 5, 5, 1, 1, 6, 6, 6,
+    5, 5, 5,  1,  1,  1,  1,  1,  1, 1, 1, 5, 5, 1, 1, 1,
+    1, 1, 2,  6,  2,  6,  6,  3,  3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3,  3,  3,  3,  3,  3,  5, 5, 5, 5, 5, 1, 1, 1,
+    1, 1, 10, 10, 10, 10, 10, 10, 7, 7, 7, 5, 1, 1, 1, 1,
+    2, 1, 1,  1,  1,  2,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 2, 2,  2,  1,  1,  1,  1,  5, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 5, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 2, 3, 2, 2,
+    1, 2, 2,  2,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 2, 2, 2, 3, 1, 1,
+    1, 1, 1,  1,  1,  1,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+// QuickJS stack pop count indexed by opcode id.
+pub const opcode_n_pop: [256]u8 = .{
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2,
+    3, 1, 2, 2, 3, 2, 3, 4, 3, 4, 5, 2, 4, 3, 3, 4,
+    5, 2, 1, 1, 2, 2, 0, 3, 1, 0, 1, 0, 0, 2, 2, 1,
+    1, 0, 1, 2, 2, 1, 2, 0, 0, 1, 1, 2, 3, 0, 0, 1,
+    1, 1, 2, 2, 3, 3, 2, 2, 3, 3, 4, 2, 1, 2, 2, 2,
+    3, 3, 3, 2, 3, 2, 3, 0, 1, 1, 0, 1, 1, 0, 1, 1,
+    0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 2, 1,
+    1, 2, 1, 2, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+    3, 1, 1, 3, 4, 4, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 0, 0, 1, 1, 1, 1, 2, 0, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1,
+    2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0,
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1,
+    1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+// QuickJS stack push count indexed by opcode id.
+pub const opcode_n_push: [256]u8 = .{
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1,
+    2, 2, 3, 4, 6, 3, 4, 5, 3, 4, 5, 2, 4, 3, 3, 4,
+    5, 1, 1, 0, 1, 0, 1, 1, 0, 0, 2, 0, 1, 2, 0, 0,
+    0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 3, 0, 0, 0, 0,
+    1, 2, 0, 1, 0, 1, 1, 2, 0, 1, 0, 1, 1, 2, 1, 2,
+    2, 2, 3, 1, 1, 2, 3, 1, 0, 1, 1, 0, 1, 1, 0, 1,
+    0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1,
+    1, 2, 0, 1, 0, 0, 0, 0, 2, 2, 2, 2, 1, 3, 3, 3,
+    5, 1, 2, 0, 4, 5, 0, 2, 2, 2, 1, 1, 1, 1, 1, 2,
+    2, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 0, 1, 2, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1,
+    1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1,
+    1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+// Operand format tag indexed by opcode id. Values are the
+// `bytecode.opcode.Format` enum names as written in
+// quickjs-opcode.h. Callers convert via `std.meta.stringToEnum`.
+pub const opcode_format_name: [256][]const u8 = .{
+    "none",         "i32",          "const",         "const",         "atom",          "atom",          "none",          "none",
+    "none",         "none",         "none",          "none",          "u8",            "u16",           "none",          "none",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "npop",         "npop",          "npop",          "npop",          "npop",          "npop",          "u16",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "atom_u8",      "npop_u16",      "u16",           "none",          "none",          "none",          "atom",
+    "atom",         "atom",         "atom",          "none",          "none",          "atom_u8",       "atom_u8",       "atom_u8",
+    "atom",         "atom",         "atom",          "none",          "none",          "none",          "none",          "none",
+    "none",         "none",         "none",          "atom",          "atom",          "none",          "none",          "none",
+    "none",         "none",         "u8",            "atom_u8",       "u8",            "atom_u8",       "atom_u8",       "loc",
+    "loc",          "loc",          "arg",           "arg",           "arg",           "var_ref",       "var_ref",       "var_ref",
+    "loc",          "loc",          "loc",           "loc",           "var_ref",       "var_ref",       "var_ref",       "loc",
+    "label",        "label",        "label",         "label",         "label",         "none",          "none",          "none",
+    "none",         "none",         "atom_label_u8", "atom_label_u8", "atom_label_u8", "atom_label_u8", "atom_label_u8", "atom_label_u8",
+    "atom_u16",     "atom_u16",     "atom_u16",      "atom",          "none",          "none",          "none",          "none",
+    "u8",           "none",         "none",          "none",          "none",          "u8",            "none",          "none",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "loc8",         "loc8",          "loc8",          "none",          "none",          "none",          "none",
+    "atom",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "i32",          "none",          "none_int",      "none_int",      "none_int",      "none_int",      "none_int",
+    "none_int",     "none_int",     "none_int",      "none_int",      "i8",            "i16",           "const8",        "const8",
+    "none",         "loc8",         "loc8",          "loc8",          "none_loc",      "none_loc",      "none_loc",      "none_loc",
+    "none_loc",     "none_loc",     "none_loc",      "none_loc",      "none_loc",      "none_loc",      "none_loc",      "none_loc",
+    "none_loc",     "none_arg",     "none_arg",      "none_arg",      "none_arg",      "none_arg",      "none_arg",      "none_arg",
+    "none_arg",     "none_arg",     "none_arg",      "none_arg",      "none_arg",      "none_var_ref",  "none_var_ref",  "none_var_ref",
+    "none_var_ref", "none_var_ref", "none_var_ref",  "none_var_ref",  "none_var_ref",  "none_var_ref",  "none_var_ref",  "none_var_ref",
+    "none_var_ref", "none",         "label8",        "label8",        "label8",        "label16",       "npopx",         "npopx",
+    "npopx",        "npopx",        "none",          "none",          "none",          "none",          "none",          "none",
+    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+};
+
+// Opcode name lookup indexed by opcode id. Slots without a
+// DEF entry contain an empty string; callers should treat
+// `opcode_name[id].len == 0` as 'unknown opcode'.
+pub const opcode_name: [256][]const u8 = .{
+    "invalid",                "push_i32",              "push_const",              "fclosure",
+    "push_atom_value",        "private_symbol",        "undefined",               "null",
+    "push_this",              "push_false",            "push_true",               "object",
+    "special_object",         "rest",                  "drop",                    "nip",
+    "nip1",                   "dup",                   "dup1",                    "dup2",
+    "dup3",                   "insert2",               "insert3",                 "insert4",
+    "perm3",                  "perm4",                 "perm5",                   "swap",
+    "swap2",                  "rot3l",                 "rot3r",                   "rot4l",
+    "rot5l",                  "call_constructor",      "call",                    "tail_call",
+    "call_method",            "tail_call_method",      "array_from",              "apply",
+    "return",                 "return_undef",          "check_ctor_return",       "check_ctor",
+    "init_ctor",              "check_brand",           "add_brand",               "return_async",
+    "throw",                  "throw_error",           "eval",                    "apply_eval",
+    "regexp",                 "get_super",             "import",                  "get_var_undef",
+    "get_var",                "put_var",               "put_var_init",            "get_ref_value",
+    "put_ref_value",          "define_var",            "check_define_var",        "define_func",
+    "get_field",              "get_field2",            "put_field",               "get_private_field",
+    "put_private_field",      "define_private_field",  "get_array_el",            "get_array_el2",
+    "put_array_el",           "get_super_value",       "put_super_value",         "define_field",
+    "set_name",               "set_name_computed",     "set_proto",               "set_home_object",
+    "define_array_el",        "append",                "copy_data_properties",    "define_method",
+    "define_method_computed", "define_class",          "define_class_computed",   "get_loc",
+    "put_loc",                "set_loc",               "get_arg",                 "put_arg",
+    "set_arg",                "get_var_ref",           "put_var_ref",             "set_var_ref",
+    "set_loc_uninitialized",  "get_loc_check",         "put_loc_check",           "put_loc_check_init",
+    "get_var_ref_check",      "put_var_ref_check",     "put_var_ref_check_init",  "close_loc",
+    "if_false",               "if_true",               "goto",                    "catch",
+    "gosub",                  "ret",                   "nip_catch",               "to_object",
+    "to_propkey",             "to_propkey2",           "with_get_var",            "with_put_var",
+    "with_delete_var",        "with_make_ref",         "with_get_ref",            "with_get_ref_undef",
+    "make_loc_ref",           "make_arg_ref",          "make_var_ref_ref",        "make_var_ref",
+    "for_in_start",           "for_of_start",          "for_await_of_start",      "for_in_next",
+    "for_of_next",            "iterator_check_object", "iterator_get_value_done", "iterator_close",
+    "iterator_next",          "iterator_call",         "initial_yield",           "yield",
+    "yield_star",             "async_yield_star",      "await",                   "neg",
+    "plus",                   "dec",                   "inc",                     "post_dec",
+    "post_inc",               "dec_loc",               "inc_loc",                 "add_loc",
+    "not",                    "lnot",                  "typeof",                  "delete",
+    "delete_var",             "mul",                   "div",                     "mod",
+    "add",                    "sub",                   "shl",                     "sar",
+    "shr",                    "and",                   "xor",                     "or",
+    "pow",                    "lt",                    "lte",                     "gt",
+    "gte",                    "instanceof",            "in",                      "eq",
+    "neq",                    "strict_eq",             "strict_neq",              "is_undefined_or_null",
+    "private_in",             "push_bigint_i32",       "nop",                     "push_minus1",
+    "push_0",                 "push_1",                "push_2",                  "push_3",
+    "push_4",                 "push_5",                "push_6",                  "push_7",
+    "push_i8",                "push_i16",              "push_const8",             "fclosure8",
+    "push_empty_string",      "get_loc8",              "put_loc8",                "set_loc8",
+    "get_loc0_loc1",          "get_loc0",              "get_loc1",                "get_loc2",
+    "get_loc3",               "put_loc0",              "put_loc1",                "put_loc2",
+    "put_loc3",               "set_loc0",              "set_loc1",                "set_loc2",
+    "set_loc3",               "get_arg0",              "get_arg1",                "get_arg2",
+    "get_arg3",               "put_arg0",              "put_arg1",                "put_arg2",
+    "put_arg3",               "set_arg0",              "set_arg1",                "set_arg2",
+    "set_arg3",               "get_var_ref0",          "get_var_ref1",            "get_var_ref2",
+    "get_var_ref3",           "put_var_ref0",          "put_var_ref1",            "put_var_ref2",
+    "put_var_ref3",           "set_var_ref0",          "set_var_ref1",            "set_var_ref2",
+    "set_var_ref3",           "get_length",            "if_false8",               "if_true8",
+    "goto8",                  "goto16",                "call0",                   "call1",
+    "call2",                  "call3",                 "is_undefined",            "is_null",
+    "typeof_is_undefined",    "typeof_is_function",    "",                        "",
+    "",                       "",                      "",                        "",
+    "",                       "",                      "",                        "",
+};

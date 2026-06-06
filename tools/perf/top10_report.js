@@ -29,7 +29,9 @@ function readReport(filePath) {
     } catch (err) {
         fail(`error: unable to read report ${filePath}: ${err.message}`);
     }
-    if (!report || !Array.isArray(report.cases)) fail(`error: ${filePath} is not a microbench JSON report`);
+    if (!report || report.tool !== 'zjs-microbench' || !Array.isArray(report.cases)) {
+        fail(`error: ${filePath} is not a zjs-microbench JSON report`);
+    }
     return report;
 }
 
@@ -82,6 +84,7 @@ const lines = [
     '# zjs microbench top 10',
     '',
     `- Source report: \`${reportPath}\``,
+    `- Report timestamp: ${report.timestamp || '-'}`,
     `- Generated: ${new Date().toISOString()}`,
     `- Sort: ${sortBy === 'zjs' ? 'zjs avg ms' : 'zjs/qjs ratio'}`,
     `- Compatible cases: ${report.summary?.compatible ?? compatible.length}`,
