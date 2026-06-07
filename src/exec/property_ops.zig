@@ -2560,10 +2560,8 @@ pub fn getVar(
             return .done;
         }
     }
-    if (canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) {
-        if (cachedOwnDataPropertyLookupForObject(function, site_pc, ctx.runtime, global, atom_id)) |cached| {
-            return try useFastGlobalDataValue(ctx, stack, function, global, frame, catch_target, atom_id, .{ .index = cached.index, .value = cached.value }, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal, handleCatchableRuntimeError);
-        }
+    if (fastInstalledGlobalDataLookupForAtomAtPc(ctx, function, global, frame, site_pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) |global_data| {
+        return try useFastGlobalDataValue(ctx, stack, function, global, frame, catch_target, atom_id, global_data, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal, handleCatchableRuntimeError);
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
         if (globalLexicalValue(ctx, atom_id)) |lex_value| {
@@ -6029,22 +6027,38 @@ fn fastInstalledGlobalDataValueForAtomAtPc(
     eval_with_object: core.JSValue,
     comptime globalLexicalValue: anytype,
 ) ?core.JSValue {
+    const global_data = fastInstalledGlobalDataLookupForAtomAtPc(ctx, function, global, frame, site_pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    return global_data.value;
+}
+
+fn fastInstalledGlobalDataLookupForAtomAtPc(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    site_pc: usize,
+    atom_id: core.Atom,
+    eval_local_names: []const core.Atom,
+    eval_var_ref_names: []const core.Atom,
+    eval_with_object: core.JSValue,
+    comptime globalLexicalValue: anytype,
+) ?BorrowedGlobalDataLookup {
     if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
-    if (!frame.current_function.isUndefined() and function.name == atom_id) return null;
+    if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
     if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
     if (cachedOwnDataPropertyLookupForObject(function, site_pc, ctx.runtime, global, atom_id)) |cached| {
-        return cached.value;
+        return .{ .index = cached.index, .value = cached.value };
     }
     if (declaredGlobalVarDataBorrowedLookup(global, function, atom_id)) |declared| {
         installOwnDataIcForObject(function, site_pc, ctx.runtime, global, atom_id, declared.index);
-        return declared.value;
+        return declared;
     }
     const global_data = globalOwnDataPropertyBorrowedLookup(global, atom_id) orelse return null;
     installOwnDataIcForObject(function, site_pc, ctx.runtime, global, atom_id, global_data.index);
-    return global_data.value;
+    return global_data;
 }
 
 fn fastGlobalDataValueForRange(
@@ -10286,6 +10300,48 @@ fn canUseInstalledGlobalDataIc(
     return true;
 }
 
+fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+    if (shared_vm.atomIdOrNameEql(rt, function.name, atom_id)) return true;
+    if (functionHasDynamicScopeBindings(function, frame)) return true;
+    if (functionLocalOrArgBindingShadowsGlobal(rt, function, frame, atom_id)) return true;
+    if (parentFunctionEvalBindingShadowsGlobal(rt, frame, atom_id)) return true;
+    return false;
+}
+
+fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
+    if (function.var_ref_names.len != 0 or frame.var_refs.len != 0) return true;
+    const function_object = objectFromValue(frame.current_function) orelse return false;
+    if (function_object.functionCapturesSlot().*.len != 0) return true;
+    if (function_object.functionEvalLocalNamesSlot().*.len != 0) return true;
+    if (function_object.functionEvalParentFunction() != null) return true;
+    return false;
+}
+
+fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+    const arg_count = @min(function.arg_names.len, frame.args.len);
+    for (function.arg_names[0..arg_count]) |name| {
+        if (shared_vm.atomIdOrNameEql(rt, name, atom_id)) return true;
+    }
+    const local_count = @min(function.var_names.len, frame.locals.len);
+    for (function.var_names[0..local_count]) |name| {
+        if (shared_vm.atomIdOrNameEql(rt, name, atom_id)) return true;
+    }
+    return false;
+}
+
+fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
+    const function_object = objectFromValue(frame.current_function) orelse return false;
+    const parent_value = function_object.functionEvalParentFunction() orelse return false;
+    const parent_object = objectFromValue(parent_value) orelse return false;
+    const names = parent_object.functionEvalLocalNamesSlot().*;
+    const refs = parent_object.functionEvalLocalRefsSlot().*;
+    const count = @min(names.len, refs.len);
+    for (names[0..count]) |name| {
+        if (shared_vm.atomIdOrNameEql(rt, name, atom_id)) return true;
+    }
+    return false;
+}
+
 fn canFuseGlobalDataWrite(
     function: *const bytecode.Bytecode,
     frame: *const frame_mod.Frame,
@@ -11386,7 +11442,6 @@ fn testHandleCatchableRuntimeError(
     return err;
 }
 
-
 test "fast own data property replacement retains private brand atom" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -11411,7 +11466,6 @@ test "fast own data property replacement retains private brand atom" {
 fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }
-
 
 // --- Combined from legacy property_ops.zig ---
 

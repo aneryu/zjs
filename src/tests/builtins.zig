@@ -822,6 +822,89 @@ test "Engine direct eval var shadows readonly global property" {
     try std.testing.expectEqualStrings("inside 2 1\nafter 1 1\n", stream.buffered());
 }
 
+test "Engine direct eval var bindings stay in caller function scope" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var x = "outside";
+        \\(function() {
+        \\  eval('var x = "inside";');
+        \\  print("ordinary", x, globalThis.x);
+        \\}());
+        \\print("ordinaryAfter", x);
+        \\
+        \\var probe1, probe2, probeBody;
+        \\(function(
+        \\  _ = (eval('var y = "inside";'), probe1 = function() { return y; }),
+        \\  _2 = (probe2 = function() { return y; })
+        \\) {
+        \\  probeBody = function() { return y; };
+        \\}());
+        \\print("param", probe1(), probe2(), probeBody(), typeof globalThis.y);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ordinary inside outside\nordinaryAfter outside\nparam inside inside inside undefined\n", stream.buffered());
+}
+
+test "Engine function global data IC preserves binding guards" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\globalThis.__zjsGlobalDataIcRead = 1;
+        \\function __zjsGlobalDataIcReadFn() { return __zjsGlobalDataIcRead; }
+        \\assert.sameValue(__zjsGlobalDataIcReadFn(), 1);
+        \\assert.sameValue(__zjsGlobalDataIcReadFn(), 1);
+        \\globalThis.__zjsGlobalDataIcRead = 7;
+        \\assert.sameValue(__zjsGlobalDataIcReadFn(), 7);
+        \\
+        \\globalThis.__zjsGlobalDataIcAccessor = 1;
+        \\function __zjsGlobalDataIcAccessorFn() { return __zjsGlobalDataIcAccessor; }
+        \\assert.sameValue(__zjsGlobalDataIcAccessorFn(), 1);
+        \\assert.sameValue(__zjsGlobalDataIcAccessorFn(), 1);
+        \\var __zjsGlobalDataIcAccessorCalls = 0;
+        \\Object.defineProperty(globalThis, "__zjsGlobalDataIcAccessor", {
+        \\    get: function() { __zjsGlobalDataIcAccessorCalls++; return 42; },
+        \\    configurable: true
+        \\});
+        \\assert.sameValue(__zjsGlobalDataIcAccessorFn(), 42);
+        \\assert.sameValue(__zjsGlobalDataIcAccessorCalls, 1);
+        \\delete globalThis.__zjsGlobalDataIcAccessor;
+        \\
+        \\let __zjsGlobalDataIcLexical = 3;
+        \\globalThis.__zjsGlobalDataIcLexical = 1;
+        \\function __zjsGlobalDataIcLexicalFn() { return __zjsGlobalDataIcLexical; }
+        \\assert.sameValue(__zjsGlobalDataIcLexicalFn(), 3);
+        \\assert.sameValue(globalThis.__zjsGlobalDataIcLexical, 1);
+        \\delete globalThis.__zjsGlobalDataIcLexical;
+        \\
+        \\globalThis.__zjsGlobalDataIcSelf = 5;
+        \\var __zjsGlobalDataIcSelfRef = function __zjsGlobalDataIcSelf() {
+        \\    return __zjsGlobalDataIcSelf === __zjsGlobalDataIcSelfRef;
+        \\};
+        \\assert.sameValue(__zjsGlobalDataIcSelfRef(), true);
+        \\assert.sameValue(globalThis.__zjsGlobalDataIcSelf, 5);
+        \\delete globalThis.__zjsGlobalDataIcSelf;
+        \\
+        \\globalThis.__zjsGlobalDataIcRedefine = 10;
+        \\function __zjsGlobalDataIcRedefineFn() { return __zjsGlobalDataIcRedefine; }
+        \\assert.sameValue(__zjsGlobalDataIcRedefineFn(), 10);
+        \\assert.sameValue(__zjsGlobalDataIcRedefineFn(), 10);
+        \\assert.sameValue(delete globalThis.__zjsGlobalDataIcRedefine, true);
+        \\globalThis.__zjsGlobalDataIcRedefine = 22;
+        \\assert.sameValue(__zjsGlobalDataIcRedefineFn(), 22);
+        \\delete globalThis.__zjsGlobalDataIcRedefine;
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine top-level var probes preserve QuickJS global object semantics" {
     var js = try engine.harness.Engine.init(std.testing.allocator);
     defer js.deinit();

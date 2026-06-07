@@ -10965,7 +10965,7 @@ pub fn directEvalVarDeclarationNames(
         }
         if (simple_var_name != core.atom.null_atom and
             simple_var_name != eval_ret_atom and
-            directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name) and
+            (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
             !functionHasNonLexicalLocal(rt, function, simple_var_name) and
             !atomSliceContains(rt, function_decl_names, simple_var_name) and
             !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
@@ -10998,7 +10998,7 @@ pub fn directEvalVarDeclarationNames(
     }
     if (simple_var_name != core.atom.null_atom and
         simple_var_name != eval_ret_atom and
-        directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name) and
+        (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
         !functionHasNonLexicalLocal(rt, function, simple_var_name) and
         !atomSliceContains(rt, function_decl_names, simple_var_name) and
         !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
