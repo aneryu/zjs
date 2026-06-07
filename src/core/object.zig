@@ -7179,15 +7179,14 @@ pub const Object = struct {
     }
 
     fn materializeNumberConstantAutoInit(info: property.AutoInit) ?JSValue {
-        const value_ops = @import("../exec/value_ops.zig");
-        if (std.mem.eql(u8, info.name, "NaN")) return value_ops.numberToValue(std.math.nan(f64));
-        if (std.mem.eql(u8, info.name, "POSITIVE_INFINITY")) return value_ops.numberToValue(std.math.inf(f64));
-        if (std.mem.eql(u8, info.name, "NEGATIVE_INFINITY")) return value_ops.numberToValue(-std.math.inf(f64));
-        if (std.mem.eql(u8, info.name, "MAX_VALUE")) return value_ops.numberToValue(std.math.floatMax(f64));
-        if (std.mem.eql(u8, info.name, "MIN_VALUE")) return value_ops.numberToValue(@as(f64, @bitCast(@as(u64, 1))));
-        if (std.mem.eql(u8, info.name, "MAX_SAFE_INTEGER")) return value_ops.numberToValue(9007199254740991.0);
-        if (std.mem.eql(u8, info.name, "MIN_SAFE_INTEGER")) return value_ops.numberToValue(-9007199254740991.0);
-        if (std.mem.eql(u8, info.name, "EPSILON")) return value_ops.numberToValue(2.220446049250313e-16);
+        if (std.mem.eql(u8, info.name, "NaN")) return JSValue.number(std.math.nan(f64));
+        if (std.mem.eql(u8, info.name, "POSITIVE_INFINITY")) return JSValue.number(std.math.inf(f64));
+        if (std.mem.eql(u8, info.name, "NEGATIVE_INFINITY")) return JSValue.number(-std.math.inf(f64));
+        if (std.mem.eql(u8, info.name, "MAX_VALUE")) return JSValue.number(std.math.floatMax(f64));
+        if (std.mem.eql(u8, info.name, "MIN_VALUE")) return JSValue.number(@as(f64, @bitCast(@as(u64, 1))));
+        if (std.mem.eql(u8, info.name, "MAX_SAFE_INTEGER")) return JSValue.number(9007199254740991.0);
+        if (std.mem.eql(u8, info.name, "MIN_SAFE_INTEGER")) return JSValue.number(-9007199254740991.0);
+        if (std.mem.eql(u8, info.name, "EPSILON")) return JSValue.number(2.220446049250313e-16);
         return null;
     }
 

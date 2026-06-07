@@ -18,18 +18,6 @@
     "exit_milestone": "M2-auto-init-materializer-hook"
   },
   {
-    "source": "src/core/object.zig",
-    "import": "src/exec/value_ops.zig",
-    "reason": "Object auto-init currently uses exec number materialization for Number constants",
-    "exit_milestone": "M2-auto-init-materializer-hook"
-  },
-  {
-    "source": "src/core/profile.zig",
-    "import": "src/bytecode/opcode.zig",
-    "reason": "OpcodeProfile currently formats opcode names through bytecode metadata",
-    "exit_milestone": "M2-profile-name-provider"
-  },
-  {
     "source": "src/builtins/buffer.zig",
     "import": "src/exec/value_ops.zig",
     "reason": "builtins currently reuse exec value conversion helpers",
@@ -57,12 +45,6 @@
     "source": "src/builtins/regexp.zig",
     "import": "src/exec/value_ops.zig",
     "reason": "RegExp builtins currently reuse exec value conversion helpers",
-    "exit_milestone": "M2-core-value-conversion-helpers"
-  },
-  {
-    "source": "src/builtins/registry.zig",
-    "import": "src/exec/value_ops.zig",
-    "reason": "builtin registry currently uses exec number materialization for lazy constants",
     "exit_milestone": "M2-core-value-conversion-helpers"
   },
   {

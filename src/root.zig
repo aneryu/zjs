@@ -16,7 +16,11 @@ pub const RuntimeMemoryUsage = zjs_kernel.RuntimeMemoryUsage;
 pub const OpcodeProfile = zjs_kernel.OpcodeProfile;
 pub const default_stack_size = zjs_kernel.default_stack_size;
 pub const default_gc_threshold = zjs_kernel.default_gc_threshold;
-pub const activateOpcodeProfile = zjs_kernel.activateOpcodeProfile;
+
+pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
+    zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
+    return zjs_kernel.activateOpcodeProfile(profile);
+}
 
 pub const value = struct {
     pub const Value = zjs_kernel.JSValue;
