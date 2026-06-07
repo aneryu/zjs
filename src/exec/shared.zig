@@ -11117,6 +11117,7 @@ pub fn publishDirectEvalVarRefs(
                 }
                 frame.eval_var_ref_names = function_object.functionEvalLocalNamesSlot().*;
                 frame.eval_var_refs = function_object.functionEvalLocalRefsSlot().*;
+                frame.eval_var_refs_republished = true;
             }
         }
         return;
@@ -14844,7 +14845,9 @@ pub fn lookupEvalBindingValue(
     atom_id: core.Atom,
 ) ?core.JSValue {
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, atom_id)) |value| return value;
-    if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
+    if (!frame.eval_var_refs_republished) {
+        if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
+    }
     if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |value| return value;
     if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |value| return value;
     return null;
@@ -14862,7 +14865,9 @@ pub fn lookupFrameFirstEvalBindingValue(
     if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |value| return value;
     if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |value| return value;
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, atom_id)) |value| return value;
-    if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
+    if (!frame.eval_var_refs_republished) {
+        if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, atom_id)) |value| return value;
+    }
     return null;
 }
 
@@ -14907,7 +14912,9 @@ pub fn deleteEvalBinding(
         if (deleteFrameLocalBinding(rt, function, frame, atom_id)) |deleted| return deleted;
     }
     if (deleteNamedSlotBinding(rt, eval_local_names, eval_local_slots, atom_id)) |deleted| return deleted;
-    if (deleteNamedVarRefBinding(rt, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| return deleted;
+    if (!frame.eval_var_refs_republished) {
+        if (deleteNamedVarRefBinding(rt, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| return deleted;
+    }
     if (deleteNamedSlotBinding(rt, frame.eval_local_names, frame.eval_local_slots, atom_id)) |deleted| return deleted;
     if (deleteNamedVarRefBinding(rt, frame.eval_var_ref_names, frame.eval_var_refs, atom_id)) |deleted| return deleted;
     return null;

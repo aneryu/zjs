@@ -164,6 +164,21 @@ pub fn runWithArgs(
     };
 }
 
+fn dupAtomSlice(rt: *core.JSRuntime, atoms: []const core.Atom) ![]core.Atom {
+    if (atoms.len == 0) return &.{};
+    const duped = try rt.memory.alloc(core.Atom, atoms.len);
+    errdefer rt.memory.free(core.Atom, duped);
+    var initialized: usize = 0;
+    errdefer {
+        for (duped[0..initialized]) |atom_id| rt.atoms.free(atom_id);
+    }
+    for (atoms, 0..) |atom_id, idx| {
+        duped[idx] = rt.atoms.dup(atom_id);
+        initialized += 1;
+    }
+    return duped;
+}
+
 pub fn runWithArgsState(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -178,7 +193,7 @@ pub fn runWithArgsState(
     stop_on_yield: bool,
     eval_local_names: []const core.Atom,
     eval_local_slots: []core.JSValue,
-    eval_var_ref_names: []const core.Atom,
+    input_eval_var_ref_names: []const core.Atom,
     input_eval_var_refs: []const core.JSValue,
     inherited_eval_local_names: []const core.Atom,
     inherited_eval_local_slots: []core.JSValue,
@@ -223,11 +238,15 @@ pub fn runWithArgsState(
     frame.actual_arg_count = args.len;
     frame.eval_local_names = if (inherited_eval_local_names.len != 0) inherited_eval_local_names else eval_local_names;
     frame.eval_local_slots = if (inherited_eval_local_names.len != 0) inherited_eval_local_slots else eval_local_slots;
-    frame.eval_var_ref_names = if (inherited_eval_var_ref_names.len != 0) inherited_eval_var_ref_names else eval_var_ref_names;
+    const frame_eval_var_ref_names_source = if (inherited_eval_var_ref_names.len != 0) inherited_eval_var_ref_names else input_eval_var_ref_names;
+    const frame_eval_var_ref_names = try dupAtomSlice(ctx.runtime, frame_eval_var_ref_names_source);
+    defer freeAtomSlice(ctx.runtime, frame_eval_var_ref_names);
+    frame.eval_var_ref_names = frame_eval_var_ref_names;
     const frame_eval_var_refs_source = if (inherited_eval_var_ref_names.len != 0) inherited_eval_var_refs else input_eval_var_refs;
     var frame_eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, frame_eval_var_refs_source);
     defer frame_eval_var_refs_buffer.deinit(ctx.runtime);
     frame.eval_var_refs = frame_eval_var_refs_buffer.values;
+    const eval_var_ref_names = frame.eval_var_ref_names;
     const eval_var_refs = frame.eval_var_refs;
     defer {
         if (break_var_ref_cycles_on_exit) _ = ctx.runtime.runObjectCycleRemoval();

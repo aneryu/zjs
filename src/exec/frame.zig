@@ -30,6 +30,7 @@ pub const Frame = struct {
     eval_local_slots: []JSValue = &.{},
     eval_var_ref_names: []const Atom = &.{},
     eval_var_refs: []JSValue = &.{},
+    eval_var_refs_republished: bool = false,
     /// Per-slot TDZ flag mirroring QuickJS's `JS_UNINITIALIZED`
     /// sentinel: `true` means the slot is in the temporal dead
     /// zone; reads via `get_loc_check` / `put_loc_check` throw
@@ -70,6 +71,7 @@ pub const Frame = struct {
         self.eval_local_slots = &.{};
         self.eval_var_ref_names = &.{};
         self.eval_var_refs = &.{};
+        self.eval_var_refs_republished = false;
     }
 
     pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {

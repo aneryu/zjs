@@ -836,19 +836,20 @@ test "Engine direct eval var bindings stay in caller function scope" {
         \\}());
         \\print("ordinaryAfter", x);
         \\
+        \\var paramEvalShadow = "outside";
         \\var probe1, probe2, probeBody;
         \\(function(
-        \\  _ = (eval('var y = "inside";'), probe1 = function() { return y; }),
-        \\  _2 = (probe2 = function() { return y; })
+        \\  _ = (eval('var paramEvalShadow = "inside";'), probe1 = function() { return paramEvalShadow; }),
+        \\  _2 = (probe2 = function() { return paramEvalShadow; })
         \\) {
-        \\  probeBody = function() { return y; };
+        \\  probeBody = function() { return paramEvalShadow; };
         \\}());
-        \\print("param", probe1(), probe2(), probeBody(), typeof globalThis.y);
+        \\print("param", probe1(), probe2(), probeBody(), globalThis.paramEvalShadow);
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("ordinary inside outside\nordinaryAfter outside\nparam inside inside inside undefined\n", stream.buffered());
+    try std.testing.expectEqualStrings("ordinary inside outside\nordinaryAfter outside\nparam inside inside inside outside\n", stream.buffered());
 }
 
 test "Engine function global data IC preserves binding guards" {
@@ -890,6 +891,18 @@ test "Engine function global data IC preserves binding guards" {
         \\assert.sameValue(__zjsGlobalDataIcSelfRef(), true);
         \\assert.sameValue(globalThis.__zjsGlobalDataIcSelf, 5);
         \\delete globalThis.__zjsGlobalDataIcSelf;
+        \\
+        \\globalThis.__zjsGlobalDataIcEval = 1;
+        \\function __zjsGlobalDataIcEvalFn() {
+        \\    assert.sameValue(__zjsGlobalDataIcEval, 1);
+        \\    assert.sameValue(__zjsGlobalDataIcEval, 1);
+        \\    eval('var __zjsGlobalDataIcEval = 9;');
+        \\    __zjsGlobalDataIcEval = 10;
+        \\    return __zjsGlobalDataIcEval;
+        \\}
+        \\assert.sameValue(__zjsGlobalDataIcEvalFn(), 10);
+        \\assert.sameValue(globalThis.__zjsGlobalDataIcEval, 1);
+        \\delete globalThis.__zjsGlobalDataIcEval;
         \\
         \\globalThis.__zjsGlobalDataIcRedefine = 10;
         \\function __zjsGlobalDataIcRedefineFn() { return __zjsGlobalDataIcRedefine; }

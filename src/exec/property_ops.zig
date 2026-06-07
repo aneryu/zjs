@@ -7637,10 +7637,12 @@ pub fn putVar(
         }
     }
     if (try setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
-    if (setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
-        return err;
-    }) return .continue_loop;
+    if (!frame.eval_var_refs_republished) {
+        if (setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        }) return .continue_loop;
+    }
     if (try setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
     if (setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
@@ -7919,13 +7921,15 @@ pub fn makeVarRef(
         try stack.pushOwned(key_value);
         return;
     }
-    if (makeEvalVarRef(ctx.runtime, eval_var_ref_names, eval_var_refs, atom_id)) |ref_value| {
-        defer ref_value.free(ctx.runtime);
-        const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-        errdefer key_value.free(ctx.runtime);
-        try stack.push(ref_value);
-        try stack.pushOwned(key_value);
-        return;
+    if (!frame.eval_var_refs_republished) {
+        if (makeEvalVarRef(ctx.runtime, eval_var_ref_names, eval_var_refs, atom_id)) |ref_value| {
+            defer ref_value.free(ctx.runtime);
+            const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
+            errdefer key_value.free(ctx.runtime);
+            try stack.push(ref_value);
+            try stack.pushOwned(key_value);
+            return;
+        }
     }
     if (try makeEvalBindingRef(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id)) |ref_value| {
         defer ref_value.free(ctx.runtime);

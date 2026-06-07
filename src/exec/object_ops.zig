@@ -258,7 +258,9 @@ pub fn createBytecodeFunctionObject(
         .{ .value = &rooted_value },
     };
     var eval_local_slots = input_eval_local_slots;
-    var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_eval_var_refs);
+    const capture_eval_var_ref_names = if (frame.eval_var_refs_republished) frame.eval_var_ref_names else eval_var_ref_names;
+    const capture_eval_var_refs_source = if (frame.eval_var_refs_republished) frame.eval_var_refs else input_eval_var_refs;
+    var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, capture_eval_var_refs_source);
     defer eval_var_refs_buffer.deinit(ctx.runtime);
     const eval_var_refs = eval_var_refs_buffer.values;
     var skip_direct_eval_capture_values_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_skip_direct_eval_capture_values);
@@ -307,7 +309,7 @@ pub fn createBytecodeFunctionObject(
     }
     try installLexicalPrivateNameRemap(ctx.runtime, object, frame, fb.private_bound_names);
     if (fb.class_fields_init) |init_bytecode| {
-        const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, &.{});
+        const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, &.{});
         try object.setOptionalValueSlot(ctx.runtime, object.functionClassFieldsInitSlot(), init_value);
     }
     if (fb.is_arrow_function) {
@@ -329,7 +331,7 @@ pub fn createBytecodeFunctionObject(
             try object.setOptionalValueSlot(ctx.runtime, object.functionArrowNewTargetSlot(), frame.new_target.dup());
         }
         if (functionBytecodeUsesAtom(fb, core.atom.ids.arguments) or functionBytecodeUsesArgumentsSpecialObject(fb)) {
-            const arguments_value = lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, core.atom.ids.arguments) orelse
+            const arguments_value = lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, frame, core.atom.ids.arguments) orelse
                 try frameArgumentsObject(ctx, global, frame);
             defer arguments_value.free(ctx.runtime);
             try appendFunctionEvalLocal(ctx, object, core.atom.ids.arguments, arguments_value);
@@ -406,7 +408,7 @@ pub fn createBytecodeFunctionObject(
         evalBytecodeHasVarDeclarations(ctx.runtime, caller_function);
     const captures_direct_eval_scope = function_has_direct_eval or captures_eval_var_scope;
     const captures_eval_frame_scope = captures_direct_eval_scope;
-    if (eval_local_names.len > 0 or eval_var_ref_names.len > 0 or
+    if (eval_local_names.len > 0 or capture_eval_var_ref_names.len > 0 or
         (captures_eval_frame_scope and caller_function.var_names.len > 0) or
         (captures_eval_frame_scope and caller_function.arg_names.len > 0) or
         (captures_direct_eval_scope and caller_function.var_ref_names.len > 0))
@@ -418,7 +420,7 @@ pub fn createBytecodeFunctionObject(
             const capture_eval_var_cell = captures_eval_var_scope and idx < eval_local_slots.len and evalLocalSlotIsEvalVarCell(eval_local_slots[idx]);
             if (captures_direct_eval_scope or capture_eval_var_cell or functionBytecodeUsesAtom(fb, atom_id)) used_count += 1;
         }
-        for (eval_var_ref_names) |atom_id| {
+        for (capture_eval_var_ref_names) |atom_id| {
             if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
             if (functionBytecodeHasClosureVarName(fb, atom_id)) continue;
             if (captures_direct_eval_scope or captures_eval_var_scope or functionBytecodeUsesAtom(fb, atom_id)) used_count += 1;
@@ -476,7 +478,7 @@ pub fn createBytecodeFunctionObject(
                 initialized += 1;
                 rooted_refs = refs[0..initialized];
             }
-            for (eval_var_ref_names, 0..) |atom_id, idx| {
+            for (capture_eval_var_ref_names, 0..) |atom_id, idx| {
                 if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
                 if (functionBytecodeHasClosureVarName(fb, atom_id)) continue;
                 if (!captures_direct_eval_scope and !captures_eval_var_scope and !functionBytecodeUsesAtom(fb, atom_id)) continue;
@@ -6369,7 +6371,9 @@ pub fn capturedArgumentsObject(
     frame: *frame_mod.Frame,
 ) ?core.JSValue {
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, core.atom.ids.arguments)) |value| return value;
-    if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, core.atom.ids.arguments)) |value| return value;
+    if (!frame.eval_var_refs_republished) {
+        if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, core.atom.ids.arguments)) |value| return value;
+    }
     if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, core.atom.ids.arguments)) |value| return value;
     if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, core.atom.ids.arguments)) |value| return value;
     return null;
