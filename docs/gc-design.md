@@ -2148,7 +2148,7 @@ JIT call boundary GC protocol
 提交边界（2026-06-03）：
   - 当前状态是可用的中间态，不是完整的新 GC 终态。
   - 最近一次验证：zig build test --summary all，1726/1726 tests passed。
-  - 最近一次验证：zig build smoke --summary all，88/88 scripts passed。
+  - 最近一次验证：zig build smoke --summary all，87/87 scripts passed。
   - 最近一次验证：git diff --check passed。
   - 后续大项按下面 TODO 推进，先完成大项修改，再统一 test / fix。
 ```

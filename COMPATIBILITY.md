@@ -27,8 +27,13 @@ zig build run-test262 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-As currently tracked, `reports/test262-latest/test262-buckets.json` records
-`total_failed: 0`, and `test262_errors.txt` is empty.
+As currently tracked, the gate has no unexpected failures. The latest local
+run selected 49,671 tests, passed 44,438, and matched three known failures in
+`test262_errors.txt`:
+
+- `test262/test/staging/sm/Function/function-name-binding.js`
+- `test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js`
+- `test262/test/staging/sm/class/newTargetDefaults.js`
 
 ## Configured Skips and Excludes
 
@@ -45,7 +50,8 @@ changed with a concrete implementation plan:
   current parity boundary are excluded individually.
 - Most `test262/test/staging/` tests are excluded by default, with selected
   locally useful staging slices re-included. Known SpiderMonkey staging
-  divergences remain explicitly excluded.
+  divergences remain explicitly excluded or tracked in `test262_errors.txt`
+  when the selected path stays useful in the gate.
 
 Do not broaden skips or excludes to manufacture a green gate. Any change to the
 compatibility boundary needs a failing scenario, QuickJS reference evidence,

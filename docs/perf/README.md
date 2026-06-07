@@ -1,9 +1,9 @@
 # Performance Workflow
 
 This directory contains performance notes and historical reports for `zjs`.
-The previous local QuickJS comparison scripts were removed with the vendored
-`quickjs/` checkout, so checked-in microbench reports are retained as
-historical context rather than active gates.
+The previous local C QuickJS comparison reports are retained as historical
+context. The active performance gate is now a ZJS self-baseline regression
+check, so it does not require a local C QuickJS binary.
 
 Current design notes:
 
@@ -11,7 +11,26 @@ Current design notes:
 - [Inline cache implementation](inline-cache-design.md)
 - [`vm/shared.zig` decomposition map](shared-vm-decomposition.md)
 
-## Current Benchmark Entry
+## Current Benchmark Entries
+
+Run the active multi-case self-baseline gate with:
+
+```sh
+zig build perf-self-check --summary all
+```
+
+This builds the ReleaseFast `zjs` CLI, records a fresh multi-case report under
+`.zig-cache/perf/current/`, and compares it with
+`reports/perf/baseline/microbench-zjs-releasefast.json`.
+
+Refresh the checked-in self baseline explicitly with:
+
+```sh
+zig build perf-self-update-baseline --summary all
+```
+
+Only refresh the baseline when an intentional performance change has separate
+semantic validation evidence.
 
 Run the current repeatable diagnostic benchmark with:
 
@@ -25,16 +44,19 @@ results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
 release gate.
 
-## Checked-In Report
+## Checked-In Reports
 
-The checked-in report is `reports/perf/current/microbench.json`.
-Its summary is:
+The active checked-in baseline is
+`reports/perf/baseline/microbench-zjs-releasefast.json`.
+
+The historical C QuickJS comparison report is
+`reports/perf/current/microbench.json`. Its summary is:
 
 - 73 selected cases.
-- 72 compatible cases.
-- 1 unsupported case in the tracked report.
+- 73 compatible cases in the tracked report.
+- 0 unsupported cases in the tracked report.
 - 0 skipped cases.
-- Geometric mean `zjs/qjs`: `1.0157757404632615`.
+- Historical geometric mean `zjs/qjs`: `0.8414527007796604`.
 
 Generate the top-10 slowest ratio summary from a JSON report:
 
@@ -44,9 +66,8 @@ node tools/perf/top10_report.js \
   reports/perf/current/microbench.json
 ```
 
-Do not use this file as proof that the current working tree has the same
-timings. A fresh performance workflow should add its own measurement command
-and record the environment with the owning change.
+Do not use the historical C QuickJS file as proof that the current working tree
+has the same relative timings.
 
 ## Baselines
 
@@ -110,8 +131,8 @@ comparison format consumed by `top10_report.js` and `diff_report.js`.
 
 The build step allows the checked-in baseline/current sample-count drift and
 reports per-case regressions without failing. Performance-sensitive PRs should
-still run a strict diff with matched sample settings when they refresh both
-multi-case reports.
+still run `zig build perf-self-check --summary all`, and may also run a strict
+C QuickJS comparison when an external `qjs` binary is available.
 
 ## Runtime Profiling
 
@@ -207,6 +228,7 @@ Run semantic checks before accepting performance-sensitive changes:
 ```sh
 zig build test --summary all
 zig build smoke --summary all
+zig build perf-self-check --summary all
 ```
 
 Run a relevant test262 subset when the optimization touches observable
