@@ -7,7 +7,8 @@ const class = @import("class.zig");
 const gc = @import("gc.zig");
 const host_function = @import("host_function.zig");
 const job_mod = @import("jobs.zig");
-const bytecode_function = @import("../bytecode/function.zig");
+const function_bytecode_mod = @import("function_bytecode.zig");
+const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const shape = @import("shape.zig");
@@ -1470,7 +1471,7 @@ pub const JSRuntime = struct {
         const MinorPromotionVisitor = struct {
             rt: *JSRuntime,
             object_worklist: std.ArrayList(*Object) = .empty,
-            bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode) = .empty,
+            bytecode_worklist: std.ArrayList(*FunctionBytecode) = .empty,
             promoted_young_objects: usize = 0,
             promoted_young_bytes: usize = 0,
             err: ?gc.CollectionError = null,
@@ -1532,7 +1533,7 @@ pub const JSRuntime = struct {
                         self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
                     },
                     .function_bytecode => {
-                        const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                        const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
                         try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
                         self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
                     },
@@ -1548,7 +1549,7 @@ pub const JSRuntime = struct {
             fn promotedSize(header: *const gc.Header) usize {
                 return switch (header.kind) {
                     .object => @sizeOf(Object),
-                    .function_bytecode => @sizeOf(bytecode_function.FunctionBytecode),
+                    .function_bytecode => @sizeOf(FunctionBytecode),
                     .string, .big_int => 0,
                 };
             }
@@ -1568,7 +1569,7 @@ pub const JSRuntime = struct {
                 }
             }
 
-            fn traceFunctionBytecode(self_visitor: *@This(), fb: *bytecode_function.FunctionBytecode) !void {
+            fn traceFunctionBytecode(self_visitor: *@This(), fb: *FunctionBytecode) !void {
                 if (fb.class_fields_init) |*stored| try self_visitor.visitValue(stored);
                 for (fb.cpool) |*stored| try self_visitor.visitValue(stored);
             }
@@ -1613,7 +1614,7 @@ pub const JSRuntime = struct {
                     };
                 },
                 .function_bytecode => {
-                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
+                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
                     visitor.traceFunctionBytecode(fb) catch |err| {
                         self.gc.recordFailure(err);
                         self.gc.requestGC(.minor, .collection_failed, .soon);
@@ -2028,7 +2029,7 @@ pub const JSRuntime = struct {
                     try obj.traceChildEdgesFallible(self, &verifier);
                 },
                 .function_bytecode => {
-                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
+                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
                     if (fb.class_fields_init) |*stored| try verifier.visitValue(stored);
                     for (fb.cpool) |*stored| try verifier.visitValue(stored);
                 },

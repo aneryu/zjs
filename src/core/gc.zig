@@ -8,7 +8,8 @@ const memory = @import("memory.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
-const bytecode_function = @import("../bytecode/function.zig");
+const function_bytecode_mod = @import("function_bytecode.zig");
+const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
@@ -769,7 +770,7 @@ pub const Registry = struct {
     free_set: std.AutoHashMap(usize, void),
     preserved_bytecodes: std.AutoHashMap(usize, void),
     object_worklist: std.ArrayList(*object.Object),
-    bytecode_worklist: std.ArrayList(*bytecode_function.FunctionBytecode),
+    bytecode_worklist: std.ArrayList(*FunctionBytecode),
 
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
         return .{
@@ -787,7 +788,7 @@ pub const Registry = struct {
             .free_set = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .object_worklist = std.ArrayList(*object.Object).empty,
-            .bytecode_worklist = std.ArrayList(*bytecode_function.FunctionBytecode).empty,
+            .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
         };
     }
 
@@ -804,7 +805,7 @@ pub const Registry = struct {
                 object.Object.destroyFromHeader(rt, h);
                 rt.drainDeferredClassPayloadFinalizers();
             } else if (h.kind == .function_bytecode) {
-                bytecode_function.destroyFromHeader(rt, h);
+                function_bytecode_mod.destroyFromHeader(rt, h);
             }
         }
 
@@ -1248,7 +1249,7 @@ pub const Registry = struct {
             obj.gc._pad[0] = @intFromEnum(h.kind);
             self.linkNode(&obj.gc);
         } else if (h.kind == .function_bytecode) {
-            const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+            const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
             fb.gc._pad[0] = @intFromEnum(h.kind);
             self.linkNode(&fb.gc);
         }
@@ -1266,7 +1267,7 @@ pub const Registry = struct {
     fn defaultHeapBytes(h: *const GCObjectHeader) usize {
         return switch (h.kind) {
             .object => @sizeOf(object.Object),
-            .function_bytecode => @sizeOf(bytecode_function.FunctionBytecode),
+            .function_bytecode => @sizeOf(FunctionBytecode),
             .string, .big_int => 0,
         };
     }
@@ -1555,7 +1556,7 @@ pub const Registry = struct {
             const obj: *object.Object = @alignCast(@fieldParentPtr("header", h));
             self.unlinkNode(&obj.gc);
         } else if (h.kind == .function_bytecode) {
-            const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+            const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
             self.unlinkNode(&fb.gc);
         }
     }
@@ -2038,7 +2039,7 @@ pub inline fn headerFromGcNode(node: *GcNode) *BlockHeader {
             return &obj.header;
         },
         .function_bytecode => {
-            const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("gc", node));
+            const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("gc", node));
             return &fb.header;
         },
         else => unreachable,
@@ -2064,7 +2065,7 @@ pub fn release(rt: anytype, header: *Header) void {
             .string => string.String.destroyFromHeader(rt, header),
             .object => object.Object.destroyFromHeader(rt, header),
             .big_int => bigint.BigInt.destroyFromHeader(rt, header),
-            .function_bytecode => bytecode_function.destroyFromHeader(rt, header),
+            .function_bytecode => function_bytecode_mod.destroyFromHeader(rt, header),
         }
     }
 }

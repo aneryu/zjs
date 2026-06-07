@@ -2847,7 +2847,7 @@ pub fn qjsAsyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    var nested = fb.asBytecodeView(ctx.runtime);
+    var nested = bytecode.function.asBytecodeView(fb, ctx.runtime);
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
 

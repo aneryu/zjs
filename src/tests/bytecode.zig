@@ -1482,7 +1482,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
         try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].pc);
         try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].slot_index);
     }
-    const bc_view = fb.asBytecodeView(rt);
+    const bc_view = bytecode.function.asBytecodeView(fb, rt);
     try std.testing.expect(bc_view.icSlotForPc(0) != null);
     try std.testing.expect(bc_view.icSlotForPc(5) == null);
     try std.testing.expectEqual(op.get_var, fb.byte_code[0]);
@@ -1514,7 +1514,7 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expect(fb.pc2line_len > 0);
     try std.testing.expectEqualStrings("async function* inner(arg) {}", fb.source.?);
 
-    const view = fb.asBytecodeView(rt);
+    const view = bytecode.function.asBytecodeView(fb, rt);
     try std.testing.expectEqualSlices(engine.bytecode.ic.Slot, fb.ic_slots, view.ic_slots);
     try std.testing.expectEqualSlices(usize, fb.ic_site_ids, view.ic_site_ids);
     try std.testing.expect(view.flags.is_strict);

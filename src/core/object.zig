@@ -12,7 +12,8 @@ const shape = @import("shape.zig");
 const string = @import("string.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
-const bytecode_function = @import("../bytecode/function.zig");
+const function_bytecode_mod = @import("function_bytecode.zig");
+const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -4899,7 +4900,7 @@ pub const Object = struct {
                 obj.traceChildEdgesNoFail(rt, visitor);
             },
             .function_bytecode => {
-                const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
+                const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
                 if (fb.class_fields_init) |*stored| visitor.visitValue(stored);
                 for (fb.cpool) |*stored| visitor.visitValue(stored);
             },
@@ -5172,7 +5173,7 @@ pub const Object = struct {
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
-                bytecode_worklist: *std.ArrayList(*bytecode_function.FunctionBytecode),
+                bytecode_worklist: *std.ArrayList(*FunctionBytecode),
                 val: JSValue,
             ) ObjectGraphError!void {
                 try preserveSymbolValue(runtime, symbol_roots_set, val);
@@ -5203,8 +5204,8 @@ pub const Object = struct {
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
-                bytecode_worklist: *std.ArrayList(*bytecode_function.FunctionBytecode),
-                fb: *bytecode_function.FunctionBytecode,
+                bytecode_worklist: *std.ArrayList(*FunctionBytecode),
+                fb: *FunctionBytecode,
             ) ObjectGraphError!void {
                 if (fb.class_fields_init) |val| {
                     try scanAndPreserveValue(runtime, visited_set, preserved_set, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
@@ -5222,7 +5223,7 @@ pub const Object = struct {
             preserved_bytecodes: *ObjectVisitSet,
             symbol_roots_set: *SymbolRootSet,
             object_worklist: *std.ArrayList(*Object),
-            bytecode_worklist: *std.ArrayList(*bytecode_function.FunctionBytecode),
+            bytecode_worklist: *std.ArrayList(*FunctionBytecode),
             err: ?ObjectGraphError = null,
 
             pub fn visitObject(self: *@This(), obj_ptr: *?*Object) ObjectGraphError!void {
@@ -5333,7 +5334,7 @@ pub const Object = struct {
                         h.flags.mark = false;
                     }
                 } else if (h.kind == .function_bytecode) {
-                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     if (preserved_bytecodes.contains(@intFromPtr(fb))) {
                         unlinkNodeFromList(&tmp_head, &tmp_tail, node);
                         linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
@@ -5364,7 +5365,7 @@ pub const Object = struct {
             while (current) |node| : (current = node.next) {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
-                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     try free_internal_bytecodes.put(@intFromPtr(fb), {});
                 }
             }
@@ -5382,7 +5383,7 @@ pub const Object = struct {
         {
             var iterator = preserved_bytecodes.keyIterator();
             while (iterator.next()) |address| {
-                const fb: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+                const fb: *FunctionBytecode = @ptrFromInt(address.*);
                 fb.header.rc += 1;
             }
         }
@@ -5419,7 +5420,7 @@ pub const Object = struct {
         {
             var iterator = preserved_bytecodes.keyIterator();
             while (iterator.next()) |address| {
-                const fb: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+                const fb: *FunctionBytecode = @ptrFromInt(address.*);
                 fb.header.rc -= 1;
                 if (fb.header.rc == 0) {
                     fb.header.rc = 1;
@@ -5446,7 +5447,7 @@ pub const Object = struct {
             while (current) |node| : (current = node.next) {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
-                    const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                     clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
                 }
             }
@@ -5457,7 +5458,7 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     unlinkNodeFromList(&tmp_head, &tmp_tail, node);
-                    bytecode_function.destroyFromHeader(rt, h);
+                    function_bytecode_mod.destroyFromHeader(rt, h);
                 }
                 current = next;
             }
@@ -5471,7 +5472,7 @@ pub const Object = struct {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
                 try obj.clearReferencesToVisited(rt, free_set, &free_internal_bytecodes);
             } else if (h.kind == .function_bytecode) {
-                const fb: *bytecode_function.FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
+                const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
                 clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
             }
         }
@@ -5486,7 +5487,7 @@ pub const Object = struct {
             if (h.kind == .object) {
                 destroyFromHeader(rt, h);
             } else if (h.kind == .function_bytecode) {
-                bytecode_function.destroyFromHeader(rt, h);
+                function_bytecode_mod.destroyFromHeader(rt, h);
             }
             current_garbage = next;
         }
@@ -5514,7 +5515,7 @@ pub const Object = struct {
 
         var iterator = candidates.keyIterator();
         while (iterator.next()) |address| {
-            const function_bytecode: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
             clearCallbackOwnedFunctionBytecodeCycleRefs(rt, function_bytecode, &candidates);
         }
     }
@@ -5524,7 +5525,7 @@ pub const Object = struct {
             var removed = false;
             var iterator = candidates.keyIterator();
             while (iterator.next()) |address| {
-                const function_bytecode: *const bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+                const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
                 const internal_refs = countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, candidates);
                 const ref_count = function_bytecode.header.rc;
                 if (ref_count == internal_refs or (ref_count != 0 and ref_count - 1 == internal_refs)) continue;
@@ -5540,7 +5541,7 @@ pub const Object = struct {
     fn retainFunctionBytecodeGuards(candidates: *const ObjectVisitSet) void {
         var iterator = candidates.keyIterator();
         while (iterator.next()) |address| {
-            const function_bytecode: *bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+            const function_bytecode: *FunctionBytecode = @ptrFromInt(address.*);
             function_bytecode.header.retain();
         }
     }
@@ -5550,7 +5551,7 @@ pub const Object = struct {
         while (current) |node| {
             const prev = node.prev;
             const h = gc.headerFromGcNode(node);
-            const fb_ptr = if (h.kind == .function_bytecode) @as(*bytecode_function.FunctionBytecode, @alignCast(@fieldParentPtr("header", h))) else null;
+            const fb_ptr = if (h.kind == .function_bytecode) @as(*FunctionBytecode, @alignCast(@fieldParentPtr("header", h))) else null;
             if (fb_ptr) |fb| {
                 if (candidates.contains(@intFromPtr(fb))) {
                     gc.release(rt, h);
@@ -5562,7 +5563,7 @@ pub const Object = struct {
 
     fn clearCallbackOwnedFunctionBytecodeCycleRefs(
         rt: *JSRuntime,
-        function_bytecode: *bytecode_function.FunctionBytecode,
+        function_bytecode: *FunctionBytecode,
         candidates: *const ObjectVisitSet,
     ) void {
         if (function_bytecode.class_fields_init) |*stored| {
@@ -5617,7 +5618,7 @@ pub const Object = struct {
     };
 
     const PayloadBytecodeRefCountContext = struct {
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
         count: usize = 0,
     };
 
@@ -6000,7 +6001,7 @@ pub const Object = struct {
         try collectFunctionBytecodeChildObjects(rt, visited, function_bytecode);
     }
 
-    fn collectFunctionBytecodeChildObjects(rt: *JSRuntime, visited: *ObjectVisitSet, function_bytecode: *const bytecode_function.FunctionBytecode) ObjectGraphError!void {
+    fn collectFunctionBytecodeChildObjects(rt: *JSRuntime, visited: *ObjectVisitSet, function_bytecode: *const FunctionBytecode) ObjectGraphError!void {
         if (function_bytecode.class_fields_init) |stored| try collectValueObject(rt, visited, stored);
         for (function_bytecode.cpool) |stored| try collectValueObject(rt, visited, stored);
     }
@@ -6124,7 +6125,7 @@ pub const Object = struct {
         rt: *JSRuntime,
         symbol_roots: *SymbolRootSet,
         function_bytecodes: *ObjectVisitSet,
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!void {
         const visit = try function_bytecodes.getOrPut(@intFromPtr(&function_bytecode.header));
         if (visit.found_existing) return;
@@ -6220,7 +6221,7 @@ pub const Object = struct {
         visited: *const ObjectVisitSet,
         preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!void {
         if (function_bytecode.class_fields_init) |stored| try scanPreservedValueObject(rt, visited, preserved, symbol_roots, stored);
         for (function_bytecode.cpool) |stored| try scanPreservedValueObject(rt, visited, preserved, symbol_roots, stored);
@@ -6501,7 +6502,7 @@ pub const Object = struct {
     }
 
     fn accumulateFunctionBytecodeChildIncoming(
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
         visited: *const ObjectVisitSet,
         incoming: *ObjectIncomingMap,
         internal_bytecodes: *const ObjectVisitSet,
@@ -6606,7 +6607,7 @@ pub const Object = struct {
 
     fn clearFunctionBytecodeReferencesToVisited(
         rt: *JSRuntime,
-        function_bytecode: *bytecode_function.FunctionBytecode,
+        function_bytecode: *FunctionBytecode,
         visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
@@ -6619,7 +6620,7 @@ pub const Object = struct {
         return visited.contains(@intFromPtr(child));
     }
 
-    fn functionBytecodeFromValue(stored: JSValue) ?*bytecode_function.FunctionBytecode {
+    fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
         const header = stored.objectHeader() orelse return null;
         if (header.kind != .function_bytecode) return null;
         return @fieldParentPtr("header", header);
@@ -6680,7 +6681,7 @@ pub const Object = struct {
             var removed = false;
             var iterator = internal_bytecodes.keyIterator();
             while (iterator.next()) |address| {
-                const function_bytecode: *const bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+                const function_bytecode: *const FunctionBytecode = @ptrFromInt(address.*);
                 const internal_refs =
                     (try countFunctionBytecodeRefsFromVisitedObjects(rt, function_bytecode, visited)) +
                     countFunctionBytecodeRefsFromFunctionBytecodes(function_bytecode, internal_bytecodes);
@@ -6694,14 +6695,14 @@ pub const Object = struct {
         }
     }
 
-    fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const bytecode_function.FunctionBytecode {
+    fn functionBytecodeFromGcHeader(header: *gc.GCObjectHeader) ?*const FunctionBytecode {
         if (header.kind != .function_bytecode) return null;
         return @alignCast(@fieldParentPtr("header", header));
     }
 
     fn countFunctionBytecodeRefsFromVisitedObjects(
         rt: *JSRuntime,
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
         visited: *const ObjectVisitSet,
     ) ObjectGraphError!usize {
         var count: usize = 0;
@@ -6714,21 +6715,21 @@ pub const Object = struct {
     }
 
     fn countFunctionBytecodeRefsFromFunctionBytecodes(
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
         owners: *const ObjectVisitSet,
     ) usize {
         var count: usize = 0;
         var iterator = owners.keyIterator();
         while (iterator.next()) |address| {
-            const owner: *const bytecode_function.FunctionBytecode = @ptrFromInt(address.*);
+            const owner: *const FunctionBytecode = @ptrFromInt(address.*);
             count += countFunctionBytecodeChildRefs(owner, function_bytecode);
         }
         return count;
     }
 
     fn countFunctionBytecodeChildRefs(
-        owner: *const bytecode_function.FunctionBytecode,
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        owner: *const FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
     ) usize {
         var count: usize = 0;
         count += countOptionalFunctionBytecodeRef(owner.class_fields_init, function_bytecode);
@@ -6739,7 +6740,7 @@ pub const Object = struct {
     fn countDirectFunctionBytecodeRefs(
         self: *Object,
         rt: *JSRuntime,
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!usize {
         var count: usize = 0;
         count += countOptionalFunctionBytecodeRef(self.cachedIteratorNext(), function_bytecode);
@@ -6870,7 +6871,7 @@ pub const Object = struct {
     fn countClassPayloadFunctionBytecodeRefs(
         self: *Object,
         rt: *JSRuntime,
-        function_bytecode: *const bytecode_function.FunctionBytecode,
+        function_bytecode: *const FunctionBytecode,
     ) usize {
         var context = PayloadBytecodeRefCountContext{ .function_bytecode = function_bytecode };
         var visitor = class.PayloadVisitor{
@@ -6881,7 +6882,7 @@ pub const Object = struct {
         return context.count;
     }
 
-    fn countSlotFunctionBytecodeRefs(slot: property.Slot, function_bytecode: *const bytecode_function.FunctionBytecode) usize {
+    fn countSlotFunctionBytecodeRefs(slot: property.Slot, function_bytecode: *const FunctionBytecode) usize {
         return switch (slot) {
             .data => |stored| countFunctionBytecodeValueRef(stored, function_bytecode),
             .accessor => |entry| countFunctionBytecodeValueRef(entry.getter, function_bytecode) +
@@ -6890,11 +6891,11 @@ pub const Object = struct {
         };
     }
 
-    fn countOptionalFunctionBytecodeRef(maybe_value: ?JSValue, function_bytecode: *const bytecode_function.FunctionBytecode) usize {
+    fn countOptionalFunctionBytecodeRef(maybe_value: ?JSValue, function_bytecode: *const FunctionBytecode) usize {
         return if (maybe_value) |stored| countFunctionBytecodeValueRef(stored, function_bytecode) else 0;
     }
 
-    fn countFunctionBytecodeValueRef(stored: JSValue, function_bytecode: *const bytecode_function.FunctionBytecode) usize {
+    fn countFunctionBytecodeValueRef(stored: JSValue, function_bytecode: *const FunctionBytecode) usize {
         const header = stored.objectHeader() orelse return 0;
         return if (header == &function_bytecode.header) 1 else 0;
     }

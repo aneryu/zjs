@@ -12442,7 +12442,7 @@ pub fn callFunctionBytecodeModeState(
         return createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, fb.func_kind == .async_generator);
     }
 
-    var nested = fb.asBytecodeView(ctx.runtime);
+    var nested = bytecode.function.asBytecodeView(fb, ctx.runtime);
 
     var combined_var_refs: []const core.JSValue = var_refs;
     var allocated_combined_refs: []core.JSValue = &.{};
