@@ -27,8 +27,16 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try appendNamespaceDecls(allocator, &actual, zjs, "zjs.");
-    try appendNamespaceDecls(allocator, &actual, zjs.kernel, "zjs.kernel.");
     try appendNamespaceDecls(allocator, &actual, zjs.runtime, "zjs.runtime.");
+    try appendNamespaceDecls(allocator, &actual, zjs.value, "zjs.value.");
+    try appendNamespaceDecls(allocator, &actual, zjs.host, "zjs.host.");
+    try appendNamespaceDecls(allocator, &actual, zjs.context, "zjs.context.");
+    try appendNamespaceDecls(allocator, &actual, zjs.object, "zjs.object.");
+    try appendNamespaceDecls(allocator, &actual, zjs.object.Buffer, "zjs.object.Buffer.");
+    try appendNamespaceDecls(allocator, &actual, zjs.module, "zjs.module.");
+    try appendNamespaceDecls(allocator, &actual, zjs.compile, "zjs.compile.");
+    try appendNamespaceDecls(allocator, &actual, zjs.@"error", "zjs.error.");
+    try appendNamespaceDecls(allocator, &actual, zjs.job, "zjs.job.");
     try appendSelectedJSValueDecls(allocator, &actual);
     sortUnique(actual.items);
 
@@ -114,7 +122,7 @@ fn writeSnapshot(io: std.Io, path: []const u8, symbols: []const []const u8) !voi
         \\#
         \\# This file is checked by `zig build architecture-check`.
         \\# It freezes the public declaration surface exposed through src/root.zig,
-        \\# zjs.kernel, zjs.runtime, and the selected JSValue lifetime aliases.
+        \\# the grouped public namespaces, zjs.runtime, and selected JSValue aliases.
         \\
     );
     for (symbols) |symbol| {

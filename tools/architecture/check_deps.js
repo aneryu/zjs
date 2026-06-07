@@ -84,8 +84,15 @@ function violationReason(source, target) {
   if (source === 'src/internal_root.zig' || source === 'src/all_tests.zig') return null;
 
   if (source === 'src/root.zig') {
-    if (target === 'src/kernel/root.zig' || target === 'src/runtime/public.zig') return null;
-    return 'public root may only import kernel/root.zig and runtime/public.zig';
+    if (
+      target === 'src/kernel/root.zig' ||
+      target === 'src/runtime/public.zig' ||
+      target === 'src/core/root.zig' ||
+      target === 'src/exec/root.zig' ||
+      target === 'src/builtins/root.zig' ||
+      target === 'src/exec/module_graph.zig'
+    ) return null;
+    return 'public root may only import modules used by the embedding facade adapter';
   }
 
   if (source.startsWith('src/core/')) {

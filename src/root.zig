@@ -5,48 +5,29 @@ pub const runtime = @import("runtime/public.zig");
 const zjs_core = @import("core/root.zig");
 const zjs_exec = @import("exec/root.zig");
 const zjs_builtins = @import("builtins/root.zig");
+const CoreObject = zjs_kernel.Object;
 
 pub const JSRuntime = zjs_kernel.JSRuntime;
 pub const JSContext = zjs_kernel.JSContext;
-pub const Object = zjs_kernel.Object;
 pub const ffi = zjs_kernel.ffi;
 pub const JSValue = zjs_kernel.JSValue;
-pub const JSValueHandle = zjs_kernel.JSValueHandle;
-pub const LocalHandle = zjs_kernel.LocalHandle;
-pub const HandleScope = zjs_kernel.HandleScope;
-pub const WeakPersistent = zjs_kernel.WeakPersistent;
-pub const WeakPersistentValue = zjs_kernel.WeakPersistentValue;
 pub const RuntimeOptions = zjs_kernel.RuntimeOptions;
 pub const RuntimeMemoryUsage = zjs_kernel.RuntimeMemoryUsage;
-pub const ContextOptions = zjs_kernel.ContextOptions;
-pub const EvalOptions = zjs_kernel.EvalOptions;
-pub const EvalMode = zjs_kernel.EvalMode;
-pub const EvalTiming = zjs_kernel.EvalTiming;
-pub const DataPropertyOptions = zjs_kernel.DataPropertyOptions;
-pub const PropertyAccessOptions = zjs_kernel.PropertyAccessOptions;
-pub const PropertyDescriptor = zjs_kernel.PropertyDescriptor;
-pub const ExternalFunctionOptions = zjs_kernel.ExternalFunctionOptions;
-pub const FunctionCallOptions = zjs_kernel.FunctionCallOptions;
-pub const ErrorOptions = zjs_kernel.ErrorOptions;
-pub const ScriptEvalOptions = zjs_kernel.ScriptEvalOptions;
-pub const SharedArrayBufferRef = zjs_kernel.SharedArrayBufferRef;
-pub const ExternalHostCall = zjs_kernel.ExternalHostCall;
-pub const ExternalHostCallFn = zjs_kernel.ExternalHostCallFn;
-pub const ExternalHostFinalizer = zjs_kernel.ExternalHostFinalizer;
 pub const OpcodeProfile = zjs_kernel.OpcodeProfile;
 pub const default_stack_size = zjs_kernel.default_stack_size;
 pub const default_gc_threshold = zjs_kernel.default_gc_threshold;
-pub const PropNameID = zjs_kernel.PropNameID;
-pub const JSString = zjs_kernel.JSString;
-pub const JSBytes = zjs_kernel.JSBytes;
-pub const binding = zjs_kernel.binding;
 pub const activateOpcodeProfile = zjs_kernel.activateOpcodeProfile;
 
 pub const value = struct {
     pub const Value = zjs_kernel.JSValue;
+    pub const Scope = zjs_kernel.HandleScope;
     pub const Local = zjs_kernel.LocalHandle;
     pub const Ref = zjs_kernel.JSValueHandle;
+    pub const Persistent = zjs_kernel.JSValueHandle;
     pub const WeakRef = zjs_kernel.WeakPersistentValue;
+    pub const Weak = zjs_kernel.WeakPersistentValue;
+    pub const String = zjs_kernel.JSString;
+    pub const Bytes = zjs_kernel.JSBytes;
 
     pub fn undefinedValue() Value {
         return Value.undefinedValue();
@@ -117,8 +98,12 @@ pub const value = struct {
 pub const host = struct {
     pub const Call = zjs_kernel.ExternalHostCall;
     pub const Function = zjs_kernel.ExternalHostCallFn;
+    pub const Finalizer = zjs_kernel.ExternalHostFinalizer;
+    pub const FunctionOptions = zjs_kernel.ExternalFunctionOptions;
     pub const NativeClass = zjs_kernel.binding.JSObject;
-    pub const NativeObject = zjs_kernel.Object;
+    pub const NativeBinding = zjs_kernel.binding;
+    pub const NativeObject = object.Object;
+    pub const PropName = zjs_kernel.PropNameID;
 
     var test_host_context: u8 = 0;
 
@@ -132,7 +117,7 @@ pub const host = struct {
 
     pub fn defineArgvGlobals(ctx: *JSContext, argv0: []const u8, exec_argv: []const []const u8) !void {
         const rt = ctx.runtimePtr();
-        const global = try ctx.globalObject();
+        const global = object.fromCore(try ctx.globalObject());
         try object.defineStringProperty(rt, global, "argv0", argv0);
         try object.defineStringArrayGlobal(ctx, "execArgv", exec_argv);
     }
@@ -174,7 +159,7 @@ pub const host = struct {
         length: i32,
         function: Function,
         with_prototype: bool,
-        realm_global: ?*Object,
+        realm_global: ?*CoreObject,
     ) !value.Value {
         return ctx.createExternalFunction(name, length, &test_host_context, function, null, .{
             .with_prototype = with_prototype,
@@ -185,17 +170,17 @@ pub const host = struct {
     pub fn evalGlobalScriptSource(
         ctx: *JSContext,
         output: ?*std.Io.Writer,
-        global: *Object,
+        global: *object.Object,
         source: []const u8,
         filename: []const u8,
     ) !value.Value {
-        return zjs_exec.call.qjsEvalGlobalScriptSource(ctx, output, global, source, filename);
+        return evalGlobalScriptSourceCore(ctx, output, object.toCore(global), source, filename);
     }
 
     pub fn evalGlobalScriptValue(
         ctx: *JSContext,
         output: ?*std.Io.Writer,
-        global: *Object,
+        global: *object.Object,
         source_value: value.Value,
         filename: []const u8,
     ) !value.Value {
@@ -203,6 +188,29 @@ pub const host = struct {
         const source = try value.toOwnedString(ctx.runtimePtr(), source_value);
         defer ctx.runtimePtr().memory.allocator.free(source);
         return evalGlobalScriptSource(ctx, output, global, source, filename);
+    }
+
+    fn evalGlobalScriptSourceCore(
+        ctx: *JSContext,
+        output: ?*std.Io.Writer,
+        global: *CoreObject,
+        source: []const u8,
+        filename: []const u8,
+    ) !value.Value {
+        return zjs_exec.call.qjsEvalGlobalScriptSource(ctx, output, global, source, filename);
+    }
+
+    fn evalGlobalScriptValueCore(
+        ctx: *JSContext,
+        output: ?*std.Io.Writer,
+        global: *CoreObject,
+        source_value: value.Value,
+        filename: []const u8,
+    ) !value.Value {
+        if (!source_value.isString()) return error.TypeError;
+        const source = try value.toOwnedString(ctx.runtimePtr(), source_value);
+        defer ctx.runtimePtr().memory.allocator.free(source);
+        return evalGlobalScriptSourceCore(ctx, output, global, source, filename);
     }
 
     fn wrapExternal(comptime function: anytype) Function {
@@ -227,20 +235,20 @@ pub const host = struct {
     fn test262EvalScript(
         ctx: *JSContext,
         output: ?*std.Io.Writer,
-        global: *Object,
-        function_object: *Object,
+        global: *CoreObject,
+        function_object: *CoreObject,
         args: []const value.Value,
     ) !value.Value {
         if (args.len == 0) return value.undefinedValue();
         if (!args[0].isString()) return error.TypeError;
         const eval_global = (try ctx.functionRealmGlobal(function_object.value())) orelse global;
-        return evalGlobalScriptValue(ctx, output, eval_global, args[0], "<evalScript>");
+        return evalGlobalScriptValueCore(ctx, output, eval_global, args[0], "<evalScript>");
     }
 
     fn test262CreateRealm(
         ctx: *JSContext,
         output: ?*std.Io.Writer,
-        global: ?*Object,
+        global: ?*CoreObject,
         args: []const value.Value,
     ) !value.Value {
         _ = output;
@@ -258,7 +266,7 @@ pub const host = struct {
     fn test262Gc(
         ctx: *JSContext,
         output: ?*std.Io.Writer,
-        global: ?*Object,
+        global: ?*CoreObject,
         args: []const value.Value,
     ) !value.Value {
         _ = output;
@@ -270,56 +278,147 @@ pub const host = struct {
 };
 
 pub const object = struct {
+    pub const Object = opaque {};
     pub const Builder = struct {};
     pub const Template = struct {};
-    pub const Descriptor = zjs_core.Descriptor;
     pub const MemoryAccount = zjs_core.memory.MemoryAccount;
+    pub const SharedArrayBufferRef = zjs_kernel.SharedArrayBufferRef;
     pub const String = zjs_core.string.String;
-    pub const Atom = struct {
-        pub const ids = struct {
-            pub const prototype = zjs_core.atom.ids.prototype;
-        };
 
-        pub fn atomFromUInt32(index: u32) zjs_core.Atom {
-            return zjs_core.atom.atomFromUInt32(index);
-        }
-
-        pub fn predefinedId(name: []const u8, kind: zjs_core.atom.AtomKind) ?zjs_core.Atom {
-            return zjs_core.atom.predefinedId(name, kind);
-        }
-    };
-    pub const Buffer = struct {
-        pub const isTypedArrayObject = zjs_builtins.buffer.isTypedArrayObject;
-        pub const typedArrayByteLength = zjs_builtins.buffer.typedArrayByteLength;
-        pub const arrayBufferConstructLength = zjs_builtins.buffer.arrayBufferConstructLength;
-        pub const typedArrayConstructFullBufferOwned = zjs_builtins.buffer.typedArrayConstructFullBufferOwned;
-    };
-
-    pub fn createPlain(rt: *JSRuntime) !*Object {
-        return Object.create(rt, zjs_core.class.ids.object, null);
+    fn fromCore(obj: *CoreObject) *Object {
+        return @ptrCast(obj);
     }
 
-    pub fn createError(rt: *JSRuntime, prototype: ?*Object) !*Object {
-        return Object.create(rt, zjs_core.class.ids.error_, prototype);
+    fn toCore(obj: *Object) *CoreObject {
+        return @ptrCast(@alignCast(obj));
     }
 
-    pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
-        return Object.createArray(rt, prototype);
+    fn optionalToCore(obj: ?*Object) ?*CoreObject {
+        return if (obj) |some| toCore(some) else null;
     }
 
-    pub fn createArrayBuffer(rt: *JSRuntime, prototype: ?*Object) !*Object {
-        return Object.create(rt, zjs_core.class.ids.array_buffer, prototype);
-    }
-
-    pub fn fromValue(v: value.Value) ?*Object {
+    fn coreFromValue(v: value.Value) ?*CoreObject {
         if (!v.isObject()) return null;
         const header = v.refHeader() orelse return null;
         if (header.kind != .object) return null;
         return @fieldParentPtr("header", header);
     }
 
+    pub fn toValue(obj: *Object) value.Value {
+        return toCore(obj).value();
+    }
+
+    pub fn arrayLength(obj: *Object) u32 {
+        return toCore(obj).length;
+    }
+
+    pub fn promiseResult(obj: *Object) ?value.Value {
+        return toCore(obj).promiseResult();
+    }
+
+    pub fn promiseIsRejected(obj: *Object) bool {
+        return toCore(obj).promiseIsRejected();
+    }
+
+    pub const OwnDataProperty = struct {
+        name: []const u8,
+        value: value.Value,
+        enumerable: bool,
+    };
+
+    pub fn forEachOwnDataProperty(
+        rt: *JSRuntime,
+        obj: *Object,
+        visitor_context: anytype,
+        comptime visitor: anytype,
+    ) !void {
+        for (toCore(obj).properties) |entry| {
+            if (entry.flags.deleted or entry.flags.accessor) continue;
+            const stored = switch (entry.slot) {
+                .data => |value_slot| value_slot,
+                else => continue,
+            };
+            const name = rt.atoms.name(entry.atom_id) orelse continue;
+            try visitor(visitor_context, OwnDataProperty{
+                .name = name,
+                .value = stored,
+                .enumerable = entry.flags.enumerable,
+            });
+        }
+    }
+
+    pub const Buffer = struct {
+        pub fn isTypedArrayObject(obj: *Object) bool {
+            return zjs_builtins.buffer.isTypedArrayObject(toCore(obj));
+        }
+
+        pub fn typedArrayByteLength(rt: *JSRuntime, obj: *Object) !usize {
+            return zjs_builtins.buffer.typedArrayByteLength(rt, toCore(obj));
+        }
+
+        pub fn ownedBytesFromObject(rt: *JSRuntime, obj: *Object) ![]u8 {
+            const bytes = value.Bytes.fromObject(toCore(obj)) catch |err| return bufferViewError(err);
+            return rt.memory.allocator.dupe(u8, bytes.slice());
+        }
+
+        pub fn createUint8ArrayFromBytes(rt: *JSRuntime, global: *Object, bytes: []const u8) !value.Value {
+            return zjs_exec.shared.createUint8ArrayFromBytes(rt, toCore(global), bytes);
+        }
+
+        /// Consumes bytes allocated by `rt.memory` on success and failure.
+        pub fn createUint8ArrayFromOwnedBytes(rt: *JSRuntime, global: *Object, bytes: []u8) !value.Value {
+            var bytes_owned = true;
+            errdefer if (bytes_owned) rt.memory.free(u8, bytes);
+
+            if (bytes.len > @as(usize, @intCast(std.math.maxInt(i32)))) return error.RangeError;
+            const buffer_proto = try constructorPrototypeObject(rt, global, "ArrayBuffer");
+            const buffer_value = try zjs_builtins.buffer.arrayBufferConstructLength(rt, 0, null, optionalToCore(buffer_proto));
+            var buffer_owned = true;
+            errdefer if (buffer_owned) buffer_value.free(rt);
+
+            const buffer = fromValue(buffer_value) orelse return error.TypeError;
+            const buffer_core = toCore(buffer);
+            try buffer_core.installByteStorage(rt, bytes);
+            bytes_owned = false;
+
+            const typed_array_proto = try constructorPrototypeObject(rt, global, "Uint8Array");
+            buffer_owned = false;
+            return zjs_builtins.buffer.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer_core, optionalToCore(typed_array_proto));
+        }
+
+        fn bufferViewError(err: value.Bytes.Error) anyerror {
+            return switch (err) {
+                error.TypeError, error.Detached, error.OutOfBounds, error.InvalidStore, error.ReadOnly => error.TypeError,
+            };
+        }
+    };
+
+    pub fn createPlain(rt: *JSRuntime) !*Object {
+        return fromCore(try CoreObject.create(rt, zjs_core.class.ids.object, null));
+    }
+
+    pub fn createError(rt: *JSRuntime, prototype: ?*Object) !*Object {
+        return fromCore(try CoreObject.create(rt, zjs_core.class.ids.error_, optionalToCore(prototype)));
+    }
+
+    pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
+        return fromCore(try CoreObject.createArray(rt, optionalToCore(prototype)));
+    }
+
+    pub fn createArrayValue(rt: *JSRuntime, prototype: ?*Object) !value.Value {
+        return toValue(try createArray(rt, prototype));
+    }
+
+    pub fn createArrayBuffer(rt: *JSRuntime, prototype: ?*Object) !*Object {
+        return fromCore(try CoreObject.create(rt, zjs_core.class.ids.array_buffer, optionalToCore(prototype)));
+    }
+
+    pub fn fromValue(v: value.Value) ?*Object {
+        return if (coreFromValue(v)) |obj| fromCore(obj) else null;
+    }
+
     pub fn isCallableValue(v: value.Value) bool {
-        const obj = fromValue(v) orelse return false;
+        const obj = coreFromValue(v) orelse return false;
         return obj.class_id == zjs_core.class.ids.c_function or
             obj.class_id == zjs_core.class.ids.bytecode_function or
             obj.class_id == zjs_core.class.ids.c_closure or
@@ -327,7 +426,7 @@ pub const object = struct {
     }
 
     pub fn isPromiseObject(obj: *Object) bool {
-        return obj.class_id == zjs_core.class.ids.promise;
+        return toCore(obj).class_id == zjs_core.class.ids.promise;
     }
 
     pub fn isPromiseValue(v: value.Value) bool {
@@ -336,19 +435,19 @@ pub const object = struct {
     }
 
     pub fn isArrayBufferObject(obj: *Object) bool {
-        return obj.class_id == zjs_core.class.ids.array_buffer;
+        return toCore(obj).class_id == zjs_core.class.ids.array_buffer;
     }
 
     pub fn isTypedArrayObject(obj: *Object) bool {
-        return zjs_builtins.buffer.isTypedArrayObject(obj);
+        return zjs_builtins.buffer.isTypedArrayObject(toCore(obj));
     }
 
     pub fn typedArrayByteLength(rt: *JSRuntime, obj: *Object) !usize {
-        return zjs_builtins.buffer.typedArrayByteLength(rt, obj);
+        return zjs_builtins.buffer.typedArrayByteLength(rt, toCore(obj));
     }
 
     pub fn arrayBufferConstructLength(rt: *JSRuntime, len: usize, proto: ?*Object) !value.Value {
-        return zjs_builtins.buffer.arrayBufferConstructLength(rt, len, null, proto);
+        return zjs_builtins.buffer.arrayBufferConstructLength(rt, len, null, optionalToCore(proto));
     }
 
     pub fn typedArrayConstructFullBufferOwned(
@@ -359,37 +458,38 @@ pub const object = struct {
         buffer: *Object,
         prototype: ?*Object,
     ) !value.Value {
-        return zjs_builtins.buffer.typedArrayConstructFullBufferOwned(rt, @intCast(element_size), kind, buffer_value, buffer, prototype);
+        return zjs_builtins.buffer.typedArrayConstructFullBufferOwned(rt, @intCast(element_size), kind, buffer_value, toCore(buffer), optionalToCore(prototype));
     }
 
-    pub fn atomFromUInt32(index: u32) zjs_core.Atom {
+    fn atomFromUInt32(index: u32) zjs_core.Atom {
         return zjs_core.atom.atomFromUInt32(index);
-    }
-
-    pub fn prototypeAtom() zjs_core.Atom {
-        return zjs_core.atom.ids.prototype;
-    }
-
-    pub fn predefinedStringAtom(name: []const u8) ?zjs_core.Atom {
-        return zjs_core.atom.predefinedId(name, .string);
     }
 
     pub fn getProperty(rt: *JSRuntime, obj: *Object, name: []const u8) !value.Value {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        return obj.getProperty(key);
+        return toCore(obj).getProperty(key);
+    }
+
+    pub fn getOwnIndexPropertyValue(rt: *JSRuntime, obj: *Object, index: u32) ?value.Value {
+        const desc = toCore(obj).getOwnProperty(atomFromUInt32(index)) orelse return null;
+        if (!desc.value_present) {
+            desc.destroy(rt);
+            return null;
+        }
+        return desc.value;
     }
 
     pub fn defineValueProperty(rt: *JSRuntime, obj: *Object, name: []const u8, v: value.Value) !void {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        try obj.defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, true, true, true));
+        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, true, true, true));
     }
 
     pub fn defineHiddenValueProperty(rt: *JSRuntime, obj: *Object, name: []const u8, v: value.Value) !void {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        try obj.defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, false, false, false));
+        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, false, false, false));
     }
 
     pub fn defineAccessorProperty(
@@ -401,7 +501,7 @@ pub const object = struct {
     ) !void {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        try obj.defineOwnProperty(rt, key, zjs_core.Descriptor.accessor(getter, setter, true, true));
+        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.accessor(getter, setter, true, true));
     }
 
     pub fn defineStringProperty(rt: *JSRuntime, obj: *Object, name: []const u8, bytes: []const u8) !void {
@@ -426,7 +526,7 @@ pub const object = struct {
 
     pub fn defineStringArrayGlobal(ctx: *JSContext, name: []const u8, items: []const []const u8) !void {
         const rt = ctx.runtimePtr();
-        const global = try ctx.globalObject();
+        const global = fromCore(try ctx.globalObject());
         const values = try rt.memory.alloc(value.Value, items.len);
         defer rt.memory.free(value.Value, values);
         var initialized: usize = 0;
@@ -440,12 +540,13 @@ pub const object = struct {
 
         const array_prototype = try constructorPrototypeObject(rt, global, "Array");
         const array = try createArray(rt, array_prototype);
-        const array_value = array.value();
+        const array_value = toValue(array);
         errdefer array_value.free(rt);
+        const array_core = toCore(array);
         for (values, 0..) |item, index| {
-            try array.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item, true, true, true));
+            try array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item, true, true, true));
         }
-        array.length = @intCast(items.len);
+        array_core.length = @intCast(items.len);
         try defineValueProperty(rt, global, name, array_value);
         array_value.free(rt);
     }
@@ -453,21 +554,99 @@ pub const object = struct {
     pub fn constructorPrototypeObject(rt: *JSRuntime, global: *Object, name: []const u8) !?*Object {
         const key = try rt.internAtom(name);
         defer rt.atoms.free(key);
-        const constructor_value = global.getProperty(key);
+        const constructor_value = toCore(global).getProperty(key);
         defer constructor_value.free(rt);
-        const constructor = fromValue(constructor_value) orelse return null;
+        const constructor = coreFromValue(constructor_value) orelse return null;
         const prototype_value = constructor.getProperty(zjs_core.atom.ids.prototype);
         defer prototype_value.free(rt);
         return fromValue(prototype_value);
     }
 
     pub fn appendArrayValue(rt: *JSRuntime, array: *Object, v: value.Value) !void {
-        try array.defineOwnProperty(
+        const array_core = toCore(array);
+        try array_core.defineOwnProperty(
             rt,
-            atomFromUInt32(array.length),
+            atomFromUInt32(array_core.length),
             zjs_core.Descriptor.data(v, true, true, true),
         );
-        array.length += 1;
+    }
+};
+
+test "public object appendArrayValue maintains array length once" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const array = try object.createArray(rt, null);
+    const array_value = object.toValue(array);
+    defer array_value.free(rt);
+
+    try object.appendArrayValue(rt, array, value.int32(1));
+    try object.appendArrayValue(rt, array, value.int32(2));
+
+    try std.testing.expectEqual(@as(u32, 2), object.arrayLength(array));
+    const first = object.getOwnIndexPropertyValue(rt, array, 0).?;
+    defer first.free(rt);
+    const second = object.getOwnIndexPropertyValue(rt, array, 1).?;
+    defer second.free(rt);
+    try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
+    try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
+}
+
+test "public Buffer helpers create and copy Uint8Array bytes" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try JSContext.create(rt);
+    defer ctx.destroy();
+
+    const global = try context.globalObject(ctx);
+    const value_from_copy = try object.Buffer.createUint8ArrayFromBytes(rt, global, "abc");
+    defer value_from_copy.free(rt);
+    const typed_array = object.fromValue(value_from_copy).?;
+    const copied = try object.Buffer.ownedBytesFromObject(rt, typed_array);
+    defer rt.memory.allocator.free(copied);
+    try std.testing.expectEqualStrings("abc", copied);
+
+    const owned = try rt.memory.alloc(u8, 3);
+    @memcpy(owned, "xyz");
+    const value_from_owned = try object.Buffer.createUint8ArrayFromOwnedBytes(rt, global, owned);
+    defer value_from_owned.free(rt);
+    const owned_typed_array = object.fromValue(value_from_owned).?;
+    const copied_owned = try object.Buffer.ownedBytesFromObject(rt, owned_typed_array);
+    defer rt.memory.allocator.free(copied_owned);
+    try std.testing.expectEqualStrings("xyz", copied_owned);
+}
+
+pub const context = struct {
+    pub const Options = zjs_kernel.ContextOptions;
+    pub const EvalMode = zjs_kernel.EvalMode;
+    pub const EvalOptions = zjs_kernel.EvalOptions;
+    pub const EvalTiming = zjs_kernel.EvalTiming;
+    pub const DataPropertyOptions = zjs_kernel.DataPropertyOptions;
+    pub const PropertyAccessOptions = zjs_kernel.PropertyAccessOptions;
+    pub const PropertyDescriptor = zjs_kernel.PropertyDescriptor;
+    pub const ErrorOptions = zjs_kernel.ErrorOptions;
+    pub const ScriptEvalOptions = zjs_kernel.ScriptEvalOptions;
+    pub const FunctionCallOptions = struct {
+        this_value: ?value.Value = null,
+        output: ?*std.Io.Writer = null,
+        realm_global: ?*object.Object = null,
+    };
+
+    pub fn globalObject(ctx: *JSContext) !*object.Object {
+        return object.fromCore(try ctx.globalObject());
+    }
+
+    pub fn callFunction(
+        ctx: *JSContext,
+        callee: value.Value,
+        args: []const value.Value,
+        options: @This().FunctionCallOptions,
+    ) !value.Value {
+        return ctx.callFunction(callee, args, .{
+            .this_value = options.this_value,
+            .output = options.output,
+            .realm_global = object.optionalToCore(options.realm_global),
+        });
     }
 };
 
@@ -560,6 +739,11 @@ test "public root exposes only the explicit runtime surface" {
     try std.testing.expect(!@hasDecl(@This(), "exec"));
     try std.testing.expect(!@hasDecl(@This(), "kernel"));
     try std.testing.expect(!@hasDecl(@This(), "low"));
+    try std.testing.expect(!@hasDecl(@This(), "ContextOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "EvalOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "EvalMode"));
+    try std.testing.expect(!@hasDecl(@This(), "EvalTiming"));
+    try std.testing.expect(!@hasDecl(@This(), "ScriptEvalOptions"));
 
     try std.testing.expect(@hasDecl(runtime, "EventLoop"));
     try std.testing.expect(@hasDecl(runtime, "EventLoopOptions"));
@@ -573,7 +757,27 @@ test "public root exposes only the explicit runtime surface" {
     try std.testing.expect(@hasDecl(runtime, "resolveModuleSpecifier"));
     try std.testing.expect(@hasDecl(runtime, "Plugin"));
     try std.testing.expect(@hasDecl(runtime, "PluginInstallOptions"));
-    try std.testing.expect(Object == zjs_kernel.Object);
+    try std.testing.expect(@typeInfo(object.Object) == .@"opaque");
+    try std.testing.expect(!@hasDecl(object.Object, "value"));
+    try std.testing.expect(!@hasDecl(@This(), "JSValueHandle"));
+    try std.testing.expect(!@hasDecl(@This(), "LocalHandle"));
+    try std.testing.expect(!@hasDecl(@This(), "HandleScope"));
+    try std.testing.expect(!@hasDecl(@This(), "WeakPersistent"));
+    try std.testing.expect(!@hasDecl(@This(), "WeakPersistentValue"));
+    try std.testing.expect(!@hasDecl(@This(), "DataPropertyOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "PropertyAccessOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "PropertyDescriptor"));
+    try std.testing.expect(!@hasDecl(@This(), "ExternalFunctionOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "FunctionCallOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "ErrorOptions"));
+    try std.testing.expect(!@hasDecl(@This(), "SharedArrayBufferRef"));
+    try std.testing.expect(!@hasDecl(@This(), "ExternalHostCall"));
+    try std.testing.expect(!@hasDecl(@This(), "ExternalHostCallFn"));
+    try std.testing.expect(!@hasDecl(@This(), "ExternalHostFinalizer"));
+    try std.testing.expect(!@hasDecl(@This(), "PropNameID"));
+    try std.testing.expect(!@hasDecl(@This(), "JSString"));
+    try std.testing.expect(!@hasDecl(@This(), "JSBytes"));
+    try std.testing.expect(!@hasDecl(@This(), "binding"));
 
     try std.testing.expect(!@hasDecl(runtime, "event_loop"));
     try std.testing.expect(!@hasDecl(runtime, "plugin"));

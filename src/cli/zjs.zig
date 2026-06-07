@@ -58,7 +58,7 @@ pub const EvalCommand = struct {
 pub const FileCommand = struct {
     path: []const u8,
     script_args: []const []const u8,
-    mode: zjs.EvalMode = .script,
+    mode: zjs.context.EvalMode = .script,
     options: RuntimeOptions = .{},
 };
 
@@ -176,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     var opcode_profile = zjs.OpcodeProfile{};
-    var eval_timing = zjs.EvalTiming{};
+    var eval_timing = zjs.context.EvalTiming{};
     var include_ns: u64 = 0;
     var setup_ns: u64 = 0;
     var eval_ns: u64 = 0;
@@ -421,7 +421,7 @@ fn monotonicNanos() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
-fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.EvalMode) zjs.EvalMode {
+fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.context.EvalMode) zjs.context.EvalMode {
     if (explicit_mode == .module) return .module;
     if (std.mem.endsWith(u8, path, ".mjs")) return .module;
     return if (sourceLooksLikeModule(source)) .module else .script;
@@ -564,7 +564,7 @@ const PerfJsonTimings = struct {
     include_ns: u64,
     eval_ns: u64,
     jobs_ns: u64,
-    zjs: zjs.EvalTiming,
+    zjs: zjs.context.EvalTiming,
 };
 
 fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?*const zjs.OpcodeProfile, timings: PerfJsonTimings) !void {
@@ -934,25 +934,25 @@ test "zjs perf json opcode profile includes counters and rows" {
 test "zjs args accept module file" {
     const command = try parseArgs(&.{ "-m", "input.mjs" });
     try std.testing.expectEqualStrings("input.mjs", command.file.path);
-    try std.testing.expectEqual(zjs.EvalMode.module, command.file.mode);
+    try std.testing.expectEqual(zjs.context.EvalMode.module, command.file.mode);
 }
 
 test "zjs args accept module file script arguments" {
     const command = try parseArgs(&.{ "-m", "input.mjs", "arg" });
     try std.testing.expectEqualStrings("input.mjs", command.file.path);
-    try std.testing.expectEqual(zjs.EvalMode.module, command.file.mode);
+    try std.testing.expectEqual(zjs.context.EvalMode.module, command.file.mode);
     try std.testing.expectEqual(@as(usize, 2), command.file.script_args.len);
     try std.testing.expectEqualStrings("input.mjs", command.file.script_args[0]);
     try std.testing.expectEqualStrings("arg", command.file.script_args[1]);
 }
 
 test "zjs detects module mode from extension and static syntax" {
-    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.mjs", "console.log(1)", .script));
-    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
-    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.js", "export const value = 1;", .script));
-    try std.testing.expectEqual(zjs.EvalMode.module, detectFileMode("input.js", "console.log(import.meta.url)", .script));
-    try std.testing.expectEqual(zjs.EvalMode.script, detectFileMode("input.js", "const s = 'import x from y';\nimport('./dep.mjs')", .script));
-    try std.testing.expectEqual(zjs.EvalMode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.mjs", "console.log(1)", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "export const value = 1;", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "console.log(import.meta.url)", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "const s = 'import x from y';\nimport('./dep.mjs')", .script));
+    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
 }
 
 test "zjs module specifier resolver uses referrer directory" {
