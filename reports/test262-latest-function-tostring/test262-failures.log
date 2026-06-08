@@ -1,1 +1,0 @@
-quickjs/test262/test/built-ins/Function/prototype/toString/bound-function.js	TypeError	TypeError: not a function     at <anonymous> (quickjs/test262/test/built-ins/Function/prototype/toString/bound-function.js:7:20)

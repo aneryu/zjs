@@ -1,9 +1,8 @@
 # Performance Workflow
 
-This directory contains performance notes and historical reports for `zjs`.
-The previous local C QuickJS comparison reports are retained as historical
-context. The active performance gate is now a ZJS self-baseline regression
-check, so it does not require a local C QuickJS binary.
+This directory contains performance notes and checked performance artifacts for
+`zjs`. The active performance gate is a ZJS self-baseline regression check, so
+it does not require a local C QuickJS binary.
 
 Current design notes:
 
@@ -44,60 +43,33 @@ results for arithmetic, dense array, object property, and string loops before
 emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
 release gate.
 
-## Checked-In Reports
+## Checked-In Artifacts
 
-The active checked-in baseline is
+The active checked-in self baseline is
 `reports/perf/baseline/microbench-zjs-releasefast.json`.
 
-The historical C QuickJS comparison report is
-`reports/perf/current/microbench.json`. Its summary is:
-
-- 73 selected cases.
-- 73 compatible cases in the tracked report.
-- 0 unsupported cases in the tracked report.
-- 0 skipped cases.
-- Historical geometric mean `zjs/qjs`: `0.8414527007796604`.
-
-Generate the top-10 slowest ratio summary from a JSON report:
-
-```sh
-node tools/perf/top10_report.js \
-  --output reports/perf/current/top10.md \
-  reports/perf/current/microbench.json
-```
-
-Do not use the historical C QuickJS file as proof that the current working tree
-has the same relative timings.
-
-## Baselines
-
-Baseline reports live under `reports/perf/baseline/`.
-
-Record the environment:
+Its environment note is `reports/perf/baseline/env-zjs-self.md`. Refresh it
+with:
 
 ```sh
 node tools/perf/write_env.js \
   --iters 30 \
   --warmup 5 \
-  --output reports/perf/baseline/env.md
+  --output reports/perf/baseline/env-zjs-self.md \
+  --notes "ZJS self-baseline report; qjs is intentionally not configured for this gate."
 ```
 
-Generate the baseline top-10 summary:
+Runtime-profile artifacts are checked under `reports/perf/current/runtime/`,
+with their source scripts in `reports/perf/current/scripts/`.
 
-```sh
-node tools/perf/top10_report.js \
-  --output reports/perf/baseline/top10.md \
-  reports/perf/baseline/microbench-releasefast.json
-```
+## Self-Baseline Diffs
 
-## Diff Reports
-
-Compare two JSON reports:
+Compare two `zjs-microbench` JSON reports:
 
 ```sh
 node tools/perf/diff_report.js \
-  reports/perf/baseline/microbench-releasefast.json \
-  reports/perf/current/microbench.json
+  reports/perf/baseline/microbench-zjs-releasefast.json \
+  .zig-cache/perf/current/microbench-zjs-releasefast.json
 ```
 
 By default, the diff fails when sample settings differ, compatible case count
@@ -116,30 +88,12 @@ node tools/perf/diff_report.js --allow-sample-config-drift OLD.json NEW.json
 Use `--allow-sample-config-drift` only for retrospective diagnostics; gate-like
 comparisons should use matching `iters` and `warmup`.
 
-For the checked-in historical reports, refresh the local summary bundle with:
-
-```sh
-zig build perf-compare --summary all
-```
-
-This records `reports/perf/current/env.md`, refreshes
-`reports/perf/current/top10.md`, and writes `reports/perf/current/diff.md` from
-the checked-in `zjs-microbench` JSON reports. It does not refresh
-`reports/perf/current/microbench.json`; `zig build perf-benchmark` is a separate
-single-script runtime smoke that emits CLI `--perf-json`, not the multi-case
-comparison format consumed by `top10_report.js` and `diff_report.js`.
-
-The build step allows the checked-in baseline/current sample-count drift and
-reports per-case regressions without failing. Performance-sensitive PRs should
-still run `zig build perf-self-check --summary all`, and may also run a strict
-C QuickJS comparison when an external `qjs` binary is available.
-
 ## Runtime Profiling
 
 For coarse internal stage timing:
 
 ```sh
-zig-out/bin/zjs --perf-json tests/zig-smoke/arith.js 2> reports/perf/current/arith-perf.json
+zig-out/bin/zjs --perf-json tests/zig-smoke/arith.js 2> .zig-cache/perf/current/arith-perf.json
 ```
 
 The JSON is written to stderr so script stdout remains comparable. Use the

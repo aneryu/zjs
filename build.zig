@@ -317,43 +317,6 @@ pub fn build(b: *std.Build) void {
         perf_runtime_profiles_step.dependOn(profile_step);
     }
 
-    const run_perf_env = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/write_env.js",
-        "--iters",
-        "30",
-        "--warmup",
-        "5",
-        "--output",
-        "reports/perf/current/env.md",
-        "--notes",
-        "top10/diff are generated from checked-in zjs-microbench JSON reports; perf-benchmark is a separate runtime smoke and does not refresh reports/perf/current/microbench.json.",
-    });
-
-    const run_perf_top10 = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/top10_report.js",
-        "--output",
-        "reports/perf/current/top10.md",
-        "reports/perf/current/microbench.json",
-    });
-    run_perf_top10.step.dependOn(&run_perf_env.step);
-
-    const run_perf_diff = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/diff_report.js",
-        "--allow-sample-config-drift",
-        "--warn-case-regressions",
-        "--output",
-        "reports/perf/current/diff.md",
-        "reports/perf/baseline/microbench-releasefast.json",
-        "reports/perf/current/microbench.json",
-    });
-    run_perf_diff.step.dependOn(&run_perf_top10.step);
-
-    const perf_compare_step = b.step("perf-compare", "Refresh checked-in performance report environment, top-10, and diff summaries");
-    perf_compare_step.dependOn(&run_perf_diff.step);
-
     const run_perf_self_current = b.addSystemCommand(&.{
         "bun",
         "tools/compare/run_microbench.js",

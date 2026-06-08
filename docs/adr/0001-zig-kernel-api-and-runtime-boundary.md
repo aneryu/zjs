@@ -18,8 +18,8 @@ longer accepted. The future public surface should be a low-level Zig kernel API
 with explicit lifecycle and ownership, not a convenience facade that hides
 runtime/context/value costs.
 
-`docs/engine-api-v1.md` is therefore legacy direction for future public API
-work. This ADR supersedes it for kernel/runtime boundary decisions.
+The former Engine API v1 document has been removed from the active docs. This
+ADR is the public API and kernel/runtime boundary source of truth.
 
 ## How To Read This ADR
 

@@ -73,8 +73,7 @@ and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
 
 The current kernel/runtime boundary is tracked in
 [docs/adr/0001-zig-kernel-api-and-runtime-boundary.md](docs/adr/0001-zig-kernel-api-and-runtime-boundary.md).
-Older Production v1 notes remain in [docs/production-grade-plan.md](docs/production-grade-plan.md)
-and related documents, but the former Engine facade direction is legacy.
+ADR 0001 is the active public API authority.
 
 The full direct test262 invocation is:
 
@@ -105,17 +104,15 @@ pending and is retried by a later GC pass.
 
 ## Performance
 
-The checked-in C QuickJS comparison reports under `reports/perf/` are
-historical artifacts from the previous local QuickJS comparison toolchain. The
-current repeatable performance gate is a ZJS self-baseline regression check,
-which does not require a C QuickJS binary:
+The repeatable performance gate is a ZJS self-baseline regression check, which
+does not require a C QuickJS binary:
 
 ```sh
 zig build perf-self-check --summary all
 ```
 
-See [docs/perf/README.md](docs/perf/README.md) for historical performance
-context. A smaller single-script diagnostic benchmark is also available:
+See [docs/perf/README.md](docs/perf/README.md) for performance workflow details.
+A smaller single-script diagnostic benchmark is also available:
 
 ```sh
 zig build perf-benchmark --summary all

@@ -1,8 +1,6 @@
 # Production v1 Release Checklist
 
-Use this checklist for an engine-only Production v1 release decision. The
-broader roadmap is tracked in
-[production-grade-plan.md](production-grade-plan.md).
+Use this checklist for an engine-only Production v1 release decision.
 
 ## API
 

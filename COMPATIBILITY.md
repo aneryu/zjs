@@ -105,12 +105,16 @@ record the QuickJS reference evidence with the owning change.
 
 ## Production v1
 
-The engine-only Production v1 target is defined in
-[docs/compatibility-v1.md](docs/compatibility-v1.md). The top-level release
-gate is:
+The engine-only Production v1 compatibility target is QuickJS parity within the
+repository validation profile. Required gates from a clean checkout:
 
 ```sh
+zig build test --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
+zig build test262-gate --summary all
 zig build engine-production-gate --summary all
+git diff --check
 ```
 
-This gate is expected to pass for the active Production v1 validation profile.
+The `engine-production-gate` build step is the top-level engine release gate and
+is expected to pass for the active Production v1 validation profile.
