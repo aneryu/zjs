@@ -7996,6 +7996,15 @@ pub fn qjsEvalGlobalScriptSource(
     const stack_mod = @import("stack.zig");
     const zjs_vm = @import("zjs_vm.zig");
 
+    const context_global = ctx.global;
+    const use_global_lexicals = context_global == null or context_global.? != global;
+    const saved_lexicals = ctx.lexicals;
+    if (use_global_lexicals) ctx.lexicals = global.global_lexicals;
+    defer if (use_global_lexicals) {
+        global.global_lexicals = ctx.lexicals;
+        ctx.lexicals = saved_lexicals;
+    };
+
     var compiled = try frontend.parser.parse(ctx.runtime, source, .{ .mode = .script, .filename = filename, .strict = false, .return_completion = true });
     defer compiled.deinit();
     if (compiled.syntax_error != null) return error.SyntaxError;

@@ -12033,6 +12033,16 @@ pub fn indirectEval(
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
     try appendSourceStringUtf8(ctx.runtime, &source, args[0]);
+
+    const context_global = ctx.global;
+    const use_global_lexicals = context_global == null or context_global.? != eval_global;
+    const saved_lexicals = ctx.lexicals;
+    if (use_global_lexicals) ctx.lexicals = eval_global.global_lexicals;
+    defer if (use_global_lexicals) {
+        eval_global.global_lexicals = ctx.lexicals;
+        ctx.lexicals = saved_lexicals;
+    };
+
     if (try simpleEvalRegExpLiteral(ctx, eval_global, source.items)) |value| return value;
     var compiled = try frontend.parser.parse(ctx.runtime, source.items, .{ .mode = .eval_indirect, .filename = "<eval>", .strict = false });
     defer compiled.deinit();

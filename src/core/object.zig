@@ -1055,6 +1055,7 @@ pub const Object = struct {
     is_array: bool = false,
     is_proxy: bool = false,
     is_global: bool = false,
+    global_lexicals: ?*Object = null,
     shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
     cached_iterator_next: ?JSValue = null,
     is_html_dda: bool = false,
@@ -1498,6 +1499,11 @@ pub const Object = struct {
         self.destroyBoundFunctionPayload(rt);
         self.destroyCollectionPayload(rt);
         self.destroyIteratorPayload(rt);
+        const global_lexicals = self.global_lexicals;
+        self.global_lexicals = null;
+        if (global_lexicals) |env| {
+            if (rt.gc.phase != .deinit) env.value().free(rt);
+        }
         const shared_lazy_native_functions = self.shared_lazy_native_functions;
         self.shared_lazy_native_functions = null;
         if (shared_lazy_native_functions) |cache| {
@@ -5765,6 +5771,7 @@ pub const Object = struct {
         };
 
         try Helper.callVisitObject(visitor, &self.prototype);
+        try Helper.callVisitObject(visitor, &self.global_lexicals);
         try Helper.traceOptValue(visitor, &self.cached_iterator_next);
         if (self.shared_lazy_native_functions) |cache| {
             for (cache) |*maybe_cached| {

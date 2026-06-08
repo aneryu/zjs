@@ -913,10 +913,7 @@ fn syntheticBytesModuleValue(ctx: *core.JSContext, global: *core.Object, source_
 }
 
 fn markImmutableArrayBuffer(rt: *core.JSRuntime, object: *core.Object) !void {
-    object.markImmutablePrototype();
-    const visible = try rt.internAtom("immutable");
-    defer rt.atoms.free(visible);
-    try object.defineOwnProperty(rt, visible, core.Descriptor.data(core.JSValue.boolean(true), false, false, true));
+    try builtins.buffer.markArrayBufferImmutable(rt, object);
 }
 
 fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
