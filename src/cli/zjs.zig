@@ -223,10 +223,6 @@ pub fn main(init: std.process.Init) !void {
         try printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    zjs.host.installTest262HostGlobals(runtime.context) catch |err| {
-        try printError(io, "zjs: test host setup failed: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
-    };
     runtime.context.setPreserveUncaughtException(true);
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.

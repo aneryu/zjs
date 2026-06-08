@@ -237,6 +237,56 @@ fn undefinedDropPairSize(code: []const u8, pc: usize) ?usize {
     return null;
 }
 
+const AddLocPeephole = struct {
+    idx: u16,
+    rhs_op: u8,
+    rhs_size: usize,
+    total_size: usize,
+};
+
+fn matchAddLocPeephole(code: []const u8, pc: usize) ?AddLocPeephole {
+    if (pc + 3 > code.len) return null;
+    const first_op = code[pc];
+    if (first_op != opcode.op.get_loc) return null;
+    const idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
+    if (idx >= 256) return null;
+
+    const rhs_pc = pc + 3;
+    if (rhs_pc >= code.len) return null;
+    const rhs_op = code[rhs_pc];
+
+    const rhs_size = switch (rhs_op) {
+        opcode.op.push_i32, opcode.op.push_const, opcode.op.push_atom_value => @as(usize, 5),
+        opcode.op.get_loc, opcode.op.get_arg, opcode.op.get_var_ref => @as(usize, 3),
+        else => return null,
+    };
+
+    const suffix_pc = rhs_pc + rhs_size;
+    if (suffix_pc + 6 > code.len) return null;
+
+    if (code[suffix_pc] != opcode.op.add) return null;
+    if (code[suffix_pc + 1] != opcode.op.dup) return null;
+    if (code[suffix_pc + 2] != opcode.op.put_loc) return null;
+
+    const put_idx = std.mem.readInt(u16, code[suffix_pc + 3 ..][0..2], .little);
+    if (put_idx != idx) return null;
+
+    if (code[suffix_pc + 5] != opcode.op.drop) return null;
+
+    var offset: usize = 1;
+    const total_len = rhs_size + 9;
+    while (offset < total_len) : (offset += 1) {
+        if (hasJumpTargetTo(code, pc + offset)) return null;
+    }
+
+    return .{
+        .idx = idx,
+        .rhs_op = rhs_op,
+        .rhs_size = rhs_size,
+        .total_size = total_len,
+    };
+}
+
 fn isTerminalOp(op_id: u8) bool {
     return switch (op_id) {
         opcode.op.goto,
@@ -396,6 +446,8 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
                 0
             else if (getLoc0Loc1PairSize(code, pc, use_short_opcodes) != null)
                 1
+            else if (matchAddLocPeephole(code, pc)) |_|
+                loweredInstrSize(code, pc + 3, use_short_opcodes) + 2
             else if (isAtomLabelU8Op(op))
                 instrSize(op)
             else if (isJumpOp(op)) blk: {
@@ -407,7 +459,7 @@ fn computeLayout(ctx: *const JSContext, positions: []usize, sizes: []usize, use_
 
             sizes[pc] = new_size;
             if (old_size != new_size) changed = true;
-            const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (getLoc0Loc1PairSize(code, pc, use_short_opcodes) orelse in_size)));
+            const next_pc = pc + (undefinedDropPairSize(code, pc) orelse (redundantReturnUndefSize(code, pc) orelse (getLoc0Loc1PairSize(code, pc, use_short_opcodes) orelse (if (matchAddLocPeephole(code, pc)) |p| p.total_size else in_size))));
             var boundary_pc = pc + 1;
             while (boundary_pc <= next_pc and boundary_pc < positions.len) : (boundary_pc += 1) {
                 positions[boundary_pc] = out_pc + new_size;
@@ -616,6 +668,12 @@ pub fn run(ctx: *JSContext) !void {
             output[out_idx] = opcode.op.get_loc0_loc1;
             out_idx += 1;
             i += pair_size;
+        } else if (matchAddLocPeephole(func.code, i)) |p| {
+            try emitLoweredInstruction(func.code, i + 3, output, &out_idx, use_short_opcodes);
+            output[out_idx] = opcode.op.add_loc;
+            output[out_idx + 1] = @intCast(p.idx);
+            out_idx += 2;
+            i += p.total_size;
         } else if (isJumpOp(op)) {
             const size = sizes[i];
             try emitJump(func.code, i, output, &out_idx, positions, size);

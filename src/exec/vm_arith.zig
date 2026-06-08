@@ -5,6 +5,7 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
+const shared_vm = @import("shared.zig");
 
 const op = bytecode.opcode.op;
 
@@ -579,6 +580,23 @@ pub fn addLocal(
 
     const rhs = try stack.pop();
     defer rhs.free(ctx.runtime);
+
+    const cell_opt = shared_vm.varRefCellFromValue(frame.locals[idx]);
+    const lhs_borrowed = if (cell_opt) |cell| (cell.varRefValueSlot().* orelse core.JSValue.undefinedValue()) else frame.locals[idx];
+    if (lhs_borrowed.isString()) {
+        const lhs = slotValueDup(frame.locals[idx]);
+        defer lhs.free(ctx.runtime);
+
+        const rhs_primitive = try toPrimitiveForAddition(ctx, output, global, rhs);
+        defer rhs_primitive.free(ctx.runtime);
+
+        const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
+
+        try setSlotValue(ctx, &frame.locals[idx], updated);
+        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+        return;
+    }
+
     const lhs = slotValueDup(frame.locals[idx]);
     defer lhs.free(ctx.runtime);
     if (lhs.asInt32()) |lhs_int| {

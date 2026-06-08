@@ -455,7 +455,10 @@ fn opcodeHasOwnDataIc(op_id: u8) bool {
         op_id == opcode.op.put_var or
         op_id == opcode.op.get_field or
         op_id == opcode.op.get_field2 or
-        op_id == opcode.op.put_field;
+        op_id == opcode.op.put_field or
+        op_id == opcode.op.get_field_data_slot or
+        op_id == opcode.op.get_global_data_slot or
+        op_id == opcode.op.get_global_lexical_slot;
 }
 
 fn bytecodeSkipsPropertyIc(code: []const u8) bool {

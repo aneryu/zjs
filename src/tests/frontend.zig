@@ -4160,7 +4160,7 @@ test "quick parser emits compound assignment and update statements" {
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
 
-    const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add);
+    const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add) + countOpcode(parsed.function.code, engine.bytecode.opcode.op.add_loc);
     const define_var_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.define_var);
     try std.testing.expect(add_count >= 1);
     try std.testing.expect(define_var_count <= 3);

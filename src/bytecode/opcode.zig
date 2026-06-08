@@ -105,30 +105,104 @@ pub const opcode_format_table: [256]Format = blk: {
 /// Returns the total byte length (opcode + operands) for the given
 /// opcode id, or 0 if no opcode occupies that id.
 pub fn sizeOf(op_id: u8) u8 {
+    if (op_id >= 176 and op_id <= 196) {
+        return switch (op_id) {
+            176 => 1,       // private_in
+            177 => 5,       // push_bigint_i32
+            178 => 1,       // nop
+            179...187 => 1, // push_minus1..push_7
+            188 => 2,       // push_i8
+            189 => 3,       // push_i16
+            190 => 2,       // push_const8
+            191 => 2,       // fclosure8
+            192 => 1,       // push_empty_string
+            193...195 => 2, // get_loc8..set_loc8
+            196 => 1,       // get_loc0_loc1
+            else => unreachable,
+        };
+    }
     return opcode_size[op_id];
 }
 
 /// Returns the operand format for the given opcode id (temp takes
 /// precedence in the 179..196 overlap range).
 pub fn formatOf(op_id: u8) Format {
+    if (op_id >= 176 and op_id <= 196) {
+        return switch (op_id) {
+            176 => .none,
+            177 => .i32,
+            178 => .none,
+            179...187 => .none_int,
+            188 => .i8,
+            189 => .i16,
+            190...191 => .const8,
+            192 => .none,
+            193...195 => .loc8,
+            196 => .none_loc,
+            else => unreachable,
+        };
+    }
     return opcode_format_table[op_id];
 }
 
-/// Baked opcode-name table for tooling. Indexed by opcode id; slots
-/// without a `DEF` entry contain the empty string.
 pub const opcode_name: [256][]const u8 = @import("opcodes_generated.zig").opcode_name;
 
 /// Returns the QuickJS opcode name for the given id, or "" if no
 /// `DEF` entry claims that id.
 pub fn nameOf(op_id: u8) []const u8 {
+    if (op_id >= 176 and op_id <= 196) {
+        return switch (op_id) {
+            176 => "private_in",
+            177 => "push_bigint_i32",
+            178 => "nop",
+            179 => "push_minus1",
+            180 => "push_0",
+            181 => "push_1",
+            182 => "push_2",
+            183 => "push_3",
+            184 => "push_4",
+            185 => "push_5",
+            186 => "push_6",
+            187 => "push_7",
+            188 => "push_i8",
+            189 => "push_i16",
+            190 => "push_const8",
+            191 => "fclosure8",
+            192 => "push_empty_string",
+            193 => "get_loc8",
+            194 => "put_loc8",
+            195 => "set_loc8",
+            196 => "get_loc0_loc1",
+            else => unreachable,
+        };
+    }
     return opcode_name[op_id];
 }
 
 pub fn nPopOf(op_id: u8) u8 {
+    if (op_id >= 176 and op_id <= 196) {
+        return switch (op_id) {
+            176 => 2,
+            177...193 => 0,
+            194...195 => 1,
+            196 => 0,
+            else => unreachable,
+        };
+    }
     return opcode_n_pop[op_id];
 }
 
 pub fn nPushOf(op_id: u8) u8 {
+    if (op_id >= 176 and op_id <= 196) {
+        return switch (op_id) {
+            176 => 1,
+            177...193 => 1,
+            194 => 0,
+            195 => 1,
+            196 => 2,
+            else => unreachable,
+        };
+    }
     return opcode_n_push[op_id];
 }
 

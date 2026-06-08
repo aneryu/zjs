@@ -747,11 +747,140 @@ pub fn run(ctx: *JSContext) !void {
         }
     }
 
+    const init_bypassed = if (ctx.function_def) |fd| blk: {
+        const bytes = try ctx.memory.alloc(bool, fd.vars.len);
+        @memset(bytes, false);
+
+        // Pre-pass: find init_pc for each var and check if any forward jump bypasses it
+        const init_pc = try ctx.memory.alloc(?usize, fd.vars.len);
+        @memset(init_pc, null);
+        defer ctx.memory.free(?usize, init_pc);
+
+        // First scan to find init_pc
+        var pc: usize = 0;
+        var scan_atom_idx: usize = 0;
+        while (pc < func.code.len) {
+            const op = func.code[pc];
+            if (op == opcode.op.eval) {
+                if (pc + 5 > func.code.len) return error.InvalidBytecode;
+                pc += 5;
+            } else if (op == opcode.op.apply_eval) {
+                if (pc + 2 > func.code.len) return error.InvalidBytecode;
+                pc += 2;
+            } else if (isScopeVarOp(op)) {
+                if (pc + 7 > func.code.len) return error.InvalidBytecode;
+                const atom_id = std.mem.readInt(u32, func.code[pc + 1 ..][0..4], .little);
+                const scope_level = std.mem.readInt(i16, func.code[pc + 5 ..][0..2], .little);
+                if (op == opcode.op.scope_put_var_init) {
+                    if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
+                        .local => |loc_idx| {
+                            if (loc_idx < fd.vars.len) {
+                                if (init_pc[loc_idx] == null) {
+                                    init_pc[loc_idx] = pc;
+                                }
+                            }
+                        },
+                        else => {},
+                    };
+                }
+                scan_atom_idx += 1;
+                pc += 7;
+            } else if (isScopePrivateFieldAt(func, pc, scan_atom_idx)) {
+                if (pc + 7 > func.code.len) return error.InvalidBytecode;
+                scan_atom_idx += 1;
+                pc += 7;
+            } else if (op == opcode.op.scope_make_ref) {
+                if (pc + 11 > func.code.len) return error.InvalidBytecode;
+                scan_atom_idx += 1;
+                pc += 11;
+            } else if (isScopeRefOp(op)) {
+                if (pc + 7 > func.code.len) return error.InvalidBytecode;
+                scan_atom_idx += 1;
+                pc += 7;
+            } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
+                if (pc + 3 > func.code.len) return error.InvalidBytecode;
+                pc += 3;
+            } else {
+                const size = instrSize(op);
+                if (pc + size > func.code.len) return error.InvalidBytecode;
+                if (hasAtomOperand(op)) {
+                    scan_atom_idx += 1;
+                }
+                pc += size;
+            }
+        }
+
+        // Second scan to check for bypassing forward jumps
+        pc = 0;
+        scan_atom_idx = 0;
+        while (pc < func.code.len) {
+            const op = func.code[pc];
+            var size: usize = undefined;
+            var is_scope_var = false;
+
+            if (op == opcode.op.eval) {
+                size = 5;
+            } else if (op == opcode.op.apply_eval) {
+                size = 2;
+            } else if (isScopeVarOp(op)) {
+                size = 7;
+                is_scope_var = true;
+            } else if (isScopePrivateFieldAt(func, pc, scan_atom_idx)) {
+                size = 7;
+                scan_atom_idx += 1;
+            } else if (op == opcode.op.scope_make_ref) {
+                size = 11;
+                scan_atom_idx += 1;
+            } else if (isScopeRefOp(op)) {
+                size = 7;
+                scan_atom_idx += 1;
+            } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
+                size = 3;
+            } else {
+                size = instrSize(op);
+                if (hasAtomOperand(op)) {
+                    scan_atom_idx += 1;
+                }
+            }
+
+            if (pc + size > func.code.len) return error.InvalidBytecode;
+
+            if (labelOperandOffset(op)) |offset| {
+                if (pc + offset + 4 <= func.code.len) {
+                    const old_target = std.mem.readInt(u32, func.code[pc + offset ..][0..4], .little);
+                    if (old_target > pc) { // forward jump
+                        for (fd.vars, 0..) |_, loc_idx| {
+                            if (init_pc[loc_idx]) |ipc| {
+                                if (pc < ipc and old_target > ipc) {
+                                    bytes[loc_idx] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (is_scope_var) {
+                scan_atom_idx += 1;
+            }
+            pc += size;
+        }
+
+        break :blk bytes;
+    } else @as([]bool, &.{});
+    defer if (init_bypassed.len != 0) ctx.memory.free(bool, init_bypassed);
+
     var output_size: usize = global_vars_size + top_level_closure_init_size + child_decl_init_size + prologue_size;
     var output_atom_count: usize = global_vars_atom_count;
     var jump_count: usize = 0;
     var i: usize = 0;
     var scan_atom_idx: usize = 0;
+    const var_initialized = if (ctx.function_def) |fd| blk: {
+        const bytes = try ctx.memory.alloc(bool, fd.vars.len);
+        @memset(bytes, false);
+        break :blk bytes;
+    } else @as([]bool, &.{});
+    defer if (var_initialized.len != 0) ctx.memory.free(bool, var_initialized);
     while (i < func.code.len) {
         const op = func.code[i];
         // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
@@ -832,9 +961,20 @@ pub fn run(ctx: *JSContext) !void {
                         output_atom_count += 1;
                         i += 7;
                         continue;
-                    } else if (isLexicalLocal(ctx, loc_idx) and
-                        (isConstLocal(ctx, loc_idx) or !useUncheckedLexicalLocals(ctx) or localTdzEmittedAtDecl(ctx, loc_idx)) and
-                        !(op == opcode.op.scope_put_var_init and localTdzEmittedAtDecl(ctx, loc_idx) and !isConstLocal(ctx, loc_idx)))
+                    } else if (blk: {
+                        if (!isLexicalLocal(ctx, loc_idx)) break :blk false;
+                        if (!useUncheckedLexicalLocals(ctx)) break :blk true;
+                        if (op == opcode.op.scope_put_var_init) {
+                            break :blk isConstLocal(ctx, loc_idx);
+                        } else if (op == opcode.op.scope_put_var) {
+                            if (isConstLocal(ctx, loc_idx)) break :blk true;
+                            const init_safe = var_initialized[loc_idx] and !init_bypassed[loc_idx];
+                            break :blk !init_safe and localTdzEmittedAtDecl(ctx, loc_idx);
+                        } else {
+                            const init_safe = var_initialized[loc_idx] and !init_bypassed[loc_idx];
+                            break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
+                        }
+                    })
                     {
                         // Lexical: 3-byte TDZ-check variant.
                         output_size += 3;
@@ -843,6 +983,9 @@ pub fn run(ctx: *JSContext) !void {
                         const local_op = lowerScopeVarOpLocal(op);
                         const form = selectLocForm(ctx, local_op, loc_idx);
                         output_size += form.size;
+                    }
+                    if (op == opcode.op.scope_put_var_init and loc_idx < var_initialized.len) {
+                        var_initialized[loc_idx] = true;
                     }
                 },
             } else if (lookupClosureVar(ctx, atom_id)) |ref_idx| {
@@ -1092,6 +1235,13 @@ pub fn run(ctx: *JSContext) !void {
         }
     }
 
+    const var_initialized_pass2 = if (ctx.function_def) |fd| blk: {
+        const bytes = try ctx.memory.alloc(bool, fd.vars.len);
+        @memset(bytes, false);
+        break :blk bytes;
+    } else @as([]bool, &.{});
+    defer if (var_initialized_pass2.len != 0) ctx.memory.free(bool, var_initialized_pass2);
+
     i = 0;
     while (i < func.code.len) {
         // pc_map for input pc i maps to output pc out_idx (after the
@@ -1209,9 +1359,20 @@ pub fn run(ctx: *JSContext) !void {
                         in_atom_idx += 1;
                         i += 7;
                         continue;
-                    } else if (isLexicalLocal(ctx, loc_idx) and
-                        (isConstLocal(ctx, loc_idx) or !useUncheckedLexicalLocals(ctx) or localTdzEmittedAtDecl(ctx, loc_idx)) and
-                        !(op == opcode.op.scope_put_var_init and localTdzEmittedAtDecl(ctx, loc_idx) and !isConstLocal(ctx, loc_idx)))
+                    } else if (blk: {
+                        if (!isLexicalLocal(ctx, loc_idx)) break :blk false;
+                        if (!useUncheckedLexicalLocals(ctx)) break :blk true;
+                        if (op == opcode.op.scope_put_var_init) {
+                            break :blk isConstLocal(ctx, loc_idx);
+                        } else if (op == opcode.op.scope_put_var) {
+                            if (isConstLocal(ctx, loc_idx)) break :blk true;
+                            const init_safe = var_initialized_pass2[loc_idx] and !init_bypassed[loc_idx];
+                            break :blk !init_safe and localTdzEmittedAtDecl(ctx, loc_idx);
+                        } else {
+                            const init_safe = var_initialized_pass2[loc_idx] and !init_bypassed[loc_idx];
+                            break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
+                        }
+                    })
                     {
                         output[out_idx] = lowerScopeVarOpLexical(op);
                         std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
@@ -1227,6 +1388,9 @@ pub fn run(ctx: *JSContext) !void {
                             else => unreachable,
                         }
                         out_idx += form.size;
+                    }
+                    if (op == opcode.op.scope_put_var_init and loc_idx < var_initialized_pass2.len) {
+                        var_initialized_pass2[loc_idx] = true;
                     }
                     in_atom_idx += 1;
                 },

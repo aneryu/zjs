@@ -126,50 +126,7 @@ pub const host = struct {
         try object.defineStringArrayGlobal(ctx, "execArgv", exec_argv);
     }
 
-    pub fn installTest262HostGlobals(ctx: *JSContext) !void {
-        const rt = ctx.runtimePtr();
-        const global = try ctx.globalObject();
-        const ns_value = try ctx.getProperty(global.value(), "$262");
-        defer ns_value.free(rt);
 
-        var created_ns = false;
-        const ns_target = if (ns_value.isObject()) ns_value else result: {
-            const obj_value = try ctx.createObject();
-            try ctx.defineDataProperty(global.value(), "$262", obj_value, .{ .enumerable = true });
-            created_ns = true;
-            break :result obj_value;
-        };
-        defer if (created_ns) ns_target.free(rt);
-
-        const methods = [_]struct {
-            name: []const u8,
-            length: i32,
-            function: Function,
-        }{
-            .{ .name = "evalScript", .length = 1, .function = wrapExternalWithFunc(test262EvalScript) },
-            .{ .name = "createRealm", .length = 0, .function = wrapExternal(test262CreateRealm) },
-            .{ .name = "gc", .length = 0, .function = wrapExternal(test262Gc) },
-        };
-        inline for (methods) |method| {
-            const func_value = try createExternalHostFunctionWithRealm(ctx, method.name, method.length, method.function, false, global);
-            defer func_value.free(rt);
-            try ctx.defineDataProperty(ns_target, method.name, func_value, .{ .enumerable = false });
-        }
-    }
-
-    fn createExternalHostFunctionWithRealm(
-        ctx: *JSContext,
-        name: []const u8,
-        length: i32,
-        function: Function,
-        with_prototype: bool,
-        realm_global: ?*CoreObject,
-    ) !value.Value {
-        return ctx.createExternalFunction(name, length, &test_host_context, function, null, .{
-            .with_prototype = with_prototype,
-            .realm_global = realm_global,
-        });
-    }
 
     pub fn evalGlobalScriptSource(
         ctx: *JSContext,
@@ -217,68 +174,6 @@ pub const host = struct {
         return evalGlobalScriptSourceCore(ctx, output, global, source, filename);
     }
 
-    fn wrapExternal(comptime function: anytype) Function {
-        return struct {
-            fn call(_: *anyopaque, host_call: Call) anyerror!value.Value {
-                const ctx: *JSContext = @ptrCast(@alignCast(host_call.ctx));
-                return function(ctx, host_call.output, host_call.global, host_call.args);
-            }
-        }.call;
-    }
-
-    fn wrapExternalWithFunc(comptime function: anytype) Function {
-        return struct {
-            fn call(_: *anyopaque, host_call: Call) anyerror!value.Value {
-                const ctx: *JSContext = @ptrCast(@alignCast(host_call.ctx));
-                const global = host_call.global orelse host_call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-                return function(ctx, host_call.output, global, host_call.func_obj, host_call.args);
-            }
-        }.call;
-    }
-
-    fn test262EvalScript(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: *CoreObject,
-        function_object: *CoreObject,
-        args: []const value.Value,
-    ) !value.Value {
-        if (args.len == 0) return value.undefinedValue();
-        if (!args[0].isString()) return error.TypeError;
-        const eval_global = (try ctx.functionRealmGlobal(function_object.value())) orelse global;
-        return evalGlobalScriptValueCore(ctx, output, eval_global, args[0], "<evalScript>");
-    }
-
-    fn test262CreateRealm(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: ?*CoreObject,
-        args: []const value.Value,
-    ) !value.Value {
-        _ = output;
-        _ = global;
-        _ = args;
-        const realm_value = try ctx.createRealm();
-        errdefer realm_value.free(ctx.runtimePtr());
-        const realm_global = try ctx.realmGlobalObject(realm_value);
-        const eval_func = try createExternalHostFunctionWithRealm(ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
-        defer eval_func.free(ctx.runtimePtr());
-        try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
-        return realm_value;
-    }
-
-    fn test262Gc(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: ?*CoreObject,
-        args: []const value.Value,
-    ) !value.Value {
-        _ = output;
-        _ = global;
-        _ = args;
-        _ = ctx.runtimePtr().runObjectCycleRemoval();
-        return value.undefinedValue();
-    }
 };
 
 pub const object = struct {

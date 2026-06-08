@@ -868,6 +868,25 @@ fn decodeLocalGet(code: []const u8, pc: usize) ?LocalGet {
     };
 }
 
+fn getConditionPc(code: []const u8, pc: usize, induction_idx: u16) ?usize {
+    if (pc >= 1) {
+        if (decodeLocalGet(code, pc - 1)) |get| {
+            if (get.idx == induction_idx and get.next_pc == pc) return pc - 1;
+        }
+    }
+    if (pc >= 2) {
+        if (decodeLocalGet(code, pc - 2)) |get| {
+            if (get.idx == induction_idx and get.next_pc == pc) return pc - 2;
+        }
+    }
+    if (pc >= 3) {
+        if (decodeLocalGet(code, pc - 3)) |get| {
+            if (get.idx == induction_idx and get.next_pc == pc) return pc - 3;
+        }
+    }
+    return null;
+}
+
 fn decodeArgGet(code: []const u8, pc: usize) ?ArgGet {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
@@ -1984,20 +2003,20 @@ fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usi
     const prefix = ctx.runtime.atoms.name(prefix_atom) orelse return null;
     if (!asciiBytes(prefix)) return null;
     const index_get = decodeLocalGet(code, pc + 5) orelse return null;
-    if (!index_get.checked or index_get.idx != local_idx) return null;
+    if (index_get.idx != local_idx) return null;
     if (index_get.next_pc >= code.len or code[index_get.next_pc] != op.add) return null;
     return .{ .prefix = prefix, .next_pc = index_get.next_pc + 1 };
 }
 
 fn parseInductionAndImmediateInt32Args(code: []const u8, pc: usize, local_idx: u16) ?InductionImmediateInt32Args {
     if (decodeLocalGet(code, pc)) |arg0_get| {
-        if (!arg0_get.checked or arg0_get.idx != local_idx) return null;
+        if (arg0_get.idx != local_idx) return null;
         const arg1 = immediateInt32Operand(code, arg0_get.next_pc) orelse return null;
         return .{ .immediate = arg1.value, .next_pc = arg1.next_pc };
     }
     const arg0 = immediateInt32Operand(code, pc) orelse return null;
     const arg1_get = decodeLocalGet(code, arg0.next_pc) orelse return null;
-    if (!arg1_get.checked or arg1_get.idx != local_idx) return null;
+    if (arg1_get.idx != local_idx) return null;
     return .{ .immediate = arg0.value, .next_pc = arg1_get.next_pc };
 }
 
@@ -2015,7 +2034,7 @@ fn parseInductionAndImmediateInt32ArgsUnchecked(code: []const u8, pc: usize, loc
 
 fn decodeSimpleNumericRangeArg(code: []const u8, pc: usize, local_idx: u16) ?struct { arg: SimpleNumericRangeArg, next_pc: usize } {
     if (decodeLocalGet(code, pc)) |get| {
-        if (!get.checked or get.idx != local_idx) return null;
+        if (get.idx != local_idx) return null;
         return .{ .arg = .induction, .next_pc = get.next_pc };
     }
     const immediate = immediateInt32Operand(code, pc) orelse return null;
@@ -4078,7 +4097,7 @@ fn tryFuseCheckedLocalCachedGlobalInt32Add(
         drop_pc = candidate_drop_pc;
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (!store.checked or store.idx != local_idx) return false;
+    if (store.idx != local_idx) return false;
     if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(local_idx)) return false;
     if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
@@ -4117,7 +4136,7 @@ fn tryFuseCheckedLocalRegExpTestConstStringCountRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     if (pc + 7 > code.len or code[pc] != op.push_i32 or code[pc + 5] != op.lt) return false;
@@ -4152,10 +4171,10 @@ fn tryFuseCheckedLocalRegExpTestConstStringCountRange(
     if (counter_drop_pc + 1 != test_branch.false_pc) return false;
 
     const tail_get = decodeLocalGet(code, test_branch.false_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
     const goto_pc = tail_drop_pc + 1;
@@ -4221,7 +4240,7 @@ fn tryFuseCheckedLocalSimpleNumericCallAddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     if (pc + 7 > code.len or code[pc] != op.push_i32 or code[pc + 5] != op.lt) return false;
@@ -4277,11 +4296,11 @@ fn tryFuseCheckedLocalSimpleNumericCallAddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
     const goto_pc = tail_drop_pc + 1;
@@ -4325,7 +4344,7 @@ fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -4369,11 +4388,11 @@ fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -4412,7 +4431,7 @@ fn tryFuseCheckedLocalInductionInt32AddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -4428,7 +4447,7 @@ fn tryFuseCheckedLocalInductionInt32AddRange(
     const accumulator_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
     if (!accumulator_get.is_var_ref and accumulator_get.idx == induction_idx) return false;
     const rhs_get = decodeLocalGet(code, accumulator_get.next_pc) orelse return false;
-    if (!rhs_get.checked or rhs_get.idx != induction_idx) return false;
+    if (rhs_get.idx != induction_idx) return false;
     if (rhs_get.next_pc >= code.len or code[rhs_get.next_pc] != op.add) return false;
 
     var store_pc = rhs_get.next_pc + 1;
@@ -4453,11 +4472,11 @@ fn tryFuseCheckedLocalInductionInt32AddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -4498,7 +4517,7 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -4511,28 +4530,53 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
         return true;
     }
 
-    const accumulator_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
-    if (!accumulator_get.is_var_ref and accumulator_get.idx == induction_idx) return false;
-    const suffix_pc = accumulator_get.next_pc;
-    if (suffix_pc + 6 > code.len or code[suffix_pc] != op.push_atom_value) return false;
-    const suffix_atom = readInt(u32, code[suffix_pc + 1 ..][0..4]);
-    const add_pc = suffix_pc + 5;
-    if (code[add_pc] != op.add) return false;
+    var suffix_atom: u32 = undefined;
+    var accumulator_put: BindingPut = undefined;
+    var tail_pc: usize = undefined;
+    var is_add_loc_pattern = false;
 
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const candidate_store = decodeBindingPut(code, store_pc) orelse return false;
-        const candidate_drop_pc = candidate_store.operand_pc + candidate_store.consume;
-        if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
+    const pc_true = exit_branch.true_pc;
+    if (pc_true + 7 <= code.len and code[pc_true] == op.push_atom_value and code[pc_true + 5] == op.add_loc) {
+        suffix_atom = readInt(u32, code[pc_true + 1 ..][0..5][0..4]);
+        const accumulator_idx = code[pc_true + 6];
+        if (accumulator_idx == induction_idx) return false;
+        if (accumulator_idx >= frame.locals.len) return false;
+        if (accumulator_idx < function.var_is_const.len and function.var_is_const[accumulator_idx]) return false;
+
+        accumulator_put = .{
+            .idx = accumulator_idx,
+            .is_var_ref = false,
+            .checked = false,
+            .operand_pc = 0,
+            .consume = 0,
+        };
+        tail_pc = pc_true + 7;
+        is_add_loc_pattern = true;
+    } else {
+        const accumulator_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
+        if (!accumulator_get.is_var_ref and accumulator_get.idx == induction_idx) return false;
+        const suffix_pc = accumulator_get.next_pc;
+        if (suffix_pc + 6 > code.len or code[suffix_pc] != op.push_atom_value) return false;
+        suffix_atom = readInt(u32, code[suffix_pc + 1 ..][0..4]);
+        const add_pc = suffix_pc + 5;
+        if (code[add_pc] != op.add) return false;
+
+        var store_pc = add_pc + 1;
+        var drop_pc: ?usize = null;
+        if (store_pc < code.len and code[store_pc] == op.dup) {
+            store_pc += 1;
+            const candidate_store = decodeBindingPut(code, store_pc) orelse return false;
+            const candidate_drop_pc = candidate_store.operand_pc + candidate_store.consume;
+            if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
+            drop_pc = candidate_drop_pc;
+        }
+        accumulator_put = decodeBindingPut(code, store_pc) orelse return false;
+        if (accumulator_put.idx != accumulator_get.idx or accumulator_put.is_var_ref != accumulator_get.is_var_ref) return false;
+        if (!bindingStoreWritableForFastPath(ctx, function, global, frame, accumulator_put)) return false;
+
+        tail_pc = if (drop_pc) |drop| drop + 1 else accumulator_put.operand_pc + accumulator_put.consume;
     }
-    const accumulator_put = decodeBindingPut(code, store_pc) orelse return false;
-    if (accumulator_put.idx != accumulator_get.idx or accumulator_put.is_var_ref != accumulator_get.is_var_ref) return false;
-    if (!bindingStoreWritableForFastPath(ctx, function, global, frame, accumulator_put)) return false;
 
-    var tail_pc = if (drop_pc) |drop| drop + 1 else accumulator_put.operand_pc + accumulator_put.consume;
     if (tail_pc < code.len and code[tail_pc] == op.close_loc) {
         if (tail_pc + 3 > code.len) return false;
         const close_idx = readInt(u16, code[tail_pc + 1 ..][0..2]);
@@ -4541,11 +4585,11 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -4556,7 +4600,16 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
     const goto_target_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
     if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
 
-    const accumulator = bindingReadableBorrowed(frame, accumulator_get) orelse return false;
+    const accumulator = if (is_add_loc_pattern)
+        slotValueBorrowed(frame.locals[accumulator_put.idx])
+    else
+        bindingReadableBorrowed(frame, .{
+            .idx = accumulator_put.idx,
+            .is_var_ref = accumulator_put.is_var_ref,
+            .checked = accumulator_put.checked,
+            .next_pc = 0,
+        }) orelse return false;
+
     if (!accumulator.isString()) return false;
     const repeat_count: usize = @intCast(limit - current_i);
     const final_value = try value_ops.latin1AtomRepeatedConcatValue(ctx.runtime, accumulator, suffix_atom, repeat_count) orelse return false;
@@ -4582,7 +4635,7 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateShortBigIntI32Operand(code, pc) orelse return false;
@@ -4598,7 +4651,7 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
     const accumulator_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
     if (!accumulator_get.is_var_ref and accumulator_get.idx == induction_idx) return false;
     const rhs_get = decodeLocalGet(code, accumulator_get.next_pc) orelse return false;
-    if (!rhs_get.checked or rhs_get.idx != induction_idx) return false;
+    if (rhs_get.idx != induction_idx) return false;
     if (rhs_get.next_pc >= code.len or code[rhs_get.next_pc] != op.add) return false;
 
     var store_pc = rhs_get.next_pc + 1;
@@ -4623,11 +4676,11 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -4668,7 +4721,7 @@ fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -4711,11 +4764,11 @@ fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -4753,7 +4806,7 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -4801,11 +4854,11 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     tail_pc = tail_get.next_pc;
     if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -4842,7 +4895,7 @@ fn tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     return try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
 }
 
@@ -4972,7 +5025,7 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     if (pc + 7 > code.len or code[pc] != op.push_i16 or code[pc + 3] != op.lt) return false;
@@ -5002,10 +5055,10 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     tail_pc += 1;
 
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
     const goto_pc = tail_drop_pc + 1;
@@ -5036,7 +5089,7 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     if (pc + 7 > code.len or code[pc] != op.push_i16 or code[pc + 3] != op.lt) return false;
@@ -5077,10 +5130,10 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
 
     const tail_pc = if (drop_pc) |drop| drop + 1 else accumulator_put.operand_pc + accumulator_put.consume;
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
     const goto_pc = tail_drop_pc + 1;
@@ -5122,7 +5175,7 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     if (pc + 7 > code.len or code[pc] != op.push_i16 or code[pc + 3] != op.lt) return false;
@@ -5185,10 +5238,10 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
     const goto_pc = tail_drop_pc + 1;
@@ -5303,7 +5356,7 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     const goto_operand_pc = tail_pc + 1;
     const goto_diff: i8 = @bitCast(code[goto_operand_pc]);
     const target_pc_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
-    if (target_pc_i64 < 0 or @as(usize, @intCast(target_pc_i64)) != pc - 3) return false;
+    if (target_pc_i64 < 0 or @as(usize, @intCast(target_pc_i64)) != (getConditionPc(function.code, pc, induction_idx) orelse return false)) return false;
 
     try setSlotValue(ctx, &frame.locals[accumulator_idx], core.JSValue.int32(@intCast(final_accumulator)));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, accumulator_idx, sync_global_lexical_locals);
@@ -5341,7 +5394,7 @@ fn tryFuseCheckedLocalFieldInt32Add(
         drop_pc = candidate_drop_pc;
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (!store.checked or store.idx != local_idx) return false;
+    if (store.idx != local_idx) return false;
     if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
     if (object_idx >= frame.locals.len or object_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(object_idx)) return false;
@@ -5388,7 +5441,7 @@ fn tryFuseCheckedLocalCheckedLocalNumericAdd(
         drop_pc = candidate_drop_pc;
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (!store.checked or store.idx != local_idx) return false;
+    if (store.idx != local_idx) return false;
     if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
     if (rhs_idx >= frame.locals.len or rhs_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(rhs_idx)) return false;
@@ -5444,7 +5497,7 @@ fn tryFuseCheckedLocalDenseArrayConstInt32Add(
         drop_pc = candidate_drop_pc;
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (!store.checked or store.idx != local_idx) return false;
+    if (store.idx != local_idx) return false;
     if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
     if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(array_idx)) return false;
@@ -6034,7 +6087,7 @@ fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
     if (value_idx < function.var_is_const.len and function.var_is_const[value_idx]) return false;
 
     const code = function.code;
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, value_idx) orelse return false;
     const pc = frame.pc;
     const end_get = decodeLocalGet(code, pc) orelse return false;
     if (end_get.next_pc >= code.len or code[end_get.next_pc] != op.lte) return false;
@@ -6074,10 +6127,10 @@ fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
     const chunk_branch = decodeFalseBranch(code, chunk_get.next_pc + 1) orelse return false;
 
     const tail_get = decodeLocalGet(code, chunk_branch.false_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != value_idx) return false;
+    if (tail_get.idx != value_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != value_idx) return false;
+    if (tail_put.idx != value_idx) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
     const goto_pc = tail_drop_pc + 1;
@@ -6128,7 +6181,7 @@ fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -6148,7 +6201,7 @@ fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     const array_object = objectFromValue(array_value) orelse return false;
 
     const index_get = decodeLocalGet(code, array_get.next_pc) orelse return false;
-    if (!index_get.checked or index_get.idx != induction_idx) return false;
+    if (index_get.idx != induction_idx) return false;
     const value_get = decodeLocalGet(code, index_get.next_pc) orelse return false;
     if (!value_get.checked or value_get.idx != induction_idx) return false;
     if (value_get.next_pc >= code.len or code[value_get.next_pc] != op.put_array_el) return false;
@@ -6162,10 +6215,10 @@ fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -6205,7 +6258,7 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
     if (frame.localIsUninitialized(induction_idx)) return false;
 
-    const condition_pc = if (frame.pc >= 3) frame.pc - 3 else return false;
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
     const pc = frame.pc;
     const code = function.code;
     const limit_operand = immediateInt32Operand(code, pc) orelse return false;
@@ -6260,10 +6313,10 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
         tail_pc += 3;
     }
     const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    if (tail_get.idx != induction_idx) return false;
     if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
     const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (!tail_put.checked or tail_put.idx != induction_idx) return false;
+    if (tail_put.idx != induction_idx) return false;
     if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
     const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
     if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
@@ -6750,7 +6803,7 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32Add(
         drop_pc = candidate_drop_pc;
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (!store.checked or store.idx != local_idx) return false;
+    if (store.idx != local_idx) return false;
     if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
     if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return false;
     if (index_idx >= frame.locals.len or index_idx >= frame.locals_uninit.len) return false;

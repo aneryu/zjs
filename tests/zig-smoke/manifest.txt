@@ -28,7 +28,6 @@ date.js
 destructuring_iterator_state.js
 destructuring_assignment_targets.js
 destructuring_default_names.js
-eval_script_host.js
 eval.js
 eval_var_binding.js
 error_diagnostics.js
