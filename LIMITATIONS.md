@@ -50,11 +50,10 @@ and should not rely on process exit for cleanup.
 
 ## Modules
 
-ECMAScript modules are supported within the local validation boundary. CommonJS
-`require`, `node_modules` resolution, package exports/import maps, and hybrid
-Node-style module loading are not supported. Binary module imports using
-`import ... with { type: "bytes" }` are outside the Production v1 active
-validation profile.
+ECMAScript modules and binary module imports (using `import ... with { type: "bytes" }`)
+are supported within the local validation boundary. CommonJS `require`,
+`node_modules` resolution, package exports/import maps, and hybrid Node-style
+module loading are not supported.
 
 ## Performance
 

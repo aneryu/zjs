@@ -44,8 +44,8 @@ changed with a concrete implementation plan:
   are outside the current core-engine target.
 - Test262 features marked `=skip` include `Temporal`, `ShadowRealm`,
   `decorators`, `tail-call-optimization`, `host-gc-required`, `import-defer`,
-  `import-bytes`, source-phase imports, canonical time zone data, duplicate
-  RegExp named groups, and the Intl feature groups listed in `test262.conf`.
+  source-phase imports, canonical time zone data, duplicate RegExp named
+  groups, and the Intl feature groups listed in `test262.conf`.
 - Generated RegExp string-property and UnicodeSets cases that still exceed the
   current parity boundary are excluded individually.
 - Most `test262/test/staging/` tests are excluded by default, with selected
@@ -81,6 +81,14 @@ String, Object, and Promise additions listed in `test262.conf`.
 Additional smoke fixtures in `src/tests/smoke_test.zig` cover CLI behavior,
 QuickJS parity markers, host module behavior, and targeted regressions that are
 faster to run than the full test262 gate.
+
+## Comparison with Upstream QuickJS
+
+While `zjs` targets semantic parity with QuickJS, its local validation profile enables and validates several features that are skipped or unsupported in upstream QuickJS:
+
+- **Atomics.waitAsync**: Fully supported and validated in `zjs` (including engine-deinit cleanup validation), whereas upstream QuickJS lists this as unsupported and skips it.
+- **Other Enabled Features**: Features like `await-dictionary`, `legacy-regexp`, `nonextensible-applies-to-private`, and `regexp-modifiers` are enabled and validated in `zjs` but skipped in upstream QuickJS.
+- **Import Bytes**: Both `zjs` and upstream QuickJS validate binary module imports (`import-bytes`).
 
 ## Validation Commands
 
