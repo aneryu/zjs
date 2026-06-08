@@ -96,21 +96,7 @@ pub fn build(b: *std.Build) void {
     zjs_step.dependOn(&install_zjs.step);
     b.installArtifact(zjs_exe);
 
-    const smoke_runner_exe = b.addExecutable(.{
-        .name = "smoke-runner",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tools/smoke_runner.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    const run_smoke = b.addRunArtifact(smoke_runner_exe);
-    run_smoke.step.dependOn(&install_zjs.step);
-    run_smoke.addArg(b.getInstallPath(.bin, "zjs"));
-    run_smoke.addArg("tests/zig-smoke/manifest.txt");
-    const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
-    smoke_step.dependOn(&run_smoke.step);
+
 
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
@@ -431,10 +417,35 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
+    test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
     unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
     const run_unified_tests = b.addRunArtifact(unified_tests);
+    run_unified_tests.step.dependOn(&install_zjs.step);
+
+    // Smoke tests (runs only the CLI integration tests in src/tests/smoke_test.zig)
+    const smoke_tests = b.addTest(.{
+        .name = "smoke-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    smoke_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    smoke_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
+    smoke_tests.root_module.addImport("zjs", unified_tests.root_module);
+    smoke_tests.root_module.addOptions("build_options", test_options);
+    const run_smoke_tests = b.addRunArtifact(smoke_tests);
+    run_smoke_tests.step.dependOn(&install_zjs.step);
+
+    const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
+    smoke_step.dependOn(&run_smoke_tests.step);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");

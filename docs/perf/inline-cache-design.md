@@ -103,7 +103,7 @@ Megamorphic sites do not re-enter mono/poly during the function lifetime.
 Expose the counters with:
 
 ```sh
-zig-out/bin/zjs --perf-json tests/zig-smoke/arith.js 2> .zig-cache/perf/current/arith-perf.json
+zig-out/bin/zjs --perf-json -e "for(var i=0; i<100000; i++) {}" 2> .zig-cache/perf/current/perf.json
 ```
 
 The JSON is written to stderr.

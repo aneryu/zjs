@@ -134,9 +134,7 @@ zig build perf-benchmark --summary all
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.
-- `tests/zig-smoke/`: JavaScript smoke fixtures and golden output.
 - `test262/`: local test262 checkout used by the gate.
 - `tests/fixtures/`: vendored fixture snapshots used by opcode and runner
   tests.

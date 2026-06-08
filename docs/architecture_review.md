@@ -2,7 +2,7 @@
 
 本文记录当前源码中的架构状态，而不是历史路线图、口号式目标或未落地的
 设计承诺。语义参考仍是 QuickJS；验证边界以根目录 `test262.conf`、
-`test262/`、`tests/zig-smoke/` 和 Zig regression 为准。
+`test262/` 和 Zig regression 为准。
 
 ## 1. Runtime And Ownership
 

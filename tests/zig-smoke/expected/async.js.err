@@ -1,3 +1,0 @@
-Possibly unhandled promise rejection: Error: return boom
-    at return (tests/zig-smoke/async.js:110:39)
-    at testForAwaitRejectedAsyncReturnIsCatchable (tests/zig-smoke/async.js:115:13)

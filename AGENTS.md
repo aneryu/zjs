@@ -66,9 +66,7 @@ available only through git history.
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.
-- `tests/zig-smoke/`: JavaScript smoke fixtures and golden output.
 - `test262/`: test262 checkout used by the local gate.
 - `tests/fixtures/`: fixture snapshots used by opcode and runner tests.
 
@@ -147,8 +145,7 @@ Missing or invalid arguments should print usage and exit non-zero.
   plugins, and buffer operations: `src/runtime/`.
 - Built-in object behavior: `src/builtins/`.
 - RegExp, Unicode, BigInt, and number formatting: `src/libs/`.
-- CLI behavior: `src/cli/`.
-- smoke and test262 runner internals: `src/tools/`.
+- CLI behavior and test262 runner: `src/cli/`.
 
 ## Pre-Commit Checklist
 

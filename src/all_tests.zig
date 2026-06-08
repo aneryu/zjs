@@ -107,6 +107,7 @@ test {
 
     // Relative imports for files that are not module roots
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
+    std.testing.refAllDecls(@import("tests/smoke_test.zig"));
     std.testing.refAllDecls(@import("cli/zjs.zig"));
     std.testing.refAllDecls(@import("cli/run_test262.zig"));
 }
