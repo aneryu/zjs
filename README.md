@@ -131,7 +131,9 @@ zig build perf-benchmark --summary all
 - `src/bytecode/`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
 - `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
-  promises, and job queue.
+  promises, VM opcode shards, and job queue.
+- `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
+  module file graphs, plugins, and buffer operations.
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.

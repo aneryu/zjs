@@ -54,15 +54,20 @@ available only through git history.
 
 - `src/root.zig`: public engine entrypoint.
 - `src/core/`: values, runtime/context, atoms, strings, objects,
-  properties, arrays, and core ownership.
+  properties, arrays, GC, and core ownership.
 - `src/frontend/`: lexer, parser, source positions, and frontend parsing.
-- `src/bytecode/`: bytecode, constants, scopes, module metadata, and
-  emitter.
-- `src/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
+- `src/bytecode/`: bytecode, constants, scopes, module metadata,
+  inline-cache slots, and pipeline passes.
+- `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
+  promises, VM opcode shards, and job queue.
+- `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
+  module file graphs, plugins, and buffer operations.
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
+- `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.
+- `tests/zig-smoke/`: JavaScript smoke fixtures and golden output.
 - `test262/`: test262 checkout used by the local gate.
 - `tests/fixtures/`: fixture snapshots used by opcode and runner tests.
 
@@ -128,17 +133,21 @@ Missing or invalid arguments should print usage and exit non-zero.
 
 ## Where To Look
 
-- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
-- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
+- Core values, runtime/context, atoms, strings, objects, properties, arrays,
+  shapes, IC storage, and GC:
   `src/core/`.
-- Lexer, parser, and early errors: `src/frontend/`.
-- Bytecode emission, scopes, and module metadata: `src/bytecode/`.
-- Execution semantics, calls, exceptions, eval, and job queue:
+- Lexer, parser, source positions, and TypeScript erasure: `src/frontend/`.
+- Bytecode emission, scopes, module metadata, inline-cache slots, and pipeline
+  passes: `src/bytecode/`.
+- Execution semantics, calls, exceptions, eval, modules, promises, job queue,
+  and opcode handlers:
   `src/exec/`.
+- Host/runtime policy helpers for event loop, cleanup, module file graphs,
+  plugins, and buffer operations: `src/runtime/`.
 - Built-in object behavior: `src/builtins/`.
 - RegExp, Unicode, BigInt, and number formatting: `src/libs/`.
 - CLI behavior: `src/cli/`.
-- test262 runner behavior: `src/cli/run_test262.zig`.
+- smoke and test262 runner internals: `src/tools/`.
 
 ## Pre-Commit Checklist
 

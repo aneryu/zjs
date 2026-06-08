@@ -1,5 +1,13 @@
 # Zig JS Runtime GC 设计方案
 
+> Current implementation note: this document is a future-oriented GC design.
+> Current source code already has `src/core/gc.zig` policy/scheduler,
+> nursery/remembered-set structures, external memory accounting, root tracing,
+> and cycle-removal integration, but the default runtime behavior is still
+> primarily non-atomic reference counting plus root-aware cycle removal. Moving
+> copying nursery, concurrent old-space GC, and uWS integration below are design
+> direction, not current release behavior.
+
 面向场景：**Zig 编写的 JavaScript 引擎 / JavaScript runtime，定位类似 Bun，网络层适配 uWS，用于 HTTP/WebSocket server。**
 
 推荐结论：
