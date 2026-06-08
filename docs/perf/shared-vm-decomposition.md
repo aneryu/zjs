@@ -1,29 +1,33 @@
-# `vm/shared.zig` Decomposition Map
+# `exec/shared.zig` Decomposition Map
 
-`src/exec/vm/shared.zig` remains large and should continue to shrink in
-small behavior-preserving moves. This map is a refactor aid, not a status
-ledger.
+`src/exec/shared.zig` remains large and should continue to shrink in small
+behavior-preserving moves. This map is a refactor aid, not a status ledger.
 
 ## Existing VM Shards
 
-Current files under `src/exec/vm/` include:
+VM-facing shards currently live directly under `src/exec/`. Opcode dispatch
+helpers use the `vm_*.zig` prefix; broader domain helpers generally use the
+`*_ops.zig` suffix.
 
-- `arith.zig`: arithmetic opcode helpers.
-- `call.zig`: call and construct related opcode helpers.
-- `class.zig`: class evaluation helpers.
-- `collection.zig`: collection-related VM helpers.
-- `control.zig`: branches, loops, returns, and control-flow helpers.
-- `date.zig`: Date-specific VM helpers.
-- `eval_module.zig`: eval/module execution helpers.
-- `exception_ops.zig`: named error construction, TDZ errors, pending-exception
-  matching, and related error-object helpers.
-- `gen_async.zig`: generator and async function helpers.
-- `iter.zig`: iterator helpers.
-- `json.zig`: JSON VM helpers.
-- `literal.zig`: literal construction helpers.
-- `property.zig`: property/global read-write-delete helpers and IC plumbing.
-- `regexp.zig`: RegExp VM helpers.
-- `value.zig`: value conversion and primitive helper operations.
+- `vm_arith.zig`: arithmetic opcode helpers.
+- `vm_call.zig`: call and construct opcode helpers.
+- `vm_control.zig`: branches, loops, returns, and control-flow helpers.
+- `vm_eval_module.zig`: eval/module execution helpers.
+- `vm_exception_ops.zig`: named error construction, TDZ errors, pending
+  exception matching, and related error-object helpers.
+- `vm_gen_async.zig`: generator and async function helpers.
+- `vm_literal.zig`: literal construction helpers.
+- `vm_property.zig`: property, reference, global read/write/delete, and related
+  property fast-path opcode handlers.
+- `property_ic.zig`: shape-keyed property inline-cache adapter plus fast
+  ordinary data-property lookup/write helpers.
+- `vm_regexp.zig`: RegExp VM helpers.
+- `vm_value.zig`: value conversion and primitive helper operations.
+
+Domain helper shards such as `array_ops.zig`, `date_ops.zig`,
+`iterator_ops.zig`, `json_ops.zig`, `object_ops.zig`, `string_ops.zig`, and
+`value_ops.zig` are not pure opcode dispatch modules, but they are still useful
+targets when shrinking `shared.zig` around a coherent ECMAScript domain.
 
 ## Move Criteria
 
@@ -57,7 +61,7 @@ place until there is a stable domain boundary.
 Minimum validation for a small move:
 
 ```sh
-zig build test-exec --summary all
+zig build zjs --summary all
 git diff --check
 ```
 

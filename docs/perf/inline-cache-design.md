@@ -7,8 +7,15 @@ Primary owners:
 
 - `src/bytecode/ic.zig`
 - `src/bytecode/function.zig`
-- `src/exec/vm/property.zig`
+- `src/exec/vm_property.zig`
+- `src/exec/property_ic.zig`
 - `src/core/profile.zig`
+
+`src/exec/property_ic.zig` owns the shape-keyed property IC adapter, low-level
+own-data slot lookup/write helpers, and the declared/own global data
+lookup-store fallback used by global fast paths. `src/exec/vm_property.zig`
+owns opcode sequencing, scope guards, catchability, and stack/frame updates
+around those helpers.
 
 Inline caches are enabled by default and can be disabled with:
 

@@ -9,6 +9,8 @@ const shared_vm = @import("shared.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
+pub const Step = enum { done, continue_loop };
+
 pub fn directEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -20,12 +22,12 @@ pub fn directEval(
     class_field_initializer_flag: u16,
     parameter_initializer_flag: u16,
     comptime execDirectEval: anytype,
-) !void {
+) !Step {
     const eval_operands = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const argc: u16 = @intCast(eval_operands & 0xffff);
     const eval_scope: u16 = @intCast((eval_operands >> 16) & 0xffff);
-    try execDirectEval(
+    return switch (try execDirectEval(
         ctx,
         stack,
         function,
@@ -36,7 +38,10 @@ pub fn directEval(
         global,
         (eval_scope & class_field_initializer_flag) != 0,
         (eval_scope & parameter_initializer_flag) != 0,
-    );
+    )) {
+        .done => .done,
+        .continue_loop => .continue_loop,
+    };
 }
 
 pub fn applyEval(
@@ -50,10 +55,10 @@ pub fn applyEval(
     class_field_initializer_flag: u16,
     parameter_initializer_flag: u16,
     comptime execApplyEval: anytype,
-) !void {
+) !Step {
     const eval_scope = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    try execApplyEval(
+    return switch (try execApplyEval(
         ctx,
         stack,
         function,
@@ -63,7 +68,10 @@ pub fn applyEval(
         global,
         (eval_scope & class_field_initializer_flag) != 0,
         (eval_scope & parameter_initializer_flag) != 0,
-    );
+    )) {
+        .done => .done,
+        .continue_loop => .continue_loop,
+    };
 }
 
 pub fn dynamicImport(

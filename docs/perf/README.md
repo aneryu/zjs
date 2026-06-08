@@ -9,7 +9,7 @@ Current design notes:
 
 - [Object and shape implementation](object-shape-design.md)
 - [Inline cache implementation](inline-cache-design.md)
-- [`vm/shared.zig` decomposition map](shared-vm-decomposition.md)
+- [`exec/shared.zig` decomposition map](shared-vm-decomposition.md)
 
 ## Current Benchmark Entries
 

@@ -11,7 +11,12 @@ pub const Result = union(enum) {
     return_value: core.JSValue,
 };
 
-pub const AwaitSuspendMode = enum {
+pub const ResumeState = struct {
+    throw_on_entry: bool = false,
+    catch_target: ?usize = null,
+};
+
+const AwaitSuspendMode = enum {
     none,
     /// Async generators drain promise jobs for internal await points, then keep
     /// executing until the next generator yield.
@@ -23,13 +28,245 @@ pub const AwaitSuspendMode = enum {
     raw,
 };
 
+pub fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, generator: *core.Object, additional: usize) !void {
+    const values = generator.generatorStack();
+    const capacity = generator.generatorStackCapacity();
+    if (values.len > stack.limit) return error.StackOverflow;
+    if (additional > stack.limit - values.len) return error.StackOverflow;
+    const needed = values.len + additional;
+    if (needed <= capacity) return;
+
+    var next_capacity = if (capacity == 0) @as(usize, 8) else capacity;
+    while (next_capacity < needed) {
+        next_capacity *= 2;
+        if (next_capacity > stack.limit) {
+            next_capacity = stack.limit;
+            break;
+        }
+    }
+
+    const next = try stack.memory.alloc(core.JSValue, next_capacity);
+    errdefer stack.memory.free(core.JSValue, next);
+    @memcpy(next[0..values.len], values);
+    try generator.writeValueSliceBarrier(rt, next[0..values.len]);
+    generator.generatorStackSlot().* = next[0..values.len];
+    generator.generatorStackCapacitySlot().* = next_capacity;
+    if (capacity != 0) {
+        stack.memory.free(core.JSValue, values.ptr[0..capacity]);
+    } else if (values.len != 0) {
+        stack.memory.free(core.JSValue, values);
+    }
+}
+
+pub fn saveGeneratorExecutionState(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    generator: *core.Object,
+    pc: usize,
+) !void {
+    generator.generatorPcSlot().* = pc;
+    try generator.writeValueSliceBarrier(ctx.runtime, stack.values);
+    try generator.writeValueSliceBarrier(ctx.runtime, frame.locals);
+    try generator.writeValueSliceBarrier(ctx.runtime, frame.args);
+    try generator.writeValueSliceBarrier(ctx.runtime, frame.var_refs);
+    const old_stack = generator.generatorStack();
+    const old_stack_capacity = generator.generatorStackCapacity();
+    const old_frame_locals = generator.generatorFrameLocals();
+    const old_frame_args = generator.generatorFrameArgs();
+    const old_frame_var_refs = generator.generatorFrameVarRefs();
+    const old_frame_locals_uninit = generator.generatorFrameLocalsUninit();
+    generator.generatorStackSlot().* = stack.values;
+    generator.generatorStackCapacitySlot().* = stack.capacity;
+    generator.generatorFrameLocalsSlot().* = frame.locals;
+    generator.generatorFrameArgsSlot().* = frame.args;
+    generator.generatorFrameVarRefsSlot().* = frame.var_refs;
+    generator.generatorFrameLocalsUninitSlot().* = frame.locals_uninit;
+    stack.values = &.{};
+    stack.capacity = 0;
+    frame.locals = &.{};
+    frame.args = &.{};
+    frame.var_refs = &.{};
+    frame.locals_uninit = &.{};
+    frame.locals_uninit_count = 0;
+
+    for (old_stack) |stored| stored.free(ctx.runtime);
+    if (old_stack_capacity != 0) {
+        ctx.runtime.memory.free(core.JSValue, old_stack.ptr[0..old_stack_capacity]);
+    } else if (old_stack.len != 0) {
+        ctx.runtime.memory.free(core.JSValue, old_stack);
+    }
+    freeValueSlice(ctx.runtime, old_frame_locals);
+    freeValueSlice(ctx.runtime, old_frame_args);
+    freeValueSlice(ctx.runtime, old_frame_var_refs);
+    if (old_frame_locals_uninit.len != 0) ctx.runtime.memory.free(bool, old_frame_locals_uninit);
+}
+
+pub fn resumeExecutionState(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    generator: ?*core.Object,
+    resume_value: ?core.JSValue,
+    comptime generatorYieldStarSuspended: anytype,
+    comptime generatorResumeCompletionType: anytype,
+    comptime setGeneratorYieldStarSuspended: anytype,
+    comptime setGeneratorResumeCompletionType: anytype,
+) !ResumeState {
+    const generator_object = generator orelse return .{};
+    return resumeExecutionStateRaw(ctx, stack, function, frame, generator_object, resume_value, generatorYieldStarSuspended, generatorResumeCompletionType, setGeneratorYieldStarSuspended, setGeneratorResumeCompletionType);
+}
+
+fn resumeExecutionStateRaw(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    generator: *core.Object,
+    resume_value: ?core.JSValue,
+    comptime generatorYieldStarSuspended: anytype,
+    comptime generatorResumeCompletionType: anytype,
+    comptime setGeneratorYieldStarSuspended: anytype,
+    comptime setGeneratorResumeCompletionType: anytype,
+) !ResumeState {
+    if (generator.generatorPc() == 0) {
+        generator.generatorJustYieldedSlot().* = false;
+        return .{};
+    }
+
+    const resume_pc = generator.generatorPc();
+    const generator_started = generator.generatorStarted();
+    const was_yield_star_suspended = generator_started and generatorYieldStarSuspended(ctx.runtime, generator);
+    const completion_type = if (generator_started) generatorResumeCompletionType(ctx.runtime, generator) else 0;
+    const resume_needs_branch_false = generator_started and
+        resume_pc > 0 and
+        resume_pc <= function.code.len and
+        function.code[resume_pc - 1] == bytecode.opcode.op.yield and
+        resume_pc < function.code.len and
+        (function.code[resume_pc] == bytecode.opcode.op.if_false or function.code[resume_pc] == bytecode.opcode.op.if_false8);
+
+    var resume_push_count: usize = if (!generator_started)
+        0
+    else if (was_yield_star_suspended)
+        2
+    else if (completion_type == 2)
+        0
+    else
+        1;
+    if (resume_needs_branch_false) resume_push_count += 1;
+    try reserveGeneratorStackAdditional(ctx.runtime, stack, generator, resume_push_count);
+
+    generator.generatorJustYieldedSlot().* = false;
+    frame.pc = resume_pc;
+    frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
+    frame.locals = generator.generatorFrameLocals();
+    frame.args = generator.generatorFrameArgs();
+    frame.original_args = &.{};
+    frame.args_on_heap = true;
+    frame.original_args_on_heap = false;
+    frame.var_refs = generator.generatorFrameVarRefs();
+    frame.locals_uninit = generator.generatorFrameLocalsUninit();
+    frame.recomputeLocalsUninitCount();
+    frame.global_lexical_sync_slots = &.{};
+    frame.global_lexical_sync_indices = &.{};
+    frame.global_lexical_sync_env = null;
+    frame.global_lexical_sync_checked = false;
+    generator.generatorFrameLocalsSlot().* = &.{};
+    generator.generatorFrameArgsSlot().* = &.{};
+    generator.generatorFrameVarRefsSlot().* = &.{};
+    generator.generatorFrameLocalsUninitSlot().* = &.{};
+    stack.values = generator.generatorStack();
+    stack.capacity = generator.generatorStackCapacity();
+    generator.generatorStackSlot().* = &.{};
+    generator.generatorStackCapacitySlot().* = 0;
+    const catch_target = activeCatchTargetForPc(function, frame.pc);
+
+    if (!generator_started) return .{ .catch_target = catch_target };
+    if (was_yield_star_suspended) {
+        try setGeneratorYieldStarSuspended(ctx.runtime, generator, false);
+        try setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+        stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
+        stack.pushOwnedAssumeCapacity(core.JSValue.int32(completion_type));
+    } else {
+        if (completion_type == 2) {
+            try setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+            if (resume_needs_branch_false) {
+                stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+            }
+            return .{ .throw_on_entry = true, .catch_target = catch_target };
+        }
+        stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
+        if (completion_type != 0) try setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+    }
+    if (resume_needs_branch_false) {
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+    }
+    return .{ .catch_target = catch_target };
+}
+
+pub fn completeResumeState(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    state: ResumeState,
+    resume_value: ?core.JSValue,
+    comptime closeForAwaitIteratorForPendingError: anytype,
+    comptime closeStackTopForOfIteratorForPendingError: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !?usize {
+    var catch_target = state.catch_target;
+    if (!state.throw_on_entry) return catch_target;
+    const thrown = resume_value orelse core.JSValue.undefinedValue();
+    _ = ctx.throwValue(thrown.dup());
+    try closeIteratorForPendingError(ctx, output, global, stack, function, frame, closeForAwaitIteratorForPendingError, closeStackTopForOfIteratorForPendingError);
+    if (!(try handleCatchableRuntimeError(ctx, stack, frame, &catch_target, global, error.JSException))) {
+        return error.JSException;
+    }
+    return catch_target;
+}
+
+fn handleAwaitError(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    err: anyerror,
+    comptime closeForAwaitIteratorForPendingError: anytype,
+    comptime closeStackTopForOfIteratorForPendingError: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !bool {
+    try closeIteratorForPendingError(ctx, output, global, stack, function, frame, closeForAwaitIteratorForPendingError, closeStackTopForOfIteratorForPendingError);
+    return try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err);
+}
+
+pub fn stopBeforePc(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    generator: ?*core.Object,
+    stop_before_pc: ?usize,
+) !?core.JSValue {
+    const stop_pc = stop_before_pc orelse return null;
+    if (frame.pc != stop_pc) return null;
+    if (generator) |generator_object| {
+        try saveGeneratorExecutionState(ctx, stack, frame, generator_object, stop_pc);
+    }
+    return core.JSValue.undefinedValue();
+}
+
 pub fn initialYield(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     stop_on_yield: bool,
-    comptime saveGeneratorExecutionState: anytype,
 ) !Result {
     if (stop_on_yield) {
         if (generator) |generator_object| {
@@ -49,7 +286,6 @@ pub fn yieldValue(
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     stop_on_yield: bool,
-    comptime saveGeneratorExecutionState: anytype,
 ) !Result {
     const value = try stack.pop();
     var value_owned = true;
@@ -79,7 +315,29 @@ pub fn yieldStar(
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
     stop_on_yield: bool,
-    comptime saveGeneratorExecutionState: anytype,
+    catch_target: *?usize,
+    comptime iteratorForValue: anytype,
+    comptime iteratorStepResult: anytype,
+    comptime setGeneratorYieldStarSuspended: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Result {
+    return yieldStarRaw(ctx, output, global, stack, function, frame, generator, stop_on_yield, iteratorForValue, iteratorStepResult, setGeneratorYieldStarSuspended) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+            return .continue_loop;
+        }
+        return err;
+    };
+}
+
+fn yieldStarRaw(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    generator: ?*core.Object,
+    stop_on_yield: bool,
     comptime iteratorForValue: anytype,
     comptime iteratorStepResult: anytype,
     comptime setGeneratorYieldStarSuspended: anytype,
@@ -172,39 +430,67 @@ pub fn awaitValue(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     generator: ?*core.Object,
-    suspend_mode: AwaitSuspendMode,
+    suspend_on_module_await: bool,
+    stop_on_yield: bool,
+    catch_target: *?usize,
     comptime settlePendingPromiseReaction: anytype,
     comptime awaitPendingPromise: anytype,
     comptime drainPendingPromiseJobs: anytype,
     comptime awaitThenableValue: anytype,
-    comptime saveGeneratorExecutionState: anytype,
+    comptime closeForAwaitIteratorForPendingError: anytype,
+    comptime closeStackTopForOfIteratorForPendingError: anytype,
+    comptime handleCatchableRuntimeError: anytype,
 ) !Result {
+    return awaitValueRaw(ctx, output, global, stack, function, frame, generator, suspend_on_module_await, stop_on_yield, settlePendingPromiseReaction, awaitPendingPromise, drainPendingPromiseJobs, awaitThenableValue) catch |err| {
+        if (try handleAwaitError(ctx, output, global, stack, function, frame, catch_target, err, closeForAwaitIteratorForPendingError, closeStackTopForOfIteratorForPendingError, handleCatchableRuntimeError)) {
+            return .continue_loop;
+        }
+        return err;
+    };
+}
+
+fn awaitValueRaw(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    generator: ?*core.Object,
+    suspend_on_module_await: bool,
+    stop_on_yield: bool,
+    comptime settlePendingPromiseReaction: anytype,
+    comptime awaitPendingPromise: anytype,
+    comptime drainPendingPromiseJobs: anytype,
+    comptime awaitThenableValue: anytype,
+) !Result {
+    const suspend_mode = awaitSuspendMode(function, suspend_on_module_await, stop_on_yield);
     const awaited = try stack.pop();
     defer awaited.free(ctx.runtime);
     if (suspend_mode == .raw) {
-        if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited, saveGeneratorExecutionState)) |result| return result;
+        if (try suspendAwaitValue(ctx, stack, frame, generator, true, awaited)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     }
     const promise = objectFromValue(awaited) orelse {
         if (try awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
-            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, saveGeneratorExecutionState)) |result| return result;
+            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value)) |result| return result;
             try stack.push(value);
             return .none;
         }
-        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited, saveGeneratorExecutionState)) |result| return result;
+        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     };
     if (promise.class_id != core.class.ids.promise) {
         if (try awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
-            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value, saveGeneratorExecutionState)) |result| return result;
+            if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value)) |result| return result;
             try stack.push(value);
             return .none;
         }
-        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited, saveGeneratorExecutionState)) |result| return result;
+        if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, awaited)) |result| return result;
         try stack.push(awaited);
         return .continue_loop;
     }
@@ -217,7 +503,7 @@ pub fn awaitValue(
         _ = ctx.throwValue(result.dup());
         return error.JSException;
     }
-    if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result, saveGeneratorExecutionState)) |suspended| return suspended;
+    if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, result)) |suspended| return suspended;
     try stack.push(result);
     return .none;
 }
@@ -229,7 +515,6 @@ fn suspendAwaitValue(
     generator: ?*core.Object,
     suspend_on_await: bool,
     value: core.JSValue,
-    comptime saveGeneratorExecutionState: anytype,
 ) !?Result {
     if (!suspend_on_await) return null;
     const generator_object = generator orelse return null;
@@ -239,24 +524,62 @@ fn suspendAwaitValue(
     return .{ .return_value = value.dup() };
 }
 
+fn awaitSuspendMode(function: *const bytecode.Bytecode, suspend_on_module_await: bool, stop_on_yield: bool) AwaitSuspendMode {
+    if (suspend_on_module_await and function.flags.is_module) return .settled;
+    if (suspend_on_module_await and function.flags.is_async) return .raw;
+    if (stop_on_yield and function.flags.is_async) return .drain;
+    return .none;
+}
+
+fn activeCatchTargetForPc(function: *const bytecode.Bytecode, start_pc: usize) ?usize {
+    var pc: usize = 0;
+    var found: ?usize = null;
+    while (pc < start_pc and pc < function.code.len) {
+        const op_id = function.code[pc];
+        if (op_id == bytecode.opcode.op.@"catch") {
+            if (pc + 5 > function.code.len) return found;
+            const operand_pc = pc + 1;
+            const diff = readInt(i32, function.code[operand_pc..][0..4]);
+            const target = @as(i64, @intCast(operand_pc)) + @as(i64, diff);
+            if (target > start_pc and target <= function.code.len) found = @intCast(target);
+        }
+        const size = bytecode.opcode.sizeOf(op_id);
+        if (size == 0) return found;
+        pc += size;
+    }
+    return found;
+}
+
+fn closeIteratorForPendingError(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    comptime closeForAwaitIteratorForPendingError: anytype,
+    comptime closeStackTopForOfIteratorForPendingError: anytype,
+) !void {
+    if (frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.iterator_get_value_done) {
+        try closeForAwaitIteratorForPendingError(ctx, output, global, stack);
+    } else {
+        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+    }
+}
+
 fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
 }
 
-fn testSaveGeneratorExecutionState(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    generator: *core.Object,
-    pc: usize,
-) !void {
-    _ = ctx;
-    _ = stack;
-    _ = frame;
-    _ = generator;
-    _ = pc;
+fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
+    for (values) |value| value.free(rt);
+    if (values.len != 0) rt.memory.free(core.JSValue, values);
+}
+
+fn readInt(comptime T: type, bytes: []const u8) T {
+    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }
 
 fn testIteratorForValue(

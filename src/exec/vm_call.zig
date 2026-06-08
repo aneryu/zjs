@@ -12,10 +12,113 @@ const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
 
+pub const Step = enum { done, continue_loop };
+
 pub const TailCallMethodResult = union(enum) {
     handled,
     return_value: core.JSValue,
 };
+
+pub const TailCallResult = TailCallMethodResult;
+
+pub const CallDepthGuard = struct {
+    ctx: *core.JSContext,
+
+    pub fn deinit(self: CallDepthGuard) void {
+        self.ctx.call_depth -= 1;
+    }
+};
+
+pub const CallProfileGuard = struct {
+    rt: *core.JSRuntime,
+    previous: ?*core.profile.OpcodeProfile,
+
+    pub fn deinit(self: CallProfileGuard) void {
+        if (self.rt.opcode_profile != null) {
+            _ = core.profile.activate(self.previous);
+        }
+    }
+};
+
+pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
+    if (ctx.call_depth >= maxJsCallDepth(ctx)) {
+        _ = shared_vm.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
+        return error.RangeError;
+    }
+    ctx.call_depth += 1;
+    return .{ .ctx = ctx };
+}
+
+pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
+    const previous = if (rt.opcode_profile) |opcode_profile|
+        core.profile.activate(opcode_profile)
+    else
+        null;
+    if (rt.opcode_profile) |profile| profile.recordCallFrame();
+    return .{ .rt = rt, .previous = previous };
+}
+
+pub fn linkDerivedConstructorThisLocal(ctx: *core.JSContext, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {
+    if (!function.flags.is_derived_class_constructor) return;
+    const count = @min(function.var_names.len, frame.locals.len);
+    for (function.var_names[0..count], 0..) |atom_id, idx| {
+        if (!value_ops.atomNameEql(ctx.runtime, atom_id, "this")) continue;
+        const this_cell = try shared_vm.ensureVarRefCell(ctx, &frame.this_value);
+        const old_value = frame.locals[idx];
+        frame.locals[idx] = this_cell;
+        old_value.free(ctx.runtime);
+        return;
+    }
+}
+
+pub fn initFrameLocals(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    eval_local_names: []const core.Atom,
+    eval_local_slots: []core.JSValue,
+) !void {
+    if (function.var_count == 0) return;
+
+    const locals = try ctx.runtime.memory.alloc(core.JSValue, function.var_count);
+    @memset(locals, core.JSValue.undefinedValue());
+    frame.locals = locals;
+
+    const uninit = try ctx.runtime.memory.alloc(bool, function.var_count);
+    @memset(uninit, false);
+    frame.locals_uninit = uninit;
+
+    if (value_ops.atomNameEql(ctx.runtime, function.name, "<eval>")) {
+        shared_vm.initializeEvalFrameLocals(ctx, function, frame, eval_local_names, eval_local_slots);
+    }
+    try linkDerivedConstructorThisLocal(ctx, function, frame);
+}
+
+pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, var_refs: []const core.JSValue) !void {
+    if (var_refs.len > 0) {
+        const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
+        for (var_refs, 0..) |value, idx| owned_refs[idx] = value.dup();
+        frame.var_refs = owned_refs;
+        return;
+    }
+
+    if (function.var_ref_names.len == 0) return;
+    const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
+    errdefer ctx.runtime.memory.free(core.JSValue, owned_refs);
+    var initialized: usize = 0;
+    errdefer {
+        for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
+    }
+    for (function.var_ref_names, 0..) |var_name, idx| {
+        const val = shared_vm.globalLexicalValue(ctx, var_name) orelse global.getProperty(var_name);
+        const cell = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+        errdefer core.Object.destroyFromHeader(ctx.runtime, &cell.header);
+        try cell.initVarRefPayload(ctx.runtime, val);
+        owned_refs[idx] = cell.value();
+        initialized += 1;
+    }
+    frame.var_refs = owned_refs;
+}
 
 pub fn closure(
     ctx: *core.JSContext,
@@ -32,7 +135,7 @@ pub fn closure(
     eval_var_refs: []const core.JSValue,
     comptime handleCatchableRuntimeError: anytype,
     comptime pushFunctionClosure: anytype,
-) !void {
+) !Step {
     const index: u32 = if (opc == op.fclosure) blk: {
         const value = readInt(u32, function.code[frame.pc..][0..4]);
         frame.pc += 4;
@@ -42,8 +145,9 @@ pub fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    if (try tryFuseImmediateSimpleArrayMapClosure(ctx, output, global, stack, function, frame, catch_target, index, handleCatchableRuntimeError)) return;
+    if (try tryFuseImmediateSimpleArrayMapClosure(ctx, output, global, stack, function, frame, catch_target, index, handleCatchableRuntimeError)) |step| return step;
     try pushFunctionClosure(ctx, frame, stack, function, global, index, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
+    return .done;
 }
 
 fn tryFuseImmediateSimpleArrayMapClosure(
@@ -56,23 +160,23 @@ fn tryFuseImmediateSimpleArrayMapClosure(
     catch_target: *?usize,
     index: usize,
     comptime handleCatchableRuntimeError: anytype,
-) !bool {
-    if (frame.pc + 3 > function.code.len) return false;
-    if (function.code[frame.pc] != op.call_method) return false;
-    if (readInt(u16, function.code[frame.pc + 1 ..][0..2]) != 1) return false;
-    if (stack.values.len < 2) return false;
+) !?Step {
+    if (frame.pc + 3 > function.code.len) return null;
+    if (function.code[frame.pc] != op.call_method) return null;
+    if (readInt(u16, function.code[frame.pc + 1 ..][0..2]) != 1) return null;
+    if (stack.values.len < 2) return null;
 
     const callback = function.constants.get(index) orelse return error.InvalidBytecode;
     defer callback.free(ctx.runtime);
-    const callback_bytecode = shared_vm.functionBytecodeFromValue(callback) orelse return false;
-    if (callback_bytecode.simple_numeric_kind != .arg0_const) return false;
+    const callback_bytecode = shared_vm.functionBytecodeFromValue(callback) orelse return null;
+    if (callback_bytecode.simple_numeric_kind != .arg0_const) return null;
 
     const receiver = stack.values[stack.values.len - 2];
     const method = stack.values[stack.values.len - 1];
-    const method_object = shared_vm.callableObjectFromValue(method) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return false;
+    const method_object = shared_vm.callableObjectFromValue(method) orelse return null;
+    const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return null;
     const map_id = @intFromEnum(builtins.array.PrototypeMethod.map);
-    if (native_ref.domain != .array or native_ref.id != map_id) return false;
+    if (native_ref.domain != .array or native_ref.id != map_id) return null;
 
     const args = [_]core.JSValue{callback};
     if (try shared_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback)) |fast_value| {
@@ -83,13 +187,13 @@ fn tryFuseImmediateSimpleArrayMapClosure(
         receiver_owned.free(ctx.runtime);
         try stack.pushOwned(fast_value);
         frame.pc += 3;
-        return true;
+        return .done;
     }
     const result = shared_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, receiver, method_object, map_id, args[0..], function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return true;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    const value = result orelse return false;
+    const value = result orelse return null;
     errdefer value.free(ctx.runtime);
 
     const method_owned = try stack.pop();
@@ -98,7 +202,7 @@ fn tryFuseImmediateSimpleArrayMapClosure(
     receiver_owned.free(ctx.runtime);
     try stack.pushOwned(value);
     frame.pc += 3;
-    return true;
+    return .done;
 }
 
 fn tryFastMathCall(
@@ -198,7 +302,7 @@ pub fn call(
     catch_target: *?usize,
     opc: u8,
     comptime execCall: anytype,
-) !void {
+) !Step {
     const argc = switch (opc) {
         op.call => blk: {
             const value = readInt(u16, function.code[frame.pc..][0..2]);
@@ -211,10 +315,13 @@ pub fn call(
         op.call3 => 3,
         else => unreachable,
     };
-    if (try tryFastMathCall(ctx, stack, argc)) return;
-    if (try tryFastSimpleStringCall(ctx, stack, argc)) return;
-    if (try tryFastSimpleNumericCall(ctx, stack, argc)) return;
-    try execCall(ctx, stack, function, frame, catch_target, argc, output, global);
+    if (try tryFastMathCall(ctx, stack, argc)) return .done;
+    if (try tryFastSimpleStringCall(ctx, stack, argc)) return .done;
+    if (try tryFastSimpleNumericCall(ctx, stack, argc)) return .done;
+    return switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global)) {
+        .done => .done,
+        .continue_loop => .continue_loop,
+    };
 }
 
 fn tryFastSimpleStringCall(
@@ -388,12 +495,15 @@ pub fn tailCall(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     comptime execCall: anytype,
-) !core.JSValue {
+) !TailCallResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    try execCall(ctx, stack, function, frame, catch_target, argc, output, global);
-    if (stack.peek()) |value| return value;
-    return core.JSValue.undefinedValue();
+    switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global)) {
+        .done => {},
+        .continue_loop => return .handled,
+    }
+    if (stack.peek()) |value| return .{ .return_value = value };
+    return .{ .return_value = core.JSValue.undefinedValue() };
 }
 
 pub fn callMethod(
@@ -408,7 +518,7 @@ pub fn callMethod(
     comptime callValueOrBytecodeClassMode: anytype,
     comptime isCurrentSuperConstructor: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     var inline_args: [4]core.JSValue = undefined;
@@ -428,29 +538,30 @@ pub fn callMethod(
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
     const fast_result = fastNativeMethodCall(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (fast_result) |value| {
-        if (dropUnusedCallResult(ctx, function, frame, value)) return;
+        if (dropUnusedCallResult(ctx, function, frame, value)) return .done;
         errdefer value.free(ctx.runtime);
         try stack.pushOwned(value);
-        return;
+        return .done;
     }
     const maybe_array_result = qjsArrayMethodFastCall(ctx, output, global, obj, func, args_buf, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const result = if (maybe_array_result) |array_result|
         array_result
     else
         callValueOrBytecodeClassMode(ctx, output, global, obj, func, args_buf, function, frame, isCurrentSuperConstructor(ctx, frame, func)) catch |err| {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
-    if (dropUnusedCallResult(ctx, function, frame, result)) return;
+    if (dropUnusedCallResult(ctx, function, frame, result)) return .done;
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
+    return .done;
 }
 
 fn dropUnusedCallResult(
@@ -658,7 +769,7 @@ pub fn apply(
     comptime initializeCurrentConstructorClassInstanceElements: anytype,
     comptime setCurrentArrowLexicalThis: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const is_new = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     const array_value = try stack.pop();
@@ -691,16 +802,25 @@ pub fn apply(
         this_value;
     const result = if (is_new != 0) blk: {
         if (allow_class_constructor_call) {
-            break :blk try constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value);
+            break :blk constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, this_value) catch |err| {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                return err;
+            };
         }
-        break :blk try constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, func);
-    } else try callValueOrBytecodeClassMode(ctx, output, global, effective_this, func, apply_args, function, frame, allow_class_constructor_call);
+        break :blk constructValueOrBytecodeWithNewTarget(ctx, output, global, func, apply_args, function, frame, func) catch |err| {
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            return err;
+        };
+    } else callValueOrBytecodeClassMode(ctx, output, global, effective_this, func, apply_args, function, frame, allow_class_constructor_call) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
     if (is_new != 0) {
         stack.pushOwned(result) catch |err| {
             result.free(ctx.runtime);
             return err;
         };
-        return;
+        return .done;
     }
     defer result.free(ctx.runtime);
     if (allow_class_constructor_call and frame.function.flags.is_derived_class_constructor) {
@@ -708,19 +828,19 @@ pub fn apply(
             const next_this = if (result.isObject()) result else frame.constructor_this_value;
             try setSlotValue(ctx, &frame.this_value, next_this.dup());
             initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
         } else {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
         try pushSlotValue(stack, frame.this_value);
-        return;
+        return .done;
     } else if (is_arrow_super_constructor) {
         if (arrow_super_this) |this_value_for_arrow| {
             if (!this_value_for_arrow.isUninitialized()) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
@@ -732,9 +852,10 @@ pub fn apply(
             result;
         try setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
         try stack.push(next_this);
-        return;
+        return .done;
     }
     try stack.push(result);
+    return .done;
 }
 
 pub fn constructor(
@@ -748,7 +869,7 @@ pub fn constructor(
     comptime popDuplicateConstructorTarget: anytype,
     comptime constructValueOrBytecode: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
     var inline_args: [4]core.JSValue = undefined;
@@ -787,16 +908,16 @@ pub fn constructor(
         new_target,
         args_buf,
     ) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (fused_typed_array_result) |result| {
         errdefer result.free(ctx.runtime);
         try stack.pushOwned(result);
-        return;
+        return .done;
     }
     const result = constructValueOrBytecode(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer result.free(ctx.runtime);
@@ -805,17 +926,33 @@ pub fn constructor(
             if (function_object.functionHomeObjectSlot().*) |home_object| {
                 const instance_object = try property_ops.expectObject(result);
                 shared_vm.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object) catch |err| {
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
             }
         }
     }
     try stack.pushOwned(result);
+    return .done;
 }
 
 pub fn checkCtor(frame: *frame_mod.Frame) !void {
     if (frame.new_target.isUndefined()) return error.TypeError;
+}
+
+pub fn checkCtorVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    checkCtor(frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
@@ -828,6 +965,21 @@ pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     } else {
         return error.TypeError;
     }
+}
+
+pub fn checkCtorReturnVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    checkCtorReturn(ctx, stack) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn initCtor(
@@ -853,6 +1005,28 @@ pub fn initCtor(
         try shared_vm.initializeClassPrivateMethods(ctx.runtime, instance_object, home_object);
     }
     try stack.pushOwned(result);
+}
+
+pub fn initCtorVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime constructValueOrBytecode: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    initCtor(ctx, output, global, stack, function, frame, constructValueOrBytecode) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
+fn maxJsCallDepth(ctx: *const core.JSContext) usize {
+    return @max(@as(usize, 16), ctx.stack_limit / 16384);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

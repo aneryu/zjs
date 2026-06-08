@@ -8,6 +8,8 @@ const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
 
+pub const Step = enum { done, continue_loop };
+
 pub fn binary(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -60,6 +62,25 @@ pub fn binary(
     } else try value_ops.binary(ctx.runtime, binop, lhs, rhs);
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
+}
+
+pub fn binaryVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    binop: u8,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    comptime toPrimitiveForAddition: anytype,
+    comptime toPrimitiveForNumber: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    binary(ctx, stack, binop, output, global, toPrimitiveForAddition, toPrimitiveForNumber) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn compare(
@@ -120,6 +141,25 @@ pub fn compare(
     try stack.pushOwned(result);
 }
 
+pub fn compareVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    cmp: u8,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    comptime toPrimitiveForNumber: anytype,
+    comptime toPrimitiveForAddition: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    compare(ctx, stack, cmp, output, global, toPrimitiveForNumber, toPrimitiveForAddition) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn unary(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -156,6 +196,24 @@ pub fn unary(
     try stack.pushOwned(result);
 }
 
+pub fn unaryVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    opcode_id: u8,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    comptime toPrimitiveForNumber: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    unary(ctx, stack, opcode_id, output, global, toPrimitiveForNumber) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn bitNot(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -170,6 +228,23 @@ pub fn bitNot(
     const result = try value_ops.unary(ctx.runtime, op.not, primitive);
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
+}
+
+pub fn bitNotVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    comptime toPrimitiveForNumber: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    bitNot(ctx, stack, output, global, toPrimitiveForNumber) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn postUpdate(
@@ -208,6 +283,24 @@ pub fn postUpdate(
     defer updated.free(ctx.runtime);
     try stack.push(numeric_old);
     try stack.push(updated);
+}
+
+pub fn postUpdateVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    opcode_id: u8,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    comptime toPrimitiveForNumber: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    postUpdate(ctx, stack, opcode_id, output, global, toPrimitiveForNumber) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn tryFuseDroppedLocalPostUpdate(
@@ -443,6 +536,29 @@ pub fn updateLocal(
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
+pub fn updateLocalVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    opcode_id: u8,
+    output: ?*std.Io.Writer,
+    sync_global_lexical_locals: bool,
+    comptime slotValueDup: anytype,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+    comptime toPrimitiveForNumber: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    updateLocal(ctx, function, global, frame, opcode_id, output, sync_global_lexical_locals, slotValueDup, setSlotValue, syncTopLevelGlobalLexicalLocal, toPrimitiveForNumber) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn addLocal(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -490,6 +606,28 @@ pub fn addLocal(
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
     try setSlotValue(ctx, &frame.locals[idx], updated);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+}
+
+pub fn addLocalVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    output: ?*std.Io.Writer,
+    sync_global_lexical_locals: bool,
+    comptime slotValueDup: anytype,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+    comptime toPrimitiveForAddition: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    addLocal(ctx, stack, function, global, frame, output, sync_global_lexical_locals, slotValueDup, setSlotValue, syncTopLevelGlobalLexicalLocal, toPrimitiveForAddition) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn tryFuseLocalNumericAdd(

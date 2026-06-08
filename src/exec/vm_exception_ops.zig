@@ -1,9 +1,12 @@
 const std = @import("std");
 
+const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
+
+const SourceLocation = core.BacktraceLocation;
 
 pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 
@@ -208,6 +211,30 @@ pub fn qjsCallSiteMethod(rt: *core.JSRuntime, object: *core.Object, name: []cons
     return null;
 }
 
+pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {
+    const function_object = objectFromValue(current_function_value) orelse return ctx.runtime.atoms.dup(fallback);
+    const name_desc = function_object.getOwnProperty(core.atom.ids.name) orelse return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+    defer name_desc.destroy(ctx.runtime);
+    if (name_desc.kind != .data or !name_desc.value.isString()) return ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(ctx.runtime.memory.allocator);
+    try value_ops.appendRawString(ctx.runtime, &bytes, name_desc.value);
+    return ctx.runtime.atoms.internString(bytes.items);
+}
+
+pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.BacktraceLocation {
+    const function: *const bytecode.Bytecode = @ptrCast(@alignCast(data orelse return .{ .line_num = 1, .col_num = 1 }));
+    const slots = function.source_loc_slots;
+    if (slots.len != 0) {
+        const index = sourceSlotUpperBound(slots, target_pc);
+        if (index == 0) return .{ .line_num = function.pc2line_start_line, .col_num = function.pc2line_start_col };
+        const slot = slots[index - 1];
+        return .{ .line_num = slot.line_num, .col_num = slot.col_num };
+    }
+    return sourceLocationFromPc2Line(function, target_pc) orelse .{ .line_num = function.line_num, .col_num = function.col_num };
+}
+
 pub fn isErrorConstructorName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Error") or
         std.mem.eql(u8, name, "AggregateError") or
@@ -283,6 +310,82 @@ fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
     if (std.mem.eql(u8, name, "RangeError")) return "RangeError";
     if (std.mem.eql(u8, name, "ReferenceError")) return "ReferenceError";
     return null;
+}
+
+fn sourceSlotUpperBound(slots: []const bytecode.pipeline.pc2line.SourceLocSlot, target_pc: usize) usize {
+    var low: usize = 0;
+    var high = slots.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (slots[mid].pc <= target_pc) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn sourceLocationFromPc2Line(function: *const bytecode.Bytecode, target_pc: usize) ?SourceLocation {
+    if (function.pc2line_buf.len == 0) return null;
+
+    var pc: usize = 0;
+    var line_num: i32 = function.pc2line_start_line;
+    var col_num: i32 = function.pc2line_start_col;
+    var best = SourceLocation{ .line_num = line_num, .col_num = col_num };
+    var i: usize = 0;
+    while (i < function.pc2line_buf.len) {
+        const marker = function.pc2line_buf[i];
+        i += 1;
+        if (marker == 0) {
+            const diff_pc = readPc2LineLeb128(function.pc2line_buf, &i) orelse break;
+            const diff_line = readPc2LineSleb128(function.pc2line_buf, &i) orelse break;
+            pc += diff_pc;
+            line_num += diff_line;
+        } else {
+            const adjusted: i32 = @as(i32, marker) - 1;
+            pc += @intCast(@divFloor(adjusted, 5));
+            line_num += @mod(adjusted, 5) - 1;
+        }
+        const diff_col = readPc2LineSleb128(function.pc2line_buf, &i) orelse break;
+        col_num += diff_col;
+        if (pc > target_pc) break;
+        best = .{ .line_num = line_num, .col_num = col_num };
+    }
+    return best;
+}
+
+fn readPc2LineLeb128(bytes: []const u8, index: *usize) ?usize {
+    var result: usize = 0;
+    var shift: u6 = 0;
+    while (true) {
+        if (index.* >= bytes.len) return null;
+        const byte = bytes[index.*];
+        index.* += 1;
+        result |= @as(usize, byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0) return result;
+        shift += 7;
+        if (shift >= @bitSizeOf(usize)) return null;
+    }
+}
+
+fn readPc2LineSleb128(bytes: []const u8, index: *usize) ?i32 {
+    var result: i32 = 0;
+    var shift: u5 = 0;
+    while (true) {
+        if (index.* >= bytes.len) return null;
+        const byte = bytes[index.*];
+        index.* += 1;
+        result |= @as(i32, @intCast(byte & 0x7f)) << shift;
+        shift += 7;
+        if ((byte & 0x80) == 0) {
+            if (shift < 32 and (byte & 0x40) != 0) {
+                result |= @as(i32, -1) << shift;
+            }
+            return result;
+        }
+        if (shift >= 32) return null;
+    }
 }
 
 fn objectFromValue(value: core.JSValue) ?*core.Object {

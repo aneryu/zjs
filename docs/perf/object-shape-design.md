@@ -8,7 +8,7 @@ Primary owners:
 - `src/core/object.zig`
 - `src/core/shape.zig`
 - `src/core/property.zig`
-- property opcode handlers in `src/exec/vm/property.zig`
+- property opcode handlers in `src/exec/vm_property.zig`
 
 ## Shape Model
 

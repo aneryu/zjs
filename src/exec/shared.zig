@@ -781,50 +781,6 @@ pub const ensureLocalsCapacity = utils.ensureLocalsCapacity;
 pub const ensureVarRefsCapacity = utils.ensureVarRefsCapacity;
 pub const catchTargetFromMarker = utils.catchTargetFromMarker;
 
-pub fn saveGeneratorExecutionState(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    generator: *core.Object,
-    pc: usize,
-) !void {
-    generator.generatorPcSlot().* = pc;
-    try generator.writeValueSliceBarrier(ctx.runtime, stack.values);
-    try generator.writeValueSliceBarrier(ctx.runtime, frame.locals);
-    try generator.writeValueSliceBarrier(ctx.runtime, frame.args);
-    try generator.writeValueSliceBarrier(ctx.runtime, frame.var_refs);
-    const old_stack = generator.generatorStack();
-    const old_stack_capacity = generator.generatorStackCapacity();
-    const old_frame_locals = generator.generatorFrameLocals();
-    const old_frame_args = generator.generatorFrameArgs();
-    const old_frame_var_refs = generator.generatorFrameVarRefs();
-    const old_frame_locals_uninit = generator.generatorFrameLocalsUninit();
-    generator.generatorStackSlot().* = stack.values;
-    generator.generatorStackCapacitySlot().* = stack.capacity;
-    generator.generatorFrameLocalsSlot().* = frame.locals;
-    generator.generatorFrameArgsSlot().* = frame.args;
-    generator.generatorFrameVarRefsSlot().* = frame.var_refs;
-    generator.generatorFrameLocalsUninitSlot().* = frame.locals_uninit;
-    stack.values = &.{};
-    stack.capacity = 0;
-    frame.locals = &.{};
-    frame.args = &.{};
-    frame.var_refs = &.{};
-    frame.locals_uninit = &.{};
-    frame.locals_uninit_count = 0;
-
-    for (old_stack) |stored| stored.free(ctx.runtime);
-    if (old_stack_capacity != 0) {
-        ctx.runtime.memory.free(core.JSValue, old_stack.ptr[0..old_stack_capacity]);
-    } else if (old_stack.len != 0) {
-        ctx.runtime.memory.free(core.JSValue, old_stack);
-    }
-    freeValueSlice(ctx.runtime, old_frame_locals);
-    freeValueSlice(ctx.runtime, old_frame_args);
-    freeValueSlice(ctx.runtime, old_frame_var_refs);
-    if (old_frame_locals_uninit.len != 0) ctx.runtime.memory.free(bool, old_frame_locals_uninit);
-}
-
 pub fn createForInIterator(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1932,6 +1888,8 @@ test "appendFunctionEvalLocal roots new refs while write barrier records slice" 
     try std.testing.expect(owner.functionEvalLocalRefsSlot().*[0].same(child_value));
 }
 
+pub const ExecCallResult = enum { done, continue_loop };
+
 pub fn execCall(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -1941,7 +1899,7 @@ pub fn execCall(
     argc: u16,
     output: ?*std.Io.Writer,
     global: *core.Object,
-) !void {
+) !ExecCallResult {
     var inline_args: [4]core.JSValue = undefined;
     const args: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
@@ -1984,7 +1942,7 @@ pub fn execCall(
 
     if (try fastHostOutputCall(ctx.runtime, output, func, args)) {
         try stack.pushOwned(core.JSValue.undefinedValue());
-        return;
+        return .done;
     }
     const is_super_constructor = isCurrentSuperConstructor(ctx, frame, func);
     const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
@@ -2009,7 +1967,7 @@ pub fn execCall(
     const result = callValueOrBytecodeClassMode(ctx, output, global, super_this, func, rooted_args, function, frame, is_super_constructor) catch |err| {
         try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
-            return;
+            return .continue_loop;
         }
         return err;
     };
@@ -2020,25 +1978,25 @@ pub fn execCall(
             try setSlotValue(ctx, &frame.this_value, next_this.dup());
             initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
-                    return;
+                    return .continue_loop;
                 }
                 return err;
             };
         } else {
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
-                return;
+                return .continue_loop;
             }
             return error.ReferenceError;
         }
         try pushSlotValue(stack, frame.this_value);
-        return;
+        return .done;
     }
     if (is_arrow_super_constructor) {
         defer result.free(ctx.runtime);
         if (arrow_super_this) |this_value_for_arrow| {
             if (!this_value_for_arrow.isUninitialized()) {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) {
-                    return;
+                    return .continue_loop;
                 }
                 return error.ReferenceError;
             }
@@ -2051,12 +2009,13 @@ pub fn execCall(
             result;
         try setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
         try stack.push(next_this);
-        return;
+        return .done;
     }
     stack.pushOwned(result) catch |err| {
         result.free(ctx.runtime);
         return err;
     };
+    return .done;
 }
 
 pub fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
@@ -2076,6 +2035,8 @@ pub fn printHostOutputArgs(rt: *core.JSRuntime, output: ?*std.Io.Writer, args: [
     }
 }
 
+pub const ExecEvalResult = enum { done, continue_loop };
+
 pub fn execDirectEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -2087,7 +2048,7 @@ pub fn execDirectEval(
     global: *core.Object,
     eval_in_class_field_initializer: bool,
     eval_in_parameter_initializer: bool,
-) !void {
+) !ExecEvalResult {
     var args: []core.JSValue = &.{};
     if (argc != 0) args = try ctx.runtime.memory.alloc(core.JSValue, argc);
     defer if (args.len != 0) ctx.runtime.memory.free(core.JSValue, args);
@@ -2129,19 +2090,20 @@ pub fn execDirectEval(
         directEval(ctx, output, global, rooted_args, function, frame, eval_in_class_field_initializer, eval_in_parameter_initializer) catch |err| {
             const eval_err = normalizeEvalRuntimeError(err);
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, eval_err)) {
-                return;
+                return .continue_loop;
             }
             return eval_err;
         }
     else
         callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), func, rooted_args, function, frame) catch |err| {
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
-                return;
+                return .continue_loop;
             }
             return err;
         };
     defer result.free(ctx.runtime);
     try stack.push(result);
+    return .done;
 }
 
 pub fn isContextIntrinsicEval(ctx: *core.JSContext, func: core.JSValue) bool {
@@ -2158,7 +2120,7 @@ pub fn execApplyEval(
     global: *core.Object,
     eval_in_class_field_initializer: bool,
     eval_in_parameter_initializer: bool,
-) !void {
+) !ExecEvalResult {
     var arg_array = try stack.pop();
     defer arg_array.free(ctx.runtime);
     var func = try stack.pop();
@@ -2183,19 +2145,20 @@ pub fn execApplyEval(
         directEval(ctx, output, global, args, function, frame, eval_in_class_field_initializer, eval_in_parameter_initializer) catch |err| {
             const eval_err = normalizeEvalRuntimeError(err);
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, eval_err)) {
-                return;
+                return .continue_loop;
             }
             return eval_err;
         }
     else
         callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), func, args, function, frame) catch |err| {
             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
-                return;
+                return .continue_loop;
             }
             return err;
         };
     defer result.free(ctx.runtime);
     try stack.push(result);
+    return .done;
 }
 
 pub fn qjsCollectionNativeRecord(
@@ -2291,10 +2254,7 @@ pub fn handleCatchableRuntimeError(
     const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
     const error_info = if (is_pending_exception) null else exception_ops.runtimeErrorInfo(err) orelse return false;
     const target = catch_target.* orelse return false;
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, stack.values);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, frame.locals);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, frame.args);
-    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, null, global, frame.var_refs);
+    closeFrameDestructuringIteratorsForAbruptCompletion(ctx, null, global, stack, frame);
     try stack.reserveAdditional(1);
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
@@ -13295,6 +13255,19 @@ pub fn closeDestructuringIteratorsInValuesForAbruptCompletion(
         if (ctx.hasException()) ctx.clearException();
         if (pending_exception) |pending| _ = ctx.throwValue(pending.dup());
     }
+}
+
+pub fn closeFrameDestructuringIteratorsForAbruptCompletion(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *const stack_mod.Stack,
+    frame: *const frame_mod.Frame,
+) void {
+    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, stack.values);
+    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.locals);
+    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.args);
+    closeDestructuringIteratorsInValuesForAbruptCompletion(ctx, output, global, frame.var_refs);
 }
 
 pub fn qjsIteratorCallForNativeRecord(

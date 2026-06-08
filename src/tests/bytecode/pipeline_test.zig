@@ -1,6 +1,7 @@
 //! F10 pipeline tests: pc2line encoding, stack_size BFS, FunctionDef.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const engine = @import("quickjs_zig_engine");
 
 const bytecode = engine.bytecode;
@@ -637,8 +638,9 @@ test "Bytecode IC allocation skips direct eval and with functions" {
     cached_code[5] = op.return_undef;
     try cached.setCode(&cached_code);
     try cached.allocateIcSlots();
-    try std.testing.expectEqual(@as(usize, 1), cached.ic_slots.len);
-    try std.testing.expect(cached.icSlotForPc(0) != null);
+    const cacheable_ic_slot_count: usize = if (build_options.zjs_enable_ic) 1 else 0;
+    try std.testing.expectEqual(cacheable_ic_slot_count, cached.ic_slots.len);
+    try std.testing.expectEqual(build_options.zjs_enable_ic, cached.icSlotForPc(0) != null);
 
     var direct_eval = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer direct_eval.deinit(rt);
@@ -1768,17 +1770,23 @@ test "createFunctionBytecode: copies metadata + bytecode + closure_var from Func
     try std.testing.expectEqual(function_def.FunctionKind.async_generator, fb.func_kind);
     try std.testing.expectEqual(@as(usize, 7), fb.byte_code.len);
     try std.testing.expectEqual(@as(i32, 7), fb.byte_code_len);
-    try std.testing.expectEqual(@as(usize, 1), fb.ic_slots.len);
-    if (fb.ic_site_ids.len != 0) {
-        try std.testing.expectEqual(fb.byte_code.len, fb.ic_site_ids.len);
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids[0]);
+    const cacheable_ic_slot_count: usize = if (build_options.zjs_enable_ic) 1 else 0;
+    try std.testing.expectEqual(cacheable_ic_slot_count, fb.ic_slots.len);
+    if (build_options.zjs_enable_ic) {
+        if (fb.ic_site_ids.len != 0) {
+            try std.testing.expectEqual(fb.byte_code.len, fb.ic_site_ids.len);
+            try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids[0]);
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), fb.ic_sites.len);
+            try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].pc);
+            try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].slot_index);
+        }
     } else {
-        try std.testing.expectEqual(@as(usize, 1), fb.ic_sites.len);
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].pc);
-        try std.testing.expectEqual(@as(usize, 0), fb.ic_sites[0].slot_index);
+        try std.testing.expectEqual(@as(usize, 0), fb.ic_site_ids.len);
+        try std.testing.expectEqual(@as(usize, 0), fb.ic_sites.len);
     }
     const bc_view = bytecode.function.asBytecodeView(fb, rt);
-    try std.testing.expect(bc_view.icSlotForPc(0) != null);
+    try std.testing.expectEqual(build_options.zjs_enable_ic, bc_view.icSlotForPc(0) != null);
     try std.testing.expect(bc_view.icSlotForPc(5) == null);
     try std.testing.expectEqual(op.get_var, fb.byte_code[0]);
     try std.testing.expectEqual(op.drop, fb.byte_code[5]);

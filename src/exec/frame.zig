@@ -5,9 +5,95 @@ const atom = @import("../core/atom.zig");
 const Atom = atom.Atom;
 const memory = @import("../core/memory.zig");
 const Object = @import("../core/object.zig").Object;
+const runtime = @import("../core/runtime.zig");
+const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
+const stack_mod = @import("stack.zig");
 
 pub const no_global_lexical_sync_index: usize = std.math.maxInt(usize);
+
+pub const EvalVarRefSnapshot = struct {
+    names: []Atom = &.{},
+    refs: runtime.ValueRootBuffer = .{},
+
+    pub fn init(rt: *JSRuntime, names: []const Atom, refs: []const JSValue) !EvalVarRefSnapshot {
+        var snapshot = EvalVarRefSnapshot{};
+        errdefer snapshot.deinit(rt);
+
+        snapshot.names = try dupAtomSlice(rt, names);
+        snapshot.refs = try runtime.ValueRootBuffer.initCopy(rt, refs);
+        return snapshot;
+    }
+
+    pub fn install(self: *EvalVarRefSnapshot, frame: *Frame) void {
+        frame.eval_var_ref_names = self.names;
+        frame.eval_var_refs = self.refs.values;
+    }
+
+    pub fn rootSlice(self: *EvalVarRefSnapshot) runtime.ValueRootSlice {
+        return self.refs.slice();
+    }
+
+    pub fn deinit(self: *EvalVarRefSnapshot, rt: *JSRuntime) void {
+        const names = self.names;
+        self.names = &.{};
+        self.refs.deinit(rt);
+        freeAtomSlice(rt, names);
+    }
+};
+
+pub const FrameRootScope = struct {
+    rt: ?*JSRuntime = null,
+    values: [4]runtime.ValueRootValue = undefined,
+    slices: [7]runtime.ValueRootSlice = undefined,
+    frame: runtime.ValueRootFrame = .{},
+
+    pub fn init(self: *FrameRootScope, rt: *JSRuntime, stack: *stack_mod.Stack, exec_frame: *Frame, eval_var_refs: *EvalVarRefSnapshot) void {
+        self.rt = rt;
+        self.values = .{
+            .{ .value = &exec_frame.this_value },
+            .{ .value = &exec_frame.constructor_this_value },
+            .{ .value = &exec_frame.current_function },
+            .{ .value = &exec_frame.new_target },
+        };
+        self.slices = .{
+            .{ .mutable = &stack.values },
+            .{ .mutable = &exec_frame.locals },
+            .{ .mutable = &exec_frame.args },
+            .{ .mutable = &exec_frame.original_args },
+            .{ .mutable = &exec_frame.var_refs },
+            .{ .mutable = &exec_frame.eval_local_slots },
+            eval_var_refs.rootSlice(),
+        };
+        self.frame = .{
+            .previous = rt.active_value_roots,
+            .slices = &self.slices,
+            .values = &self.values,
+        };
+        rt.active_value_roots = &self.frame;
+    }
+
+    pub fn deinit(self: *FrameRootScope) void {
+        const rt = self.rt orelse return;
+        rt.active_value_roots = self.frame.previous;
+        self.* = .{};
+    }
+};
+
+pub const CallBindingInputs = struct {
+    initial_this_value: JSValue,
+    current_function_value: JSValue,
+    new_target_value: JSValue,
+    constructor_this_value: JSValue,
+    eval_local_names: []const Atom,
+    eval_local_slots: []JSValue,
+    input_eval_var_ref_names: []const Atom,
+    input_eval_var_refs: []const JSValue,
+    inherited_eval_local_names: []const Atom,
+    inherited_eval_local_slots: []JSValue,
+    inherited_eval_var_ref_names: []const Atom,
+    inherited_eval_var_refs: []const JSValue,
+};
 
 pub const Frame = struct {
     function: *const bytecode.Bytecode,
@@ -46,6 +132,68 @@ pub const Frame = struct {
 
     pub fn init(function: *const bytecode.Bytecode) Frame {
         return .{ .function = function };
+    }
+
+    pub fn initCallBindings(self: *Frame, rt: *JSRuntime, inputs: CallBindingInputs) !EvalVarRefSnapshot {
+        self.this_value = inputs.initial_this_value.dup();
+        self.constructor_this_value = inputs.constructor_this_value.dup();
+        self.current_function = inputs.current_function_value.dup();
+        self.new_target = inputs.new_target_value.dup();
+        errdefer self.releaseCallBindings(rt);
+
+        self.eval_local_names = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_names else inputs.eval_local_names;
+        self.eval_local_slots = if (inputs.inherited_eval_local_names.len != 0) inputs.inherited_eval_local_slots else inputs.eval_local_slots;
+        const frame_eval_var_ref_names = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_ref_names else inputs.input_eval_var_ref_names;
+        const frame_eval_var_refs = if (inputs.inherited_eval_var_ref_names.len != 0) inputs.inherited_eval_var_refs else inputs.input_eval_var_refs;
+
+        var snapshot = try EvalVarRefSnapshot.init(rt, frame_eval_var_ref_names, frame_eval_var_refs);
+        snapshot.install(self);
+        return snapshot;
+    }
+
+    pub fn initArguments(self: *Frame, account: *memory.MemoryAccount, args: []const JSValue, use_inline_storage: bool) !void {
+        self.actual_arg_count = args.len;
+
+        const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
+        if (frame_arg_count > 0) {
+            const owned_args = if (use_inline_storage and frame_arg_count <= self.inline_args.len)
+                self.inline_args[0..frame_arg_count]
+            else blk: {
+                self.args_on_heap = true;
+                break :blk try account.alloc(JSValue, frame_arg_count);
+            };
+            @memset(owned_args, JSValue.undefinedValue());
+            for (args, 0..) |arg, idx| owned_args[idx] = arg.dup();
+            self.args = owned_args;
+        }
+
+        if (args.len > 0) {
+            const original_args = if (use_inline_storage and args.len <= self.inline_original_args.len)
+                self.inline_original_args[0..args.len]
+            else blk: {
+                self.original_args_on_heap = true;
+                break :blk try account.alloc(JSValue, args.len);
+            };
+            for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
+            self.original_args = original_args;
+        }
+    }
+
+    fn releaseCallBindings(self: *Frame, rt: *JSRuntime) void {
+        const this_value = self.this_value;
+        const constructor_this_value = self.constructor_this_value;
+        const current_function = self.current_function;
+        const new_target = self.new_target;
+        self.this_value = JSValue.undefinedValue();
+        self.constructor_this_value = JSValue.undefinedValue();
+        self.current_function = JSValue.undefinedValue();
+        self.new_target = JSValue.undefinedValue();
+        self.eval_local_names = &.{};
+        self.eval_local_slots = &.{};
+        this_value.free(rt);
+        constructor_this_value.free(rt);
+        current_function.free(rt);
+        new_target.free(rt);
     }
 
     pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
@@ -169,3 +317,23 @@ pub const Frame = struct {
         }
     }
 };
+
+fn dupAtomSlice(rt: *JSRuntime, atoms: []const Atom) ![]Atom {
+    if (atoms.len == 0) return &.{};
+    const duped = try rt.memory.alloc(Atom, atoms.len);
+    errdefer rt.memory.free(Atom, duped);
+    var initialized: usize = 0;
+    errdefer {
+        for (duped[0..initialized]) |atom_id| rt.atoms.free(atom_id);
+    }
+    for (atoms, 0..) |atom_id, idx| {
+        duped[idx] = rt.atoms.dup(atom_id);
+        initialized += 1;
+    }
+    return duped;
+}
+
+fn freeAtomSlice(rt: *JSRuntime, atoms: []Atom) void {
+    for (atoms) |atom_id| rt.atoms.free(atom_id);
+    if (atoms.len != 0) rt.memory.free(Atom, atoms);
+}

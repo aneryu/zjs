@@ -22,6 +22,8 @@ const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const shared_vm = @import("shared.zig");
 
+pub const Step = enum { done, continue_loop };
+
 // --- Dynamically gathered shared_vm aliases (excluding local definitions) ---
 const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;
 const DataViewConstructorArgs = shared_vm.DataViewConstructorArgs;
@@ -6498,7 +6500,7 @@ pub fn getSuperValue(
     comptime toPropertyKeyAtom_: anytype,
     comptime sameObjectIdentity_: anytype,
     comptime getSuperPropertyValue_: anytype,
-) !void {
+) !Step {
     _ = slotValueDup_;
     const prop_value = try stack.pop();
     defer prop_value.free(ctx.runtime);
@@ -6507,16 +6509,16 @@ pub fn getSuperValue(
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
     if (varRefSlotIsUninitialized(receiver)) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     const atom_id = toPropertyKeyAtom_(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     if (obj.isUndefined() or obj.isNull()) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
 
@@ -6527,18 +6529,19 @@ pub fn getSuperValue(
                 if (function_object.functionHomeObjectSlot().*) |home_object| {
                     prototype = home_object.getPrototype() orelse {
                         try stack.pushOwned(core.JSValue.undefinedValue());
-                        return;
+                        return .done;
                     };
                 }
             }
         }
     } else |_| {}
     const value = getSuperPropertyValue_(ctx, output, global, receiver, prototype, atom_id, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer value.free(ctx.runtime);
     try stack.push(value);
+    return .done;
 }
 
 pub fn putSuperValue(
@@ -6555,7 +6558,7 @@ pub fn putSuperValue(
     comptime toPropertyKeyAtom_: anytype,
     comptime sameObjectIdentity_: anytype,
     comptime setSuperPropertyValue_: anytype,
-) !void {
+) !Step {
     _ = slotValueDup_;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
@@ -6566,15 +6569,15 @@ pub fn putSuperValue(
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
     if (varRefSlotIsUninitialized(receiver)) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     if (obj.isUndefined() or obj.isNull()) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     const atom_id = toPropertyKeyAtom_(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
@@ -6584,7 +6587,7 @@ pub fn putSuperValue(
             if (sameObjectIdentity_(super_constructor, obj)) {
                 if (function_object.functionHomeObjectSlot().*) |home_object| {
                     prototype = home_object.getPrototype() orelse {
-                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                         return error.TypeError;
                     };
                 }
@@ -6592,9 +6595,10 @@ pub fn putSuperValue(
         }
     } else |_| {}
     setSuperPropertyValue_(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    return .done;
 }
 
 pub fn setHomeObject(
@@ -6635,6 +6639,21 @@ pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
 
+pub fn checkBrandVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    checkBrand(ctx, stack) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const home_value = try stack.pop();
     var rooted_home = home_value;
@@ -6663,6 +6682,21 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
             else => return err,
         };
     }
+}
+
+pub fn addBrandVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    addBrand(ctx, stack) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn privateIn(
@@ -6694,6 +6728,25 @@ pub fn privateIn(
     try stack.pushOwned(core.JSValue.boolean(found));
 }
 
+pub fn privateInVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime throwTypeErrorMessage_: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    privateIn(ctx, output, global, stack, function, frame, toPropertyKeyAtom_, throwTypeErrorMessage_) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn defineClass(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -6721,7 +6774,7 @@ pub fn defineClass(
     comptime functionNameValueFromAtom_: anytype,
     comptime defineFunctionNameProperty_: anytype,
     is_computed_name: bool,
-) !void {
+) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     const flags = function.code[frame.pc + 4];
     frame.pc += 5;
@@ -6773,7 +6826,7 @@ pub fn defineClass(
             superclass_value = try stack.pop();
         }
         if (!(superclass_value.isObject() or superclass_value.isNull())) {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         }
     }
@@ -6782,7 +6835,7 @@ pub fn defineClass(
     if (is_computed_name) {
         computed_key = try stackValueFromTop(stack, 0);
         const name_atom = toPropertyKeyAtom_(ctx, output, global, computed_key, function, frame) catch |err| {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         defer ctx.runtime.atoms.free(name_atom);
@@ -6797,20 +6850,20 @@ pub fn defineClass(
     if (superclass_value_active) {
         if (superclass_value.isObject()) {
             if (!isConstructorLike_(ctx, superclass_value)) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
             try ctor_object.setOptionalValueSlot(ctx.runtime, ctor_object.functionSuperConstructorSlot(), superclass_value.dup());
             superclass_proto = getValueProperty_(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (superclass_proto.isObject()) {
                 proto_parent = try property_ops.expectObject(superclass_proto);
             } else if (!superclass_proto.isNull()) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
         } else {
@@ -6840,6 +6893,7 @@ pub fn defineClass(
     }
     try stack.push(ctor);
     try stack.push(proto_value);
+    return .done;
 }
 
 pub fn defineMethod(
@@ -6855,15 +6909,16 @@ pub fn defineMethod(
     comptime functionNameValueFromAtom_: anytype,
     comptime defineFunctionNameProperty_: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const flags = function.code[frame.pc];
     frame.pc += 1;
     defineObjectMethod(ctx.runtime, stack, atom_id, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    return .done;
 }
 
 pub fn defineMethodComputed(
@@ -6881,19 +6936,23 @@ pub fn defineMethodComputed(
     comptime functionNameValueFromAtom_: anytype,
     comptime defineFunctionNameProperty_: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const flags = function.code[frame.pc];
     frame.pc += 1;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const key_value = try stack.pop();
     defer key_value.free(ctx.runtime);
-    const atom_id = try toPropertyKeyAtom_(ctx, output, global, key_value, function, frame);
-    defer ctx.runtime.atoms.free(atom_id);
-    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+    const atom_id = toPropertyKeyAtom_(ctx, output, global, key_value, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    defer ctx.runtime.atoms.free(atom_id);
+    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 fn defineObjectMethod(

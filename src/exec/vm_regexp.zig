@@ -76,6 +76,190 @@ pub fn tryPushLiteralFromAtomPair(
     return true;
 }
 
+pub fn tryFuseGoto8LiteralAssignmentLoop(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+) bool {
+    if (ctx.runtime.hasInterruptHandler()) return false;
+    const operand_pc = frame.pc;
+    if (operand_pc >= function.code.len) return false;
+    const diff: i8 = @bitCast(function.code[operand_pc]);
+    if (diff >= 0) return false;
+    const target_pc: usize = @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
+    if (target_pc + 11 > function.code.len) return false;
+
+    const code = function.code;
+    if (decodeLocalInt32LessThanLoopCondition(code, target_pc)) |condition| {
+        if (condition.idx >= frame.locals.len or condition.idx >= frame.locals_uninit.len) return false;
+        if (frame.localIsUninitialized(condition.idx)) return false;
+        if (shared_vm.varRefCellFromValue(frame.locals[condition.idx]) != null) return false;
+        const current = frame.locals[condition.idx].asInt32() orelse return false;
+        if (!decodeRegExpLiteralAssignmentLoopBody(code, condition.body_pc, operand_pc - 1, .{ .local = condition.idx })) return false;
+        if (current < condition.limit) {
+            const old_value = frame.locals[condition.idx];
+            frame.locals[condition.idx] = core.JSValue.int32(condition.limit);
+            old_value.free(ctx.runtime);
+        }
+        frame.pc = condition.false_pc;
+        return true;
+    }
+
+    if (decodeGlobalInt32LessThanLoopCondition(code, target_pc)) |condition| {
+        const desc = global.getOwnProperty(condition.atom) orelse return false;
+        defer desc.destroy(ctx.runtime);
+        if (desc.kind != .data or !(desc.writable orelse false)) return false;
+        const current = desc.value.asInt32() orelse return false;
+        if (!decodeRegExpLiteralAssignmentLoopBody(code, condition.body_pc, operand_pc - 1, .{ .global = condition.atom })) return false;
+        if (current < condition.limit) {
+            _ = global.setOwnWritableDataProperty(ctx.runtime, condition.atom, core.JSValue.int32(condition.limit)) catch return false;
+        }
+        frame.pc = condition.false_pc;
+        return true;
+    }
+
+    return false;
+}
+
+const RegExpLiteralLoopInduction = union(enum) {
+    local: u16,
+    global: core.Atom,
+};
+
+const LocalLoopCondition = struct {
+    idx: u16,
+    limit: i32,
+    body_pc: usize,
+    false_pc: usize,
+};
+
+const GlobalLoopCondition = struct {
+    atom: core.Atom,
+    limit: i32,
+    body_pc: usize,
+    false_pc: usize,
+};
+
+fn decodeLocalInt32LessThanLoopCondition(code: []const u8, target_pc: usize) ?LocalLoopCondition {
+    if (target_pc + 6 > code.len or code[target_pc] != op.get_loc_check) return null;
+    const immediate = decodeLoopImmediateInt32(code, target_pc + 3) orelse return null;
+    if (immediate.next_pc + 2 > code.len or code[immediate.next_pc] != op.lt or code[immediate.next_pc + 1] != op.if_false8) return null;
+    const branch_operand_pc = immediate.next_pc + 2;
+    const branch_diff: i8 = @bitCast(code[branch_operand_pc]);
+    return .{
+        .idx = readInt(u16, code[target_pc + 1 ..][0..2]),
+        .limit = immediate.value,
+        .body_pc = branch_operand_pc + 1,
+        .false_pc = @intCast(@as(i64, @intCast(branch_operand_pc)) + @as(i64, branch_diff)),
+    };
+}
+
+fn decodeGlobalInt32LessThanLoopCondition(code: []const u8, target_pc: usize) ?GlobalLoopCondition {
+    if (target_pc + 8 > code.len) return null;
+    if (code[target_pc] != op.get_var and code[target_pc] != op.get_var_undef) return null;
+    const immediate = decodeLoopImmediateInt32(code, target_pc + 5) orelse return null;
+    if (immediate.next_pc + 2 > code.len or code[immediate.next_pc] != op.lt or code[immediate.next_pc + 1] != op.if_false8) return null;
+    const branch_operand_pc = immediate.next_pc + 2;
+    const branch_diff: i8 = @bitCast(code[branch_operand_pc]);
+    return .{
+        .atom = readInt(u32, code[target_pc + 1 ..][0..4]),
+        .limit = immediate.value,
+        .body_pc = branch_operand_pc + 1,
+        .false_pc = @intCast(@as(i64, @intCast(branch_operand_pc)) + @as(i64, branch_diff)),
+    };
+}
+
+fn decodeLoopImmediateInt32(code: []const u8, pc: usize) ?struct { value: i32, next_pc: usize } {
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.push_0 => .{ .value = 0, .next_pc = pc + 1 },
+        op.push_1 => .{ .value = 1, .next_pc = pc + 1 },
+        op.push_2 => .{ .value = 2, .next_pc = pc + 1 },
+        op.push_3 => .{ .value = 3, .next_pc = pc + 1 },
+        op.push_4 => .{ .value = 4, .next_pc = pc + 1 },
+        op.push_5 => .{ .value = 5, .next_pc = pc + 1 },
+        op.push_6 => .{ .value = 6, .next_pc = pc + 1 },
+        op.push_7 => .{ .value = 7, .next_pc = pc + 1 },
+        op.push_i8 => if (pc + 2 <= code.len) .{ .value = @as(i8, @bitCast(code[pc + 1])), .next_pc = pc + 2 } else null,
+        op.push_i16 => if (pc + 3 <= code.len) .{ .value = readInt(i16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 } else null,
+        op.push_i32 => if (pc + 5 <= code.len) .{ .value = readInt(i32, code[pc + 1 ..][0..4]), .next_pc = pc + 5 } else null,
+        else => null,
+    };
+}
+
+fn decodeRegExpLiteralAssignmentLoopBody(code: []const u8, body_pc: usize, goto_pc: usize, induction: RegExpLiteralLoopInduction) bool {
+    var pc = body_pc;
+    if (pc + 5 > code.len or code[pc] != op.make_var_ref) return false;
+    pc += 5;
+    if (pc + 6 > code.len or code[pc] != op.push_atom_value) return false;
+    const flags_pc = pc + 5;
+    const regexp_pc = switch (code[flags_pc]) {
+        op.push_atom_value => blk: {
+            if (flags_pc + 6 > code.len or code[flags_pc + 5] != op.regexp) return false;
+            break :blk flags_pc + 5;
+        },
+        op.push_empty_string => blk: {
+            if (flags_pc + 2 > code.len or code[flags_pc + 1] != op.regexp) return false;
+            break :blk flags_pc + 1;
+        },
+        else => return false,
+    };
+    const after_regexp_pc = regexp_pc + 1;
+    if (after_regexp_pc >= code.len or code[after_regexp_pc] != op.put_ref_value) return false;
+    return decodeRegExpLiteralAssignmentLoopTail(code, after_regexp_pc + 1, goto_pc, induction);
+}
+
+fn decodeRegExpLiteralAssignmentLoopTail(code: []const u8, tail_pc: usize, goto_pc: usize, induction: RegExpLiteralLoopInduction) bool {
+    switch (induction) {
+        .local => |induction_idx| {
+            if (tail_pc + 2 == goto_pc and code[tail_pc] == op.inc_loc and code[tail_pc + 1] == @as(u8, @intCast(@min(induction_idx, 255)))) return induction_idx <= 255;
+
+            const get = decodeLocalGetForLoopTail(code, tail_pc) orelse return false;
+            if (get.idx != induction_idx) return false;
+            if (get.next_pc >= code.len or code[get.next_pc] != op.post_inc) return false;
+            const put = decodeLocalPutForLoopTail(code, get.next_pc + 1) orelse return false;
+            if (put.idx != induction_idx) return false;
+            if (put.next_pc >= code.len or code[put.next_pc] != op.drop) return false;
+            return put.next_pc + 1 == goto_pc;
+        },
+        .global => |atom_id| {
+            if (tail_pc + 11 > code.len or (code[tail_pc] != op.get_var and code[tail_pc] != op.get_var_undef)) return false;
+            if (readInt(u32, code[tail_pc + 1 ..][0..4]) != atom_id) return false;
+            if (code[tail_pc + 5] != op.post_inc) return false;
+            if (code[tail_pc + 6] != op.put_var or readInt(u32, code[tail_pc + 7 ..][0..4]) != atom_id) return false;
+            if (tail_pc + 11 >= code.len or code[tail_pc + 11] != op.drop) return false;
+            return tail_pc + 12 == goto_pc;
+        },
+    }
+}
+
+fn decodeLocalGetForLoopTail(code: []const u8, pc: usize) ?LocalAccess {
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.get_loc0 => .{ .idx = 0, .next_pc = pc + 1 },
+        op.get_loc1 => .{ .idx = 1, .next_pc = pc + 1 },
+        op.get_loc2 => .{ .idx = 2, .next_pc = pc + 1 },
+        op.get_loc3 => .{ .idx = 3, .next_pc = pc + 1 },
+        op.get_loc8 => if (pc + 2 <= code.len) .{ .idx = code[pc + 1], .next_pc = pc + 2 } else null,
+        op.get_loc, op.get_loc_check => if (pc + 3 <= code.len) .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 } else null,
+        else => null,
+    };
+}
+
+fn decodeLocalPutForLoopTail(code: []const u8, pc: usize) ?LocalAccess {
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.put_loc0 => .{ .idx = 0, .next_pc = pc + 1 },
+        op.put_loc1 => .{ .idx = 1, .next_pc = pc + 1 },
+        op.put_loc2 => .{ .idx = 2, .next_pc = pc + 1 },
+        op.put_loc3 => .{ .idx = 3, .next_pc = pc + 1 },
+        op.put_loc8 => if (pc + 2 <= code.len) .{ .idx = code[pc + 1], .next_pc = pc + 2 } else null,
+        op.put_loc, op.put_loc_check => if (pc + 3 <= code.len) .{ .idx = readInt(u16, code[pc + 1 ..][0..2]), .next_pc = pc + 3 } else null,
+        else => null,
+    };
+}
+
 const LocalAccess = struct {
     idx: u16,
     next_pc: usize,
@@ -275,4 +459,8 @@ fn decodeGotoTarget(code: []const u8, pc: usize) ?usize {
         },
         else => null,
     };
+}
+
+fn readInt(comptime T: type, bytes: []const u8) T {
+    return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }

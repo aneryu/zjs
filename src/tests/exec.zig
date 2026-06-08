@@ -3401,6 +3401,20 @@ test "Engine direct eval Annex B block function updates same-name parameter" {
     try std.testing.expectEqualStrings("123\nfunction\nundefined\n", stream.buffered());
 }
 
+test "Engine eval exit releases frame var-ref cycles before cycle collection" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const result = try js.eval(
+        \\{
+        \\    let self = function() { return self; };
+        \\}
+    );
+    result.free(js.runtime);
+
+    try std.testing.expectEqual(@as(usize, 0), js.runtime.runObjectCycleRemoval());
+}
+
 test "Engine eval supports Annex B escape and unescape code-unit semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
