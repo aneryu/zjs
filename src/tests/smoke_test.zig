@@ -3,7 +3,15 @@ const build_options = @import("build_options");
 
 test "zjs CLI behavior" {
     const allocator = std.testing.allocator;
-    const zjs_path = build_options.zjs_executable_path;
+    var zjs_path_buf: [1024]u8 = undefined;
+    var zjs_path = build_options.zjs_executable_path;
+
+    // If zjs_path doesn't exist under current CWD, check relative to parent directory
+    if (std.Io.Dir.cwd().openFile(std.testing.io, zjs_path, .{})) |file| {
+        file.close(std.testing.io);
+    } else |_| {
+        zjs_path = std.fmt.bufPrint(&zjs_path_buf, "../../{s}", .{zjs_path}) catch zjs_path;
+    }
 
     // 1. Basic Eval
     {
