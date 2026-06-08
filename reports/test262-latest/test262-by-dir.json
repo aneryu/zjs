@@ -213,6 +213,6 @@
   { "dir": "staging/set-is-subset-table-receiver-cleared.js", "passed": 1, "failed": 0, "known_failed": 0 },
   { "dir": "staging/set-is-subset-table-transition.js", "passed": 1, "failed": 0, "known_failed": 0 },
   { "dir": "staging/set-methods", "passed": 3, "failed": 0, "known_failed": 0 },
-  { "dir": "staging/sm", "passed": 1226, "failed": 0, "known_failed": 3 },
+  { "dir": "staging/sm", "passed": 1228, "failed": 0, "known_failed": 1 },
   { "dir": "staging/top-level-await", "passed": 1, "failed": 0, "known_failed": 0 }
 ]

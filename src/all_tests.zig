@@ -3,7 +3,7 @@ const std = @import("std");
 const kernel_api = @import("root.zig");
 
 pub const public_api = kernel_api;
-pub const kernel = @import("kernel/root.zig");
+pub const binding_root = @import("binding/root.zig");
 pub const core = @import("core/root.zig");
 pub const frontend = @import("frontend/root.zig");
 pub const bytecode = @import("bytecode/root.zig");
@@ -107,6 +107,7 @@ test {
 
     // Relative imports for files that are not module roots
     std.testing.refAllDecls(@import("tests/gc_stress.zig"));
+    std.testing.refAllDecls(@import("tests/smoke_test.zig"));
     std.testing.refAllDecls(@import("cli/zjs.zig"));
     std.testing.refAllDecls(@import("cli/run_test262.zig"));
 }

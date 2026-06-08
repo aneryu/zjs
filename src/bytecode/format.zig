@@ -74,4 +74,3 @@ test "format metadata computes immediate operand widths" {
     try std.testing.expectEqual(@as(usize, 10), describe(.atom_label_u16).immediateSize());
     try std.testing.expectEqual(@as(usize, 8), describe(.u32x2).immediateSize());
 }
-

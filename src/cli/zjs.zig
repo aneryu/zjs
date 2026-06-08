@@ -223,10 +223,6 @@ pub fn main(init: std.process.Init) !void {
         try printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    zjs.host.installTest262HostGlobals(runtime.context) catch |err| {
-        try printError(io, "zjs: test host setup failed: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
-    };
     runtime.context.setPreserveUncaughtException(true);
     setup_ns = elapsedNanosSince(setup_start);
     // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
@@ -609,6 +605,8 @@ fn dumpPerfJson(io: std.Io, command: Command, runtime: *Runtime, perf_profile: ?
 }
 
 fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
+    ensureOpcodeProfileNames();
+
     var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
     var row_count: usize = 0;
     for (profile.count, 0..) |count, opcode| {
@@ -709,6 +707,8 @@ const OpcodeProfileRow = struct {
 };
 
 fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
+    ensureOpcodeProfileNames();
+
     var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
     var row_count: usize = 0;
     for (profile.count, 0..) |count, opcode| {
@@ -752,6 +752,11 @@ fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRo
     if (lhs.nanos != rhs.nanos) return lhs.nanos > rhs.nanos;
     if (lhs.count != rhs.count) return lhs.count > rhs.count;
     return lhs.opcode < rhs.opcode;
+}
+
+fn ensureOpcodeProfileNames() void {
+    const previous = zjs.activateOpcodeProfile(null);
+    _ = zjs.activateOpcodeProfile(previous);
 }
 
 fn takePendingRejectionOrException(runtime: *Runtime) zjs.JSValue {

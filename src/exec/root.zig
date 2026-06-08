@@ -27,6 +27,10 @@ pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
 pub const shared = @import("shared.zig");
 
+pub fn opcodeName(opcode: u8) []const u8 {
+    return bytecode.opcode.nameOf(opcode);
+}
+
 pub const Vm = struct {
     ctx: *core.JSContext,
     stack: stack_mod.Stack,

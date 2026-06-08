@@ -1,5 +1,4 @@
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode/root.zig");
 const std = @import("std");
 
 pub const EntriesMode = enum {
@@ -195,9 +194,9 @@ test "object literal roots direct function bytecode values while creating object
     defer rt.atoms.free(key);
     const names = [_]core.Atom{key};
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
+    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
     const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
@@ -319,9 +318,9 @@ test "object entryArrayValue roots direct function bytecode value while creating
     const key = try rt.internAtom("entryKey");
     defer rt.atoms.free(key);
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
+    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
     const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-entry-array-value-bytecode-symbol");

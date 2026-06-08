@@ -1,8 +1,8 @@
 const exec = @import("../exec/root.zig");
-const zjs = @import("../kernel/root.zig");
+const zjs = @import("../binding/root.zig");
 
 pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void {
-    exec.zjs_vm.cleanupAtomicsWaitersForContext(ctx);
+    exec.zjs_vm.cleanupAtomicsWaitersForContext(&ctx.core);
 }
 
 pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *zjs.JSRuntime) void {

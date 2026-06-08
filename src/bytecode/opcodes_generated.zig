@@ -255,6 +255,9 @@ pub const op = struct {
     pub const is_null: u8 = 243;
     pub const typeof_is_undefined: u8 = 244;
     pub const typeof_is_function: u8 = 245;
+    pub const get_field_data_slot: u8 = 246;
+    pub const get_global_data_slot: u8 = 247;
+    pub const get_global_lexical_slot: u8 = 248;
 
     // Temporary opcodes (Phase 1 emit, Phase 2 erase). Ids overlap with
     // the short opcodes above; the parser/emitter must not mix them.
@@ -277,7 +280,7 @@ pub const op = struct {
     pub const set_class_name: u8 = 195;
     pub const source_loc: u8 = 196;
 
-    pub const op_count: u16 = 246;
+    pub const op_count: u16 = 249;
     pub const op_temp_start: u8 = 179;
     pub const op_temp_end: u8 = 197;
 };
@@ -298,11 +301,11 @@ pub const opcode_size: [256]u8 = .{
     2, 1, 1,  1,  1,  2,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
     1, 2, 2,  2,  1,  1,  1,  1,  5, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
-    1, 5, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 2, 3, 2, 2,
-    1, 2, 2,  2,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1,  1,  1,  1,  1,  1,  1, 1, 2, 2, 2, 3, 1, 1,
-    1, 1, 1,  1,  1,  1,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1,  1,  1,  1,  5,  5,  5, 0, 0, 0, 0, 0, 0, 0,
 };
 
 // QuickJS stack pop count indexed by opcode id.
@@ -379,8 +382,8 @@ pub const opcode_format_name: [256][]const u8 = .{
     "none_arg",     "none_arg",     "none_arg",      "none_arg",      "none_arg",      "none_var_ref",  "none_var_ref",  "none_var_ref",
     "none_var_ref", "none_var_ref", "none_var_ref",  "none_var_ref",  "none_var_ref",  "none_var_ref",  "none_var_ref",  "none_var_ref",
     "none_var_ref", "none",         "label8",        "label8",        "label8",        "label16",       "npopx",         "npopx",
-    "npopx",        "npopx",        "none",          "none",          "none",          "none",          "none",          "none",
-    "none",         "none",         "none",          "none",          "none",          "none",          "none",          "none",
+    "npopx",        "npopx",        "none",          "none",          "none",          "none",          "u32",           "u32",
+    "u32",          "none",         "none",          "none",          "none",          "none",          "none",          "none",
 };
 
 // Opcode name lookup indexed by opcode id. Slots without a
@@ -448,7 +451,7 @@ pub const opcode_name: [256][]const u8 = .{
     "set_var_ref3",           "get_length",            "if_false8",               "if_true8",
     "goto8",                  "goto16",                "call0",                   "call1",
     "call2",                  "call3",                 "is_undefined",            "is_null",
-    "typeof_is_undefined",    "typeof_is_function",    "",                        "",
-    "",                       "",                      "",                        "",
+    "typeof_is_undefined",    "typeof_is_function",    "get_field_data_slot",     "get_global_data_slot",
+    "get_global_lexical_slot", "",                      "",                        "",
     "",                       "",                      "",                        "",
 };

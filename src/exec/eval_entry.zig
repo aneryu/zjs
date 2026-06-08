@@ -12,7 +12,7 @@ const stack_mod = @import("stack.zig");
 const zjs_vm = @import("zjs_vm.zig");
 
 pub fn evalScriptSource(ctx: *core.JSContext, source_text: []const u8, options: core.context.ScriptEvalOptions) !core.JSValue {
-    const global = options.realm_global orelse try ctx.globalObject();
+    const global = options.realm_global orelse try zjs_vm.contextGlobal(ctx);
     return call.qjsEvalGlobalScriptSource(ctx, options.output, global, source_text, options.filename);
 }
 
@@ -38,7 +38,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     defer compiled.deinit();
     if (compiled.syntax_error) |err| {
         if (options.mode == .script and isWhitespaceSeparatedNumericScript(source_text)) return core.JSValue.undefinedValue();
-        const global = try ctx.globalObject();
+        const global = try zjs_vm.contextGlobal(ctx);
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(rt.memory.allocator);
         try msg_buf.print(rt.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ options.filename, err.position.line, err.position.column, err.message });
@@ -63,7 +63,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         _ = try module_exec.instantiateParsedRecordWithReferrer(rt, module_name, &compiled.function, referrer_path);
         if (rt.modules.find(module_name)) |record| record.import_meta_main = true;
         rt.modules.linkModule(rt, module_name) catch |err| {
-            const global = try ctx.globalObject();
+            const global = try zjs_vm.contextGlobal(ctx);
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(rt.memory.allocator);
             try msg_buf.print(rt.memory.allocator, "LINK ERROR for module {s}: {s}", .{ options.filename, @errorName(err) });

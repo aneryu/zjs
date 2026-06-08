@@ -152,7 +152,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     fb.var_ref_count = @intCast(fd.var_ref_count);
     fb.closure_var_count = @intCast(fd.closure_var_count);
     fb.stack_size = lowered.stack_size;
-    try fb.allocateIcSlots();
+    try bytecode_function.allocateFunctionBytecodeIcSlots(fb);
 
     // Copy source location
     fb.atoms.replace(&fb.filename, fd.filename);
@@ -352,7 +352,7 @@ fn simplePercentHexBytecode(fb: *const bytecode_function.FunctionBytecode) bool 
 ///
 /// `createFunctionBytecode` is the QuickJS-style storage path. It lowers a
 /// `FunctionDef`, stores the result in `FunctionBytecode`, and the VM obtains
-/// a borrowed execution view with `FunctionBytecode.asBytecodeView`.
+/// a borrowed execution view with `bytecode.function.asBytecodeView`.
 pub fn run(function: *bytecode_function.Bytecode) !void {
     return runWithFunctionDef(function, null);
 }

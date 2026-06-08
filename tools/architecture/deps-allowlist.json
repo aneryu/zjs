@@ -12,58 +12,16 @@
     "exit_milestone": "M1-host-function-factory"
   },
   {
-    "source": "src/core/gc.zig",
-    "import": "src/bytecode/function.zig",
-    "reason": "FunctionBytecode is currently a GC heap object stored in bytecode instead of core",
-    "exit_milestone": "M2-function-bytecode-to-core"
-  },
-  {
-    "source": "src/core/object.zig",
-    "import": "src/bytecode/function.zig",
-    "reason": "Object graph cleanup must currently understand FunctionBytecode while it is misplaced in bytecode",
-    "exit_milestone": "M2-function-bytecode-to-core"
-  },
-  {
     "source": "src/core/object.zig",
     "import": "src/builtins/root.zig",
     "reason": "Object auto-init materialization still owns builtin and host global policy",
     "exit_milestone": "M2-auto-init-materializer-hook"
   },
   {
-    "source": "src/core/object.zig",
-    "import": "src/exec/value_ops.zig",
-    "reason": "Object auto-init currently uses exec number materialization for Number constants",
-    "exit_milestone": "M2-auto-init-materializer-hook"
-  },
-  {
-    "source": "src/core/profile.zig",
-    "import": "src/bytecode/opcode.zig",
-    "reason": "OpcodeProfile currently formats opcode names through bytecode metadata",
-    "exit_milestone": "M2-profile-name-provider"
-  },
-  {
-    "source": "src/core/runtime.zig",
-    "import": "src/bytecode/function.zig",
-    "reason": "FunctionBytecode is currently a runtime-traced heap object stored in bytecode instead of core",
-    "exit_milestone": "M2-function-bytecode-to-core"
-  },
-  {
-    "source": "src/builtins/array.zig",
-    "import": "src/bytecode/root.zig",
-    "reason": "builtins currently reference bytecode-level function records that should move behind core/exec seams",
-    "exit_milestone": "M2-function-bytecode-to-core"
-  },
-  {
     "source": "src/builtins/buffer.zig",
     "import": "src/exec/value_ops.zig",
     "reason": "builtins currently reuse exec value conversion helpers",
     "exit_milestone": "M2-core-value-conversion-helpers"
-  },
-  {
-    "source": "src/builtins/collection.zig",
-    "import": "src/bytecode/root.zig",
-    "reason": "collection builtins currently reference bytecode-level closure details",
-    "exit_milestone": "M2-function-bytecode-to-core"
   },
   {
     "source": "src/builtins/collection.zig",
@@ -84,34 +42,10 @@
     "exit_milestone": "M2-core-value-conversion-helpers"
   },
   {
-    "source": "src/builtins/object.zig",
-    "import": "src/bytecode/root.zig",
-    "reason": "object builtins currently reference bytecode-level function records",
-    "exit_milestone": "M2-function-bytecode-to-core"
-  },
-  {
-    "source": "src/builtins/promise.zig",
-    "import": "src/bytecode/root.zig",
-    "reason": "promise builtins currently reference bytecode-level function records",
-    "exit_milestone": "M2-function-bytecode-to-core"
-  },
-  {
     "source": "src/builtins/regexp.zig",
     "import": "src/exec/value_ops.zig",
     "reason": "RegExp builtins currently reuse exec value conversion helpers",
     "exit_milestone": "M2-core-value-conversion-helpers"
-  },
-  {
-    "source": "src/builtins/registry.zig",
-    "import": "src/exec/value_ops.zig",
-    "reason": "builtin registry currently uses exec number materialization for lazy constants",
-    "exit_milestone": "M2-core-value-conversion-helpers"
-  },
-  {
-    "source": "src/builtins/string.zig",
-    "import": "src/bytecode/root.zig",
-    "reason": "string builtins currently reference bytecode-level function records",
-    "exit_milestone": "M2-function-bytecode-to-core"
   },
   {
     "source": "src/builtins/string.zig",

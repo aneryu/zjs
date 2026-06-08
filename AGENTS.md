@@ -54,11 +54,15 @@ available only through git history.
 
 - `src/root.zig`: public engine entrypoint.
 - `src/core/`: values, runtime/context, atoms, strings, objects,
-  properties, arrays, and core ownership.
+  properties, arrays, GC, and core ownership.
 - `src/frontend/`: lexer, parser, source positions, and frontend parsing.
-- `src/bytecode/`: bytecode, constants, scopes, module metadata, and
-  emitter.
-- `src/exec/`: bytecode execution, calls, eval, exceptions, and job queue.
+- `src/bytecode/`: bytecode, constants, scopes, module metadata,
+  inline-cache slots, and pipeline passes.
+- `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
+  promises, VM opcode shards, and job queue.
+- `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
+  module file graphs, plugins, and buffer operations.
+- `src/binding/`: FFI plugins, host binding helpers, and public API aliases.
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
@@ -128,17 +132,20 @@ Missing or invalid arguments should print usage and exit non-zero.
 
 ## Where To Look
 
-- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
-- Core values, runtime/context, atoms, strings, objects, properties, and arrays:
+- Core values, runtime/context, atoms, strings, objects, properties, arrays,
+  shapes, IC storage, and GC:
   `src/core/`.
-- Lexer, parser, and early errors: `src/frontend/`.
-- Bytecode emission, scopes, and module metadata: `src/bytecode/`.
-- Execution semantics, calls, exceptions, eval, and job queue:
+- Lexer, parser, source positions, and TypeScript erasure: `src/frontend/`.
+- Bytecode emission, scopes, module metadata, inline-cache slots, and pipeline
+  passes: `src/bytecode/`.
+- Execution semantics, calls, exceptions, eval, modules, promises, job queue,
+  and opcode handlers:
   `src/exec/`.
+- Host/runtime policy helpers for event loop, cleanup, module file graphs,
+  plugins, and buffer operations: `src/runtime/`.
 - Built-in object behavior: `src/builtins/`.
 - RegExp, Unicode, BigInt, and number formatting: `src/libs/`.
-- CLI behavior: `src/cli/`.
-- test262 runner behavior: `src/cli/run_test262.zig`.
+- CLI behavior and test262 runner: `src/cli/`.
 
 ## Pre-Commit Checklist
 

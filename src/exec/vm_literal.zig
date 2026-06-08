@@ -11,6 +11,8 @@ const stack_mod = @import("stack.zig");
 const op = bytecode.opcode.op;
 const atom_print = core.atom.predefinedId("print", .string).?;
 
+pub const Step = enum { done, continue_loop };
+
 pub fn object(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -513,7 +515,7 @@ pub fn defineField(
     comptime defineClassFieldDataProperty: anytype,
     comptime createDataPropertyOrThrow: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try stack.pop();
@@ -539,12 +541,12 @@ pub fn defineField(
             const new_len: u32 = @intCast(@max(length, 0));
             target.truncateArrayElements(ctx.runtime, new_len);
             target.length = new_len;
-            return;
+            return .done;
         }
     }
     if (ctx.runtime.atoms.kind(effective_atom) == .private) {
         try defineClassFieldDataProperty(ctx.runtime, target, effective_atom, rooted_value);
-        return;
+        return .done;
     }
     if (target.class_id == core.class.ids.object and
         target.exotic == null and
@@ -553,12 +555,13 @@ pub fn defineField(
         target.properties.len == 0)
     {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, effective_atom, core.Descriptor.data(rooted_value, true, true, true));
-        return;
+        return .done;
     }
     createDataPropertyOrThrow(ctx, output, global, rooted_obj, target, effective_atom, rooted_value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    return .done;
 }
 
 pub fn setProto(
@@ -584,20 +587,42 @@ pub fn defineArrayEl(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
+    catch_target: *?usize,
     comptime toPropertyKeyAtom: anytype,
     comptime createDataPropertyOrThrow: anytype,
-) !void {
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
     const value = try stack.pop();
+    var rooted_value = value;
     defer value.free(ctx.runtime);
     const index = try stack.pop();
+    var rooted_index = index;
     defer index.free(ctx.runtime);
     const array_value = stack.peek() orelse return error.StackUnderflow;
+    var rooted_array = array_value;
     defer array_value.free(ctx.runtime);
-    const object_value = try property_ops.expectObject(array_value);
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, index, function, frame);
+
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_value },
+        .{ .value = &rooted_index },
+        .{ .value = &rooted_array },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = ctx.runtime.active_value_roots,
+        .values = &root_values,
+    };
+    ctx.runtime.active_value_roots = &root_frame;
+    defer ctx.runtime.active_value_roots = root_frame.previous;
+
+    const object_value = property_ops.expectObject(rooted_array) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err, handleCatchableRuntimeError);
+    const atom_id = toPropertyKeyAtom(ctx, output, global, rooted_index, function, frame) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err, handleCatchableRuntimeError);
     defer ctx.runtime.atoms.free(atom_id);
-    try createDataPropertyOrThrow(ctx, output, global, array_value, object_value, atom_id, value, function, frame);
-    try stack.push(index);
+    createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, function, frame) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err, handleCatchableRuntimeError);
+    try stack.push(rooted_index);
+    return .done;
 }
 
 pub fn appendSpreadValues(
@@ -636,6 +661,24 @@ pub fn appendSpreadValues(
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
+pub fn appendSpreadValuesVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    opc: u8,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime appendIteratorValues: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    appendSpreadValues(ctx, output, global, stack, opc, appendIteratorValues) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn copyDataProperties(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -643,32 +686,78 @@ pub fn copyDataProperties(
     stack: *stack_mod.Stack,
     mask: u8,
     caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
+    caller_frame: *frame_mod.Frame,
+    catch_target: *?usize,
     comptime objectRestOwnKeys: anytype,
     comptime objectRestOwnPropertyDescriptor: anytype,
     comptime getValueProperty: anytype,
-) !void {
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
     const rt = ctx.runtime;
     const target_value = try stackValueFromTop(stack, mask & 3);
+    var rooted_target_value = target_value;
     defer target_value.free(rt);
     const source_value = try stackValueFromTop(stack, (mask >> 2) & 7);
+    var rooted_source_value = source_value;
     defer source_value.free(rt);
 
-    if (source_value.isNull() or source_value.isUndefined()) return;
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_target_value },
+        .{ .value = &rooted_source_value },
+    };
+    const root_frame = core.runtime.ValueRootFrame{
+        .previous = rt.active_value_roots,
+        .values = &root_values,
+    };
+    rt.active_value_roots = &root_frame;
+    defer rt.active_value_roots = root_frame.previous;
 
-    const target = try property_ops.expectObject(target_value);
-    const source = try property_ops.expectObject(source_value);
-    const keys = try objectRestOwnKeys(ctx, output, global, source);
+    if (rooted_source_value.isNull() or rooted_source_value.isUndefined()) return .done;
+
+    const target = property_ops.expectObject(rooted_target_value) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+    const source = property_ops.expectObject(rooted_source_value) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+    const keys = objectRestOwnKeys(ctx, output, global, source) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
     defer core.Object.freeKeys(rt, keys);
 
     for (keys) |key| {
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
+        const maybe_desc = objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
+            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+        const desc = maybe_desc orelse continue;
         defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
-        const value = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
+        const value = getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
+            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+        var rooted_value = value;
         defer value.free(rt);
-        try property_ops.defineDataProperty(rt, target, key, value);
+        var value_root_values = [_]core.runtime.ValueRootValue{
+            .{ .value = &rooted_value },
+        };
+        const value_root_frame = core.runtime.ValueRootFrame{
+            .previous = rt.active_value_roots,
+            .values = &value_root_values,
+        };
+        rt.active_value_roots = &value_root_frame;
+        defer rt.active_value_roots = value_root_frame.previous;
+        property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
+            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
     }
+    return .done;
+}
+
+fn handleLiteralRuntimeError(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    err: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    return err;
 }
 
 pub fn specialObject(
@@ -722,16 +811,17 @@ pub fn getLength(
     catch_target: *?usize,
     comptime getValueProperty: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    if (tryFuseArrayLengthLessThanFalseBranch(ctx.runtime, stack, function, frame, value)) return;
+    if (tryFuseArrayLengthLessThanFalseBranch(ctx.runtime, stack, function, frame, value)) return .done;
     const length = getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer length.free(ctx.runtime);
     try stack.pushOwned(length);
+    return .done;
 }
 
 fn tryFuseArrayLengthLessThanFalseBranch(

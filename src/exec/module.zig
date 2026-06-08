@@ -750,7 +750,7 @@ fn preloadFileModuleGraphInnerMode(
     if (parsed.syntax_error) |err| {
         if (context) |ctx| {
             const exception_ops = @import("vm_exception_ops.zig");
-            const global_object = try ctx.globalObject();
+            const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
             try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });

@@ -22,6 +22,8 @@ const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const shared_vm = @import("shared.zig");
 
+pub const Step = enum { done, continue_loop };
+
 // --- Dynamically gathered shared_vm aliases (excluding local definitions) ---
 const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;
 const DataViewConstructorArgs = shared_vm.DataViewConstructorArgs;
@@ -258,7 +260,9 @@ pub fn createBytecodeFunctionObject(
         .{ .value = &rooted_value },
     };
     var eval_local_slots = input_eval_local_slots;
-    var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_eval_var_refs);
+    const capture_eval_var_ref_names = if (frame.eval_var_refs_republished) frame.eval_var_ref_names else eval_var_ref_names;
+    const capture_eval_var_refs_source = if (frame.eval_var_refs_republished) frame.eval_var_refs else input_eval_var_refs;
+    var eval_var_refs_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, capture_eval_var_refs_source);
     defer eval_var_refs_buffer.deinit(ctx.runtime);
     const eval_var_refs = eval_var_refs_buffer.values;
     var skip_direct_eval_capture_values_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_skip_direct_eval_capture_values);
@@ -307,7 +311,7 @@ pub fn createBytecodeFunctionObject(
     }
     try installLexicalPrivateNameRemap(ctx.runtime, object, frame, fb.private_bound_names);
     if (fb.class_fields_init) |init_bytecode| {
-        const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, &.{});
+        const init_value = try createBytecodeFunctionObject(ctx, frame, caller_function, global, init_bytecode, core.atom.ids.empty_string, opc, false, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, &.{});
         try object.setOptionalValueSlot(ctx.runtime, object.functionClassFieldsInitSlot(), init_value);
     }
     if (fb.is_arrow_function) {
@@ -329,7 +333,7 @@ pub fn createBytecodeFunctionObject(
             try object.setOptionalValueSlot(ctx.runtime, object.functionArrowNewTargetSlot(), frame.new_target.dup());
         }
         if (functionBytecodeUsesAtom(fb, core.atom.ids.arguments) or functionBytecodeUsesArgumentsSpecialObject(fb)) {
-            const arguments_value = lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, core.atom.ids.arguments) orelse
+            const arguments_value = lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, capture_eval_var_ref_names, eval_var_refs, frame, core.atom.ids.arguments) orelse
                 try frameArgumentsObject(ctx, global, frame);
             defer arguments_value.free(ctx.runtime);
             try appendFunctionEvalLocal(ctx, object, core.atom.ids.arguments, arguments_value);
@@ -406,7 +410,7 @@ pub fn createBytecodeFunctionObject(
         evalBytecodeHasVarDeclarations(ctx.runtime, caller_function);
     const captures_direct_eval_scope = function_has_direct_eval or captures_eval_var_scope;
     const captures_eval_frame_scope = captures_direct_eval_scope;
-    if (eval_local_names.len > 0 or eval_var_ref_names.len > 0 or
+    if (eval_local_names.len > 0 or capture_eval_var_ref_names.len > 0 or
         (captures_eval_frame_scope and caller_function.var_names.len > 0) or
         (captures_eval_frame_scope and caller_function.arg_names.len > 0) or
         (captures_direct_eval_scope and caller_function.var_ref_names.len > 0))
@@ -418,7 +422,7 @@ pub fn createBytecodeFunctionObject(
             const capture_eval_var_cell = captures_eval_var_scope and idx < eval_local_slots.len and evalLocalSlotIsEvalVarCell(eval_local_slots[idx]);
             if (captures_direct_eval_scope or capture_eval_var_cell or functionBytecodeUsesAtom(fb, atom_id)) used_count += 1;
         }
-        for (eval_var_ref_names) |atom_id| {
+        for (capture_eval_var_ref_names) |atom_id| {
             if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
             if (functionBytecodeHasClosureVarName(fb, atom_id)) continue;
             if (captures_direct_eval_scope or captures_eval_var_scope or functionBytecodeUsesAtom(fb, atom_id)) used_count += 1;
@@ -476,7 +480,7 @@ pub fn createBytecodeFunctionObject(
                 initialized += 1;
                 rooted_refs = refs[0..initialized];
             }
-            for (eval_var_ref_names, 0..) |atom_id, idx| {
+            for (capture_eval_var_ref_names, 0..) |atom_id, idx| {
                 if (shouldSkipDirectEvalScopeCaptureName(ctx.runtime, captures_direct_eval_scope, fb, atom_id)) continue;
                 if (functionBytecodeHasClosureVarName(fb, atom_id)) continue;
                 if (!captures_direct_eval_scope and !captures_eval_var_scope and !functionBytecodeUsesAtom(fb, atom_id)) continue;
@@ -6369,7 +6373,9 @@ pub fn capturedArgumentsObject(
     frame: *frame_mod.Frame,
 ) ?core.JSValue {
     if (lookupNamedSlotValue(rt, eval_local_names, eval_local_slots, core.atom.ids.arguments)) |value| return value;
-    if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, core.atom.ids.arguments)) |value| return value;
+    if (!frame.eval_var_refs_republished) {
+        if (lookupNamedVarRef(rt, eval_var_ref_names, eval_var_refs, core.atom.ids.arguments)) |value| return value;
+    }
     if (lookupNamedSlotValue(rt, frame.eval_local_names, frame.eval_local_slots, core.atom.ids.arguments)) |value| return value;
     if (lookupNamedVarRef(rt, frame.eval_var_ref_names, frame.eval_var_refs, core.atom.ids.arguments)) |value| return value;
     return null;
@@ -6494,7 +6500,7 @@ pub fn getSuperValue(
     comptime toPropertyKeyAtom_: anytype,
     comptime sameObjectIdentity_: anytype,
     comptime getSuperPropertyValue_: anytype,
-) !void {
+) !Step {
     _ = slotValueDup_;
     const prop_value = try stack.pop();
     defer prop_value.free(ctx.runtime);
@@ -6503,16 +6509,16 @@ pub fn getSuperValue(
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
     if (varRefSlotIsUninitialized(receiver)) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     const atom_id = toPropertyKeyAtom_(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     if (obj.isUndefined() or obj.isNull()) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
 
@@ -6523,18 +6529,19 @@ pub fn getSuperValue(
                 if (function_object.functionHomeObjectSlot().*) |home_object| {
                     prototype = home_object.getPrototype() orelse {
                         try stack.pushOwned(core.JSValue.undefinedValue());
-                        return;
+                        return .done;
                     };
                 }
             }
         }
     } else |_| {}
     const value = getSuperPropertyValue_(ctx, output, global, receiver, prototype, atom_id, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer value.free(ctx.runtime);
     try stack.push(value);
+    return .done;
 }
 
 pub fn putSuperValue(
@@ -6551,7 +6558,7 @@ pub fn putSuperValue(
     comptime toPropertyKeyAtom_: anytype,
     comptime sameObjectIdentity_: anytype,
     comptime setSuperPropertyValue_: anytype,
-) !void {
+) !Step {
     _ = slotValueDup_;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
@@ -6562,15 +6569,15 @@ pub fn putSuperValue(
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
     if (varRefSlotIsUninitialized(receiver)) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     if (obj.isUndefined() or obj.isNull()) {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     const atom_id = toPropertyKeyAtom_(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
@@ -6580,7 +6587,7 @@ pub fn putSuperValue(
             if (sameObjectIdentity_(super_constructor, obj)) {
                 if (function_object.functionHomeObjectSlot().*) |home_object| {
                     prototype = home_object.getPrototype() orelse {
-                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                         return error.TypeError;
                     };
                 }
@@ -6588,9 +6595,10 @@ pub fn putSuperValue(
         }
     } else |_| {}
     setSuperPropertyValue_(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    return .done;
 }
 
 pub fn setHomeObject(
@@ -6631,6 +6639,21 @@ pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
 
+pub fn checkBrandVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    checkBrand(ctx, stack) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     const home_value = try stack.pop();
     var rooted_home = home_value;
@@ -6659,6 +6682,21 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
             else => return err,
         };
     }
+}
+
+pub fn addBrandVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    addBrand(ctx, stack) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn privateIn(
@@ -6690,6 +6728,25 @@ pub fn privateIn(
     try stack.pushOwned(core.JSValue.boolean(found));
 }
 
+pub fn privateInVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime toPropertyKeyAtom_: anytype,
+    comptime throwTypeErrorMessage_: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    privateIn(ctx, output, global, stack, function, frame, toPropertyKeyAtom_, throwTypeErrorMessage_) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn defineClass(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -6717,7 +6774,7 @@ pub fn defineClass(
     comptime functionNameValueFromAtom_: anytype,
     comptime defineFunctionNameProperty_: anytype,
     is_computed_name: bool,
-) !void {
+) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     const flags = function.code[frame.pc + 4];
     frame.pc += 5;
@@ -6769,7 +6826,7 @@ pub fn defineClass(
             superclass_value = try stack.pop();
         }
         if (!(superclass_value.isObject() or superclass_value.isNull())) {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         }
     }
@@ -6778,7 +6835,7 @@ pub fn defineClass(
     if (is_computed_name) {
         computed_key = try stackValueFromTop(stack, 0);
         const name_atom = toPropertyKeyAtom_(ctx, output, global, computed_key, function, frame) catch |err| {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         defer ctx.runtime.atoms.free(name_atom);
@@ -6793,20 +6850,20 @@ pub fn defineClass(
     if (superclass_value_active) {
         if (superclass_value.isObject()) {
             if (!isConstructorLike_(ctx, superclass_value)) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
             try ctor_object.setOptionalValueSlot(ctx.runtime, ctor_object.functionSuperConstructorSlot(), superclass_value.dup());
             superclass_proto = getValueProperty_(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (superclass_proto.isObject()) {
                 proto_parent = try property_ops.expectObject(superclass_proto);
             } else if (!superclass_proto.isNull()) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return;
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
         } else {
@@ -6836,6 +6893,7 @@ pub fn defineClass(
     }
     try stack.push(ctor);
     try stack.push(proto_value);
+    return .done;
 }
 
 pub fn defineMethod(
@@ -6851,15 +6909,16 @@ pub fn defineMethod(
     comptime functionNameValueFromAtom_: anytype,
     comptime defineFunctionNameProperty_: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const flags = function.code[frame.pc];
     frame.pc += 1;
     defineObjectMethod(ctx.runtime, stack, atom_id, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    return .done;
 }
 
 pub fn defineMethodComputed(
@@ -6877,19 +6936,23 @@ pub fn defineMethodComputed(
     comptime functionNameValueFromAtom_: anytype,
     comptime defineFunctionNameProperty_: anytype,
     comptime handleCatchableRuntimeError: anytype,
-) !void {
+) !Step {
     const flags = function.code[frame.pc];
     frame.pc += 1;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     const key_value = try stack.pop();
     defer key_value.free(ctx.runtime);
-    const atom_id = try toPropertyKeyAtom_(ctx, output, global, key_value, function, frame);
-    defer ctx.runtime.atoms.free(atom_id);
-    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return;
+    const atom_id = toPropertyKeyAtom_(ctx, output, global, key_value, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
+    defer ctx.runtime.atoms.free(atom_id);
+    defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame, remapPrivateAtomFromObject_, functionBytecodeFromValue_, installLexicalPrivateNameRemap_, functionNameValueFromAtom_, defineFunctionNameProperty_) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 fn defineObjectMethod(

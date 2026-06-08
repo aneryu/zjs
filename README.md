@@ -8,8 +8,13 @@ This is a Production v1 Candidate. It has reached production-grade maturity for 
 
 ## Status
 
-The active local test262 gate is expected to pass with an empty known-error
-file:
+The active local test262 gate is expected to pass with no unexpected errors.
+The current known-error boundary contains three selected SpiderMonkey staging
+cases:
+
+- `test262/test/staging/sm/Function/function-name-binding.js`
+- `test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js`
+- `test262/test/staging/sm/class/newTargetDefaults.js`
 
 ```sh
 zig build test262-gate --summary all
@@ -23,6 +28,7 @@ part of the current compatibility boundary.
 
 - Zig 0.16.0
 - A POSIX-like shell for helper scripts
+- Bun, only for the optional multi-case performance self-baseline workflow
 
 ## Build
 
@@ -39,9 +45,11 @@ Useful build steps:
 ```sh
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
+zig build smoke --summary all
 # zig build test-oom --summary all (不再执行 / No longer executed)
 # zig build test-oom-exhaustive --summary all (不再执行 / No longer executed)
 zig build gc-stress --summary all
+zig build perf-self-check --summary all
 zig build engine-production-gate --summary all
 ```
 
@@ -65,8 +73,7 @@ and [LIMITATIONS.md](LIMITATIONS.md) for runtime limitations.
 
 The current kernel/runtime boundary is tracked in
 [docs/adr/0001-zig-kernel-api-and-runtime-boundary.md](docs/adr/0001-zig-kernel-api-and-runtime-boundary.md).
-Older Production v1 notes remain in [docs/production-grade-plan.md](docs/production-grade-plan.md)
-and related documents, but the former Engine facade direction is legacy.
+ADR 0001 is the active public API authority.
 
 The full direct test262 invocation is:
 
@@ -97,21 +104,15 @@ pending and is retried by a later GC pass.
 
 ## Performance
 
-The checked-in performance reports under `reports/perf/` are historical
-artifacts from the previous local QuickJS comparison toolchain.
+The repeatable performance gate is a ZJS self-baseline regression check, which
+does not require a C QuickJS binary:
 
-- 72 compatible cases, 1 unsupported case, 0 skipped cases.
-- Geometric mean `zjs/qjs` ratio: `1.0158`, roughly parity with the local C
-  QuickJS baseline for this external-process benchmark.
-- 24 cases currently favor `zjs`, 41 favor C QuickJS, and 7 are near ties.
+```sh
+zig build perf-self-check --summary all
+```
 
-Wins in that report include `global_read_loop`, `regexp_test_cached`,
-`array_map_callback`, and `map_string_keys`. Slower areas in that report
-include dense array write/read, integer sums, monomorphic/prototype property
-reads, URI decoding, and some function-call loops.
-
-See [docs/perf/README.md](docs/perf/README.md) for historical performance
-context. The current repeatable diagnostic benchmark entry is:
+See [docs/perf/README.md](docs/perf/README.md) for performance workflow details.
+A smaller single-script diagnostic benchmark is also available:
 
 ```sh
 zig build perf-benchmark --summary all
@@ -127,13 +128,13 @@ zig build perf-benchmark --summary all
 - `src/bytecode/`: bytecode, constants, scopes, module metadata,
   inline-cache slots, and pipeline passes.
 - `src/exec/`: bytecode execution, calls, eval, exceptions, modules,
-  promises, and job queue.
+  promises, VM opcode shards, and job queue.
+- `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
+  module file graphs, plugins, and buffer operations.
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.
-- `src/tools/`: smoke runner, test262 runner, and shared validation tooling.
 - `src/tests/`: Zig unit and integration test entrypoints.
-- `tests/zig-smoke/`: JavaScript smoke fixtures and golden output.
 - `test262/`: local test262 checkout used by the gate.
 - `tests/fixtures/`: vendored fixture snapshots used by opcode and runner
   tests.

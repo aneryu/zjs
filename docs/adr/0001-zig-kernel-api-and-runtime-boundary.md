@@ -18,8 +18,8 @@ longer accepted. The future public surface should be a low-level Zig kernel API
 with explicit lifecycle and ownership, not a convenience facade that hides
 runtime/context/value costs.
 
-`docs/engine-api-v1.md` is therefore legacy direction for future public API
-work. This ADR supersedes it for kernel/runtime boundary decisions.
+The former Engine API v1 document has been removed from the active docs. This
+ADR is the public API and kernel/runtime boundary source of truth.
 
 ## How To Read This ADR
 
@@ -1195,8 +1195,7 @@ Current landed surface:
 - The core/runtime boundary has a production architecture regression test that
   scans `src/core/**/*.zig` and rejects imports or markers for runtime policy,
   CLI, kernel, plugin, or test262 layers.
-- `zjs` and `run-test262` are built against the public `zjs` module for
-  public kernel/runtime operations. `zjs` keeps the JavaScript-visible host API
+- `zjs` is built against the public `zjs` module for public kernel/runtime operations, while `run-test262` is compiled against the internal `zjs` module (pointing to `src/internal_root.zig`) to access internal binding and object APIs required for test harness setup. `zjs` keeps the JavaScript-visible host API
   minimal: `print` and `console.log`; production tests pin `std`, `os`, and
   timer globals as absent from the default global object, including after
   installing `runtime.EventLoop`. The default `print`/`console` output

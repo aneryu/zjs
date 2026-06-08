@@ -1,33 +1,37 @@
 const std = @import("std");
 
-const zjs_kernel = @import("kernel/root.zig");
+const zjs_binding = @import("binding/root.zig");
 pub const runtime = @import("runtime/public.zig");
 const zjs_core = @import("core/root.zig");
 const zjs_exec = @import("exec/root.zig");
 const zjs_builtins = @import("builtins/root.zig");
-const CoreObject = zjs_kernel.Object;
+const CoreObject = zjs_binding.Object;
 
-pub const JSRuntime = zjs_kernel.JSRuntime;
-pub const JSContext = zjs_kernel.JSContext;
-pub const ffi = zjs_kernel.ffi;
-pub const JSValue = zjs_kernel.JSValue;
-pub const RuntimeOptions = zjs_kernel.RuntimeOptions;
-pub const RuntimeMemoryUsage = zjs_kernel.RuntimeMemoryUsage;
-pub const OpcodeProfile = zjs_kernel.OpcodeProfile;
-pub const default_stack_size = zjs_kernel.default_stack_size;
-pub const default_gc_threshold = zjs_kernel.default_gc_threshold;
-pub const activateOpcodeProfile = zjs_kernel.activateOpcodeProfile;
+pub const JSRuntime = zjs_binding.JSRuntime;
+pub const JSContext = zjs_binding.JSContext;
+pub const ffi = zjs_binding.ffi;
+pub const JSValue = zjs_binding.JSValue;
+pub const RuntimeOptions = zjs_binding.RuntimeOptions;
+pub const RuntimeMemoryUsage = zjs_binding.RuntimeMemoryUsage;
+pub const OpcodeProfile = zjs_binding.OpcodeProfile;
+pub const default_stack_size = zjs_binding.default_stack_size;
+pub const default_gc_threshold = zjs_binding.default_gc_threshold;
+
+pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
+    zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
+    return zjs_binding.activateOpcodeProfile(profile);
+}
 
 pub const value = struct {
-    pub const Value = zjs_kernel.JSValue;
-    pub const Scope = zjs_kernel.HandleScope;
-    pub const Local = zjs_kernel.LocalHandle;
-    pub const Ref = zjs_kernel.JSValueHandle;
-    pub const Persistent = zjs_kernel.JSValueHandle;
-    pub const WeakRef = zjs_kernel.WeakPersistentValue;
-    pub const Weak = zjs_kernel.WeakPersistentValue;
-    pub const String = zjs_kernel.JSString;
-    pub const Bytes = zjs_kernel.JSBytes;
+    pub const Value = zjs_binding.JSValue;
+    pub const Scope = zjs_binding.HandleScope;
+    pub const Local = zjs_binding.LocalHandle;
+    pub const Ref = zjs_binding.JSValueHandle;
+    pub const Persistent = zjs_binding.JSValueHandle;
+    pub const WeakRef = zjs_binding.WeakPersistentValue;
+    pub const Weak = zjs_binding.WeakPersistentValue;
+    pub const String = zjs_binding.JSString;
+    pub const Bytes = zjs_binding.JSBytes;
 
     pub fn undefinedValue() Value {
         return Value.undefinedValue();
@@ -96,19 +100,19 @@ pub const value = struct {
 };
 
 pub const host = struct {
-    pub const Call = zjs_kernel.ExternalHostCall;
-    pub const Function = zjs_kernel.ExternalHostCallFn;
-    pub const Finalizer = zjs_kernel.ExternalHostFinalizer;
-    pub const FunctionOptions = zjs_kernel.ExternalFunctionOptions;
-    pub const NativeClass = zjs_kernel.binding.JSObject;
-    pub const NativeBinding = zjs_kernel.binding;
+    pub const Call = zjs_binding.ExternalHostCall;
+    pub const Function = zjs_binding.ExternalHostCallFn;
+    pub const Finalizer = zjs_binding.ExternalHostFinalizer;
+    pub const FunctionOptions = zjs_binding.ExternalFunctionOptions;
+    pub const NativeClass = zjs_binding.binding.JSObject;
+    pub const NativeBinding = zjs_binding.binding;
     pub const NativeObject = object.Object;
-    pub const PropName = zjs_kernel.PropNameID;
+    pub const PropName = zjs_binding.PropNameID;
 
     var test_host_context: u8 = 0;
 
     pub fn exposeStdOsGlobals(ctx: *JSContext) !void {
-        try zjs_exec.call.installLegacyStdOsGlobals(ctx);
+        try zjs_exec.call.installLegacyStdOsGlobals(&ctx.core);
     }
 
     pub fn defineScriptArgs(ctx: *JSContext, args: []const []const u8) !void {
@@ -122,50 +126,7 @@ pub const host = struct {
         try object.defineStringArrayGlobal(ctx, "execArgv", exec_argv);
     }
 
-    pub fn installTest262HostGlobals(ctx: *JSContext) !void {
-        const rt = ctx.runtimePtr();
-        const global = try ctx.globalObject();
-        const ns_value = try ctx.getProperty(global.value(), "$262");
-        defer ns_value.free(rt);
 
-        var created_ns = false;
-        const ns_target = if (ns_value.isObject()) ns_value else result: {
-            const obj_value = try ctx.createObject();
-            try ctx.defineDataProperty(global.value(), "$262", obj_value, .{ .enumerable = true });
-            created_ns = true;
-            break :result obj_value;
-        };
-        defer if (created_ns) ns_target.free(rt);
-
-        const methods = [_]struct {
-            name: []const u8,
-            length: i32,
-            function: Function,
-        }{
-            .{ .name = "evalScript", .length = 1, .function = wrapExternalWithFunc(test262EvalScript) },
-            .{ .name = "createRealm", .length = 0, .function = wrapExternal(test262CreateRealm) },
-            .{ .name = "gc", .length = 0, .function = wrapExternal(test262Gc) },
-        };
-        inline for (methods) |method| {
-            const func_value = try createExternalHostFunctionWithRealm(ctx, method.name, method.length, method.function, false, global);
-            defer func_value.free(rt);
-            try ctx.defineDataProperty(ns_target, method.name, func_value, .{ .enumerable = false });
-        }
-    }
-
-    fn createExternalHostFunctionWithRealm(
-        ctx: *JSContext,
-        name: []const u8,
-        length: i32,
-        function: Function,
-        with_prototype: bool,
-        realm_global: ?*CoreObject,
-    ) !value.Value {
-        return ctx.createExternalFunction(name, length, &test_host_context, function, null, .{
-            .with_prototype = with_prototype,
-            .realm_global = realm_global,
-        });
-    }
 
     pub fn evalGlobalScriptSource(
         ctx: *JSContext,
@@ -197,7 +158,7 @@ pub const host = struct {
         source: []const u8,
         filename: []const u8,
     ) !value.Value {
-        return zjs_exec.call.qjsEvalGlobalScriptSource(ctx, output, global, source, filename);
+        return zjs_exec.call.qjsEvalGlobalScriptSource(&ctx.core, output, global, source, filename);
     }
 
     fn evalGlobalScriptValueCore(
@@ -213,68 +174,6 @@ pub const host = struct {
         return evalGlobalScriptSourceCore(ctx, output, global, source, filename);
     }
 
-    fn wrapExternal(comptime function: anytype) Function {
-        return struct {
-            fn call(_: *anyopaque, host_call: Call) anyerror!value.Value {
-                const ctx: *JSContext = @ptrCast(@alignCast(host_call.ctx));
-                return function(ctx, host_call.output, host_call.global, host_call.args);
-            }
-        }.call;
-    }
-
-    fn wrapExternalWithFunc(comptime function: anytype) Function {
-        return struct {
-            fn call(_: *anyopaque, host_call: Call) anyerror!value.Value {
-                const ctx: *JSContext = @ptrCast(@alignCast(host_call.ctx));
-                const global = host_call.global orelse host_call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-                return function(ctx, host_call.output, global, host_call.func_obj, host_call.args);
-            }
-        }.call;
-    }
-
-    fn test262EvalScript(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: *CoreObject,
-        function_object: *CoreObject,
-        args: []const value.Value,
-    ) !value.Value {
-        if (args.len == 0) return value.undefinedValue();
-        if (!args[0].isString()) return error.TypeError;
-        const eval_global = (try ctx.functionRealmGlobal(function_object.value())) orelse global;
-        return evalGlobalScriptValueCore(ctx, output, eval_global, args[0], "<evalScript>");
-    }
-
-    fn test262CreateRealm(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: ?*CoreObject,
-        args: []const value.Value,
-    ) !value.Value {
-        _ = output;
-        _ = global;
-        _ = args;
-        const realm_value = try ctx.createRealm();
-        errdefer realm_value.free(ctx.runtimePtr());
-        const realm_global = try ctx.realmGlobalObject(realm_value);
-        const eval_func = try createExternalHostFunctionWithRealm(ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
-        defer eval_func.free(ctx.runtimePtr());
-        try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
-        return realm_value;
-    }
-
-    fn test262Gc(
-        ctx: *JSContext,
-        output: ?*std.Io.Writer,
-        global: ?*CoreObject,
-        args: []const value.Value,
-    ) !value.Value {
-        _ = output;
-        _ = global;
-        _ = args;
-        _ = ctx.runtimePtr().runObjectCycleRemoval();
-        return value.undefinedValue();
-    }
 };
 
 pub const object = struct {
@@ -282,7 +181,7 @@ pub const object = struct {
     pub const Builder = struct {};
     pub const Template = struct {};
     pub const MemoryAccount = zjs_core.memory.MemoryAccount;
-    pub const SharedArrayBufferRef = zjs_kernel.SharedArrayBufferRef;
+    pub const SharedArrayBufferRef = zjs_binding.SharedArrayBufferRef;
     pub const String = zjs_core.string.String;
 
     fn fromCore(obj: *CoreObject) *Object {
@@ -617,15 +516,15 @@ test "public Buffer helpers create and copy Uint8Array bytes" {
 }
 
 pub const context = struct {
-    pub const Options = zjs_kernel.ContextOptions;
-    pub const EvalMode = zjs_kernel.EvalMode;
-    pub const EvalOptions = zjs_kernel.EvalOptions;
-    pub const EvalTiming = zjs_kernel.EvalTiming;
-    pub const DataPropertyOptions = zjs_kernel.DataPropertyOptions;
-    pub const PropertyAccessOptions = zjs_kernel.PropertyAccessOptions;
-    pub const PropertyDescriptor = zjs_kernel.PropertyDescriptor;
-    pub const ErrorOptions = zjs_kernel.ErrorOptions;
-    pub const ScriptEvalOptions = zjs_kernel.ScriptEvalOptions;
+    pub const Options = zjs_binding.ContextOptions;
+    pub const EvalMode = zjs_binding.EvalMode;
+    pub const EvalOptions = zjs_binding.EvalOptions;
+    pub const EvalTiming = zjs_binding.EvalTiming;
+    pub const DataPropertyOptions = zjs_binding.DataPropertyOptions;
+    pub const PropertyAccessOptions = zjs_binding.PropertyAccessOptions;
+    pub const PropertyDescriptor = zjs_binding.PropertyDescriptor;
+    pub const ErrorOptions = zjs_binding.ErrorOptions;
+    pub const ScriptEvalOptions = zjs_binding.ScriptEvalOptions;
     pub const FunctionCallOptions = struct {
         this_value: ?value.Value = null,
         output: ?*std.Io.Writer = null,
@@ -666,7 +565,7 @@ pub const module = struct {
         host_hooks: Host,
         allocator: std.mem.Allocator,
     ) !value.Value {
-        return module_graph.evalFileModuleGraphWithHostHooks(ctx.runtimePtr(), ctx, source_text, output, filename, host_hooks, allocator);
+        return module_graph.evalFileModuleGraphWithHostHooks(ctx.runtimePtr(), &ctx.core, source_text, output, filename, host_hooks, allocator);
     }
 
     fn moduleResolutionError(err: anyerror) anyerror {
@@ -729,7 +628,7 @@ pub const job = struct {
 };
 
 test {
-    _ = zjs_kernel;
+    _ = zjs_binding;
     _ = runtime;
 }
 

@@ -2847,7 +2847,7 @@ pub fn qjsAsyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.functionBytecodeSlot().* orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    var nested = fb.asBytecodeView(ctx.runtime);
+    var nested = bytecode.function.asBytecodeView(fb, ctx.runtime);
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
 
@@ -3901,6 +3901,11 @@ fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue 
 test "promise enqueues reactions and executes jobs via engine" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    rt.materialize_context_global_cb = struct {
+        fn cb(c: *core.JSContext) anyerror!*core.Object {
+            return try zjs_vm.contextGlobal(c);
+        }
+    }.cb;
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 

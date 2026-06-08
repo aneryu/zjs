@@ -50,27 +50,17 @@ and should not rely on process exit for cleanup.
 
 ## Modules
 
-ECMAScript modules are supported within the local validation boundary. CommonJS
-`require`, `node_modules` resolution, package exports/import maps, and hybrid
-Node-style module loading are not supported. Binary module imports using
-`import ... with { type: "bytes" }` are outside the Production v1 active
-validation profile.
+ECMAScript modules and binary module imports (using `import ... with { type: "bytes" }`)
+are supported within the local validation boundary. CommonJS `require`,
+`node_modules` resolution, package exports/import maps, and hybrid Node-style
+module loading are not supported.
 
 ## Performance
 
-The checked-in microbench reports are historical artifacts from the previous C
-QuickJS comparison toolchain.
-
-Performance is uneven by subsystem:
-
-- Wins in that report include global read loops, cached RegExp tests,
-  array-map callbacks, and string-keyed Map workloads.
-- Slower areas in that report include dense array write/read, integer sums,
-  monomorphic and prototype property reads, URI decoding, and some function
-  call loops.
-
-Do not infer production performance from the external-process microbench alone;
-it includes startup cost and is meant for local regression tracking.
+Performance is uneven by subsystem. The checked performance gate is a ZJS
+self-baseline regression check, and single-script/runtime-profile artifacts are
+diagnostic. Do not treat external-process microbench timings as a semantic
+compatibility signal.
 
 ## Documentation Scope
 

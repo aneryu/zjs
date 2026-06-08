@@ -12,6 +12,7 @@ const value_ops = @import("value_ops.zig");
 const IteratorZipError = exceptions.HostError;
 const for_await_record_marker: i32 = -0x7fff0001;
 pub const simple_for_in_iterator_kind: u8 = 251;
+pub const Step = enum { done, continue_loop };
 
 pub fn forOfStart(
     ctx: *core.JSContext,
@@ -141,6 +142,28 @@ pub fn forOfStart(
         if (it) |value| value.free(ctx.runtime);
     }
     try stack.pushOwned(core.JSValue.catchOffset(catchTargetMarkerValue(catch_target)));
+}
+
+pub fn forOfStartVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    is_async: bool,
+    comptime getIteratorMethod: anytype,
+    comptime getValueProperty: anytype,
+    comptime isCallableValue: anytype,
+    comptime callValueOrBytecode: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    forOfStart(ctx, output, global, stack, function, frame, catch_target.*, is_async, getIteratorMethod, getValueProperty, isCallableValue, callValueOrBytecode) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 fn catchTargetMarkerValue(catch_target: ?usize) i32 {
@@ -338,6 +361,23 @@ pub fn forInStart(
     try stack.pushOwned(iterator);
 }
 
+pub fn forInStartVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime createForInIterator: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    forInStart(ctx, output, global, stack, createForInIterator) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn iteratorNext(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -368,10 +408,43 @@ pub fn iteratorNext(
     };
 }
 
+pub fn iteratorNextVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime callValueOrBytecode: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    iteratorNext(ctx, output, global, stack, function, frame, callValueOrBytecode) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
+}
+
 pub fn iteratorCheckObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     _ = ctx;
     const value = stack.peekBorrowed() orelse return error.StackUnderflow;
     if (!value.isObject()) return error.TypeError;
+}
+
+pub fn iteratorCheckObjectVm(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    iteratorCheckObject(ctx, stack) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn iteratorGetValueDone(
@@ -401,6 +474,25 @@ pub fn iteratorGetValueDone(
 
     stack.pushOwnedAssumeCapacity(value);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(valueTruthy(done)));
+}
+
+pub fn iteratorGetValueDoneVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime getValueProperty: anytype,
+    comptime valueTruthy: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    iteratorGetValueDone(ctx, output, global, stack, function, frame, getValueProperty, valueTruthy) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn iteratorCall(
@@ -444,6 +536,25 @@ pub fn iteratorCall(
     old_arg.free(ctx.runtime);
     stack.pushOwnedAssumeCapacity(result);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+}
+
+pub fn iteratorCallVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime getValueProperty: anytype,
+    comptime callValueOrBytecode: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    iteratorCall(ctx, output, global, stack, function, frame, getValueProperty, callValueOrBytecode) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn forOfNext(
@@ -491,6 +602,27 @@ pub fn forOfNext(
     }
     stack.pushOwnedAssumeCapacity(value);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done));
+}
+
+pub fn forOfNextVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime findForOfIteratorIndex: anytype,
+    comptime callValueOrBytecode: anytype,
+    comptime getValueProperty: anytype,
+    comptime valueTruthy: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    forOfNext(ctx, output, global, stack, function, frame, findForOfIteratorIndex, callValueOrBytecode, getValueProperty, valueTruthy) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn forInNext(
@@ -610,6 +742,24 @@ pub fn iteratorClose(
     } else {
         try closeIteratorFromVm(ctx, output, global, it);
     }
+}
+
+pub fn iteratorCloseVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime closeIteratorFromVm: anytype,
+    comptime closeForAwaitIteratorFromVm: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    iteratorClose(ctx, output, global, stack, closeIteratorFromVm, closeForAwaitIteratorFromVm) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    return .done;
 }
 
 pub fn arrayIteratorPrototypeFromContext(
@@ -2910,7 +3060,6 @@ fn testIteratorValueTruthy(value: core.JSValue) bool {
     return value_ops.isTruthy(value);
 }
 
-
 fn testIteratorCallGetValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2950,5 +3099,3 @@ fn testIteratorCallValueOrBytecode(
     _ = caller_frame;
     return core.JSValue.int32(123);
 }
-
-

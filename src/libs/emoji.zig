@@ -1,4 +1,3 @@
-
 pub const StringUnits = union(enum) {
     latin1: []const u8,
     utf16: []const u16,
@@ -444,4 +443,3 @@ test "emoji functionality" {
     try std.testing.expectEqual(@as(usize, 4), prefixed_match.len);
     try std.testing.expect(findRgiEmojiMatch(.{ .utf16 = &prefixed }, 0, true) == null);
 }
-

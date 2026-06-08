@@ -37,8 +37,6 @@ fn freeAndDrain(lx: *QjsLexer, tok: *t.Token) void {
 
 // ---- F1.1 / F1.5 -----------------------------------------------------
 
-
-
 test "F1.5: every keyword token maps to its predefined atom" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
@@ -3617,8 +3615,6 @@ test "Object literal: spread" {
 // These tests cover the FunctionDef-side data that the finalize pipeline
 // consumes, without depending on full bytecode emission.
 
-
-
 test "F10.1a FunctionDef: initial scope chain has scope 0 with parent -1" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3979,8 +3975,6 @@ test "TS: Strict Enum Constant Expression Rejection" {
 
 // ================== INTEGRATION TESTS ==================
 
-
-
 fn countCalls(code: []const u8) usize {
     return countOpcode(code, qop.call) +
         countOpcode(code, qop.call0) +
@@ -3992,8 +3986,6 @@ fn countCalls(code: []const u8) usize {
 fn countFunctionClosures(code: []const u8) usize {
     return countOpcode(code, qop.fclosure) + countOpcode(code, qop.fclosure8);
 }
-
-
 
 fn functionBytecodeHasKind(fb: *const engine.bytecode.FunctionBytecode, kind: function_def.FunctionKind) bool {
     if (fb.func_kind == kind) return true;
@@ -4036,12 +4028,6 @@ fn expectNoLiveDynamicAtom(rt: *core.JSRuntime, kind: core.atom.AtomKind, bytes:
         try std.testing.expect(!std.mem.eql(u8, entry.bytes, bytes));
     }
 }
-
-
-
-
-
-
 
 test "syntax error deinit balances empty message allocation" {
     var account = core.memory.MemoryAccount.init(std.testing.allocator);
@@ -4174,7 +4160,7 @@ test "quick parser emits compound assignment and update statements" {
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
 
-    const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add);
+    const add_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.add) + countOpcode(parsed.function.code, engine.bytecode.opcode.op.add_loc);
     const define_var_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.define_var);
     try std.testing.expect(add_count >= 1);
     try std.testing.expect(define_var_count <= 3);

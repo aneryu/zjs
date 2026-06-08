@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const atom = @import("../core/atom.zig");
+const function_bytecode = @import("../core/function_bytecode.zig");
 const memory = @import("../core/memory.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const pc2line = @import("./pipeline/pc2line.zig");
@@ -29,13 +30,7 @@ fn freeOwnedValue(atoms: *atom.AtomTable, value: JSValue, rt: anytype) void {
     value.free(rt);
 }
 
-/// Mirrors `JSFunctionKindEnum` (`quickjs.c:761`).
-pub const FunctionKind = enum(u2) {
-    normal = 0,
-    generator = 1 << 0,
-    async = 1 << 1,
-    async_generator = 3, // generator | async
-};
+pub const FunctionKind = function_bytecode.FunctionKind;
 
 /// Mirrors `JSParseFunctionEnum` (`quickjs.c:21401`).
 pub const ParseFunctionKind = enum(u7) {
@@ -51,43 +46,9 @@ pub const ParseFunctionKind = enum(u7) {
     derived_class_constructor,
 };
 
-/// Mirrors `JSClosureTypeEnum` (`quickjs.c:675`).
-pub const ClosureType = enum(u3) {
-    local, // 'var_idx' is the index of a local variable in the parent function
-    arg, // 'var_idx' is the index of an argument variable in the parent function
-    ref, // 'var_idx' is the index of a closure variable in the parent function
-    global_ref, // 'var_idx' is the index of a closure variable referencing a global variable
-    global_decl, // global variable declaration (eval code only)
-    global, // global variable (eval code only)
-    module_decl, // definition of a module variable (eval code only)
-    module_import, // definition of a module import (eval code only)
-};
-
-/// Mirrors `JSVarKindEnum` (`quickjs.c:707`).
-pub const VarKind = enum(u4) {
-    normal,
-    function_decl, // lexical var with function declaration
-    new_function_decl, // lexical var with async/generator function declaration
-    catch_,
-    function_name, // function expression name
-    private_field,
-    private_method,
-    private_getter,
-    private_setter,
-    private_getter_setter,
-};
-
-/// Mirrors `JSVarDef` (`quickjs.c:724`).
-pub const VarDef = struct {
-    var_name: atom.Atom,
-    scope_level: i32, // index into scopes of this variable lexical scope
-    scope_next: i32 = -1, // index into vars of the next variable in the same or enclosing lexical scope
-    is_lexical: bool = false,
-    is_const: bool = false,
-    is_captured: bool = false,
-    tdz_emitted_at_decl: bool = false,
-    var_kind: VarKind = .normal,
-};
+pub const ClosureType = function_bytecode.ClosureType;
+pub const VarKind = function_bytecode.VarKind;
+pub const VarDef = function_bytecode.VarDef;
 
 /// Mirrors `JSVarScope` (`quickjs.c:702`).
 pub const VarScope = struct {
@@ -95,15 +56,7 @@ pub const VarScope = struct {
     first: i32, // index into vars of the last variable in this scope
 };
 
-/// Mirrors `JSClosureVar` (`quickjs.c:687`).
-pub const ClosureVar = struct {
-    closure_type: ClosureType,
-    is_lexical: bool = false,
-    is_const: bool = false,
-    var_kind: VarKind = .normal,
-    var_idx: u16, // index to a normal variable of the parent function, or index to a closure variable
-    var_name: atom.Atom,
-};
+pub const ClosureVar = function_bytecode.ClosureVar;
 
 /// Mirrors `JSGlobalVar` (`quickjs.c:21364`).
 pub const GlobalVar = struct {

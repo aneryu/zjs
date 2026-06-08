@@ -20,6 +20,7 @@ let qjsBin = process.env.QJS || defaultQjs;
 let iters = parseInteger(process.env.BENCH_ITERS, 10);
 let warmup = parseInteger(process.env.BENCH_WARMUP, 3);
 let includeUnsupported = false;
+let zjsOnly = false;
 let emitJson = false;
 let outputPath = null;
 let emitScriptsDir = null;
@@ -37,6 +38,7 @@ function usage() {
 
 Runs zjs-compatible QuickJS microbench-derived cases through both C qjs and zjs.
 Each case is checked for matching stdout, stderr, and exit code before timing.
+Use --zjs-only for self-baseline reports that compare zjs to a checked-in zjs report.
 
 Options:
   --iters N                 Timed iterations per case and binary (default: ${iters})
@@ -44,6 +46,7 @@ Options:
   --case NAME               Run one case; repeatable
   --category NAME           Run one category; repeatable
   --include-unsupported     Show unsupported cases in the terminal table
+  --zjs-only                Use zjs for the reference column; does not require C qjs
   --json                    Print the JSON report to stdout instead of the table
   --output PATH             Write the JSON report to PATH
   --emit-scripts DIR        Write generated benchmark scripts to DIR for profiling
@@ -365,6 +368,10 @@ for (let i = 0; i < args.length; i += 1) {
         case '--include-unsupported':
             includeUnsupported = true;
             break;
+        case '--zjs-only':
+        case '--self':
+            zjsOnly = true;
+            break;
         case '--json':
             emitJson = true;
             break;
@@ -405,7 +412,11 @@ for (let i = 0; i < args.length; i += 1) {
 }
 
 ensureExecutable(zjsBin, 'zjs', "run 'zig build qjs -Doptimize=ReleaseFast' first, or set QJS_ZIG");
-ensureExecutable(qjsBin, 'qjs (C)', 'build QuickJS first, or set QJS');
+if (zjsOnly) {
+    qjsBin = zjsBin;
+} else {
+    ensureExecutable(qjsBin, 'qjs (C)', 'build QuickJS first, or set QJS');
+}
 
 const selected = selectedCaseList();
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zjs-microbench-'));
@@ -474,9 +485,14 @@ try {
     const startupBaseline = measureStartupBaseline(tempDir);
     addStartupAdjustedRows(rows, startupBaseline);
     const report = makeReport(rows, selected);
+    if (zjsOnly) report.baseline = 'zjs-only';
     report.startupBaseline = startupBaseline;
     const json = `${JSON.stringify(report, null, 2)}\n`;
-    if (outputPath) fs.writeFileSync(path.resolve(process.cwd(), outputPath), json);
+    if (outputPath) {
+        const resolvedOutput = path.resolve(process.cwd(), outputPath);
+        fs.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
+        fs.writeFileSync(resolvedOutput, json);
+    }
     if (emitJson) {
         process.stdout.write(json);
     } else {

@@ -117,4 +117,3 @@ test "intrinsic bootstrap registers global builtin domains through object proper
     const set_func_obj: *core.Object = @fieldParentPtr("header", set_desc.value.refHeader().?);
     try std.testing.expectEqual(core.class.ids.c_function, set_func_obj.class_id);
 }
-

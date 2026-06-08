@@ -3,7 +3,8 @@ const std = @import("std");
 const build_options = @import("build_options");
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
-const ffi = @import("../kernel/ffi.zig");
+const ffi = @import("../binding/ffi.zig");
+const zjs = @import("../binding/root.zig");
 
 pub const InstallOptions = struct {
     overwrite: bool = false,
@@ -610,7 +611,7 @@ fn createBindingFunction(ctx: *core.JSContext, plugin: *InstalledPlugin, descrip
 
     const length = std.math.cast(i32, descriptor.length) orelse return error.BindingLengthOverflow;
     try defineFunctionMetadata(rt, function_object, descriptor.name.slice(), length);
-    try function_object.setFunctionRealmGlobalPtr(rt, try ctx.globalObject());
+    try function_object.setFunctionRealmGlobalPtr(rt, try exec.zjs_vm.contextGlobal(ctx));
 
     const external_id = try rt.registerExternalHostFunction(.{
         .ptr = @ptrCast(installed_binding),
@@ -735,8 +736,8 @@ fn fallbackMessageFromStatus(status: ffi.Status) []const u8 {
     };
 }
 
-fn installDescriptorForTesting(ctx: *core.JSContext, target_value: core.JSValue, descriptor: *const ffi.PluginDescriptor, options: InstallOptions) !void {
-    try installSource(ctx, target_value, "<test-plugin>", .{ .descriptor = descriptor }, options);
+fn installDescriptorForTesting(ctx: *zjs.JSContext, target_value: core.JSValue, descriptor: *const ffi.PluginDescriptor, options: InstallOptions) !void {
+    try installSource(&ctx.core, target_value, "<test-plugin>", .{ .descriptor = descriptor }, options);
 }
 
 fn objectFromValue(value: core.JSValue) ?*core.Object {
@@ -780,7 +781,7 @@ test "runtime Plugin installs synchronous bindings on an ordinary target" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -856,16 +857,16 @@ test "runtime Plugin loads a dynamic library and installs its binding" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const target_value = target.value();
     defer target_value.free(rt);
 
-    try plugin.install(ctx, target_value, .{});
+    try plugin.install(&ctx.core, target_value, .{});
     try std.testing.expect(plugin.loaded == null);
-    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx, target_value, .{}));
+    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(&ctx.core, target_value, .{}));
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
@@ -892,14 +893,14 @@ test "runtime Plugin load owns a path copy independent from caller storage" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const target_value = target.value();
     defer target_value.free(rt);
 
-    try plugin.install(ctx, target_value, .{});
+    try plugin.install(&ctx.core, target_value, .{});
 
     const global = try ctx.globalObject();
     const native_atom = try rt.internAtom("native");
@@ -922,7 +923,7 @@ test "runtime Plugin treats repeated loads of the same path as independent insta
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const left = try core.Object.create(rt, core.class.ids.object, null);
@@ -932,8 +933,8 @@ test "runtime Plugin treats repeated loads of the same path as independent insta
     const right_value = right.value();
     defer right_value.free(rt);
 
-    try first.install(ctx, left_value, .{});
-    try second.install(ctx, right_value, .{});
+    try first.install(&ctx.core, left_value, .{});
+    try second.install(&ctx.core, right_value, .{});
     try std.testing.expect(first.loaded == null);
     try std.testing.expect(second.loaded == null);
 
@@ -959,7 +960,7 @@ test "runtime Plugin accepts empty descriptors as no-op installs" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -970,10 +971,10 @@ test "runtime Plugin accepts empty descriptors as no-op installs" {
     defer rt.atoms.free(sentinel_atom);
     try target.defineOwnProperty(rt, sentinel_atom, core.Descriptor.data(core.JSValue.int32(17), false, false, true));
 
-    try plugin.install(ctx, target_value, .{});
+    try plugin.install(&ctx.core, target_value, .{});
     try std.testing.expect(plugin.consumed);
     try std.testing.expect(plugin.loaded == null);
-    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx, target_value, .{}));
+    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(&ctx.core, target_value, .{}));
 
     const sentinel = target.getOwnProperty(sentinel_atom) orelse return error.TestExpectedEqual;
     defer sentinel.destroy(rt);
@@ -992,7 +993,7 @@ test "runtime Plugin install consumes the loaded handle even when install fails"
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1003,10 +1004,10 @@ test "runtime Plugin install consumes the loaded handle even when install fails"
     defer rt.atoms.free(add_atom);
     try target.defineOwnProperty(rt, add_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
 
-    try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(ctx, target_value, .{}));
+    try std.testing.expectError(error.PropertyAlreadyExists, plugin.install(&ctx.core, target_value, .{}));
     try std.testing.expect(plugin.consumed);
     try std.testing.expect(plugin.loaded != null);
-    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(ctx, target_value, .{ .overwrite = true }));
+    try std.testing.expectError(error.PluginAlreadyConsumed, plugin.install(&ctx.core, target_value, .{ .overwrite = true }));
 }
 
 test "runtime Plugin install rejects non-ordinary targets" {
@@ -1021,7 +1022,7 @@ test "runtime Plugin install rejects non-ordinary targets" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -1063,7 +1064,7 @@ test "runtime Plugin install rejects targets from another runtime" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const other_rt = try core.JSRuntime.create(std.testing.allocator);
@@ -1087,7 +1088,7 @@ test "runtime Plugin install rejects additions on non-extensible targets" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1110,7 +1111,7 @@ test "runtime Plugin install ignores inherited binding-name properties" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const key = try rt.internAtom("shadowed");
@@ -1149,7 +1150,7 @@ test "runtime Plugin install prechecks conflicts before mutating target" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1184,7 +1185,7 @@ test "runtime Plugin install rejects duplicate binding names before mutating tar
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1212,7 +1213,7 @@ test "runtime Plugin install rejects non-configurable overwrite" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1239,7 +1240,7 @@ test "runtime Plugin overwrite replaces configurable own properties" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1344,7 +1345,7 @@ test "runtime Plugin install rejects host object descriptors without bindings" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1370,7 +1371,7 @@ test "runtime Plugin install rolls back host classes when later binding preparat
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1394,14 +1395,14 @@ test "runtime Plugin install tombstones external host records on binding prepara
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const target_value = target.value();
     defer target_value.free(rt);
 
-    _ = try ctx.globalObject();
+    _ = try exec.zjs_vm.contextGlobal(&ctx.core);
     const base_external_count = rt.external_host_functions.len;
     try std.testing.expectError(error.BindingLengthOverflow, installDescriptorForTesting(ctx, target_value, TestPlugin.descriptor(), .{}));
 
@@ -1441,7 +1442,7 @@ test "runtime Plugin releases committed host classes with external host records"
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1464,7 +1465,7 @@ test "runtime Plugin install resolves prop-name descriptors without mutating tar
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     try std.testing.expectError(error.InvalidTarget, installDescriptorForTesting(ctx, core.JSValue.int32(1), TestPlugin.descriptor(), .{}));
@@ -1506,7 +1507,7 @@ test "runtime Plugin exposes resolved prop-name descriptors through HostServices
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1545,7 +1546,7 @@ test "runtime Plugin call copies error_message into thrown JS error" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1597,7 +1598,7 @@ test "runtime Plugin status without messages maps to JavaScript error classes" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1641,7 +1642,7 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1662,7 +1663,7 @@ test "runtime Plugin failed raw CallFrame calls do not free borrowed result valu
 
     const before_rc = sentinel.header.rc;
     var args = [_]core.JSValue{sentinel_value};
-    try std.testing.expectError(error.JSException, exec.call.callValue(ctx, null, fail_value, &args));
+    try std.testing.expectError(error.JSException, exec.call.callValue(&ctx.core, null, fail_value, &args));
     try std.testing.expect(ctx.hasException());
     ctx.clearException();
     try std.testing.expectEqual(before_rc, sentinel.header.rc);
@@ -1681,7 +1682,7 @@ test "runtime Plugin maps unknown status values to generic errors" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1715,7 +1716,7 @@ test "runtime Plugin ignores invalid non-empty error messages" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1751,7 +1752,7 @@ test "runtime Plugin invalid utf8 error messages fall back to status names" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1787,7 +1788,7 @@ test "runtime Plugin treats ok return with non-ok frame error_status as failure"
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1821,7 +1822,7 @@ test "runtime Plugin out_of_memory status ignores borrowed error messages" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1834,7 +1835,7 @@ test "runtime Plugin out_of_memory status ignores borrowed error messages" {
     const fail_value = target.getProperty(fail_atom);
     defer fail_value.free(rt);
 
-    try std.testing.expectError(error.OutOfMemory, exec.call.callValue(ctx, null, fail_value, &.{}));
+    try std.testing.expectError(error.OutOfMemory, exec.call.callValue(&ctx.core, null, fail_value, &.{}));
     try std.testing.expect(!ctx.hasException());
 }
 
@@ -1855,7 +1856,7 @@ test "runtime Plugin pending_exception preserves an existing pending exception" 
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1889,7 +1890,7 @@ test "runtime Plugin pending_exception without a pending value maps to generic e
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1923,7 +1924,7 @@ test "runtime Plugin pending_exception without a pending value ignores error mes
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -1976,7 +1977,7 @@ test "runtime Plugin create opaque service rejects invalid host objects as TypeE
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -2045,7 +2046,7 @@ test "runtime Plugin unwrap opaque service reports expected and actual type diag
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -2121,7 +2122,7 @@ test "runtime Plugin nullable opaque references are represented as JS null" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -2181,7 +2182,7 @@ test "runtime Plugin host services create and unwrap opaque host objects" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -2240,7 +2241,7 @@ test "runtime Plugin pending opaque wrapper finalizers trace plugin payload root
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     var state = State{ .rt = rt };
@@ -2271,7 +2272,7 @@ test "runtime Plugin pending opaque wrapper finalizers trace plugin payload root
     const make_value = target.getProperty(make_atom);
     defer make_value.free(rt);
 
-    const wrapper = try exec.call.callValue(ctx, null, make_value, &.{});
+    const wrapper = try exec.call.callValue(&ctx.core, null, make_value, &.{});
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 
@@ -2342,7 +2343,7 @@ test "runtime Plugin runtime destroy drains pending opaque wrapper finalizers" {
     });
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const target_value = target.value();
@@ -2350,7 +2351,7 @@ test "runtime Plugin runtime destroy drains pending opaque wrapper finalizers" {
 
     const make_atom = try rt.internAtom("make");
     const make_value = target.getProperty(make_atom);
-    const wrapper = try exec.call.callValue(ctx, null, make_value, &.{});
+    const wrapper = try exec.call.callValue(&ctx.core, null, make_value, &.{});
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
     try std.testing.expectEqual(@as(usize, 0), state.finalizer_calls);
@@ -2389,7 +2390,7 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     var state = State{};
@@ -2420,7 +2421,7 @@ test "runtime Plugin host-owned opaque wrappers can trace without taking ownersh
     const make_value = target.getProperty(make_atom);
     defer make_value.free(rt);
 
-    const wrapper = try exec.call.callValue(ctx, null, make_value, &.{});
+    const wrapper = try exec.call.callValue(&ctx.core, null, make_value, &.{});
     wrapper.free(rt);
     try std.testing.expectEqual(@as(usize, 1), rt.pendingDeferredClassPayloadFinalizerCountForTest());
 
@@ -2474,7 +2475,7 @@ test "runtime Plugin opaque wrappers expose only reference branding" {
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -2544,7 +2545,7 @@ test "runtime Plugin unwrap accepts opaque wrappers from another plugin with the
 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt);
     defer ctx.destroy();
 
     const producer = try core.Object.create(rt, core.class.ids.object, null);
@@ -2596,7 +2597,7 @@ test "runtime Plugin unwrap rejects opaque wrappers from another runtime" {
 
     const rt_a = try core.JSRuntime.create(std.testing.allocator);
     defer rt_a.destroy();
-    const ctx_a = try core.JSContext.create(rt_a);
+    const ctx_a = try zjs.JSContext.create(rt_a);
     defer ctx_a.destroy();
 
     const target_a = try core.Object.create(rt_a, core.class.ids.object, null);
@@ -2608,12 +2609,12 @@ test "runtime Plugin unwrap rejects opaque wrappers from another runtime" {
     defer rt_a.atoms.free(make_atom);
     const make_value = target_a.getProperty(make_atom);
     defer make_value.free(rt_a);
-    const wrapper_a = try exec.call.callValue(ctx_a, null, make_value, &.{});
+    const wrapper_a = try exec.call.callValue(&ctx_a.core, null, make_value, &.{});
     defer wrapper_a.free(rt_a);
 
     const rt_b = try core.JSRuntime.create(std.testing.allocator);
     defer rt_b.destroy();
-    const ctx_b = try core.JSContext.create(rt_b);
+    const ctx_b = try zjs.JSContext.create(rt_b);
     defer ctx_b.destroy();
 
     const target_b = try core.Object.create(rt_b, core.class.ids.object, null);

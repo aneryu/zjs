@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
     });
     public_fast_mod.addOptions("build_options", engine_options);
     const internal_fast_mod = b.createModule(.{
-        .root_source_file = b.path("src/test262_internal_root.zig"),
+        .root_source_file = b.path("src/internal_root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .link_libc = true,
@@ -95,6 +95,8 @@ pub fn build(b: *std.Build) void {
     const zjs_step = b.step("zjs", "Build and install zjs");
     zjs_step.dependOn(&install_zjs.step);
     b.installArtifact(zjs_exe);
+
+
 
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
@@ -301,42 +303,69 @@ pub fn build(b: *std.Build) void {
         perf_runtime_profiles_step.dependOn(profile_step);
     }
 
-    const run_perf_env = b.addSystemCommand(&.{
+    const run_perf_self_current = b.addSystemCommand(&.{
+        "bun",
+        "tools/compare/run_microbench.js",
+        "--zjs-only",
+        "--iters",
+        "30",
+        "--warmup",
+        "5",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs"),
+        "--output",
+        ".zig-cache/perf/current/microbench-zjs-releasefast.json",
+        "--emit-scripts",
+        ".zig-cache/perf/current/scripts",
+    });
+    run_perf_self_current.step.dependOn(&install_zjs.step);
+
+    const run_perf_self_diff = b.addSystemCommand(&.{
+        "node",
+        "tools/perf/diff_report.js",
+        "--warn-case-regressions",
+        "--output",
+        ".zig-cache/perf/current/diff-zjs-self.md",
+        "reports/perf/baseline/microbench-zjs-releasefast.json",
+        ".zig-cache/perf/current/microbench-zjs-releasefast.json",
+    });
+    run_perf_self_diff.step.dependOn(&run_perf_self_current.step);
+    const perf_self_check_step = b.step("perf-self-check", "Compare current zjs microbench timings against the checked-in zjs self baseline");
+    perf_self_check_step.dependOn(&run_perf_self_diff.step);
+
+    const run_perf_self_update = b.addSystemCommand(&.{
+        "bun",
+        "tools/compare/run_microbench.js",
+        "--zjs-only",
+        "--iters",
+        "30",
+        "--warmup",
+        "5",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs"),
+        "--output",
+        "reports/perf/baseline/microbench-zjs-releasefast.json",
+        "--emit-scripts",
+        ".zig-cache/perf/baseline/scripts",
+    });
+    run_perf_self_update.step.dependOn(&install_zjs.step);
+    const run_perf_self_env_update = b.addSystemCommand(&.{
         "node",
         "tools/perf/write_env.js",
         "--iters",
-        "120",
+        "30",
         "--warmup",
-        "15",
+        "5",
         "--output",
-        "reports/perf/current/env.md",
+        "reports/perf/baseline/env-zjs-self.md",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs"),
         "--notes",
-        "top10/diff are generated from checked-in zjs-microbench JSON reports; perf-benchmark is a separate runtime smoke and does not refresh reports/perf/current/microbench.json.",
+        "ZJS self-baseline report; qjs is intentionally not configured for this gate.",
     });
-
-    const run_perf_top10 = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/top10_report.js",
-        "--output",
-        "reports/perf/current/top10.md",
-        "reports/perf/current/microbench.json",
-    });
-    run_perf_top10.step.dependOn(&run_perf_env.step);
-
-    const run_perf_diff = b.addSystemCommand(&.{
-        "node",
-        "tools/perf/diff_report.js",
-        "--allow-sample-config-drift",
-        "--warn-case-regressions",
-        "--output",
-        "reports/perf/current/diff.md",
-        "reports/perf/baseline/microbench-releasefast.json",
-        "reports/perf/current/microbench.json",
-    });
-    run_perf_diff.step.dependOn(&run_perf_top10.step);
-
-    const perf_compare_step = b.step("perf-compare", "Refresh checked-in performance report environment, top-10, and diff summaries");
-    perf_compare_step.dependOn(&run_perf_diff.step);
+    run_perf_self_env_update.step.dependOn(&run_perf_self_update.step);
+    const perf_self_update_step = b.step("perf-self-update-baseline", "Refresh the checked-in zjs self performance baseline");
+    perf_self_update_step.dependOn(&run_perf_self_env_update.step);
 
     const run_architecture_deps = b.addSystemCommand(&.{
         "node",
@@ -388,10 +417,35 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
+    test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
     unified_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
     unified_tests.root_module.addImport("zjs", unified_tests.root_module);
     unified_tests.root_module.addOptions("build_options", test_options);
     const run_unified_tests = b.addRunArtifact(unified_tests);
+    run_unified_tests.step.dependOn(&install_zjs.step);
+
+    // Smoke tests (runs only the CLI integration tests in src/tests/smoke_test.zig)
+    const smoke_tests = b.addTest(.{
+        .name = "smoke-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    smoke_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    smoke_tests.root_module.addImport("quickjs_zig_engine", unified_tests.root_module);
+    smoke_tests.root_module.addImport("zjs", unified_tests.root_module);
+    smoke_tests.root_module.addOptions("build_options", test_options);
+    const run_smoke_tests = b.addRunArtifact(smoke_tests);
+    run_smoke_tests.step.dependOn(&install_zjs.step);
+
+    const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
+    smoke_step.dependOn(&run_smoke_tests.step);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
@@ -400,5 +454,7 @@ pub fn build(b: *std.Build) void {
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine-only Production v1 release gate");
     engine_production_gate_step.dependOn(test_step);
+    engine_production_gate_step.dependOn(smoke_step);
+    engine_production_gate_step.dependOn(architecture_check_step);
     engine_production_gate_step.dependOn(test262_gate_step);
 }

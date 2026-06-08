@@ -1,6 +1,9 @@
 const std = @import("std");
 
 pub const max_opcode_count = 256;
+pub const OpcodeNameProvider = *const fn (u8) []const u8;
+
+threadlocal var opcode_name_provider: ?OpcodeNameProvider = null;
 
 pub const OpcodeProfile = struct {
     pub const opcode_count = max_opcode_count;
@@ -55,7 +58,8 @@ pub const OpcodeProfile = struct {
     }
 
     pub fn opcodeName(opcode: u8) []const u8 {
-        return @import("../bytecode/opcode.zig").nameOf(opcode);
+        if (opcode_name_provider) |provider| return provider(opcode);
+        return "unknown";
     }
 
     pub fn recordIcHit(self: *OpcodeProfile, opcode: ?u8) void {
@@ -110,6 +114,10 @@ pub const OpcodeProfile = struct {
         return totalCounter(self.ic_promote_mega);
     }
 };
+
+pub fn setOpcodeNameProvider(provider: ?OpcodeNameProvider) void {
+    opcode_name_provider = provider;
+}
 
 fn incrementOpcodeCounter(counter: *[max_opcode_count]u64, opcode: ?u8) void {
     if (opcode) |op| counter[op] +|= 1;

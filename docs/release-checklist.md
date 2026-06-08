@@ -1,8 +1,6 @@
 # Production v1 Release Checklist
 
-Use this checklist for an engine-only Production v1 release decision. The
-broader roadmap is tracked in
-[production-grade-plan.md](production-grade-plan.md).
+Use this checklist for an engine-only Production v1 release decision.
 
 ## API
 
@@ -21,6 +19,7 @@ broader roadmap is tracked in
 
 - `zig build test --summary all` passes.
 - `zig build test -Doptimize=ReleaseSafe --summary all` passes.
+- `zig build smoke --summary all` passes.
 - `zig build test262-gate --summary all` passes with the checked-in config.
 - Focused test262 slices were run for every changed semantic area.
 
@@ -33,6 +32,8 @@ broader roadmap is tracked in
 ## Hygiene
 
 - `git diff --check` passes.
+- `zig build perf-self-check --summary all` passes when the release includes
+  performance-sensitive runtime changes.
 - No temporary debug output, generated noise, or unrelated refactors are in the
   release diff.
 - Non-trivial validation evidence is in the PR, issue, or release notes.

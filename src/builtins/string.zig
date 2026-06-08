@@ -1,5 +1,4 @@
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode/root.zig");
 const function_builtin = @import("function.zig");
 const bignum = @import("../libs/bignum.zig");
 const value_ops = @import("../exec/value_ops.zig");
@@ -1495,9 +1494,9 @@ test "string iteratorResult roots direct function bytecode value while creating 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
+    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
     const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");

@@ -6,7 +6,7 @@ const path = require('node:path');
 const process = require('node:process');
 const { spawnSync } = require('node:child_process');
 
-let outputPath = 'reports/perf/baseline/env.md';
+let outputPath = 'reports/perf/baseline/env-zjs-self.md';
 let iters = process.env.BENCH_ITERS || '30';
 let warmup = process.env.BENCH_WARMUP || '5';
 let qjs = process.env.QJS || '';

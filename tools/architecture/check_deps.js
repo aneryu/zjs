@@ -103,9 +103,8 @@ function violationReason(source, target) {
       'src/exec/',
       'src/frontend/',
       'src/runtime/',
-      'src/tools/',
     ];
-    return targetStarts(target, disallowed) ? 'core must not depend on bytecode, builtins, exec, frontend, runtime, CLI, or tools' : null;
+    return targetStarts(target, disallowed) ? 'core must not depend on bytecode, builtins, exec, frontend, runtime, or CLI' : null;
   }
 
   if (source.startsWith('src/kernel/')) {
@@ -117,9 +116,8 @@ function violationReason(source, target) {
       'src/frontend/',
       'src/libs/',
       'src/runtime/',
-      'src/tools/',
     ];
-    return targetStarts(target, disallowed) ? 'kernel may import core/kernel only; it must not depend on exec, runtime, frontend, bytecode, builtins, libs, CLI, or tools' : null;
+    return targetStarts(target, disallowed) ? 'kernel may import core/kernel only; it must not depend on exec, runtime, frontend, bytecode, builtins, libs, or CLI' : null;
   }
 
   if (source.startsWith('src/builtins/')) {
@@ -129,9 +127,8 @@ function violationReason(source, target) {
       'src/exec/',
       'src/frontend/',
       'src/runtime/',
-      'src/tools/',
     ];
-    return targetStarts(target, disallowed) ? 'builtins may import core/libs/builtins only; exec/runtime/frontend/bytecode/CLI/tools dependencies must be explicit debt' : null;
+    return targetStarts(target, disallowed) ? 'builtins may import core/libs/builtins only; exec/runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
   }
 
   return null;

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const core = @import("../core/root.zig");
 const exec = @import("../exec/root.zig");
-const zjs = @import("../kernel/root.zig");
+const zjs = @import("../binding/root.zig");
 
 const libc = @cImport({
     @cUndef("_FORTIFY_SOURCE");
@@ -207,11 +207,11 @@ pub const EventLoop = struct {
                     if (promise.promiseResultSlot().* == null) {
                         try promise.setPromiseResult(rt, zjs.JSValue.undefinedValue());
                     }
-                    try exec.shared.settlePendingPromiseReaction(ctx, output, global, promise);
+                    try exec.shared.settlePendingPromiseReaction(&ctx.core, output, global, promise);
                     return true;
                 }
             }
-            const call_result = try exec.shared.callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
+            const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
             call_result.free(rt);
             if (repeats and !self.timerExists(timer_id)) return true;
             return true;
@@ -343,14 +343,14 @@ pub const EventLoop = struct {
                 if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.isNull()) {
                     const callback = handler.read_callback.dup();
                     defer callback.free(rt);
-                    const call_result = try exec.shared.callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
+                    const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
                     call_result.free(rt);
                     return true;
                 }
                 if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.isNull()) {
                     const callback = handler.write_callback.dup();
                     defer callback.free(rt);
-                    const call_result = try exec.shared.callValueOrBytecode(ctx, output, global, global.value(), callback, &.{}, null, null);
+                    const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
                     call_result.free(rt);
                     return true;
                 }
@@ -431,7 +431,7 @@ pub const EventLoop = struct {
             os_pending_signals &= ~mask;
             const callback = handler.callback.dup();
             defer callback.free(rt);
-            const call_result = try exec.shared.callValueOrBytecode(ctx, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
+            const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
             call_result.free(rt);
             return true;
         }
@@ -606,39 +606,48 @@ fn nextTimerId(ptr: *anyopaque) i64 {
     return fromOpaque(ptr).takeNextTimerId();
 }
 
-fn enqueueTimer(ptr: *anyopaque, ctx: *zjs.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
+fn enqueueTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64, callback: zjs.JSValue, delay_ms: u64, repeats: bool) !void {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     try fromOpaque(ptr).enqueueTimer(ctx, id, callback, delay_ms, repeats);
 }
 
-fn clearTimer(ptr: *anyopaque, ctx: *zjs.JSContext, id: i64) void {
+fn clearTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64) void {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     fromOpaque(ptr).clearTimer(ctx, id);
 }
 
-fn runNextTimer(ptr: *anyopaque, ctx: *zjs.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+fn runNextTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     return fromOpaque(ptr).runNextTimer(ctx, output, global);
 }
 
-fn setRwHandler(ptr: *anyopaque, ctx: *zjs.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
+fn setRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool, callback: zjs.JSValue) !void {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     try fromOpaque(ptr).setRwHandler(ctx, fd, write_handler, callback);
 }
 
-fn clearRwHandler(ptr: *anyopaque, ctx: *zjs.JSContext, fd: i32, write_handler: bool) void {
+fn clearRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool) void {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     fromOpaque(ptr).clearRwHandler(ctx, fd, write_handler);
 }
 
-fn runNextRwHandler(ptr: *anyopaque, ctx: *zjs.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+fn runNextRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     return fromOpaque(ptr).runNextRwHandler(ctx, output, global);
 }
 
-fn setSignalHandler(ptr: *anyopaque, ctx: *zjs.JSContext, sig: u32, callback: zjs.JSValue) !void {
+fn setSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, callback: zjs.JSValue) !void {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     try fromOpaque(ptr).setSignalHandler(ctx, sig, callback);
 }
 
-fn clearSignalHandler(ptr: *anyopaque, ctx: *zjs.JSContext, sig: u32, disposition: core.context.SignalDisposition) void {
+fn clearSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, disposition: core.context.SignalDisposition) void {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     fromOpaque(ptr).clearSignalHandler(ctx, sig, disposition);
 }
 
-fn runNextSignalHandler(ptr: *anyopaque, ctx: *zjs.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+fn runNextSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+    const ctx: *zjs.JSContext = @ptrCast(core_ctx);
     return fromOpaque(ptr).runNextSignalHandler(ctx, output, global);
 }
 
@@ -674,7 +683,7 @@ test "EventLoop drains queued JS callbacks" {
     , .{});
     defer callback.free(rt);
 
-    try exec.shared.enqueuePendingMicrotask(ctx, callback);
+    try exec.shared.enqueuePendingMicrotask(&ctx.core, callback);
 
     const result = try loop.runUntilIdle();
     try std.testing.expect(!result.hasPendingError());

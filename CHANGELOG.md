@@ -7,9 +7,8 @@
   DefineOwnProperty detach-during-conversion semantics.
 - Moved `import-bytes` out of the Production v1 active test262 profile; binary
   module imports remain unsupported in this release boundary.
-- Added `zig build perf-compare` to refresh environment, top-10, and diff
-  summaries from the checked-in multi-case microbench reports without implying
-  that the single-script `perf-benchmark` smoke refreshes those reports.
+- Removed the historical C QuickJS performance comparison workflow and
+  `perf-compare`; the checked performance gate is the ZJS self-baseline.
 - Added a `run_runtime_profile.js` helper and `zig build perf-uri-profile`
   shortcut for checked single-script `--perf-json` artifacts that stay separate
   from multi-case microbench reports.
@@ -50,7 +49,16 @@
   `count++`, reducing the URI 4-byte profile's `if_false8` executions from
   65536 to 1 and its `get_var` executions by another 65535.
 - Refreshed active documentation to match the current build steps, test262
-  boundary, comparison tools, and tracked performance report.
+  boundary, ZJS self-baseline performance gate, and tracked active reports.
+- Removed the completed Production v1 roadmap from the active docs; ADR 0001,
+  compatibility docs, and the release checklist are the current authorities.
+- Merged the small Compatibility v1 summary into `COMPATIBILITY.md` so the
+  compatibility boundary has one active source of truth.
+- Removed old one-off test262 slice and QuickJS comparison report directories
+  from `reports/`; the active gate report remains `reports/test262-latest/`.
+- Removed the future-oriented Bun/uWS GC design note from the active docs; the
+  current GC boundary remains documented in `README.md` and `LIMITATIONS.md`.
+- Removed the unused opcode-alignment report snapshot from `reports/`.
 - Removed historical phase/ledger documents from the active tree:
   `docs/gc-memory-lifecycle-candidates.md`, `docs/perf/roadmap.md`, and
   `reports/perf/baseline/phase-a-baseline.md`.

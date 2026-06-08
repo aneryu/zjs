@@ -1,5 +1,4 @@
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode/root.zig");
 const function_builtin = @import("function.zig");
 const object_builtin = @import("object.zig");
 const jobs = @import("../core/jobs.zig");
@@ -62,9 +61,9 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
+    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
     const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
@@ -614,9 +613,9 @@ test "settlementRecord roots direct function bytecode item while creating record
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
+    const fb_slice = try rt.memory.alloc(core.FunctionBytecode, 1);
     const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
+    fb.* = core.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
     try rt.gc.add(&fb.header);
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-bytecode-symbol");

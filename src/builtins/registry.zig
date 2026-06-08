@@ -8,7 +8,6 @@ const object_builtin = @import("object.zig");
 const regexp_builtin = @import("regexp.zig");
 const atomics_builtin = @import("atomics.zig");
 const reflect_builtin = @import("reflect_proxy.zig");
-const value_ops = @import("../exec/value_ops.zig");
 const std = @import("std");
 
 pub const Flags = struct {
@@ -394,7 +393,7 @@ pub fn defineConstructor(
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), core.JSValue.int32(0));
         }
         if (spec.kind == .string) {
-            const empty = try value_ops.createStringValue(rt, "");
+            const empty = try createBuiltinAsciiStringValue(rt, "");
             defer empty.free(rt);
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), empty.dup());
         }
@@ -405,7 +404,7 @@ pub fn defineConstructor(
             const proto_name = try constructorNameStringValueOrCreate(rt, constructor, name);
             defer proto_name.free(rt);
             try defineDataAssumingNew(rt, prototype, "name", proto_name, Flags{ .writable = true, .enumerable = false, .configurable = true });
-            const proto_message = try value_ops.createStringValue(rt, "");
+            const proto_message = try createBuiltinAsciiStringValue(rt, "");
             defer proto_message.free(rt);
             try defineDataAssumingNew(rt, prototype, "message", proto_message, Flags{ .writable = true, .enumerable = false, .configurable = true });
         }
@@ -465,7 +464,12 @@ fn constructorPrototypeObject(rt: *core.JSRuntime, ctor: *core.Object) ?*core.Ob
     return expectObject(proto_value);
 }
 
+fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: core.property.AutoInitKind) anyerror!?core.JSValue {
+    return try materializeBuiltinNamespaceAutoInit(rt, global, kind);
+}
+
 pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
+    rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, 99);
     var installed_constructors: [constructor_specs.len]?*core.Object = @splat(null);
     for (constructor_specs, 0..) |spec, index| {
