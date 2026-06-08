@@ -156,4 +156,3 @@ test "QuickJS opcode table has no host print opcode names" {
         try std.testing.expect(!std.mem.eql(u8, decl.name, "host_print_n"));
     }
 }
-

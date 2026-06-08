@@ -220,7 +220,7 @@ pub const helpers = struct {
             errdefer ctx.destroy();
             const event_loop = try options.allocator.create(engine.runtime.EventLoop);
             errdefer options.allocator.destroy(event_loop);
-            event_loop.* = engine.runtime.EventLoop.init(ctx, .{});
+            event_loop.* = engine.runtime.EventLoop.init(@ptrCast(ctx), .{});
             event_loop.install();
             return .{
                 .allocator = options.allocator,
@@ -231,7 +231,8 @@ pub const helpers = struct {
         }
 
         pub fn deinit(self: *TestEngine) void {
-            self.context.runJobs(null) catch {};
+            const wrapper: *zjs.JSContext = @ptrCast(self.context);
+            wrapper.runJobs(null) catch {};
             self.event_loop.deinit();
             self.allocator.destroy(self.event_loop);
             engine.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
@@ -266,7 +267,7 @@ pub const helpers = struct {
             if (self.context.global == null) {
                 const global_obj = try engine.exec.zjs_vm.contextGlobal(self.context);
                 const run_test262 = @import("../cli/run_test262.zig");
-                try run_test262.installTest262Globals(self.runtime, self.context, global_obj);
+                try run_test262.installTest262Globals(self.runtime, @ptrCast(self.context), global_obj);
             }
         }
 
@@ -274,7 +275,7 @@ pub const helpers = struct {
             const filename = options.filename;
             const mode = options.mode;
             self.ensureTest262GlobalsInstalled() catch |err| return @errorCast(err);
-            return self.context.eval(source_text, .{
+            return (@as(*zjs.JSContext, @ptrCast(self.context))).eval(source_text, .{
                 .mode = mode,
                 .filename = filename,
                 .source_kind = options.source_kind,
@@ -342,7 +343,7 @@ pub const helpers = struct {
         }
 
         pub fn runJobs(self: *TestEngine) !void {
-            try self.context.runJobs(null);
+            try (@as(*zjs.JSContext, @ptrCast(self.context))).runJobs(null);
         }
 
         pub fn createExternalHostFunctionValue(
@@ -948,7 +949,7 @@ test "call subsystem installs and invokes host globals" {
     defer global.value().free(rt);
     try engine.exec.call.installHostGlobals(rt, global);
     const run_test262 = @import("../cli/run_test262.zig");
-    try run_test262.installTest262Globals(rt, ctx, global);
+    try run_test262.installTest262Globals(rt, @ptrCast(ctx), global);
 
     const print_key = try rt.internAtom("print");
     defer rt.atoms.free(print_key);
@@ -4073,7 +4074,7 @@ test "Engine runJobs preserves pending JS exceptions for callers" {
     const callback = global.getProperty(callback_key);
     defer callback.free(js.runtime);
 
-    try js.event_loop.enqueueTimer(js.context, 1, callback, 0, false);
+    try js.event_loop.enqueueTimer(@ptrCast(js.context), 1, callback, 0, false);
 
     try js.runJobs();
     try std.testing.expect(js.context.hasException());

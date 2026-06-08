@@ -62,6 +62,7 @@ available only through git history.
   promises, VM opcode shards, and job queue.
 - `src/runtime/`: host/runtime policy helpers for event loop, cleanup,
   module file graphs, plugins, and buffer operations.
+- `src/binding/`: FFI plugins, host binding helpers, and public API aliases.
 - `src/builtins/`: ECMAScript built-in objects and constructors.
 - `src/libs/`: regexp, unicode, bignum, dtoa, and support libraries.
 - `src/cli/`: `zjs` and test262 CLI entrypoints.

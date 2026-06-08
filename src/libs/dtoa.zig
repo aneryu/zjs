@@ -1648,4 +1648,3 @@ test "dtoa functionality" {
     try std.testing.expectEqualStrings("12.5", try formatNumber(&buf, n));
     try std.testing.expect(std.math.isPositiveInf(try parseNumber("+Infinity")));
 }
-

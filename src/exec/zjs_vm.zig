@@ -1562,7 +1562,8 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
 
-    const value = try ctx.eval("print(1);", .{ .output = &output });
+    const eval_entry = @import("eval_entry.zig");
+    const value = try eval_entry.eval(ctx, "print(1);", .{ .output = &output });
     defer value.free(rt);
 
     try std.testing.expect(value.isUndefined());

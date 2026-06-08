@@ -499,7 +499,7 @@ test "production runtime can detach array buffers through public runtime API" {
     defer owned_value.free(rt);
     try std.testing.expectEqual(@as(usize, 0), owned_state.calls);
 
-    const detached = try zjs.runtime.detachArrayBuffer(ctx, owned_value);
+    const detached = try zjs.runtime.detachArrayBuffer(&ctx.core, owned_value);
     defer detached.free(rt);
     try std.testing.expect(detached.isUndefined());
     try std.testing.expectEqual(@as(usize, 1), owned_state.calls);
@@ -516,7 +516,7 @@ test "production runtime can detach array buffers through public runtime API" {
 
     const shared_value = try ctx.arrayBuffer(&shared_store);
     defer shared_value.free(rt);
-    try std.testing.expectError(error.TypeError, zjs.runtime.detachArrayBuffer(ctx, shared_value));
+    try std.testing.expectError(error.TypeError, zjs.runtime.detachArrayBuffer(&ctx.core, shared_value));
     try std.testing.expectEqual(@as(usize, 0), shared_state.calls);
 }
 

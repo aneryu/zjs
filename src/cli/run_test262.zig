@@ -1,6 +1,6 @@
 const std = @import("std");
 const test262_root = @import("zjs");
-const zjs = test262_root.kernel;
+const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
 
 extern "c" fn getpid() c_int;
@@ -3226,7 +3226,7 @@ fn hostCallSetTimeout(
     if (delay < 1) delay = 1;
     const host_event_loop = ctx.hostEventLoop() orelse return error.TypeError;
     const id = host_event_loop.nextTimerId();
-    try host_event_loop.enqueueTimer(ctx, id, callback, @intCast(delay), false);
+    try host_event_loop.enqueueTimer(&ctx.core, id, callback, @intCast(delay), false);
     return int64ResultValue(id);
 }
 
@@ -3393,7 +3393,7 @@ fn qjsTest262DetachArrayBuffer(
     _ = output;
     _ = global;
     if (args.len < 1) return error.TypeError;
-    return try runtime_layer.detachArrayBuffer(ctx, args[0]);
+    return try runtime_layer.detachArrayBuffer(&ctx.core, args[0]);
 }
 
 fn qjsTest262Gc(

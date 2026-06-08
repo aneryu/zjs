@@ -185,7 +185,6 @@ test "gc stress finalization registry dead target queues pending job" {
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCount());
 }
 
-
 test "gc stress function bytecode constant pool object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0006);
     const random = prng.random();

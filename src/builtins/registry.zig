@@ -464,7 +464,12 @@ fn constructorPrototypeObject(rt: *core.JSRuntime, ctor: *core.Object) ?*core.Ob
     return expectObject(proto_value);
 }
 
+fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: core.property.AutoInitKind) anyerror!?core.JSValue {
+    return try materializeBuiltinNamespaceAutoInit(rt, global, kind);
+}
+
 pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
+    rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, 99);
     var installed_constructors: [constructor_specs.len]?*core.Object = @splat(null);
     for (constructor_specs, 0..) |spec, index| {

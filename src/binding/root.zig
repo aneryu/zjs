@@ -1,7 +1,8 @@
 const core = @import("../core/root.zig");
 
 pub const JSRuntime = core.JSRuntime;
-pub const JSContext = core.JSContext;
+pub const context_mod = @import("context.zig");
+pub const JSContext = context_mod.JSContext;
 pub const JSValue = core.JSValue;
 pub const Object = core.Object;
 

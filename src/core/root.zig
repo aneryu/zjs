@@ -67,4 +67,5 @@ pub const ExternalHostFinalizer = host_function.ExternalFinalizer;
 pub const BacktraceFrame = context.BacktraceFrame;
 pub const BacktraceLocation = context.BacktraceLocation;
 pub const BacktraceLocationResolver = context.BacktraceLocationResolver;
+pub const PendingPromiseJob = context.PendingPromiseJob;
 pub const OpcodeProfile = profile.OpcodeProfile;

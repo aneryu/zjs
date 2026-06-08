@@ -1,6 +1,12 @@
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
 const JSValue = @import("value.zig").JSValue;
+const Object = @import("object.zig").Object;
+const Descriptor = @import("descriptor.zig").Descriptor;
+const string = @import("string.zig");
+const JSRuntime = @import("runtime.zig").JSRuntime;
+const class = @import("class.zig");
+const std = @import("std");
 
 fn dupOwnedValue(atoms: *atom.AtomTable, value: JSValue) JSValue {
     if (value.asSymbolAtom()) |atom_id| return JSValue.symbol(atoms.dup(atom_id));
@@ -260,3 +266,34 @@ pub const FunctionRecord = struct {
         }
     }
 };
+
+fn isAsciiBuiltinName(bytes: []const u8) bool {
+    for (bytes) |b| {
+        if (b >= 0x80) return false;
+    }
+    return true;
+}
+
+pub fn nativeFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
+    const function_object = try Object.create(rt, class.ids.c_function, null);
+    errdefer function_object.value().free(rt);
+
+    const length_key = atom.predefinedId("length", .string).?;
+    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
+
+    const name_string = if (name.len == 0)
+        try rt.emptyString()
+    else if (isAsciiBuiltinName(name))
+        try string.String.createAscii(rt, name)
+    else
+        try string.String.createUtf8(rt, name);
+    const name_value = if (name.len == 0) name_string.value().dup() else name_string.value();
+    defer name_value.free(rt);
+
+    const name_key = atom.predefinedId("name", .string).?;
+    try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));
+
+    function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
+
+    return function_object.value();
+}

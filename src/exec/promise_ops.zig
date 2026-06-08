@@ -3901,6 +3901,11 @@ fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue 
 test "promise enqueues reactions and executes jobs via engine" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    rt.materialize_context_global_cb = struct {
+        fn cb(c: *core.JSContext) anyerror!*core.Object {
+            return try zjs_vm.contextGlobal(c);
+        }
+    }.cb;
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 

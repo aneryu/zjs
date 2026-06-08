@@ -1070,6 +1070,12 @@ pub const Object = struct {
     property_capacity: usize = 0,
     exotic: ?ExoticMethods = null,
 
+    pub fn expect(val: JSValue) !*Object {
+        const header = val.refHeader() orelse return error.TypeError;
+        if (!val.isObject()) return error.TypeError;
+        return @fieldParentPtr("header", header);
+    }
+
     pub fn create(rt: *JSRuntime, class_id: class.ClassId, prototype: ?*Object) !*Object {
         const class_record = rt.classes.record(class_id);
         const inline_layout = inlineClassPayloadLayout(class_record);
@@ -7098,8 +7104,7 @@ pub const Object = struct {
             const materialized = materializeHostFunctionAutoInit(info) orelse return JSValue.undefinedValue();
             return self.finishMaterializedAutoInit(index, info, materialized);
         }
-        const builtins = @import("../builtins/root.zig");
-        const materialized = builtins.function.nativeFunction(info.rt, info.name, info.length) catch return JSValue.undefinedValue();
+        const materialized = function.nativeFunction(info.rt, info.name, info.length) catch return JSValue.undefinedValue();
         if (info.native_builtin_id != 0) {
             if (materialized.refHeader()) |header| {
                 const obj: *Object = @fieldParentPtr("header", header);
@@ -7353,8 +7358,8 @@ pub const Object = struct {
             @ptrFromInt(info.host_function_realm_global)
         else
             return null;
-        const builtins = @import("../builtins/root.zig");
-        return builtins.registry.materializeBuiltinNamespaceAutoInit(info.rt, global, info.kind) catch null;
+        const cb = info.rt.materialize_builtin_namespace_cb orelse return null;
+        return cb(info.rt, global, info.kind) catch null;
     }
 
     fn defineHostAutoInitDataPropertyByName(
@@ -7402,7 +7407,6 @@ pub const Object = struct {
 
     fn materializeNavigatorAutoInit(info: property.AutoInit) ?JSValue {
         const rt = info.rt;
-        const builtins = @import("../builtins/root.zig");
         const global: *Object = if (info.host_function_realm_global != 0)
             @ptrFromInt(info.host_function_realm_global)
         else
@@ -7421,7 +7425,7 @@ pub const Object = struct {
             descriptor.Descriptor.data(tag_value, false, false, true),
         ) catch return null;
 
-        const getter = builtins.function.nativeFunction(rt, "get userAgent", 0) catch return null;
+        const getter = function.nativeFunction(rt, "get userAgent", 0) catch return null;
         defer getter.free(rt);
         const user_agent = rt.internAtom("userAgent") catch return null;
         defer rt.atoms.free(user_agent);

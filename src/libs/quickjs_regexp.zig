@@ -952,4 +952,3 @@ test "quickjs_regexp compilation and execution" {
     try std.testing.expectEqual(@as(usize, 2), status.match.start);
     try std.testing.expectEqual(@as(usize, 5), status.match.end);
 }
-

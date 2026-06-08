@@ -16,6 +16,8 @@ const string = @import("string.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = object_mod.Object;
 const profile = @import("profile.zig");
+const property = @import("property.zig");
+const context_mod = @import("context.zig");
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
@@ -492,6 +494,8 @@ pub const JSRuntime = struct {
     classes: class.Table,
     shapes: shape.Registry,
     modules: module.Registry,
+    materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
+    materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
 
     borrowed_reference_holders: []*Object = &.{},
     borrowed_reference_holders_capacity: usize = 0,
@@ -629,6 +633,8 @@ pub const JSRuntime = struct {
         }
         rt.shapes = shape.Registry.init(&rt.memory, &rt.atoms);
         rt.modules = module.Registry.init(&rt.memory, &rt.atoms);
+        rt.materialize_builtin_namespace_cb = null;
+        rt.materialize_context_global_cb = null;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
         rt.root_providers = &.{};

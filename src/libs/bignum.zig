@@ -756,4 +756,3 @@ test "bignum functionality" {
     try std.testing.expectEqualStrings("-2", neg_q_text);
     try std.testing.expectEqualStrings("-1", neg_r_text);
 }
-

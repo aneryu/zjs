@@ -88,8 +88,12 @@ pub const DynamicImportState = struct {
 };
 
 fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
-    _ = runtime;
-    try context.runJobs(output);
+    runtime.job_queue.runAll();
+    const global_object = try @import("zjs_vm.zig").contextGlobal(context);
+    @import("zjs_vm.zig").drainPendingPromiseJobs(context, output, global_object) catch |err| {
+        if (context.hasException() or context.hasUnhandledRejection()) return;
+        return err;
+    };
 }
 
 pub fn evalFileModuleGraphWithOutput(

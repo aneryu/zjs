@@ -3,7 +3,7 @@ const std = @import("std");
 const kernel_api = @import("root.zig");
 
 pub const public_api = kernel_api;
-pub const kernel = @import("kernel/root.zig");
+pub const binding_root = @import("binding/root.zig");
 pub const core = @import("core/root.zig");
 pub const frontend = @import("frontend/root.zig");
 pub const bytecode = @import("bytecode/root.zig");

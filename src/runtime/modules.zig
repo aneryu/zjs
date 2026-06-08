@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const exec = @import("../exec/root.zig");
-const zjs = @import("../kernel/root.zig");
+const zjs = @import("../binding/root.zig");
 
 pub fn evalFileModuleGraphWithOutput(
     ctx: *zjs.JSContext,
@@ -12,7 +12,7 @@ pub fn evalFileModuleGraphWithOutput(
     allocator: std.mem.Allocator,
     max_source_size: usize,
 ) !zjs.JSValue {
-    return exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx, source_text, output, filename, io, allocator, max_source_size);
+    return exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), &ctx.core, source_text, output, filename, io, allocator, max_source_size);
 }
 
 pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {

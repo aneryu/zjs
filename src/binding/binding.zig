@@ -3,6 +3,8 @@ const core = @import("../core/root.zig");
 const JSBytes = @import("bytes.zig").JSBytes;
 const JSString = @import("string.zig").JSString;
 const PropNameID = @import("prop_name.zig").PropNameID;
+const context_mod = @import("context.zig");
+const JSContext = context_mod.JSContext;
 
 pub const BindingError = error{
     NotInstalled,
@@ -852,7 +854,7 @@ test "JSObject payload explicit deinit releases persistent value roots" {
         .deinit = Hooks.deinit,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -896,7 +898,7 @@ test "JSObject installs class and owns js external payload" {
         .deinit = Hooks.deinit,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -927,7 +929,7 @@ test "JSObject can wrap host-owned external payload" {
         .storage = Storage{ .external_ptr = .{ .owner = .host } },
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -961,7 +963,7 @@ test "JSObject class identity is independent from class name" {
         .storage = Storage.inlineValue,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -992,7 +994,7 @@ test "JSObject binding is realm-local even when runtime class is installed" {
         .storage = Storage.inlineValue,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx_a = try core.JSContext.create(rt);
     defer ctx_a.destroy();
@@ -1039,17 +1041,17 @@ test "JSObject prototype methods enforce realm-local binding" {
         }),
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
-    const ctx_a = try core.JSContext.create(rt);
+    const ctx_a = try JSContext.create(rt);
     defer ctx_a.destroy();
-    const ctx_b = try core.JSContext.create(rt);
+    const ctx_b = try JSContext.create(rt);
     defer ctx_b.destroy();
 
-    try ObjectType.install(ctx_a);
-    try ObjectType.install(ctx_b);
-    const binding_a = try ObjectType.binding(ctx_a);
-    const binding_b = try ObjectType.binding(ctx_b);
+    try ObjectType.install(&ctx_a.core);
+    try ObjectType.install(&ctx_b.core);
+    const binding_a = try ObjectType.binding(&ctx_a.core);
+    const binding_b = try ObjectType.binding(&ctx_b.core);
 
     const value_a = try binding_a.new(.{ .value = 10 });
     defer value_a.free(rt);
@@ -1087,7 +1089,7 @@ test "JSObject method prototype roots release with external host records" {
         }),
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -1110,18 +1112,18 @@ test "JSObject install does not export constructors to the global object" {
         .storage = Storage.inlineValue,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try ObjectType.install(ctx);
+    try ObjectType.install(&ctx.core);
     const global = try ctx.globalObject();
     const name_atom = try rt.internAtom("KernelBindingNoGlobalConstructor");
     defer rt.atoms.free(name_atom);
     try std.testing.expect(!global.hasOwnProperty(name_atom));
 
-    const binding = try ObjectType.binding(ctx);
+    const binding = try ObjectType.binding(&ctx.core);
     const value = try binding.new(.{ .value = 1 });
     defer value.free(rt);
     try std.testing.expectEqual(@as(i32, 1), binding.payload(value).?.value);
@@ -1143,7 +1145,7 @@ test "JSObject inline_value stores payload in object allocation and finalizes sy
         .deinit = Hooks.deinit,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -1190,7 +1192,7 @@ test "JSObject inline_value trace hook marks typed payload slots" {
         .deinit = Hooks.deinit,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -1232,7 +1234,7 @@ test "JSObject trace hook marks typed payload slots" {
         .trace = Hooks.trace,
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
@@ -1294,15 +1296,15 @@ test "JSObject installs prototype method with typed self and arguments" {
         }),
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try std.testing.expectError(error.NotInstalled, ObjectType.binding(ctx));
-    try std.testing.expectError(error.NotInstalled, ObjectType.new(ctx, .{ .total = 10 }));
-    try ObjectType.install(ctx);
-    const binding = try ObjectType.binding(ctx);
+    try std.testing.expectError(error.NotInstalled, ObjectType.binding(&ctx.core));
+    try std.testing.expectError(error.NotInstalled, ObjectType.new(&ctx.core, .{ .total = 10 }));
+    try ObjectType.install(&ctx.core);
+    const binding = try ObjectType.binding(&ctx.core);
     const value = try binding.new(.{ .total = 10 });
     defer value.free(rt);
 
@@ -1342,7 +1344,7 @@ test "JSObject keeps static property names in runtime binding state" {
         }),
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
 
@@ -1393,13 +1395,13 @@ test "JSObject typed method borrows utf8 string and byte slices" {
         }),
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try ObjectType.install(ctx);
-    const binding = try ObjectType.binding(ctx);
+    try ObjectType.install(&ctx.core);
+    const binding = try ObjectType.binding(&ctx.core);
     const value = try binding.new(.{});
     defer value.free(rt);
 
@@ -1518,14 +1520,14 @@ test "JSObject typed method errors become pending JS exceptions" {
         }),
     });
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try createTestRuntime();
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try JSContext.create(rt);
     defer ctx.destroy();
 
-    try ObjectType.install(ctx);
+    try ObjectType.install(&ctx.core);
     const global = try ctx.globalObject();
-    const binding = try ObjectType.binding(ctx);
+    const binding = try ObjectType.binding(&ctx.core);
     const value = try binding.new(.{});
     defer value.free(rt);
 
@@ -1571,7 +1573,7 @@ fn objectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !
     return object.getProperty(key);
 }
 
-fn expectErrorObjectProperty(ctx: *core.JSContext, value: core.JSValue, property_name: []const u8, expected: []const u8) !void {
+fn expectErrorObjectProperty(ctx: *JSContext, value: core.JSValue, property_name: []const u8, expected: []const u8) !void {
     const rt = ctx.runtimePtr();
     const object = objectFromValue(value) orelse return error.TypeError;
     const property_value = try objectProperty(rt, object, property_name);
@@ -1579,4 +1581,14 @@ fn expectErrorObjectProperty(ctx: *core.JSContext, value: core.JSValue, property
     const bytes = try ctx.toOwnedUtf8(property_value, std.testing.allocator);
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings(expected, bytes);
+}
+
+fn createTestRuntime() !*core.JSRuntime {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    rt.materialize_context_global_cb = struct {
+        fn cb(c: *core.JSContext) anyerror!*core.Object {
+            return try @import("../exec/root.zig").zjs_vm.contextGlobal(c);
+        }
+    }.cb;
+    return rt;
 }

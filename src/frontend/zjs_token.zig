@@ -208,4 +208,3 @@ test "F1: keyword token integer values match QuickJS TOK_*" {
     try std.testing.expectEqual(@as(TokenKind, -40), TOK_AWAIT);
     try std.testing.expectEqual(@as(TokenKind, -39), TOK_OF);
 }
-
