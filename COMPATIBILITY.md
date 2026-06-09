@@ -124,7 +124,9 @@ zig build engine-production-gate --summary all
 git diff --check
 ```
 
-The `engine-production-gate` build step is the top-level engine release gate and
-must pass before cutting a Production v1 release. Its sub-gates include
+The `engine-production-gate` build step is the engine semantic and architecture
+gate and must pass before cutting a Production v1 release. Its sub-gates include
 semantic tests, smoke coverage, test262, public API snapshot validation, and
 architecture dependency checks; a failure in any sub-gate is release-blocking.
+The complete release decision also requires the other commands listed above,
+including ReleaseSafe testing and diff hygiene.

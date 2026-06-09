@@ -98,6 +98,7 @@ fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) voi
 test {
     refAllDeclsRecursive(kernel_api, .{});
     std.testing.refAllDecls(@import("tests/engine_production.zig"));
+    std.testing.refAllDecls(@import("tests/embedding_examples.zig"));
     std.testing.refAllDecls(@import("tests/core.zig"));
     std.testing.refAllDecls(@import("tests/bytecode.zig"));
     std.testing.refAllDecls(@import("tests/frontend.zig"));

@@ -23,10 +23,10 @@ The gate uses `test262.conf` and writes the latest bucket/failure reports under
 `reports/test262-latest/`. Skips and excludes in that config are part of the
 current compatibility boundary.
 
-`zig build engine-production-gate --summary all` is the release-level gate. A
-Production v1 release requires this gate to pass from a clean checkout; if it
-fails, the failing sub-gate is release-blocking even when the semantic test262
-gate is green.
+`zig build engine-production-gate --summary all` is the engine semantic and
+architecture gate. A Production v1 release requires this gate to pass from a
+clean checkout; the full release checklist also requires ReleaseSafe testing,
+diff hygiene, and performance evidence when runtime-sensitive code changed.
 
 ## Requirements
 
@@ -80,9 +80,11 @@ Zig-native embedding examples: runtime/context lifecycle, host functions,
 handle scopes, persistent values, byte stores, limits, interrupts, and module
 evaluation.
 
-The current kernel/runtime boundary is tracked in
-[docs/adr/0001-zig-kernel-api-and-runtime-boundary.md](docs/adr/0001-zig-kernel-api-and-runtime-boundary.md).
-ADR 0001 is the active public API authority.
+Read [docs/public-api-contract.md](docs/public-api-contract.md) for the current
+public Zig API contract, [docs/api-boundary.md](docs/api-boundary.md) for the
+core/runtime boundary, and
+[docs/runtime-plugin-abi.md](docs/runtime-plugin-abi.md) for the dynamic runtime
+plugin ABI.
 
 The full direct test262 invocation is:
 

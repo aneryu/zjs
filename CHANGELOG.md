@@ -50,8 +50,8 @@
   65536 to 1 and its `get_var` executions by another 65535.
 - Refreshed active documentation to match the current build steps, test262
   boundary, ZJS self-baseline performance gate, and tracked active reports.
-- Removed the completed Production v1 roadmap from the active docs; ADR 0001,
-  compatibility docs, and the release checklist are the current authorities.
+- Removed the completed Production v1 roadmap from the active docs; public API,
+  compatibility, and release-checklist docs are the current authorities.
 - Merged the small Compatibility v1 summary into `COMPATIBILITY.md` so the
   compatibility boundary has one active source of truth.
 - Removed old one-off test262 slice and QuickJS comparison report directories

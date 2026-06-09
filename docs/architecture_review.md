@@ -160,7 +160,9 @@ Use the narrowest validation that covers the changed surface:
 zig build zjs --summary all
 zig build smoke --summary all
 zig build test --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 zig build test262-gate --summary all
+zig build architecture-check --summary all
 git diff --check
 ```
 

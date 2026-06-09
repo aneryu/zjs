@@ -570,8 +570,8 @@ pub fn forEachArrayPrint(rt: *core.JSRuntime, output: ?*std.Io.Writer, array_val
 
 // The std/os entries mirror QuickJS-shaped host modules kept for legacy
 // internal paths. They are not installed by the default zjs/embedding global
-// surface; see ADR 0001's implementation status before treating them as a
-// product runtime API.
+// surface; see docs/api-boundary.md before treating them as a product runtime
+// API.
 const HostFunction = enum(i32) {
     output = core.host_function.ids.output,
     std_load_file = 23,

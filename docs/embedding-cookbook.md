@@ -4,6 +4,8 @@ This cookbook shows the public Zig-native embedding shape. It is not a
 `libquickjs` C API compatibility guide, and it does not use repository-internal
 modules.
 
+The examples below are covered by `src/tests/embedding_examples.zig`.
+
 ## Basic Script Eval
 
 ```zig
@@ -102,8 +104,8 @@ const text = try ctx.toOwnedUtf8(value, allocator);
 defer allocator.free(text);
 ```
 
-Use `JSBytes.Store` for ArrayBuffer backing memory that should be transferred to
-the engine without copying.
+Use `zjs.value.Bytes.Store` for ArrayBuffer backing memory that should be
+transferred to the engine without copying.
 
 ```zig
 const BytesState = struct {
@@ -119,7 +121,7 @@ var bytes_state = BytesState{ .allocator = allocator };
 const backing = try allocator.alloc(u8, 4);
 @memcpy(backing, &[_]u8{ 1, 2, 3, 4 });
 
-var store = zjs.JSValue.Bytes.Store.owned(backing, .{
+var store = zjs.value.Bytes.Store.owned(backing, .{
     .context = &bytes_state,
     .deinit = BytesState.deinit,
 });

@@ -2,9 +2,17 @@
 
 Use this checklist for an engine-only Production v1 release decision.
 
+`zig build engine-production-gate --summary all` is the semantic and
+architecture gate. It is required release evidence, but it does not replace the
+ReleaseSafe, hygiene, and performance checks below.
+
 ## API
 
-- Public Zig API matches `docs/adr/0001-zig-kernel-api-and-runtime-boundary.md`.
+- Public Zig API matches `docs/public-api-contract.md`.
+- Public embedding cookbook examples compile and pass through
+  `src/tests/embedding_examples.zig`.
+- Public NativeBinding and runtime Plugin failure paths preserve host-owned
+  state and leave no half-installed public binding.
 - Ownership-bearing values have documented free paths.
 - Error-set changes are recorded in release notes.
 - No public API was removed without a migration note.
