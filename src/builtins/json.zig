@@ -1,6 +1,5 @@
 const core = @import("../core/root.zig");
 const std = @import("std");
-const value_ops = @import("../exec/value_ops.zig");
 
 const JsonStringifyError = std.mem.Allocator.Error || error{
     InvalidAtom,
@@ -918,7 +917,7 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
         const printed = try std.fmt.bufPrint(&float_buf, "{d}", .{float_value});
         return buffer.appendSlice(rt.memory.allocator, printed);
     }
-    if (rooted_value.isBigInt()) return value_ops.appendValueString(rt, buffer, rooted_value);
+    if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, rooted_value);
     if (rooted_value.isObject()) {
         const header = rooted_value.refHeader() orelse return error.TypeError;
         const object: *core.Object = @fieldParentPtr("header", header);

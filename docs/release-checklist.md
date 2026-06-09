@@ -12,8 +12,12 @@ Use this checklist for an engine-only Production v1 release decision.
 ## Lifecycle
 
 - Runtime/context init, eval, and deinit run cleanly under Zig leak detection.
-- OOM paths used by public embedding APIs have focused tests.
-- Interrupt-handler behavior is covered by a regression test.
+- Public handle lifetime is covered by production tests: local handle scopes
+  release at scope exit, and persistent handles keep host-held values alive
+  across scopes.
+- Memory-limit / OOM paths used by public embedding APIs have focused tests
+  that return `error.OutOfMemory` without leaving pending host-owned values.
+- Interrupt-handler behavior is covered by a production regression test.
 
 ## Compatibility
 
@@ -21,10 +25,14 @@ Use this checklist for an engine-only Production v1 release decision.
 - `zig build test -Doptimize=ReleaseSafe --summary all` passes.
 - `zig build smoke --summary all` passes.
 - `zig build test262-gate --summary all` passes with the checked-in config.
+- `zig build engine-production-gate --summary all` passes from a clean
+  checkout.
 - Focused test262 slices were run for every changed semantic area.
 
 ## Boundary
 
+- `zig build architecture-check --summary all` passes, including dependency
+  rules and public API snapshot validation.
 - `docs/security-boundary.md` is accurate for the release.
 - `COMPATIBILITY.md` and `LIMITATIONS.md` do not overclaim.
 - Release notes state that the engine is trusted-code only.

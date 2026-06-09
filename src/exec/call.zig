@@ -3,6 +3,7 @@ const builtins = @import("../builtins/root.zig");
 const bytecode_opcode = @import("../bytecode/opcode.zig");
 const function_bytecode = @import("../bytecode/function.zig");
 const closure_mod = @import("closure.zig");
+const collection_adapter = @import("collection_adapter.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const globals_mod = @import("globals.zig");
@@ -2482,7 +2483,7 @@ fn callNativeBuiltin(
                 }
             }
             if (try constructorNameEql(ctx.runtime, receiver, "Map")) {
-                if (std.mem.eql(u8, name, "groupBy")) return builtins.collection.groupBy(ctx.runtime, args, globals, constructorPrototype(ctx.runtime, receiver)) catch |err| switch (err) {
+                if (std.mem.eql(u8, name, "groupBy")) return builtins.collection.groupByWithCallbackHost(ctx.runtime, args, constructorPrototype(ctx.runtime, receiver), collection_adapter.host(globals)) catch |err| switch (err) {
                     error.TypeError => error.TypeError,
                     else => err,
                 };
@@ -2533,7 +2534,7 @@ fn callNativeBuiltin(
                 if (owner_class != core.class.invalid_class_id) {
                     if (receiver.class_id != owner_class) return error.TypeError;
                 }
-                return builtins.collection.methodCallWithGlobals(ctx.runtime, this_value, method, args, globals) catch |err| switch (err) {
+                return builtins.collection.methodCallWithCallbackHost(ctx.runtime, this_value, method, args, collection_adapter.host(globals)) catch |err| switch (err) {
                     error.TypeError => error.TypeError,
                     else => err,
                 };
@@ -3136,7 +3137,7 @@ fn collectionGroupByNativeRecord(
         if (try shared_vm.qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
         return error.TypeError;
     }
-    return builtins.collection.groupBy(ctx.runtime, args, globals, prototype) catch |err| switch (err) {
+    return builtins.collection.groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
     };
@@ -3176,7 +3177,7 @@ fn collectionNativeRecordWithoutGlobal(
         @intFromEnum(builtins.collection.PrototypeMethod.is_superset_of),
         @intFromEnum(builtins.collection.PrototypeMethod.symmetric_difference),
         @intFromEnum(builtins.collection.PrototypeMethod.union_),
-        => builtins.collection.methodCallWithContext(ctx, this_value, id, args, globals) catch |err| switch (err) {
+        => builtins.collection.methodCallWithContextAndHost(ctx, this_value, id, args, collection_adapter.host(globals)) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         },

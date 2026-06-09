@@ -27,13 +27,11 @@ zig build run-test262 --summary all
 ./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
 ```
 
-As currently tracked, the gate has no unexpected failures. The latest local
-run selected 49,671 tests, passed 44,438, and matched three known failures in
-`test262_errors.txt`:
-
-- `test262/test/staging/sm/Function/function-name-binding.js`
-- `test262/test/staging/sm/TypedArray/constructor-ArrayBuffer-species-wrap.js`
-- `test262/test/staging/sm/class/newTargetDefaults.js`
+As currently tracked, the gate has no unexpected failures and no checked-in
+known failures. The latest local run selected 49,671 tests from 53,292 total
+tests, excluded 3,621 by config, skipped 5,225 by feature, and reported
+`0/49,671` errors with 44,446 passing tests. `test262_errors.txt` is currently
+empty.
 
 ## Configured Skips and Excludes
 
@@ -82,9 +80,11 @@ Additional smoke fixtures in `src/tests/smoke_test.zig` cover CLI behavior,
 QuickJS parity markers, host module behavior, and targeted regressions that are
 faster to run than the full test262 gate.
 
-## Comparison with Upstream QuickJS
+## Comparison With Upstream QuickJS
 
-While `zjs` targets semantic parity with QuickJS, its local validation profile enables and validates several features that are skipped or unsupported in upstream QuickJS:
+While `zjs` targets semantic parity with QuickJS, its local validation profile
+enables and validates several features that are skipped or unsupported in
+upstream QuickJS:
 
 - **Atomics.waitAsync**: Fully supported and validated in `zjs` (including engine-deinit cleanup validation), whereas upstream QuickJS lists this as unsupported and skips it.
 - **Other Enabled Features**: Features like `await-dictionary`, `legacy-regexp`, `nonextensible-applies-to-private`, and `regexp-modifiers` are enabled and validated in `zjs` but skipped in upstream QuickJS.
@@ -125,4 +125,6 @@ git diff --check
 ```
 
 The `engine-production-gate` build step is the top-level engine release gate and
-is expected to pass for the active Production v1 validation profile.
+must pass before cutting a Production v1 release. Its sub-gates include
+semantic tests, smoke coverage, test262, public API snapshot validation, and
+architecture dependency checks; a failure in any sub-gate is release-blocking.

@@ -2316,7 +2316,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations without fixtur
     };
     defer globals[0].value.free(rt);
 
-    const result_value = try engine.builtins.collection.methodCallWithGlobals(rt, base_set_value, 20, &.{setlike_value}, globals[0..]);
+    const result_value = try engine.builtins.collection.methodCallWithCallbackHost(rt, base_set_value, 20, &.{setlike_value}, engine.exec.collection_adapter.host(globals[0..]));
     defer result_value.free(rt);
     const result_set = objectFromValue(result_value);
 

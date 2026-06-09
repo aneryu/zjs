@@ -1,7 +1,9 @@
 # Limitations
 
 `zjs` has reached its Production v1 Candidate status. It is designed for
-semantic convergence, validation work, and production-grade embedded use cases, rather than a broad, general-purpose production JavaScript runtime (such as a full Node.js/Deno competitor).
+semantic convergence, validation work, and production-grade Zig-native embedded
+use cases, rather than a broad, general-purpose production JavaScript runtime
+such as a full Node.js or Deno competitor.
 
 ## Runtime Boundary
 
@@ -9,7 +11,8 @@ semantic convergence, validation work, and production-grade embedded use cases, 
   local `quickjs/` source tree.
 - Compatibility is scoped to the active `test262.conf` profile and the
   focused regression tests in this repository.
-- `zjs` is not a Node.js, Deno, browser, or general-purpose production QuickJS replacement.
+- `zjs` is not a Node.js, Deno, browser, or drop-in `libquickjs` C API
+  replacement.
 - The engine-only Production v1 target is trusted-code embedding, not
   hostile-code sandboxing. See [docs/security-boundary.md](docs/security-boundary.md).
 
@@ -31,8 +34,8 @@ and should not rely on process exit for cleanup.
 
 - Reference counts are non-atomic. A runtime and its values are thread-affine.
 - The collector is non-moving. Embedders must still treat raw object pointers as
-  runtime-owned and must not keep them without a `PersistentValue` or documented
-  native payload ownership.
+  runtime-owned and must not keep them without a `JSValue.Persistent` handle or
+  documented native payload ownership.
 - GC safe points are explicit. New VM or host APIs that allocate must root
   temporaries before polling GC.
 - Changes that touch weak edges, finalizers, descriptors, or object graphs need

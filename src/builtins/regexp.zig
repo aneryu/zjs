@@ -1,7 +1,5 @@
 const core = @import("../core/root.zig");
-const bignum = @import("../libs/bignum.zig");
 const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
-const value_ops = @import("../exec/value_ops.zig");
 const std = @import("std");
 
 const AppendStringError = error{
@@ -237,14 +235,14 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags:
     source_val = if (pattern_object) |regexp_object|
         try getInternalSource(regexp_object)
     else if (pattern.isUndefined())
-        try value_ops.createStringValue(rt, "")
+        try createStringValue(rt, "")
     else
         try regExpStringValue(rt, pattern);
 
     flags_val = if (flags.isUndefined() and pattern_object != null)
         try getInternalFlags(pattern_object.?)
     else if (flags.isUndefined())
-        try value_ops.createStringValue(rt, "")
+        try createStringValue(rt, "")
     else
         try regExpStringValue(rt, flags);
 
@@ -263,8 +261,8 @@ fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) return value.dup();
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
-    try value_ops.appendValueString(rt, &bytes, value);
-    return try value_ops.createStringValue(rt, bytes.items);
+    try appendValueString(rt, &bytes, value);
+    return try createStringValue(rt, bytes.items);
 }
 
 fn constructValidated(rt: *core.JSRuntime, source: core.JSValue, stored_flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
@@ -3254,7 +3252,7 @@ fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, source);
-    if (bytes.items.len == 0) return value_ops.createStringValue(rt, "(?:)");
+    if (bytes.items.len == 0) return createStringValue(rt, "(?:)");
 
     var escaped = std.ArrayList(u8).empty;
     defer escaped.deinit(rt.memory.allocator);
@@ -3288,7 +3286,7 @@ fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
             else => try escaped.append(rt.memory.allocator, byte),
         }
     }
-    return value_ops.createStringValue(rt, escaped.items);
+    return createStringValue(rt, escaped.items);
 }
 
 fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
@@ -3369,7 +3367,7 @@ fn canonicalFlagsValue(rt: *core.JSRuntime, flags: core.JSValue) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try appendCanonicalRegExpFlags(rt, &buffer, flags);
-    return value_ops.createStringValue(rt, buffer.items);
+    return createStringValue(rt, buffer.items);
 }
 
 fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), flags: core.JSValue) !void {
@@ -3402,6 +3400,21 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
 }
 
+fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
+    const str = if (isAsciiBytes(bytes))
+        try core.string.String.createAscii(rt, bytes)
+    else
+        try core.string.String.createUtf8(rt, bytes);
+    return str.value();
+}
+
+fn isAsciiBytes(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte >= 0x80) return false;
+    }
+    return true;
+}
+
 fn getInternalSource(object: *core.Object) !core.JSValue {
     return (object.regexpSource() orelse return error.TypeError).dup();
 }
@@ -3430,11 +3443,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
     } else if (value.isBigInt()) {
-        var big = try cloneBigIntValue(rt, value);
-        defer big.deinit();
-        const printed = try big.formatBase10Alloc(rt.memory.allocator);
-        defer rt.memory.allocator.free(printed);
-        try buffer.appendSlice(rt.memory.allocator, printed);
+        try core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, value);
     } else if (value.asBool()) |bool_value| {
         try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
     } else if (value.isUndefined()) {
@@ -3470,17 +3479,13 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
         .latin1 => |bytes| {
             for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
         },
-        .utf16 => |units| {
-            for (units) |unit| {
-                try appendUtf8CodePoint(rt, buffer, unit);
-            }
-        },
+        .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
     }
 }
 
 fn appendRegExpPatternString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue, flags: []const u8) !void {
     _ = flags;
-    try value_ops.appendValueString(rt, buffer, value);
+    try appendValueString(rt, buffer, value);
 }
 
 fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object) AppendStringError!void {
@@ -3566,6 +3571,19 @@ fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32)
     }
 }
 
+fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
+    var index: usize = 0;
+    while (index < units.len) : (index += 1) {
+        const unit = units[index];
+        if (isHighSurrogate(unit) and index + 1 < units.len and isLowSurrogate(units[index + 1])) {
+            try appendUtf8CodePoint(rt, buffer, surrogateCodePoint(unit, units[index + 1]));
+            index += 1;
+            continue;
+        }
+        try appendUtf8CodePoint(rt, buffer, unit);
+    }
+}
+
 fn isAsciiAlphaNumeric(byte: u8) bool {
     return (byte >= '0' and byte <= '9') or (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
 }
@@ -3617,16 +3635,6 @@ fn isLowSurrogate(unit: u16) bool {
 
 fn surrogateCodePoint(high: u16, low: u16) u32 {
     return 0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00);
-}
-
-fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.asShortBigInt()) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
-    if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.value.cloneWithAllocator(rt.memory.allocator);
-    }
-    return error.TypeError;
 }
 
 fn isNegativeZero(value: f64) bool {

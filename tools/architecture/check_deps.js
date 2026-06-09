@@ -86,6 +86,7 @@ function violationReason(source, target) {
   if (source === 'src/root.zig') {
     if (
       target === 'src/kernel/root.zig' ||
+      target === 'src/binding/root.zig' ||
       target === 'src/runtime/public.zig' ||
       target === 'src/core/root.zig' ||
       target === 'src/exec/root.zig' ||

@@ -416,29 +416,7 @@ fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
 }
 
 fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = trimJsWhitespace(bytes);
-    if (trimmed.len == 0) return 0;
-    if (std.mem.indexOfScalar(u8, trimmed, '_') != null) return std.math.nan(f64);
-    if (hasSignedRadixPrefix(trimmed)) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    const parsed = std.fmt.parseFloat(f64, trimmed) catch return std.math.nan(f64);
-    if (std.math.isInf(parsed) and beginsWithAsciiAlphaAfterSign(trimmed)) return std.math.nan(f64);
-    return parsed;
-}
-
-fn trimJsWhitespace(bytes: []const u8) []const u8 {
-    var start: usize = 0;
-    var end: usize = bytes.len;
-    while (start < end) {
-        const width = jsWhitespacePrefixLen(bytes[start..end]) orelse break;
-        start += width;
-    }
-    while (end > start) {
-        const width = jsWhitespaceSuffixLen(bytes[start..end]) orelse break;
-        end -= width;
-    }
-    return bytes[start..end];
+    return core.value_format.parseJsNumber(bytes);
 }
 
 fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
@@ -459,39 +437,8 @@ fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
     return null;
 }
 
-fn jsWhitespaceSuffixLen(bytes: []const u8) ?usize {
-    if (bytes.len == 0) return null;
-    const last = bytes[bytes.len - 1];
-    if ((last >= 0x09 and last <= 0x0d) or last == 0x20) return 1;
-    if (endsWith(bytes, &.{ 0xc2, 0xa0 })) return 2;
-    if (last == 0xa0) return 1;
-    if (endsWith(bytes, &.{ 0xe1, 0x9a, 0x80 })) return 3;
-    if (endsWith(bytes, &.{ 0xe2, 0x81, 0x9f })) return 3;
-    if (endsWith(bytes, &.{ 0xe3, 0x80, 0x80 })) return 3;
-    if (endsWith(bytes, &.{ 0xef, 0xbb, 0xbf })) return 3;
-    if (bytes.len >= 3 and bytes[bytes.len - 3] == 0xe2 and bytes[bytes.len - 2] == 0x80) {
-        const tail = bytes[bytes.len - 1];
-        if ((tail >= 0x80 and tail <= 0x8a) or tail == 0xa8 or tail == 0xa9 or tail == 0xaf) return 3;
-    }
-    return null;
-}
-
 fn startsWith(bytes: []const u8, prefix: []const u8) bool {
     return bytes.len >= prefix.len and std.mem.eql(u8, bytes[0..prefix.len], prefix);
-}
-
-fn endsWith(bytes: []const u8, suffix: []const u8) bool {
-    return bytes.len >= suffix.len and std.mem.eql(u8, bytes[bytes.len - suffix.len ..], suffix);
-}
-
-fn hasSignedRadixPrefix(bytes: []const u8) bool {
-    return bytes.len >= 3 and (bytes[0] == '+' or bytes[0] == '-') and bytes[1] == '0' and
-        (bytes[2] == 'x' or bytes[2] == 'X' or bytes[2] == 'o' or bytes[2] == 'O' or bytes[2] == 'b' or bytes[2] == 'B');
-}
-
-fn beginsWithAsciiAlphaAfterSign(bytes: []const u8) bool {
-    const index: usize = if (bytes.len > 0 and (bytes[0] == '+' or bytes[0] == '-')) 1 else 0;
-    return index < bytes.len and ((bytes[index] >= 'a' and bytes[index] <= 'z') or (bytes[index] >= 'A' and bytes[index] <= 'Z'));
 }
 
 fn toInt32(number: f64) i32 {

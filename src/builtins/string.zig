@@ -1,7 +1,6 @@
 const core = @import("../core/root.zig");
 const function_builtin = @import("function.zig");
 const bignum = @import("../libs/bignum.zig");
-const value_ops = @import("../exec/value_ops.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
@@ -173,9 +172,9 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
 
     if (rooted_args.len >= 1 and rooted_args[0].isSymbol()) return error.TypeError;
     data_value = if (rooted_args.len >= 1)
-        try value_ops.toStringValue(rt, rooted_args[0])
+        try stringValueFromSearchArgument(rt, rooted_args[0])
     else
-        try value_ops.createStringValue(rt, "");
+        try createStringValue(rt, "");
     defer data_value.free(rt);
     const data = stringValueFromReceiver(data_value) orelse return error.TypeError;
 
@@ -1397,6 +1396,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 }
 
 fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
+    if (value.isString()) return value.dup();
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try appendValueString(rt, &bytes, value);
@@ -1638,7 +1638,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
-            const printed = try value_ops.formatFiniteNumber(&float_buf, float_value);
+            const printed = try core.value_format.formatFiniteNumber(&float_buf, float_value);
             try buffer.appendSlice(rt.memory.allocator, printed);
         }
     } else if (value.isBigInt()) {
@@ -1755,11 +1755,7 @@ fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
 }
 
 fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+    return core.value_format.parseJsNumber(bytes);
 }
 
 fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {

@@ -1,6 +1,7 @@
 const core = @import("../core/root.zig");
 const builtins = @import("../builtins/root.zig");
 const closure_mod = @import("closure.zig");
+const collection_adapter = @import("collection_adapter.zig");
 const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
@@ -1123,7 +1124,7 @@ fn callClosureWithThis(
         const name = try nativeFunctionName(rt, object);
         defer rt.memory.allocator.free(name);
         if (collectionMethodId(name)) |method| {
-            return builtins.collection.methodCallWithGlobals(rt, this_value, method, args, globals) catch |err| switch (err) {
+            return builtins.collection.methodCallWithCallbackHost(rt, this_value, method, args, collection_adapter.host(globals)) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 else => err,
             };

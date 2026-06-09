@@ -1,5 +1,4 @@
 const core = @import("../core/root.zig");
-const value_ops = @import("../exec/value_ops.zig");
 const bignum = @import("../libs/bignum.zig");
 const std = @import("std");
 
@@ -652,14 +651,14 @@ pub fn dataViewSet(rt: *core.JSRuntime, view_value: core.JSValue, kind: u32, arg
     var bytes: [8]u8 = undefined;
     const endian: std.builtin.Endian = if (little_endian) .little else .big;
     switch (kind) {
-        1, 2 => bytes[0] = @truncate(valueToUint32(value_arg)),
-        3, 4 => std.mem.writeInt(u16, bytes[0..2], @truncate(valueToUint32(value_arg)), endian),
-        5 => std.mem.writeInt(u32, bytes[0..4], @bitCast(valueToInt32(value_arg)), endian),
-        6 => std.mem.writeInt(u32, bytes[0..4], valueToUint32(value_arg), endian),
-        7 => std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(numberValue(value_arg) orelse std.math.nan(f64)))), endian),
-        8 => std.mem.writeInt(u64, bytes[0..8], @bitCast(numberValue(value_arg) orelse std.math.nan(f64)), endian),
+        1, 2 => bytes[0] = @truncate(numberToUint32(try coerceNumber(rt, value_arg))),
+        3, 4 => std.mem.writeInt(u16, bytes[0..2], @truncate(numberToUint32(try coerceNumber(rt, value_arg))), endian),
+        5 => std.mem.writeInt(u32, bytes[0..4], numberToUint32(try coerceNumber(rt, value_arg)), endian),
+        6 => std.mem.writeInt(u32, bytes[0..4], numberToUint32(try coerceNumber(rt, value_arg)), endian),
+        7 => std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(try coerceNumber(rt, value_arg)))), endian),
+        8 => std.mem.writeInt(u64, bytes[0..8], @bitCast(try coerceNumber(rt, value_arg)), endian),
         9, 10 => std.mem.writeInt(u64, bytes[0..8], try valueToBigInt64Bits(rt, value_arg), endian),
-        11 => std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(numberValue(value_arg) orelse std.math.nan(f64)), endian),
+        11 => std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(try coerceNumber(rt, value_arg)), endian),
         else => return error.TypeError,
     }
 
@@ -844,7 +843,7 @@ fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !Typ
     else if (std.math.isNegativeInf(number))
         "-Infinity"
     else
-        try value_ops.formatFiniteNumber(&buf, number);
+        try core.value_format.formatFiniteNumber(&buf, number);
     if (!std.mem.eql(u8, name, printed)) return .none;
     if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
     return .{ .index = @intFromFloat(number) };
@@ -887,7 +886,7 @@ fn createArrayBuffer(rt: *core.JSRuntime, byte_length: usize, max_byte_length: ?
 fn relativeSliceIndex(rt: *core.JSRuntime, value: core.JSValue, len: usize, undefined_is_len: bool) !usize {
     if (undefined_is_len and value.isUndefined()) return len;
 
-    const relative = try value_ops.toIntegerOrInfinity(rt, value);
+    const relative = try toIntegerOrInfinity(rt, value);
     if (std.math.isNan(relative)) return 0;
     if (std.math.isNegativeInf(relative)) return 0;
     if (std.math.isPositiveInf(relative)) return len;
@@ -1138,8 +1137,17 @@ fn numberToUint8Clamp(number: f64) u8 {
 }
 
 fn coerceNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
-    const number_value = try value_ops.toNumberValue(rt, value);
-    return numberValue(number_value) orelse std.math.nan(f64);
+    if (value.isSymbol()) return error.TypeError;
+    if (numberValue(value)) |number| return number;
+    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
+    if (value.isNull()) return 0;
+    if (value.isString()) {
+        var bytes = std.ArrayList(u8).empty;
+        defer bytes.deinit(rt.memory.allocator);
+        try appendRawString(rt, &bytes, value);
+        return parseJsNumber(bytes.items);
+    }
+    return std.math.nan(f64);
 }
 
 fn dataViewKindWidth(kind: u32) usize {
@@ -1269,11 +1277,7 @@ fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize {
 }
 
 fn parseJsNumber(bytes: []const u8) f64 {
-    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
-    if (trimmed.len == 0) return std.math.nan(f64);
-    if (std.mem.eql(u8, trimmed, "Infinity") or std.mem.eql(u8, trimmed, "+Infinity")) return std.math.inf(f64);
-    if (std.mem.eql(u8, trimmed, "-Infinity")) return -std.math.inf(f64);
-    return std.fmt.parseFloat(f64, trimmed) catch std.math.nan(f64);
+    return core.value_format.parseJsNumber(bytes);
 }
 
 fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {

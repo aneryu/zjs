@@ -25,6 +25,7 @@ pub const jobs = @import("jobs.zig");
 pub const value_ops = @import("value_ops.zig");
 pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
+pub const collection_adapter = @import("collection_adapter.zig");
 pub const shared = @import("shared.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {

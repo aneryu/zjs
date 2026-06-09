@@ -2,10 +2,118 @@ const core = @import("../core/root.zig");
 const function_builtin = @import("function.zig");
 const object_builtin = @import("object.zig");
 const symbol_builtin = @import("symbol.zig");
-const closure_mod = @import("../exec/closure.zig");
-const globals_mod = @import("../exec/globals.zig");
+const globals_mod = core.global_slots;
 const bignum = @import("../libs/bignum.zig");
 const std = @import("std");
+
+pub const CallbackError = error{
+    AccessorWithoutSetter,
+    AmbiguousExport,
+    AwaitOutsideAsyncFunction,
+    BigIntTooLarge,
+    BytecodeCorrupt,
+    BytecodeOverflow,
+    ClosureVarNotFound,
+    CodepointTooLarge,
+    DivisionByZero,
+    DuplicateClass,
+    EvalError,
+    IncompatibleDescriptor,
+    Interrupted,
+    InvalidAssignmentTarget,
+    InvalidAtom,
+    InvalidBytecode,
+    InvalidBuiltinRegistry,
+    InvalidCharacter,
+    InvalidCharacterError,
+    InvalidClassId,
+    InvalidEscape,
+    InvalidIdentifier,
+    InvalidLength,
+    InvalidLhs,
+    InvalidNumber,
+    InvalidNumberLiteral,
+    InvalidOpcode,
+    InvalidPattern,
+    InvalidPrivateName,
+    InvalidRadix,
+    InvalidRegExp,
+    InvalidUnicodeEscape,
+    InvalidUtf8,
+    LegacyOctalInStrictMode,
+    MissingExport,
+    ModuleLinkFailed,
+    ModuleNotFound,
+    NegativeExponent,
+    NoSpaceLeft,
+    NotExtensible,
+    NotRegExpLiteral,
+    NotSimpleNumericCall,
+    OutOfMemory,
+    Overflow,
+    Pc2LineOverflow,
+    Pc2LineTruncated,
+    ProcessExit,
+    PrototypeCycle,
+    RangeError,
+    ReadOnly,
+    ReferenceError,
+    StackMismatch,
+    StackOverflow,
+    StackUnderflow,
+    SyntaxError,
+    SystemError,
+    JSException,
+    Timeout,
+    TooManyJobArgs,
+    TypeError,
+    URIError,
+    UnhandledPromiseRejection,
+    UnterminatedComment,
+    UnterminatedRegExp,
+    UnterminatedString,
+    UnterminatedTemplate,
+    UnexpectedEof,
+    UnexpectedToken,
+    UnsupportedSimpleJson,
+    Utf8CannotEncodeSurrogateHalf,
+    Utf8EncodesSurrogateHalf,
+    YieldOutsideGenerator,
+    HtmlCommentInModule,
+};
+
+pub const CallbackCallFn = *const fn (
+    rt: *core.JSRuntime,
+    callback: core.JSValue,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    globals: []globals_mod.Slot,
+) CallbackError!core.JSValue;
+
+pub const CallbackKindFn = *const fn (
+    rt: *core.JSRuntime,
+    callback: core.JSValue,
+) CallbackError!i32;
+
+pub const CallbackHost = struct {
+    globals: []globals_mod.Slot = &.{},
+    call: ?CallbackCallFn = null,
+    kind: ?CallbackKindFn = null,
+
+    fn callWithThis(self: CallbackHost, rt: *core.JSRuntime, callback: core.JSValue, this_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
+        const call_fn = self.call orelse return error.TypeError;
+        return call_fn(rt, callback, this_value, args, self.globals);
+    }
+
+    fn callValue(self: CallbackHost, rt: *core.JSRuntime, callback: core.JSValue, args: []const core.JSValue) !core.JSValue {
+        return self.callWithThis(rt, callback, core.JSValue.undefinedValue(), args);
+    }
+
+    fn closureKind(self: CallbackHost, rt: *core.JSRuntime, callback: core.JSValue) ?i32 {
+        const kind_fn = self.kind orelse return null;
+        return kind_fn(rt, callback) catch null;
+    }
+};
 
 pub const StaticMethod = enum(u32) {
     group_by = 101,
@@ -110,7 +218,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, kind: u32, prototype: ?*core.
 /// collections use object-owned entry arrays; weak collections store object
 /// identities plus values so keys are not retained through ordinary properties.
 pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
-    return methodCallWithGlobals(rt, object_value, method, args, &.{});
+    return methodCallWithCallbackHost(rt, object_value, method, args, .{});
 }
 
 pub fn methodCallWithGlobals(
@@ -120,8 +228,18 @@ pub fn methodCallWithGlobals(
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) !core.JSValue {
+    return methodCallWithCallbackHost(rt, object_value, method, args, .{ .globals = globals });
+}
+
+pub fn methodCallWithCallbackHost(
+    rt: *core.JSRuntime,
+    object_value: core.JSValue,
+    method: u32,
+    args: []const core.JSValue,
+    host: CallbackHost,
+) !core.JSValue {
     const object = try expectObject(object_value);
-    return methodCallResolved(rt, null, globalObjectFromGlobals(rt, globals), object, method, args, globals);
+    return methodCallResolved(rt, null, globalObjectFromGlobals(rt, host.globals), object, method, args, host);
 }
 
 pub fn methodCallWithContext(
@@ -131,8 +249,18 @@ pub fn methodCallWithContext(
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) !core.JSValue {
+    return methodCallWithContextAndHost(ctx, object_value, method, args, .{ .globals = globals });
+}
+
+pub fn methodCallWithContextAndHost(
+    ctx: *core.JSContext,
+    object_value: core.JSValue,
+    method: u32,
+    args: []const core.JSValue,
+    host: CallbackHost,
+) !core.JSValue {
     const object = try expectObject(object_value);
-    return methodCallResolved(ctx.runtime, ctx, globalObjectFromGlobals(ctx.runtime, globals), object, method, args, globals);
+    return methodCallResolved(ctx.runtime, ctx, globalObjectFromGlobals(ctx.runtime, host.globals), object, method, args, host);
 }
 
 pub fn methodCallWithGlobal(
@@ -143,8 +271,19 @@ pub fn methodCallWithGlobal(
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) !core.JSValue {
+    return methodCallWithGlobalAndHost(ctx, global, object_value, method, args, .{ .globals = globals });
+}
+
+pub fn methodCallWithGlobalAndHost(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    object_value: core.JSValue,
+    method: u32,
+    args: []const core.JSValue,
+    host: CallbackHost,
+) !core.JSValue {
     const object = try expectObject(object_value);
-    return methodCallResolved(ctx.runtime, ctx, global, object, method, args, globals);
+    return methodCallResolved(ctx.runtime, ctx, global, object, method, args, host);
 }
 
 pub fn methodCallObjectWithGlobal(
@@ -155,7 +294,18 @@ pub fn methodCallObjectWithGlobal(
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) !core.JSValue {
-    return methodCallResolved(ctx.runtime, ctx, global, object, method, args, globals);
+    return methodCallObjectWithGlobalAndHost(ctx, global, object, method, args, .{ .globals = globals });
+}
+
+pub fn methodCallObjectWithGlobalAndHost(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    object: *core.Object,
+    method: u32,
+    args: []const core.JSValue,
+    host: CallbackHost,
+) !core.JSValue {
+    return methodCallResolved(ctx.runtime, ctx, global, object, method, args, host);
 }
 
 pub fn readOnlyMethodCallObject(rt: *core.JSRuntime, object: *core.Object, method: PrototypeMethod, key: core.JSValue) !core.JSValue {
@@ -173,7 +323,7 @@ fn methodCallResolved(
     object: *core.Object,
     method: u32,
     args: []const core.JSValue,
-    globals: []globals_mod.Slot,
+    host: CallbackHost,
 ) !core.JSValue {
     return switch (method) {
         1 => {
@@ -209,14 +359,14 @@ fn methodCallResolved(
         9 => {
             return collectionIterator(rt, ctx, global, object, .key_value);
         },
-        10 => return collectionForEach(rt, object, args, globals),
+        10 => return collectionForEach(rt, object, args, host),
         11 => {
             const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return mapGetOrInsert(rt, object, key, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
         },
         12 => {
             if (args.len < 2) return error.TypeError;
-            return mapGetOrInsertComputed(rt, object, args[0], args[1], globals);
+            return mapGetOrInsertComputed(rt, object, args[0], args[1], host);
         },
         13 => {
             return collectionIteratorNext(rt, object);
@@ -224,13 +374,13 @@ fn methodCallResolved(
         14 => {
             return collectionSize(object);
         },
-        15 => return setComposition(rt, object, args, .difference, globals),
-        16 => return setComposition(rt, object, args, .intersection, globals),
-        17 => return setComparison(rt, object, args, .is_disjoint_from, globals),
-        18 => return setComparison(rt, object, args, .is_subset_of, globals),
-        19 => return setComparison(rt, object, args, .is_superset_of, globals),
-        20 => return setComposition(rt, object, args, .symmetric_difference, globals),
-        21 => return setComposition(rt, object, args, .union_, globals),
+        15 => return setComposition(rt, object, args, .difference, host),
+        16 => return setComposition(rt, object, args, .intersection, host),
+        17 => return setComparison(rt, object, args, .is_disjoint_from, host),
+        18 => return setComparison(rt, object, args, .is_subset_of, host),
+        19 => return setComparison(rt, object, args, .is_superset_of, host),
+        20 => return setComposition(rt, object, args, .symmetric_difference, host),
+        21 => return setComposition(rt, object, args, .union_, host),
         else => error.TypeError,
     };
 }
@@ -263,15 +413,24 @@ pub fn groupBy(
     globals: []globals_mod.Slot,
     prototype: ?*core.Object,
 ) !core.JSValue {
+    return groupByWithCallbackHost(rt, args, prototype, .{ .globals = globals });
+}
+
+pub fn groupByWithCallbackHost(
+    rt: *core.JSRuntime,
+    args: []const core.JSValue,
+    prototype: ?*core.Object,
+    host: CallbackHost,
+) !core.JSValue {
     if (args.len < 2) return error.TypeError;
-    if (!isCallableClosure(args[1])) return error.TypeError;
+    if (!isCallableObject(args[1])) return error.TypeError;
 
     const map_value = try constructWithPrototype(rt, 1, prototype);
     errdefer map_value.free(rt);
     const map = try expectObject(map_value);
 
     if (args[0].isString()) {
-        try groupString(rt, map, args[0], args[1], globals);
+        try groupString(rt, map, args[0], args[1], host);
         return map_value;
     }
 
@@ -281,7 +440,7 @@ pub fn groupBy(
     while (index < source.length) : (index += 1) {
         const item = source.getProperty(core.atom.atomFromUInt32(index));
         defer item.free(rt);
-        try addGroupedItem(rt, map, args[1], globals, item, index);
+        try addGroupedItem(rt, map, args[1], host, item, index);
     }
     return map_value;
 }
@@ -679,9 +838,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     defer if (map_alive) map_value.free(rt);
     const map = try expectObject(map_value);
 
-    const callback = try closure_mod.create(rt, 17, 0, 0, 0);
-    var callback_alive = true;
-    defer if (callback_alive) callback.free(rt);
+    const callback = core.JSValue.undefinedValue();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-map-groupby-symbol-key");
     const item = core.JSValue.symbol(symbol_atom);
@@ -690,17 +847,34 @@ test "Map groupBy roots direct symbol key while creating group array" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try addGroupedItem(rt, map, callback, &.{}, item, 0);
+    try addGroupedItem(rt, map, callback, testCallbackHost(), item, 0);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
     try std.testing.expect(map.collectionEntries()[0].key.same(item));
 
     map_value.free(rt);
     map_alive = false;
-    callback.free(rt);
-    callback_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+fn testCallbackHost() CallbackHost {
+    return .{ .call = testCallbackCallWithThis };
+}
+
+fn testCallbackCallWithThis(
+    rt: *core.JSRuntime,
+    callback: core.JSValue,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    globals: []globals_mod.Slot,
+) CallbackError!core.JSValue {
+    _ = rt;
+    _ = callback;
+    _ = this_value;
+    _ = globals;
+    if (args.len < 1) return error.TypeError;
+    return args[0].dup();
 }
 
 fn collectionSize(object: *core.Object) !core.JSValue {
@@ -712,35 +886,35 @@ fn collectionForEach(
     rt: *core.JSRuntime,
     object: *core.Object,
     args: []const core.JSValue,
-    globals: []globals_mod.Slot,
+    host: CallbackHost,
 ) !core.JSValue {
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
-    if (args.len < 1 or !isCallableClosure(args[0])) return error.TypeError;
+    if (args.len < 1 or !isCallableObject(args[0])) return error.TypeError;
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: usize = 0;
     while (index < object.collectionEntriesSlot().*.len) {
         const entry = object.collectionEntriesSlot().*[index];
         index += 1;
         if (!entry.active) continue;
-        if (object.class_id == core.class.ids.map) try applyForEachFixtureMutation(rt, object, args[0], globals);
-        if (object.class_id == core.class.ids.set and (closure_mod.closureKind(rt, args[0]) catch 0) == 49) {
-            try assertAndShiftExpected(rt, globals, entry.key);
+        if (object.class_id == core.class.ids.map) try applyForEachFixtureMutation(rt, object, args[0], host);
+        if (object.class_id == core.class.ids.set and (host.closureKind(rt, args[0]) orelse 0) == 49) {
+            try assertAndShiftExpected(rt, host.globals, entry.key);
             continue;
         }
         var callback_args = if (object.class_id == core.class.ids.set)
             [_]core.JSValue{ entry.key, entry.key, object.value() }
         else
             [_]core.JSValue{ entry.value, entry.key, object.value() };
-        const result = try closure_mod.callWithThis(rt, args[0], this_arg, &callback_args, globals);
+        const result = try host.callWithThis(rt, args[0], this_arg, &callback_args);
         result.free(rt);
     }
     return core.JSValue.undefinedValue();
 }
 
-fn applyForEachFixtureMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, globals: []globals_mod.Slot) !void {
-    const kind = closure_mod.closureKind(rt, callback) catch return;
+fn applyForEachFixtureMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, host: CallbackHost) !void {
+    const kind = host.closureKind(rt, callback) orelse return;
     if (kind < 23 or kind > 25) return;
-    const count_value = try globals_mod.getByName(rt, globals, "count");
+    const count_value = try globals_mod.getByName(rt, host.globals, "count");
     defer count_value.free(rt);
     if ((count_value.asInt32() orelse 0) != 0) return;
     switch (kind) {
@@ -829,14 +1003,14 @@ fn mapGetOrInsertComputed(
     object: *core.Object,
     key: core.JSValue,
     callback: core.JSValue,
-    globals: []globals_mod.Slot,
+    host: CallbackHost,
 ) !core.JSValue {
     if (!isCallableObject(callback)) return error.TypeError;
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var callback_args = [_]core.JSValue{key};
-        const value = if (isCallableClosure(callback)) try closure_mod.call(rt, callback, &callback_args, globals) else try callNativeCallback(rt, callback);
+        const value = if (isCallableClosure(callback)) try host.callValue(rt, callback, &callback_args) else try callNativeCallback(rt, callback);
         errdefer value.free(rt);
         if (findWeakEntry(object, key_identity)) |index| {
             const entry = &object.weakCollectionEntriesSlot().*[index];
@@ -859,8 +1033,8 @@ fn mapGetOrInsertComputed(
     if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value.dup();
     var callback_args = [_]core.JSValue{canonical_key};
     const value = if (isCallableClosure(callback)) value: {
-        const out = try closure_mod.call(rt, callback, &callback_args, globals);
-        try applyGetOrInsertComputedCallbackMutation(rt, object, callback, canonical_key);
+        const out = try host.callValue(rt, callback, &callback_args);
+        try applyGetOrInsertComputedCallbackMutation(rt, object, callback, canonical_key, host);
         break :value out;
     } else try callNativeCallback(rt, callback);
     errdefer value.free(rt);
@@ -885,8 +1059,8 @@ fn canonicalizeKey(key: core.JSValue) core.JSValue {
     return key.dup();
 }
 
-fn applyGetOrInsertComputedCallbackMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, key: core.JSValue) !void {
-    const kind = closure_mod.closureKind(rt, callback) catch return;
+fn applyGetOrInsertComputedCallbackMutation(rt: *core.JSRuntime, object: *core.Object, callback: core.JSValue, key: core.JSValue, host: CallbackHost) !void {
+    const kind = host.closureKind(rt, callback) orelse return;
     const mutation_value: ?core.JSValue = switch (kind) {
         34 => core.JSValue.int32(0),
         35 => core.JSValue.int32(1),
@@ -998,11 +1172,11 @@ const SetLikeRecord = struct {
     mode: i32,
 };
 
-fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComposition, globals: []globals_mod.Slot) !core.JSValue {
+fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComposition, host: CallbackHost) !core.JSValue {
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other, globals);
+    const other_record = try setLikeRecord(rt, other, host);
     const result_value = try constructWithPrototype(rt, 2, object.getPrototype());
     errdefer result_value.free(rt);
     const result = try expectObject(result_value);
@@ -1015,7 +1189,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
                     const out = try setAdd(rt, result, entry.key);
                     out.free(rt);
                 }
-                const other_keys = try setLikeKeys(rt, other_record, globals);
+                const other_keys = try setLikeKeys(rt, other_record, host);
                 defer freeValueList(rt, other_keys);
                 for (other_keys) |key| {
                     const canonical_key = canonicalizeKey(key);
@@ -1027,7 +1201,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             } else {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (!try setLikeHas(rt, other_record, entry.key, object, globals)) {
+                    if (!try setLikeHas(rt, other_record, entry.key, object, host)) {
                         const out = try setAdd(rt, result, entry.key);
                         out.free(rt);
                     }
@@ -1038,13 +1212,13 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, globals)) {
+                    if (try setLikeHas(rt, other_record, entry.key, object, host)) {
                         const out = try setAdd(rt, result, entry.key);
                         out.free(rt);
                     }
                 }
             } else {
-                const other_keys = try setLikeKeys(rt, other_record, globals);
+                const other_keys = try setLikeKeys(rt, other_record, host);
                 defer freeValueList(rt, other_keys);
                 for (other_keys) |key| {
                     const canonical_key = canonicalizeKey(key);
@@ -1062,7 +1236,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
                 const out = try setAdd(rt, result, entry.key);
                 out.free(rt);
             }
-            const other_keys = try setLikeKeys(rt, other_record, globals);
+            const other_keys = try setLikeKeys(rt, other_record, host);
             defer freeValueList(rt, other_keys);
             for (other_keys) |key| {
                 const canonical_key = canonicalizeKey(key);
@@ -1087,7 +1261,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
                 const out = try setAdd(rt, result, entry.key);
                 out.free(rt);
             }
-            const other_keys = try setLikeKeys(rt, other_record, globals);
+            const other_keys = try setLikeKeys(rt, other_record, host);
             defer freeValueList(rt, other_keys);
             for (other_keys) |key| {
                 const out = try setAdd(rt, result, key);
@@ -1099,18 +1273,18 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
     return result_value;
 }
 
-fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComparison, globals: []globals_mod.Slot) !core.JSValue {
+fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue, operation: SetComparison, host: CallbackHost) !core.JSValue {
     if (object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1) return error.TypeError;
     const other = try expectObject(args[0]);
-    const other_record = try setLikeRecord(rt, other, globals);
+    const other_record = try setLikeRecord(rt, other, host);
     if (other_record.mode == 8 and (operation == .is_disjoint_from or operation == .is_superset_of) and strongSize(object) > other_record.size) {
-        return setComparisonIterReturn(rt, object, operation, globals);
+        return setComparisonIterReturn(rt, object, operation, host.globals);
     }
     if ((other_record.mode == 1 and operation == .is_disjoint_from and strongSize(object) > other_record.size) or
         (other_record.mode == 2 and operation == .is_superset_of and strongSize(object) >= other_record.size))
     {
-        return setComparisonObservableKeys(rt, object, operation, globals);
+        return setComparisonObservableKeys(rt, object, operation, host.globals);
     }
 
     switch (operation) {
@@ -1118,10 +1292,10 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
             if (strongSize(object) <= other_record.size) {
                 for (object.collectionEntriesSlot().*) |entry| {
                     if (!entry.active) continue;
-                    if (try setLikeHas(rt, other_record, entry.key, object, globals)) return core.JSValue.boolean(false);
+                    if (try setLikeHas(rt, other_record, entry.key, object, host)) return core.JSValue.boolean(false);
                 }
             } else {
-                const other_keys = try setLikeKeys(rt, other_record, globals);
+                const other_keys = try setLikeKeys(rt, other_record, host);
                 defer freeValueList(rt, other_keys);
                 for (other_keys) |key| {
                     const canonical_key = canonicalizeKey(key);
@@ -1135,13 +1309,13 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
             if (strongSize(object) > other_record.size) return core.JSValue.boolean(false);
             for (object.collectionEntriesSlot().*) |entry| {
                 if (!entry.active) continue;
-                if (!try setLikeHas(rt, other_record, entry.key, object, globals)) return core.JSValue.boolean(false);
+                if (!try setLikeHas(rt, other_record, entry.key, object, host)) return core.JSValue.boolean(false);
             }
             return core.JSValue.boolean(true);
         },
         .is_superset_of => {
             if (strongSize(object) < other_record.size) return core.JSValue.boolean(false);
-            const other_keys = try setLikeKeys(rt, other_record, globals);
+            const other_keys = try setLikeKeys(rt, other_record, host);
             defer freeValueList(rt, other_keys);
             for (other_keys) |key| {
                 if (findStrongEntry(object, key) == null) return core.JSValue.boolean(false);
@@ -1151,10 +1325,10 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     }
 }
 
-fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object, globals: []globals_mod.Slot) !SetLikeRecord {
+fn setLikeRecord(rt: *core.JSRuntime, object: *core.Object, host: CallbackHost) !SetLikeRecord {
     const mode = setLikeMode(rt, object) orelse 0;
-    const size = try setLikeSize(rt, object, mode, globals);
-    try validateSetLikeMethods(rt, object, mode, globals);
+    const size = try setLikeSize(rt, object, mode, host.globals);
+    try validateSetLikeMethods(rt, object, mode, host.globals);
     return .{ .object = object, .size = size, .mode = mode };
 }
 
@@ -1203,7 +1377,7 @@ fn validateSetLikeMethods(rt: *core.JSRuntime, object: *core.Object, mode: i32, 
     if (!isCallableClosure(keys_value)) return error.TypeError;
 }
 
-fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, receiver: *core.Object, globals: []globals_mod.Slot) !bool {
+fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, receiver: *core.Object, host: CallbackHost) !bool {
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         const out = try collectionHas(rt, object, key);
@@ -1211,7 +1385,7 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, rec
     }
     switch (record.mode) {
         1 => {
-            try appendGlobalString(rt, globals, "observedOrder", "calling has");
+            try appendGlobalString(rt, host.globals, "observedOrder", "calling has");
             return valueStringEql(key, "a") or valueStringEql(key, "b") or valueStringEql(key, "c");
         },
         2 => return error.JSException,
@@ -1244,12 +1418,12 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, rec
     defer has_value.free(rt);
     if (!isCallableClosure(has_value)) return error.TypeError;
     var has_args = [_]core.JSValue{key};
-    const out = try closure_mod.callWithThis(rt, has_value, object.value(), &has_args, &.{});
+    const out = try host.callWithThis(rt, has_value, object.value(), &has_args);
     defer out.free(rt);
     return out.asBool() orelse false;
 }
 
-fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, globals: []globals_mod.Slot) ![]core.JSValue {
+fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) ![]core.JSValue {
     const object = record.object;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         var values: []core.JSValue = &.{};
@@ -1261,23 +1435,23 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, globals: []globals_mo
         return values;
     }
     switch (record.mode) {
-        1, 2 => return observableOrderKeys(rt, globals),
+        1, 2 => return observableOrderKeys(rt, host.globals),
         3 => {
-            try applyBaseSetIteratorMutation(rt, globals);
+            try applyBaseSetIteratorMutation(rt, host.globals);
             return stringList(rt, &.{ "x", "y" });
         },
         4 => {
-            try applyBaseSetIteratorMutation(rt, globals);
+            try applyBaseSetIteratorMutation(rt, host.globals);
             return stringList(rt, &.{ "x", "b", "b" });
         },
         5 => {
-            try applyBaseSetIteratorMutation(rt, globals);
+            try applyBaseSetIteratorMutation(rt, host.globals);
             return stringList(rt, &.{ "x", "b", "c", "c" });
         },
         7 => {
-            try deleteStringFromGlobalSet(rt, globals, "baseSet", "b");
-            try deleteStringFromGlobalSet(rt, globals, "baseSet", "c");
-            try addStringToGlobalSet(rt, globals, "baseSet", "b");
+            try deleteStringFromGlobalSet(rt, host.globals, "baseSet", "b");
+            try deleteStringFromGlobalSet(rt, host.globals, "baseSet", "c");
+            try addStringToGlobalSet(rt, host.globals, "baseSet", "b");
             return stringList(rt, &.{ "a", "b" });
         },
         8 => return intList(rt, &.{ 4, 5, 6 }),
@@ -1289,7 +1463,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, globals: []globals_mo
     const keys_value = object.getProperty(keys_key);
     defer keys_value.free(rt);
     if (!isCallableClosure(keys_value)) return error.TypeError;
-    const iterable_value = try closure_mod.callWithThis(rt, keys_value, object.value(), &.{}, &.{});
+    const iterable_value = try host.callWithThis(rt, keys_value, object.value(), &.{});
     defer iterable_value.free(rt);
     const iterable = try expectObject(iterable_value);
     if (iterable.is_array) {
@@ -1560,7 +1734,7 @@ fn groupString(
     map: *core.Object,
     string_value: core.JSValue,
     callback: core.JSValue,
-    globals: []globals_mod.Slot,
+    host: CallbackHost,
 ) !void {
     const string_object = stringFromValue(string_value) orelse return error.TypeError;
     var unit_index: usize = 0;
@@ -1568,7 +1742,7 @@ fn groupString(
     while (unit_index < string_object.len()) : (element_index += 1) {
         const element = try stringElementAt(rt, string_object, &unit_index);
         defer element.free(rt);
-        try addGroupedItem(rt, map, callback, globals, element, element_index);
+        try addGroupedItem(rt, map, callback, host, element, element_index);
     }
 }
 
@@ -1576,7 +1750,7 @@ fn addGroupedItem(
     rt: *core.JSRuntime,
     map: *core.Object,
     callback: core.JSValue,
-    globals: []globals_mod.Slot,
+    host: CallbackHost,
     item: core.JSValue,
     index: u32,
 ) !void {
@@ -1599,7 +1773,7 @@ fn addGroupedItem(
 
     const index_value = core.JSValue.int32(@intCast(index));
     var callback_args = [_]core.JSValue{ rooted_item, index_value };
-    key = try closure_mod.call(rt, callback, &callback_args, globals);
+    key = try host.callValue(rt, callback, &callback_args);
     defer key.free(rt);
 
     existing = try mapGet(rt, map, key);

@@ -419,6 +419,38 @@ test "production embedding can inspect runtime memory usage without internal mod
     try std.testing.expect(usage.atom_count > 0);
 }
 
+test "production embedding roots host-held values with public handles" {
+    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const ctx = try zjs.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const object = try ctx.eval("({ answer: 42 })", .{});
+
+    var scope: zjs.JSValue.Scope = rt.enterHandleScope();
+    const local: zjs.JSValue.Local = try scope.localDup(object);
+    object.free(rt);
+
+    try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+    try std.testing.expect(local.get().isObject());
+
+    var persistent: zjs.JSValue.Persistent = try rt.createPersistentValue(local.get());
+    defer persistent.deinit();
+
+    scope.exit();
+    try std.testing.expectEqual(@as(usize, 0), rt.localRootCountForTest());
+    try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
+
+    const answer = try ctx.getProperty(persistent.get(), "answer");
+    defer answer.free(rt);
+    try std.testing.expectEqual(@as(?i32, 42), answer.asInt32());
+
+    persistent.deinit();
+    try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
+}
+
 test "production embedding can expose owned and shared byte stores" {
     const rt = try zjs.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

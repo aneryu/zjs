@@ -1,6 +1,7 @@
 pub const subsystem_name = "core_runtime";
 
 pub const value = @import("value.zig");
+pub const value_format = @import("value_format.zig");
 pub const list = @import("list.zig");
 pub const gc = @import("gc.zig");
 pub const atom = @import("atom.zig");
@@ -9,6 +10,7 @@ pub const bigint = @import("bigint.zig");
 pub const class = @import("class.zig");
 pub const shape = @import("shape.zig");
 pub const ic = @import("ic.zig");
+pub const global_slots = @import("global_slots.zig");
 pub const function = @import("function.zig");
 pub const function_bytecode = @import("function_bytecode.zig");
 pub const module = @import("module.zig");
