@@ -79,6 +79,10 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     }
     defer module_exec.freeModuleVarRefs(rt, module_var_refs);
 
+    if (!has_module_record and canReturnUndefinedWithoutVm(&compiled.function)) {
+        return core.JSValue.undefinedValue();
+    }
+
     const result = if (has_module_record)
         try runEvalModuleWithVarRefs(ctx, &compiled.function, options.output, module_var_refs, options.timing)
     else blk: {
@@ -101,6 +105,23 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         return core.JSValue.undefinedValue();
     }
     return result;
+}
+
+fn canReturnUndefinedWithoutVm(function: *const bytecode.Bytecode) bool {
+    if (function.flags.is_module or function.module_record != null) return false;
+    if (function.code.len != 1 or function.code[0] != bytecode.opcode.op.return_undef) return false;
+    return function.var_count == 0 and
+        function.arg_count == 0 and
+        function.var_names.len == 0 and
+        function.var_is_lexical.len == 0 and
+        function.var_is_const.len == 0 and
+        function.var_ref_names.len == 0 and
+        function.var_ref_is_lexical.len == 0 and
+        function.var_ref_is_const.len == 0 and
+        function.global_var_names.len == 0 and
+        function.private_bound_names.len == 0 and
+        function.constants.values.len == 0 and
+        function.scopes.len == 0;
 }
 
 fn runEvalModuleWithVarRefs(

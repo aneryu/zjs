@@ -1187,6 +1187,71 @@ test "native builtin records use callee realm for errors and created objects" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "TypedArray iterator methods accept cross-realm typed array receivers" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function () {
+        \\    var other = $262.createRealm().global;
+        \\    var local = new Uint8Array([42, 36]);
+        \\    var remote = new other.Uint8Array([42, 36]);
+        \\    assert.sameValue([...Uint8Array.prototype.values.call(remote)].toString(), "42,36");
+        \\    assert.sameValue([...other.Uint8Array.prototype.values.call(local)].toString(), "42,36");
+        \\    assert.sameValue([...Uint8Array.prototype.keys.call(remote)].toString(), "0,1");
+        \\    assert.sameValue([...other.Uint8Array.prototype.entries.call(local)].toString(), "0,42,1,36");
+        \\})();
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "TypedArray iterator methods reject proxy-wrapped shared typed array receivers" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\(function (global) {
+        \\    const {Object, Reflect, SharedArrayBuffer, WeakMap} = global;
+        \\    const {apply: Reflect_apply, construct: Reflect_construct} = Reflect;
+        \\    const {get: WeakMap_prototype_get, has: WeakMap_prototype_has} = WeakMap.prototype;
+        \\    const sharedConstructors = new WeakMap();
+        \\    function sharedConstructor(baseConstructor) {
+        \\        class SharedTypedArray extends Object.getPrototypeOf(baseConstructor) {
+        \\            constructor(...args) {
+        \\                var array = Reflect_construct(baseConstructor, args);
+        \\                var {buffer, byteOffset, length} = array;
+        \\                var sharedBuffer = new SharedArrayBuffer(buffer.byteLength);
+        \\                var sharedArray = Reflect_construct(baseConstructor, [sharedBuffer, byteOffset, length], new.target);
+        \\                for (var i = 0; i < length; i++) sharedArray[i] = array[i];
+        \\                return sharedArray;
+        \\            }
+        \\        }
+        \\        sharedConstructors.set(SharedTypedArray, baseConstructor);
+        \\        return SharedTypedArray;
+        \\    }
+        \\    function isSharedConstructor(constructor) {
+        \\        return Reflect_apply(WeakMap_prototype_has, sharedConstructors, [constructor]);
+        \\    }
+        \\    var constructors = [Uint8Array];
+        \\    if (typeof SharedArrayBuffer === "function") constructors.push(sharedConstructor(Uint8Array));
+        \\    for (var constructor of constructors) {
+        \\        if (isSharedConstructor(constructor)) {
+        \\            assert.sameValue(Reflect_apply(WeakMap_prototype_get, sharedConstructors, [constructor]), Uint8Array);
+        \\        }
+        \\        var invalidReceiver = new Proxy(new constructor(), {});
+        \\        assert.throws(TypeError, function () {
+        \\            constructor.prototype.values.call(invalidReceiver);
+        \\        });
+        \\    }
+        \\})(this);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Engine eval assigns missing with references through outer scope" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

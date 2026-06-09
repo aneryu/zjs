@@ -4130,15 +4130,16 @@ fn optionalCallFollows(s: *ParseState) bool {
 }
 
 fn rewriteTrailingMemberReferenceForCall(s: *ParseState) Error!bool {
+    const should_promote_optional_exit = s.last_lhs_had_optional_chain;
     const code = s.currentCode();
     if (code.len >= 5 and code[code.len - 5] == opcode.op.get_field) {
         code[code.len - 5] = opcode.op.get_field2;
-        try promoteTrailingOptionalChainExitForMethodCall(s);
+        if (should_promote_optional_exit) try promoteTrailingOptionalChainExitForMethodCall(s);
         return true;
     }
     if (code.len >= 1 and code[code.len - 1] == opcode.op.get_array_el) {
         code[code.len - 1] = opcode.op.get_array_el2;
-        try promoteTrailingOptionalChainExitForMethodCall(s);
+        if (should_promote_optional_exit) try promoteTrailingOptionalChainExitForMethodCall(s);
         return true;
     }
     return false;
@@ -4149,11 +4150,8 @@ fn promoteTrailingOptionalChainExitForMethodCall(s: *ParseState) Error!void {
     const chain_end: u32 = @intCast(code.len);
     var pc: usize = 0;
     var candidate_drop: ?usize = null;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
-        if (size == 0 or pc + size > code.len) return Error.UnexpectedToken;
-        if (op_id == opcode.op.dup and pc + 14 <= code.len and
+    while (pc + 14 <= code.len) : (pc += 1) {
+        if (code[pc] == opcode.op.dup and
             code[pc + 1] == opcode.op.is_undefined_or_null and
             code[pc + 2] == opcode.op.if_false and
             code[pc + 7] == opcode.op.drop and
@@ -4163,7 +4161,6 @@ fn promoteTrailingOptionalChainExitForMethodCall(s: *ParseState) Error!void {
             const target = std.mem.readInt(u32, code[pc + 10 ..][0..4], .little);
             if (target == chain_end) candidate_drop = pc + 7;
         }
-        pc += size;
     }
     if (candidate_drop) |drop_pc| {
         try insertByteInCurrentCode(s, drop_pc + 2, opcode.op.undefined);

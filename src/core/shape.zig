@@ -257,6 +257,51 @@ pub const Registry = struct {
         shape.version +%= 1;
     }
 
+    pub fn restorePropertyLayout(self: *Registry, shape: *Shape, baseline_props: []const Property, baseline_hash: u32, baseline_deleted_count: usize) !void {
+        try self.reserveProperties(shape, baseline_props.len);
+
+        var next_buckets: []u32 = &.{};
+        if (baseline_props.len >= small_shape_linear_limit) {
+            const bucket_count = @max(initial_hash_size, nextPowerOfTwo(baseline_props.len + baseline_deleted_count + 1));
+            next_buckets = try self.memory.alloc(u32, bucket_count);
+            @memset(next_buckets, no_property_index);
+        }
+        errdefer if (next_buckets.len != 0) self.memory.free(u32, next_buckets);
+
+        for (shape.props[0..shape.prop_count]) |prop| {
+            if (prop.atom_id != atom.null_atom) self.atoms.free(prop.atom_id);
+        }
+        @memset(shape.props[0..shape.prop_count], .{});
+
+        shape.prop_count = baseline_props.len;
+        shape.deleted_prop_count = baseline_deleted_count;
+        for (baseline_props, 0..) |prop, index| {
+            shape.props[index] = .{
+                .hash_next = no_property_index,
+                .flags = prop.flags,
+                .atom_id = if (prop.atom_id == atom.null_atom) atom.null_atom else self.atoms.dup(prop.atom_id),
+            };
+        }
+
+        const old_hash = shape.hash;
+        shape.hash = baseline_hash;
+        self.rehashShape(shape, old_hash);
+
+        const old_buckets = shape.hash_buckets;
+        shape.hash_buckets = next_buckets;
+        shape.prop_hash_mask = if (next_buckets.len == 0) no_property_hash else @as(u32, @intCast(next_buckets.len - 1));
+        if (old_buckets.len != 0) self.memory.free(u32, old_buckets);
+        next_buckets = &.{};
+
+        if (shape.hasPropertyHash()) {
+            for (shape.props[0..shape.prop_count], 0..) |*prop, index| {
+                prop.hash_next = no_property_index;
+                self.linkPropertyHash(shape, index);
+            }
+        }
+        shape.version +%= 1;
+    }
+
     pub fn bumpVersion(self: *Registry, shape: *Shape) void {
         _ = self;
         shape.version +%= 1;

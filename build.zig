@@ -96,8 +96,6 @@ pub fn build(b: *std.Build) void {
     zjs_step.dependOn(&install_zjs.step);
     b.installArtifact(zjs_exe);
 
-
-
     const run_test262_exe = b.addExecutable(.{
         .name = "run-test262",
         .root_module = b.createModule(.{
@@ -423,6 +421,7 @@ pub fn build(b: *std.Build) void {
     unified_tests.root_module.addOptions("build_options", test_options);
     const run_unified_tests = b.addRunArtifact(unified_tests);
     run_unified_tests.step.dependOn(&install_zjs.step);
+    if (b.args) |args| run_unified_tests.addArgs(args);
 
     // Smoke tests (runs only the CLI integration tests in src/tests/smoke_test.zig)
     const smoke_tests = b.addTest(.{
@@ -443,6 +442,7 @@ pub fn build(b: *std.Build) void {
     smoke_tests.root_module.addOptions("build_options", test_options);
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
     run_smoke_tests.step.dependOn(&install_zjs.step);
+    if (b.args) |args| run_smoke_tests.addArgs(args);
 
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     smoke_step.dependOn(&run_smoke_tests.step);

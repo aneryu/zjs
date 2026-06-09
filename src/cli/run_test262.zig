@@ -2,6 +2,7 @@ const std = @import("std");
 const test262_root = @import("zjs");
 const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
+const frontend_parser = test262_root.frontend.parser;
 
 extern "c" fn getpid() c_int;
 
@@ -1697,11 +1698,9 @@ fn runEmbeddedEngine(
             .output = &output,
             .discard_script_result = true,
         })) catch |err| failed: {
-        if (err == error.JSException) {
-            if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
-                stderr_out.* = name;
-                break :failed zjs.JSValue.exception();
-            }
+        if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
+            stderr_out.* = name;
+            break :failed zjs.JSValue.exception();
         }
         stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
         break :failed zjs.JSValue.exception();
@@ -3941,6 +3940,54 @@ test "test262 asyncTest source does not inject $DONE harness without async flag"
 
     try std.testing.expect(std.mem.indexOf(u8, source, "function $DONE(error)") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "function asyncTest(testFunc)") != null);
+}
+
+test "test262 typed array iterator staging source parses after installing globals" {
+    const allocator = std.testing.allocator;
+    var metadata = TestMetadata.init(allocator);
+    defer metadata.deinit(allocator);
+    try metadata.includes.appendOwned(try allocator.dupe(u8, "sm/non262-TypedArray-shell.js"));
+    try metadata.includes.appendOwned(try allocator.dupe(u8, "deepEqual.js"));
+
+    const harness_prelude = try makeHarnessPrelude(allocator, std.testing.io, "test262/harness");
+    defer allocator.free(harness_prelude);
+    var harness_cache = HarnessCache.init(allocator, std.testing.io, "test262/harness");
+    defer harness_cache.deinit();
+    const test_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test262/test/staging/sm/TypedArray/entries.js", allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(test_source);
+    const source = try makeTestSourceFromBytes(allocator, &harness_cache, harness_prelude, test_source, metadata);
+    defer allocator.free(source);
+
+    {
+        const rt = try zjs.JSRuntime.create(allocator);
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt);
+        defer ctx.destroy();
+        _ = try ctx.globalObject();
+        var parsed = try frontend_parser.parse(rt, source, .{
+            .mode = .script,
+            .filename = "<eval>",
+            .return_completion = true,
+        });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+
+    {
+        const rt = try zjs.JSRuntime.create(allocator);
+        defer rt.destroy();
+        const ctx = try zjs.JSContext.create(rt);
+        defer ctx.destroy();
+        const global = try ctx.globalObject();
+        try installTest262Globals(rt, ctx, global);
+        var parsed = try frontend_parser.parse(rt, source, .{
+            .mode = .script,
+            .filename = "<eval>",
+            .return_completion = true,
+        });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
 }
 
 test "test262 negative result matching requires expected type when present" {

@@ -411,6 +411,7 @@ pub const helpers = struct {
     var shared_engine_baseline_shape_hash: u32 = 0;
     var shared_engine_baseline_shape_deleted_count: usize = 0;
     var shared_engine_baseline_properties: ?[]core.property.Entry = null;
+    var shared_engine_baseline_shape_props: ?[]core.shape.Property = null;
 
     pub fn sharedTestEngine() *TestEngine {
         if (shared_engine_storage == null) {
@@ -445,6 +446,15 @@ pub const helpers = struct {
                     shared_engine_baseline_properties.?[idx].slot = entry.slot.dup();
                     if (entry.atom_id != core.atom.null_atom) {
                         _ = eng.runtime.atoms.dup(entry.atom_id);
+                    }
+                }
+
+                shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
+                for (g.shape_ref.props[0..g.shape_ref.prop_count], 0..) |prop, idx| {
+                    shared_engine_baseline_shape_props.?[idx] = prop;
+                    shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
+                    if (prop.atom_id != core.atom.null_atom) {
+                        _ = eng.runtime.atoms.dup(prop.atom_id);
                     }
                 }
             }
@@ -522,15 +532,13 @@ pub const helpers = struct {
                 }
             }
 
-            const shape_baseline = shared_engine_baseline_shape_prop_count;
-            if (global.shape_ref.prop_count > shape_baseline) {
-                for (global.shape_ref.props[shape_baseline..global.shape_ref.prop_count]) |*prop| {
-                    if (prop.atom_id != core.atom.null_atom) eng.runtime.atoms.free(prop.atom_id);
-                    prop.* = .{};
-                }
-                global.shape_ref.prop_count = shape_baseline;
-                global.shape_ref.hash = shared_engine_baseline_shape_hash;
-                global.shape_ref.deleted_prop_count = shared_engine_baseline_shape_deleted_count;
+            if (shared_engine_baseline_shape_props) |baseline_shape_props| {
+                eng.runtime.shapes.restorePropertyLayout(
+                    global.shape_ref,
+                    baseline_shape_props[0..shared_engine_baseline_shape_prop_count],
+                    shared_engine_baseline_shape_hash,
+                    shared_engine_baseline_shape_deleted_count,
+                ) catch unreachable;
             }
         }
     }
@@ -3008,6 +3016,29 @@ test "Engine eval executes test262 helpers through generic call paths" {
     try std.testing.expect(result.isUndefined());
     try std.testing.expectError(error.JSException, js.eval("assert.sameValue(1, 2);"));
     try std.testing.expectError(error.JSException, js.eval("throw new Test262Error('boom');"));
+}
+
+test "shared test engine reset rebuilds global shape hash buckets" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval("assert.sameValue(1 + 1, 2, 'sum');");
+    result.free(js.runtime);
+    try std.testing.expectError(error.JSException, js.eval("assert.sameValue(1, 2);"));
+    try std.testing.expectError(error.JSException, js.eval("throw new Test262Error('boom');"));
+    helpers.endSharedTest();
+
+    const clean = helpers.sharedTestEngine();
+    var output_buffer: [16]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const clean_result = try clean.evalWithOutput(
+        \\"use strict";
+        \\print(this === globalThis);
+    , &stream);
+    defer clean_result.free(clean.runtime);
+
+    try std.testing.expect(clean_result.isUndefined());
+    try std.testing.expectEqualStrings("true\n", stream.buffered());
 }
 
 test "Engine eval strips TypeScript source kind before execution" {
