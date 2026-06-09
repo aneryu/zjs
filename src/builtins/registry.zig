@@ -1,11 +1,14 @@
 const core = @import("../core/root.zig");
+const array_builtin = @import("array.zig");
 const buffer_builtin = @import("buffer.zig");
 const collection_builtin = @import("collection.zig");
+const date_builtin = @import("date.zig");
 const error_builtin = @import("error.zig");
 const function_builtin = @import("function.zig");
 const iterator_builtin = @import("iterator.zig");
 const object_builtin = @import("object.zig");
 const regexp_builtin = @import("regexp.zig");
+const string_builtin = @import("string.zig");
 const atomics_builtin = @import("atomics.zig");
 const reflect_builtin = @import("reflect_proxy.zig");
 const std = @import("std");
@@ -87,6 +90,23 @@ pub const prototype_flags = Flags{ .writable = false, .enumerable = false, .conf
 // Keep this tied to the QuickJS reference version used by the local fixtures.
 pub const navigator_user_agent = "quickjs-ng/0.14.0";
 
+const shared_lazy_parse_int_slot: u8 = 1;
+const shared_lazy_parse_float_slot: u8 = 2;
+const shared_lazy_array_values_slot: u8 = 3;
+const shared_lazy_typed_array_values_slot: u8 = 4;
+const shared_lazy_map_entries_slot: u8 = 5;
+const shared_lazy_set_values_slot: u8 = 6;
+const shared_lazy_disposable_stack_dispose_slot: u8 = 7;
+const shared_lazy_async_disposable_stack_dispose_slot: u8 = 8;
+const shared_lazy_array_to_string_slot: u8 = 9;
+const shared_lazy_date_to_utc_string_slot: u8 = 10;
+const shared_lazy_string_trim_start_slot: u8 = 11;
+const shared_lazy_string_trim_end_slot: u8 = 12;
+
+comptime {
+    std.debug.assert(shared_lazy_string_trim_end_slot <= core.runtime.shared_lazy_native_function_slots);
+}
+
 fn temporaryStringAtom(rt: *core.JSRuntime, name: []const u8) !core.Atom {
     return core.atom.predefinedId(name, .string) orelse try rt.internAtom(name);
 }
@@ -160,6 +180,17 @@ pub fn defineDataAtomAssumingNew(
     try target.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, flags.writable, flags.enumerable, flags.configurable));
 }
 
+fn defineStringConstantAtomAssumingNew(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    atom_id: core.Atom,
+    bytes: []const u8,
+    flags: Flags,
+) !void {
+    const property_flags = core.property.Flags.data(flags.writable, flags.enumerable, flags.configurable);
+    try target.defineStringConstantAutoInitProperty(rt, atom_id, bytes, property_flags);
+}
+
 pub fn defineAccessorAtom(
     rt: *core.JSRuntime,
     target: *core.Object,
@@ -170,6 +201,63 @@ pub fn defineAccessorAtom(
 ) !void {
     _ = flags.writable;
     try target.defineOwnProperty(rt, atom_id, core.Descriptor.accessor(getter, setter, flags.enumerable, flags.configurable));
+}
+
+fn defineLazyNativeGetterAtom(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    atom_id: core.Atom,
+    getter_name: []const u8,
+    getter_native_builtin_id: i32,
+    flags: Flags,
+) !void {
+    try defineLazyNativeGetterAtomWithRealm(rt, target, atom_id, getter_name, getter_native_builtin_id, flags, null);
+}
+
+fn defineLazyNativeGetterAtomWithRealm(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    atom_id: core.Atom,
+    getter_name: []const u8,
+    getter_native_builtin_id: i32,
+    flags: Flags,
+    realm_global: ?*core.Object,
+) !void {
+    const property_flags = core.property.Flags.accessorFlags(flags.enumerable, flags.configurable);
+    try target.defineNativeAccessorAutoInitPropertyWithRealmAndNative(
+        rt,
+        atom_id,
+        getter_name,
+        0,
+        property_flags,
+        realm_global,
+        getter_native_builtin_id,
+    );
+}
+
+fn defineLazyNativeAccessorPairAtom(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    atom_id: core.Atom,
+    getter_name: []const u8,
+    getter_native_builtin_id: i32,
+    setter_length: i32,
+    setter_native_builtin_id: i32,
+    flags: Flags,
+    realm_global: ?*core.Object,
+) !void {
+    const property_flags = core.property.Flags.accessorFlags(flags.enumerable, flags.configurable);
+    try target.defineNativeAccessorAutoInitPairPropertyWithRealmAndNative(
+        rt,
+        atom_id,
+        getter_name,
+        0,
+        setter_length,
+        property_flags,
+        realm_global,
+        getter_native_builtin_id,
+        setter_native_builtin_id,
+    );
 }
 
 pub fn defineNativeMethod(rt: *core.JSRuntime, target: *core.Object, method: Method) !void {
@@ -261,8 +349,40 @@ pub fn defineGlobalSharedLazyNativeFunction(
     try global.defineAutoInitPropertyWithRealmNativeAndCache(rt, key, name, length, flags, global, core.function.nativeBuiltinId(domain, id), shared_cache_slot);
 }
 
+fn defineSharedLazyNativeMethod(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    global: *core.Object,
+    atom_id: core.Atom,
+    name: []const u8,
+    length: i32,
+    native_builtin_id: i32,
+    shared_cache_slot: u8,
+) !void {
+    const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
+    if (target.is_array) {
+        try target.defineAutoInitNonIndexPropertyWithRealmNativeAndCache(rt, atom_id, name, length, flags, global, native_builtin_id, shared_cache_slot);
+        return;
+    }
+    try target.defineAutoInitPropertyWithRealmNativeAndCache(rt, atom_id, name, length, flags, global, native_builtin_id, shared_cache_slot);
+}
+
+fn replaceSharedLazyNativeMethod(
+    rt: *core.JSRuntime,
+    target: *core.Object,
+    global: *core.Object,
+    atom_id: core.Atom,
+    name: []const u8,
+    length: i32,
+    native_builtin_id: i32,
+    shared_cache_slot: u8,
+) !void {
+    const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
+    try target.replaceAutoInitPropertyWithRealmNativeAndCache(rt, atom_id, name, length, flags, global, native_builtin_id, shared_cache_slot);
+}
+
 pub fn defineNamespace(rt: *core.JSRuntime, global: *core.Object, name: []const u8, methods: []const Method) !*core.Object {
-    const namespace = try createNamespaceObject(rt, global, methods);
+    const namespace = try createNamespaceObject(rt, global, methods, 0);
     errdefer namespace.value().free(rt);
     // `name` (Math/JSON/Reflect/Atomics) is added to the global once
     // per call from `installStandardGlobals` and the names do not
@@ -273,8 +393,13 @@ pub fn defineNamespace(rt: *core.JSRuntime, global: *core.Object, name: []const 
     return namespace;
 }
 
-fn createNamespaceObject(rt: *core.JSRuntime, global: *core.Object, methods: []const Method) !*core.Object {
-    const namespace = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
+fn createNamespaceObject(rt: *core.JSRuntime, global: *core.Object, methods: []const Method, extra_property_count: usize) !*core.Object {
+    const namespace = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        objectPrototypeFromGlobal(rt, global),
+        methods.len + extra_property_count,
+    );
     errdefer namespace.value().free(rt);
     try namespace.setFunctionRealmGlobalPtr(rt, global);
     // Namespace is freshly created and method-table entries are unique
@@ -297,10 +422,10 @@ fn defineLazyNamespace(rt: *core.JSRuntime, global: *core.Object, name: []const 
 
 pub fn materializeBuiltinNamespaceAutoInit(rt: *core.JSRuntime, global: *core.Object, kind: core.property.AutoInitKind) !core.JSValue {
     const namespace = switch (kind) {
-        .math_namespace => try createNamespaceObject(rt, global, &math_methods),
+        .math_namespace => try createNamespaceObject(rt, global, &math_methods, math_namespace_extra_property_count),
         .json_namespace => try createJsonNamespaceObject(rt, global),
-        .reflect_namespace => try createNamespaceObject(rt, global, &reflect_methods),
-        .atomics_namespace => try createNamespaceObject(rt, global, &atomics_methods),
+        .reflect_namespace => try createNamespaceObject(rt, global, &reflect_methods, namespace_to_string_tag_property_count),
+        .atomics_namespace => try createNamespaceObject(rt, global, &atomics_methods, namespace_to_string_tag_property_count),
         else => return error.TypeError,
     };
     errdefer namespace.value().free(rt);
@@ -327,11 +452,15 @@ pub fn materializeBuiltinNamespaceAutoInit(rt: *core.JSRuntime, global: *core.Ob
 }
 
 fn createJsonNamespaceObject(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
-    const namespace = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
+    const namespace = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        objectPrototypeFromGlobal(rt, global),
+        json_methods.len + namespace_to_string_tag_property_count,
+    );
     errdefer namespace.value().free(rt);
     try namespace.setFunctionRealmGlobalPtr(rt, global);
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
-    if (json_methods.len != 0) try namespace.reserveOwnPropertyCapacityAssumingPlain(rt, namespace.properties.len + json_methods.len);
     for (json_methods) |method| {
         const id = @import("json.zig").methodId(method.name) orelse continue;
         const key = try temporaryStringAtom(rt, method.name);
@@ -357,30 +486,145 @@ fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.O
     return expectObject(prototype_value);
 }
 
+const namespace_to_string_tag_property_count: usize = 1;
+const math_constant_property_count: usize = 8;
+const math_namespace_extra_property_count: usize = math_constant_property_count + namespace_to_string_tag_property_count;
+const number_constant_property_count: usize = 8;
+const global_lazy_function_property_count: usize = 15;
+
+pub fn standardGlobalOwnPropertyCapacity() usize {
+    return constructor_specs.len +
+        4 + // Math, JSON, Reflect, Atomics
+        2 + // performance, navigator
+        global_lazy_function_property_count;
+}
+
+fn constructorOwnPropertyCapacity(spec: ConstructorSpec) usize {
+    const prototype_count: usize = if (spec.kind == .proxy) 0 else 1;
+    return 2 + prototype_count + spec.static_methods.len + constructorExtraPropertyCount(spec.kind);
+}
+
+fn prototypeOwnPropertyCapacity(spec: ConstructorSpec) usize {
+    if (spec.kind == .proxy) return 0;
+    const function_prototype_base: usize = if (spec.kind == .function) 2 else 0;
+    return function_prototype_base +
+        spec.prototype_methods.len +
+        1 + // constructor, as data property or Iterator accessor
+        prototypeExtraPropertyCount(spec.kind);
+}
+
+fn constructorExtraPropertyCount(kind: ConstructorKind) usize {
+    return switch (kind) {
+        .symbol => 15,
+        .array => 1,
+        .number => number_constant_property_count,
+        .regexp => 21,
+        .error_ => 1,
+        .dom_exception => dom_exception_constants.len,
+        .promise,
+        .map,
+        .set,
+        .array_buffer,
+        .shared_array_buffer,
+        .typed_array,
+        => 1,
+        .uint8_array => 3,
+        .int8_array,
+        .uint8_clamped_array,
+        .int16_array,
+        .uint16_array,
+        .int32_array,
+        .uint32_array,
+        .float16_array,
+        .float32_array,
+        .float64_array,
+        .bigint64_array,
+        .biguint64_array,
+        => 1,
+        else => 0,
+    };
+}
+
+fn prototypeExtraPropertyCount(kind: ConstructorKind) usize {
+    return switch (kind) {
+        .object => 1,
+        .function => 1,
+        .array => 2,
+        .string => 4,
+        .symbol => 3,
+        .bigint,
+        .promise,
+        .weak_ref,
+        .finalization_registry,
+        => 1,
+        .date => 2,
+        .regexp => 15,
+        .aggregate_error,
+        .suppressed_error,
+        .eval_error,
+        .range_error,
+        .reference_error,
+        .syntax_error,
+        .type_error,
+        .uri_error,
+        => 2,
+        .error_ => 3,
+        .dom_exception => 1 + dom_exception_constants.len,
+        .disposable_stack,
+        .async_disposable_stack,
+        .map,
+        .set,
+        => 3,
+        .weak_map,
+        .weak_set,
+        => 1,
+        .array_buffer => 6,
+        .shared_array_buffer => 4,
+        .typed_array => 8,
+        .uint8_array => 5,
+        .int8_array,
+        .uint8_clamped_array,
+        .int16_array,
+        .uint16_array,
+        .int32_array,
+        .uint32_array,
+        .float16_array,
+        .float32_array,
+        .float64_array,
+        .bigint64_array,
+        .biguint64_array,
+        => 1,
+        .data_view => 4,
+        .iterator => 3,
+        else => 0,
+    };
+}
+
 pub fn defineConstructor(
     rt: *core.JSRuntime,
     global: *core.Object,
     spec: ConstructorSpec,
 ) !core.JSValue {
     const name = spec.name;
-    const constructor_value = try function_builtin.nativeFunction(rt, name, spec.length);
+    const constructor_value = try core.function.nativeFunctionWithLazyNameAndCapacity(rt, name, spec.length, constructorOwnPropertyCapacity(spec));
     errdefer constructor_value.free(rt);
     const constructor = expectObject(constructor_value);
     try constructor.setFunctionRealmGlobalPtr(rt, global);
 
     if (spec.kind != .proxy) {
+        const prototype_capacity = prototypeOwnPropertyCapacity(spec);
         const prototype_value = if (spec.kind == .function)
-            try function_builtin.nativeFunction(rt, "", 0)
+            try core.function.nativeFunctionWithLazyNameAndCapacity(rt, "", 0, prototype_capacity)
         else if (spec.kind == .array)
-            (try core.Object.create(rt, core.class.ids.array, null)).value()
+            (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.array, null, prototype_capacity)).value()
         else if (spec.kind == .string)
-            (try core.Object.create(rt, core.class.ids.string, null)).value()
+            (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.string, null, prototype_capacity)).value()
         else if (spec.kind == .number)
-            (try core.Object.create(rt, core.class.ids.number, null)).value()
+            (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.number, null, prototype_capacity)).value()
         else if (spec.kind == .boolean)
-            (try core.Object.create(rt, core.class.ids.boolean, null)).value()
+            (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.boolean, null, prototype_capacity)).value()
         else
-            (try core.Object.create(rt, core.class.ids.object, null)).value();
+            (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, prototype_capacity)).value();
         errdefer prototype_value.free(rt);
         const prototype = expectObject(prototype_value);
         try prototype.setFunctionRealmGlobalPtr(rt, global);
@@ -401,12 +645,8 @@ pub fn defineConstructor(
             try prototype.setOptionalValueSlot(rt, prototype.objectDataSlot(), core.JSValue.boolean(false));
         }
         if (isErrorConstructorKind(spec.kind)) {
-            const proto_name = try constructorNameStringValueOrCreate(rt, constructor, name);
-            defer proto_name.free(rt);
-            try defineDataAssumingNew(rt, prototype, "name", proto_name, Flags{ .writable = true, .enumerable = false, .configurable = true });
-            const proto_message = try createBuiltinAsciiStringValue(rt, "");
-            defer proto_message.free(rt);
-            try defineDataAssumingNew(rt, prototype, "message", proto_message, Flags{ .writable = true, .enumerable = false, .configurable = true });
+            try defineStringConstantAtomAssumingNew(rt, prototype, core.atom.ids.name, name, Flags{ .writable = true, .enumerable = false, .configurable = true });
+            try defineStringConstantAtomAssumingNew(rt, prototype, core.atom.predefinedId("message", .string).?, "", Flags{ .writable = true, .enumerable = false, .configurable = true });
         }
         // Constructor is freshly created above; "prototype" is unique
         // among its existing visible properties (length / name).
@@ -470,7 +710,7 @@ fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: 
 
 pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
-    try global.reserveOwnPropertyCapacityAssumingPlain(rt, 99);
+    try global.reserveOwnPropertyCapacityAssumingPlain(rt, standardGlobalOwnPropertyCapacity());
     var installed_constructors: [constructor_specs.len]?*core.Object = @splat(null);
     for (constructor_specs, 0..) |spec, index| {
         {
@@ -486,6 +726,9 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
             try defineNativeMethodsAssumingNew(rt, constructor, spec.static_methods);
             switch (spec.kind) {
                 .object => {
+                    const object_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .object_prototype);
+                    try global.setOptionalValueSlot(rt, cached, object_proto.value().dup());
                     try bindObjectStaticNativeRecords(rt, constructor);
                     try installObjectPrototypeExtras(rt, constructor);
                     try bindObjectPrototypeNativeRecords(rt, constructor);
@@ -493,14 +736,17 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                 .symbol => try installSymbolExtras(rt, constructor),
                 .array => {
                     constructor.arrayBuiltinMarkerSlot().* = .constructor;
+                    const array_proto = constructorPrototypeObject(rt, constructor) orelse return error.InvalidBuiltinRegistry;
+                    const cached = try global.cachedRealmValueSlot(rt, .array_prototype);
+                    try global.setOptionalValueSlot(rt, cached, array_proto.value().dup());
                     try bindArrayNativeRecords(rt, constructor);
-                    try installArrayPrototypeSymbols(rt, constructor);
+                    try installArrayPrototypeSymbols(rt, global, constructor);
                     try tagArrayPrototypeMethods(rt, constructor);
                     try bindArrayPrototypeNativeRecords(rt, constructor);
                 },
                 .string => {
                     constructor.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.string, @intFromEnum(@import("string.zig").ConstructorMethod.call));
-                    try installStringPrototypeAliases(rt, constructor);
+                    try installStringPrototypeAliases(rt, global, constructor);
                     try bindStringNativeRecords(rt, constructor);
                 },
                 .number => {
@@ -530,7 +776,7 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                 },
                 .date => {
                     try bindDateNativeRecords(rt, constructor);
-                    try installDatePrototypeAliases(rt, constructor);
+                    try installDatePrototypeAliases(rt, global, constructor);
                 },
                 .function => {
                     try installFunctionPrototypeExtras(rt, constructor);
@@ -555,8 +801,8 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                 .data_view => try installDataViewExtras(rt, constructor),
                 .iterator => try installIteratorExtras(rt, global, constructor),
                 .dom_exception => try installDOMExceptionExtras(rt, constructor),
-                .disposable_stack => try installDisposableStackExtras(rt, constructor),
-                .async_disposable_stack => try installAsyncDisposableStackExtras(rt, constructor),
+                .disposable_stack => try installDisposableStackExtras(rt, global, constructor),
+                .async_disposable_stack => try installAsyncDisposableStackExtras(rt, global, constructor),
                 else => {},
             }
             switch (spec.kind) {
@@ -566,14 +812,13 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
             if (primitivePrototypeTagForKind(spec.kind)) |tag| try bindPrimitivePrototypeNativeRecordsWithTag(rt, constructor, tag);
             if (typedArrayElementSpecForKind(spec.kind)) |element| {
                 try installTypedArrayElementSize(rt, constructor, element.size, element.kind);
-                try installTypedArraySpecies(rt, constructor);
                 try installTypedArrayArrayBufferPrototype(rt, global, constructor);
             }
             if (spec.kind == .uint8_array) try installUint8ArrayCodecExtras(rt, constructor);
             if (collectionNameForKind(spec.kind)) |collection_name| try installCollectionExtras(rt, global, collection_name, constructor);
         }
     }
-    try wireStandardConstructorGraph(rt, &installed_constructors);
+    try wireStandardConstructorGraph(rt, global, &installed_constructors);
     const object_ctor = installedConstructor(&installed_constructors, .object) orelse return error.InvalidBuiltinRegistry;
     const object_proto = constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
     try global.setPrototype(rt, object_proto);
@@ -586,8 +831,8 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try installNavigator(rt, global);
 
     const number_mod = @import("number.zig");
-    try defineGlobalSharedLazyNativeFunction(rt, global, "parseInt", 2, .number, @intFromEnum(number_mod.StaticMethod.parse_int), 1);
-    try defineGlobalSharedLazyNativeFunction(rt, global, "parseFloat", 1, .number, @intFromEnum(number_mod.StaticMethod.parse_float), 2);
+    try defineGlobalSharedLazyNativeFunction(rt, global, "parseInt", 2, .number, @intFromEnum(number_mod.StaticMethod.parse_int), shared_lazy_parse_int_slot);
+    try defineGlobalSharedLazyNativeFunction(rt, global, "parseFloat", 1, .number, @intFromEnum(number_mod.StaticMethod.parse_float), shared_lazy_parse_float_slot);
     const number_constructor = installedConstructor(&installed_constructors, .number) orelse return error.InvalidBuiltinRegistry;
     try installNumberParseAliases(rt, global, number_constructor);
     try installNumberConstants(rt, number_constructor);
@@ -625,8 +870,8 @@ fn installNumberParseAliases(rt: *core.JSRuntime, global: *core.Object, number: 
         id: u32,
         cache_slot: u8,
     }{
-        .{ .name = "parseInt", .length = 2, .id = @intFromEnum(number_mod.StaticMethod.parse_int), .cache_slot = 1 },
-        .{ .name = "parseFloat", .length = 1, .id = @intFromEnum(number_mod.StaticMethod.parse_float), .cache_slot = 2 },
+        .{ .name = "parseInt", .length = 2, .id = @intFromEnum(number_mod.StaticMethod.parse_int), .cache_slot = shared_lazy_parse_int_slot },
+        .{ .name = "parseFloat", .length = 1, .id = @intFromEnum(number_mod.StaticMethod.parse_float), .cache_slot = shared_lazy_parse_float_slot },
     };
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
     for (aliases) |alias| {
@@ -657,7 +902,7 @@ fn installNumberConstants(rt: *core.JSRuntime, number: *core.Object) !void {
     }
 }
 
-fn wireStandardConstructorGraph(rt: *core.JSRuntime, constructors: []const ?*core.Object) !void {
+fn wireStandardConstructorGraph(rt: *core.JSRuntime, global: *core.Object, constructors: []const ?*core.Object) !void {
     const object_ctor = installedConstructor(constructors, .object) orelse return error.InvalidBuiltinRegistry;
     const object_proto = constructorPrototypeObject(rt, object_ctor) orelse return error.InvalidBuiltinRegistry;
 
@@ -692,45 +937,31 @@ fn wireStandardConstructorGraph(rt: *core.JSRuntime, constructors: []const ?*cor
         } else {
             try proto.setPrototype(rt, object_proto);
         }
-        if (spec.kind == .object) {
-            const proto_key = core.atom.predefinedId("__proto__", .string).?;
-            const proto_desc = proto.getOwnProperty(proto_key) orelse continue;
-            defer proto_desc.destroy(rt);
-            if (proto_desc.kind == .accessor) {
-                const call_key = core.atom.predefinedId("call", .string).?;
-                const call_value = function_proto.getProperty(call_key);
-                defer call_value.free(rt);
-                if (proto_desc.getter.isObject()) try defineData(rt, expectObject(proto_desc.getter), "call", call_value, Flags{ .writable = true, .enumerable = false, .configurable = true });
-                if (proto_desc.setter.isObject()) try defineData(rt, expectObject(proto_desc.setter), "call", call_value, Flags{ .writable = true, .enumerable = false, .configurable = true });
-            }
-        }
     }
     try installObjectConstructorPrimitivePrototypes(rt, constructors, object_ctor);
     try wireTypedArrayConstructorGraph(rt, constructors);
-    try installTypedArrayIntrinsicExtras(rt, constructors);
+    try installTypedArrayIntrinsicExtras(rt, global, constructors);
 }
 
-fn installTypedArrayIntrinsicExtras(rt: *core.JSRuntime, constructors: []const ?*core.Object) !void {
+fn installTypedArrayIntrinsicExtras(rt: *core.JSRuntime, global: *core.Object, constructors: []const ?*core.Object) !void {
     const typed_array_ctor = installedConstructor(constructors, .typed_array) orelse return;
     try installTypedArraySpecies(rt, typed_array_ctor);
     try tagTypedArrayStaticMethods(rt, typed_array_ctor);
     const proto = constructorPrototypeObject(rt, typed_array_ctor) orelse return;
-    if (installedConstructor(constructors, .array)) |array_ctor| {
-        if (constructorPrototypeObject(rt, array_ctor)) |array_proto| {
-            const to_string_key = core.atom.predefinedId("toString", .string).?;
-            const array_to_string = array_proto.getProperty(to_string_key);
-            defer array_to_string.free(rt);
-            if (array_to_string.isObject()) {
-                try defineData(rt, proto, "toString", array_to_string, method_flags);
-            }
-        }
-    }
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 8);
+    const to_string_atom = core.atom.predefinedId("toString", .string).?;
+    const to_string_native_id = core.function.nativeBuiltinId(.array, @intFromEnum(array_builtin.PrototypeMethod.to_string));
+    try replaceSharedLazyNativeMethod(rt, proto, global, to_string_atom, "toString", 0, to_string_native_id, shared_lazy_array_to_string_slot);
     try defineLazyNativeMethod(rt, proto, .{ .name = "set", .length = 1 });
     try defineLazyNativeMethod(rt, proto, .{ .name = "subarray", .length = 2 });
     const values_atom = core.atom.predefinedId("values", .string).?;
-    const values_value = proto.getProperty(values_atom);
-    defer values_value.free(rt);
-    try defineDataAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, values_value, method_flags);
+    const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
+    try replaceSharedLazyNativeMethod(rt, proto, global, values_atom, "values", 0, 0, shared_lazy_typed_array_values_slot);
+    try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "values", 0, 0, shared_lazy_typed_array_values_slot);
+    if (!tagAutoInitArrayIteratorKindByAtom(proto, values_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayIteratorKindByAtom(proto, iterator_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitTypedArrayBuiltinByAtom(proto, values_atom, .prototype_method)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitTypedArrayBuiltinByAtom(proto, iterator_atom, .prototype_method)) return error.InvalidBuiltinRegistry;
     try tagArrayIteratorMethod(rt, proto, "keys", 1);
     try tagArrayIteratorMethod(rt, proto, "values", 2);
     try tagArrayIteratorMethod(rt, proto, "entries", 3);
@@ -1189,16 +1420,20 @@ fn installTypedArrayElementSize(rt: *core.JSRuntime, ctor: *core.Object, size: i
     const flags = Flags{ .writable = false, .enumerable = false, .configurable = false };
     const prop_flags = core.property.Flags.data(flags.writable, flags.enumerable, flags.configurable);
     const bytes_key = core.atom.predefinedId("BYTES_PER_ELEMENT", .string).?;
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
     try ctor.defineInt32ConstantAutoInitProperty(rt, bytes_key, "BYTES_PER_ELEMENT", size, prop_flags);
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 1);
     try proto.defineInt32ConstantAutoInitProperty(rt, bytes_key, "BYTES_PER_ELEMENT", size, prop_flags);
 }
 
 fn installUint8ArrayCodecExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 2);
     try defineLazyNativeMethod(rt, ctor, .{ .name = "fromBase64", .length = 1 });
     try defineLazyNativeMethod(rt, ctor, .{ .name = "fromHex", .length = 1 });
 
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 4);
     try defineLazyNativeMethod(rt, proto, .{ .name = "setFromBase64", .length = 1 });
     try defineLazyNativeMethod(rt, proto, .{ .name = "setFromHex", .length = 1 });
     try defineLazyNativeMethod(rt, proto, .{ .name = "toBase64", .length = 0 });
@@ -1268,25 +1503,30 @@ fn tagTypedArrayPrototypeMethods(rt: *core.JSRuntime, proto: *core.Object) !void
 
 fn installTypedArrayPrototypeAccessors(rt: *core.JSRuntime, proto: *core.Object) !void {
     const flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    const accessors = [_][]const u8{ "buffer", "byteLength", "byteOffset", "length" };
-    for (accessors) |name| {
-        var getter_name_buf: [64]u8 = undefined;
-        const getter_name = try std.fmt.bufPrint(&getter_name_buf, "get {s}", .{name});
-        const getter = try function_builtin.nativeFunction(rt, getter_name, 0);
-        defer getter.free(rt);
-        if (buffer_builtin.typedArrayAccessorMethodId(name)) |id| {
-            expectObject(getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.buffer, id);
-        }
-        const key = core.atom.predefinedId(name, .string) orelse return error.InvalidBuiltinRegistry;
-        try defineAccessorAtom(rt, proto, key, getter, core.JSValue.undefinedValue(), flags);
+    const accessors = [_]struct {
+        property_name: []const u8,
+        getter_name: []const u8,
+    }{
+        .{ .property_name = "buffer", .getter_name = "get buffer" },
+        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
+        .{ .property_name = "byteOffset", .getter_name = "get byteOffset" },
+        .{ .property_name = "length", .getter_name = "get length" },
+    };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + accessors.len + 1);
+    for (accessors) |accessor| {
+        const native_id = if (buffer_builtin.typedArrayAccessorMethodId(accessor.property_name)) |id|
+            core.function.nativeBuiltinId(.buffer, id)
+        else
+            0;
+        const key = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
+        try defineLazyNativeGetterAtom(rt, proto, key, accessor.getter_name, native_id, flags);
     }
 
-    const tag_getter = try function_builtin.nativeFunction(rt, "get [Symbol.toStringTag]", 0);
-    defer tag_getter.free(rt);
-    if (buffer_builtin.typedArrayAccessorMethodId("[Symbol.toStringTag]")) |id| {
-        expectObject(tag_getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.buffer, id);
-    }
-    try defineAccessorAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_getter, core.JSValue.undefinedValue(), flags);
+    const tag_native_id = if (buffer_builtin.typedArrayAccessorMethodId("[Symbol.toStringTag]")) |id|
+        core.function.nativeBuiltinId(.buffer, id)
+    else
+        0;
+    try defineLazyNativeGetterAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "get [Symbol.toStringTag]", tag_native_id, flags);
 }
 
 const object_static = [_]Method{
@@ -1878,21 +2118,19 @@ const performance_methods = [_]Method{
 fn installSymbolExtras(rt: *core.JSRuntime, symbol_ctor: *core.Object) !void {
     try installWellKnownSymbolProperties(rt, symbol_ctor);
     const proto = constructorPrototypeObject(rt, symbol_ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 3);
 
-    const desc_getter = try function_builtin.nativeFunction(rt, "get description", 0);
-    defer desc_getter.free(rt);
     const description_key = core.atom.predefinedId("description", .string).?;
-    try defineAccessorAtom(rt, proto, description_key, desc_getter, core.JSValue.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineLazyNativeGetterAtom(rt, proto, description_key, "get description", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
 
     const to_primitive_flags = core.property.Flags.data(false, false, true);
     try proto.defineAutoInitProperty(rt, core.atom.predefinedId("Symbol.toPrimitive", .symbol).?, "[Symbol.toPrimitive]", 1, to_primitive_flags);
 
-    const tag_value = try constructorNameStringValueOrCreate(rt, symbol_ctor, "Symbol");
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "Symbol", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installWellKnownSymbolProperties(rt: *core.JSRuntime, symbol_ctor: *core.Object) !void {
+    try symbol_ctor.reserveOwnPropertyCapacityAssumingPlain(rt, symbol_ctor.properties.len + 15);
     try defineWellKnownSymbol(rt, symbol_ctor, "toPrimitive", "Symbol.toPrimitive");
     try defineWellKnownSymbol(rt, symbol_ctor, "species", "Symbol.species");
     try defineWellKnownSymbol(rt, symbol_ctor, "iterator", "Symbol.iterator");
@@ -1912,24 +2150,30 @@ fn installWellKnownSymbolProperties(rt: *core.JSRuntime, symbol_ctor: *core.Obje
 
 fn defineWellKnownSymbol(rt: *core.JSRuntime, symbol_ctor: *core.Object, name: []const u8, symbol_name: []const u8) !void {
     const symbol_atom = core.atom.predefinedId(symbol_name, .symbol) orelse return error.InvalidBuiltinRegistry;
-    try defineData(rt, symbol_ctor, name, core.JSValue.symbol(symbol_atom), Flags{ .writable = false, .enumerable = false, .configurable = false });
+    try defineDataAssumingNew(rt, symbol_ctor, name, core.JSValue.symbol(symbol_atom), Flags{ .writable = false, .enumerable = false, .configurable = false });
 }
 
-fn installArrayPrototypeSymbols(rt: *core.JSRuntime, ctor: *core.Object) !void {
+fn installArrayPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    proto.is_array = true;
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 2);
+    proto.is_array = true;
 
-    const species_getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer species_getter.free(rt);
-    expectObject(species_getter).arrayBuiltinMarkerSlot().* = .species_getter;
-    try defineAccessorAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, species_getter, core.JSValue.undefinedValue(), accessor_flags);
+    const species_atom = core.atom.predefinedId("Symbol.species", .symbol).?;
+    try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", 0, accessor_flags);
+    if (!tagAutoInitArrayBuiltinByAtom(ctor, species_atom, .species_getter)) return error.InvalidBuiltinRegistry;
 
-    const values_atom = core.atom.predefinedId("values", .string).?;
-    const values_value = proto.getProperty(values_atom);
-    defer values_value.free(rt);
     const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
-    try defineDataAtom(rt, proto, iterator_atom, values_value, method_flags);
+    const values_atom = core.atom.predefinedId("values", .string).?;
+    const values_native_id = core.function.nativeBuiltinId(.array, @intFromEnum(array_builtin.PrototypeMethod.values));
+    const to_string_atom = core.atom.predefinedId("toString", .string).?;
+    const to_string_native_id = core.function.nativeBuiltinId(.array, @intFromEnum(array_builtin.PrototypeMethod.to_string));
+    try replaceSharedLazyNativeMethod(rt, proto, global, to_string_atom, "toString", 0, to_string_native_id, shared_lazy_array_to_string_slot);
+    try replaceSharedLazyNativeMethod(rt, proto, global, values_atom, "values", 0, values_native_id, shared_lazy_array_values_slot);
+    try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "values", 0, values_native_id, shared_lazy_array_values_slot);
+    if (!tagAutoInitArrayIteratorKindByAtom(proto, values_atom, 2)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitArrayIteratorKindByAtom(proto, iterator_atom, 2)) return error.InvalidBuiltinRegistry;
 
     const unscopables_atom = core.atom.predefinedId("Symbol.unscopables", .symbol).?;
     try proto.defineArrayUnscopablesAutoInitProperty(
@@ -1941,87 +2185,94 @@ fn installArrayPrototypeSymbols(rt: *core.JSRuntime, ctor: *core.Object) !void {
 
 fn installArrayBufferExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    const species_getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer species_getter.free(rt);
-    try defineAccessorAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, species_getter, core.JSValue.undefinedValue(), accessor_flags);
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
+    try defineLazyNativeGetterAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, "get [Symbol.species]", 0, accessor_flags);
 
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    const accessors = [_][]const u8{ "byteLength", "detached", "maxByteLength", "resizable", "immutable" };
-    for (accessors) |name| {
-        var getter_name_buf: [64]u8 = undefined;
-        const getter_name = try std.fmt.bufPrint(&getter_name_buf, "get {s}", .{name});
-        const getter = try function_builtin.nativeFunction(rt, getter_name, 0);
-        defer getter.free(rt);
-        if (buffer_builtin.arrayBufferAccessorMethodId(name)) |id| {
-            expectObject(getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.buffer, id);
-        }
-        const atom = try temporaryStringAtom(rt, name);
+    const accessors = [_]struct {
+        property_name: []const u8,
+        getter_name: []const u8,
+    }{
+        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
+        .{ .property_name = "detached", .getter_name = "get detached" },
+        .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength" },
+        .{ .property_name = "resizable", .getter_name = "get resizable" },
+        .{ .property_name = "immutable", .getter_name = "get immutable" },
+    };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + accessors.len + 1);
+    for (accessors) |accessor| {
+        const native_id = if (buffer_builtin.arrayBufferAccessorMethodId(accessor.property_name)) |id|
+            core.function.nativeBuiltinId(.buffer, id)
+        else
+            0;
+        const atom = try temporaryStringAtom(rt, accessor.property_name);
         defer freeTemporaryStringAtom(rt, atom);
-        try defineAccessorAtom(rt, proto, atom, getter, core.JSValue.undefinedValue(), accessor_flags);
+        try defineLazyNativeGetterAtom(rt, proto, atom, accessor.getter_name, native_id, accessor_flags);
     }
 
-    const tag_value = try constructorNameStringValueOrCreate(rt, ctor, "ArrayBuffer");
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "ArrayBuffer", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installSharedArrayBufferExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    const species_getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer species_getter.free(rt);
-    try defineAccessorAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, species_getter, core.JSValue.undefinedValue(), accessor_flags);
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
+    try defineLazyNativeGetterAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, "get [Symbol.species]", 0, accessor_flags);
 
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    const accessors = [_][]const u8{ "byteLength", "maxByteLength", "growable" };
-    for (accessors) |name| {
-        var getter_name_buf: [64]u8 = undefined;
-        const getter_name = try std.fmt.bufPrint(&getter_name_buf, "get {s}", .{name});
-        const getter = try function_builtin.nativeFunction(rt, getter_name, 0);
-        defer getter.free(rt);
-        if (buffer_builtin.sharedArrayBufferAccessorMethodId(name)) |id| {
-            expectObject(getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.buffer, id);
-        }
-        const atom = core.atom.predefinedId(name, .string) orelse return error.InvalidBuiltinRegistry;
-        try defineAccessorAtom(rt, proto, atom, getter, core.JSValue.undefinedValue(), accessor_flags);
+    const accessors = [_]struct {
+        property_name: []const u8,
+        getter_name: []const u8,
+    }{
+        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
+        .{ .property_name = "maxByteLength", .getter_name = "get maxByteLength" },
+        .{ .property_name = "growable", .getter_name = "get growable" },
+    };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + accessors.len + 1);
+    for (accessors) |accessor| {
+        const native_id = if (buffer_builtin.sharedArrayBufferAccessorMethodId(accessor.property_name)) |id|
+            core.function.nativeBuiltinId(.buffer, id)
+        else
+            0;
+        const atom = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
+        try defineLazyNativeGetterAtom(rt, proto, atom, accessor.getter_name, native_id, accessor_flags);
     }
 
-    const tag_value = try constructorNameStringValueOrCreate(rt, ctor, "SharedArrayBuffer");
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "SharedArrayBuffer", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installDataViewExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    const accessors = [_][]const u8{ "buffer", "byteLength", "byteOffset" };
-    for (accessors) |name| {
-        var getter_name_buf: [64]u8 = undefined;
-        const getter_name = try std.fmt.bufPrint(&getter_name_buf, "get {s}", .{name});
-        const getter = try function_builtin.nativeFunction(rt, getter_name, 0);
-        defer getter.free(rt);
-        if (buffer_builtin.dataViewAccessorMethodId(name)) |id| {
-            expectObject(getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.buffer, id);
-        }
-        const atom = core.atom.predefinedId(name, .string) orelse return error.InvalidBuiltinRegistry;
-        try defineAccessorAtom(rt, proto, atom, getter, core.JSValue.undefinedValue(), accessor_flags);
+    const accessors = [_]struct {
+        property_name: []const u8,
+        getter_name: []const u8,
+    }{
+        .{ .property_name = "buffer", .getter_name = "get buffer" },
+        .{ .property_name = "byteLength", .getter_name = "get byteLength" },
+        .{ .property_name = "byteOffset", .getter_name = "get byteOffset" },
+    };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + accessors.len + 1);
+    for (accessors) |accessor| {
+        const native_id = if (buffer_builtin.dataViewAccessorMethodId(accessor.property_name)) |id|
+            core.function.nativeBuiltinId(.buffer, id)
+        else
+            0;
+        const atom = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
+        try defineLazyNativeGetterAtom(rt, proto, atom, accessor.getter_name, native_id, accessor_flags);
     }
     for (data_view_prototype) |method| {
         const id = buffer_builtin.dataViewPrototypeMethodId(method.name) orelse continue;
         try bindNativeRecordByName(rt, proto, method.name, .buffer, id);
     }
 
-    const tag_value = try constructorNameStringValueOrCreate(rt, ctor, "DataView");
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "DataView", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
-fn installDatePrototypeAliases(rt: *core.JSRuntime, ctor: *core.Object) !void {
+fn installDatePrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    const to_utc_key = core.atom.predefinedId("toUTCString", .string).?;
-    const to_gmt_key = core.atom.predefinedId("toGMTString", .string).?;
-    const to_utc_value = proto.getProperty(to_utc_key);
-    defer to_utc_value.free(rt);
-    try proto.defineOwnProperty(rt, to_gmt_key, core.Descriptor.data(to_utc_value, true, false, true));
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 2);
+    const to_utc_id = core.function.nativeBuiltinId(.date, @intFromEnum(date_builtin.PrototypeMethod.to_utc_string));
+    try installSharedLazyNativeMethodAlias(rt, proto, global, "toUTCString", "toGMTString", "toUTCString", 0, to_utc_id, shared_lazy_date_to_utc_string_slot);
 
     const to_primitive_atom = core.atom.predefinedId("Symbol.toPrimitive", .symbol).?;
     const to_primitive_flags = core.property.Flags.data(false, false, true);
@@ -2038,6 +2289,7 @@ fn installDatePrototypeAliases(rt: *core.JSRuntime, ctor: *core.Object) !void {
 
 fn installFunctionPrototypeExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 1);
     try bindNativeRecordByName(rt, proto, "toString", .function, @intFromEnum(function_builtin.PrototypeMethod.to_string));
 
     const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.InvalidBuiltinRegistry;
@@ -2047,32 +2299,28 @@ fn installFunctionPrototypeExtras(rt: *core.JSRuntime, ctor: *core.Object) !void
 
 fn installErrorPrototypeExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 1);
     try bindNativeRecordByName(rt, proto, "toString", .error_object, @intFromEnum(error_builtin.PrototypeMethod.to_string));
-
-    const getter = try function_builtin.nativeFunction(rt, "get stack", 0);
-    defer getter.free(rt);
-    const getter_object = expectObject(getter);
-    try getter_object.setFunctionRealmGlobalPtr(rt, proto.functionRealmGlobalPtr());
-    getter_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.error_object, @intFromEnum(error_builtin.PrototypeMethod.stack_getter));
-
-    const setter = try function_builtin.nativeFunction(rt, "set stack", 1);
-    defer setter.free(rt);
-    const setter_object = expectObject(setter);
-    try setter_object.setFunctionRealmGlobalPtr(rt, proto.functionRealmGlobalPtr());
-    setter_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.error_object, @intFromEnum(error_builtin.PrototypeMethod.stack_setter));
 
     const stack_key = try temporaryStringAtom(rt, "stack");
     defer freeTemporaryStringAtom(rt, stack_key);
-    try defineAccessorAtom(rt, proto, stack_key, getter, setter, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineLazyNativeAccessorPairAtom(
+        rt,
+        proto,
+        stack_key,
+        "get stack",
+        core.function.nativeBuiltinId(.error_object, @intFromEnum(error_builtin.PrototypeMethod.stack_getter)),
+        1,
+        core.function.nativeBuiltinId(.error_object, @intFromEnum(error_builtin.PrototypeMethod.stack_setter)),
+        Flags{ .writable = false, .enumerable = false, .configurable = true },
+        proto.functionRealmGlobalPtr(),
+    );
 }
 
 fn installPromiseExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.InvalidBuiltinRegistry;
-    const getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer getter.free(rt);
-    const getter_object = expectObject(getter);
-    try function_builtin.defineNativeMethod(rt, getter_object, "call", 1);
-    try defineAccessorAtom(rt, ctor, species_atom, getter, core.JSValue.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
+    try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
     try global.setCachedPromiseProto(rt, constructorPrototypeObject(rt, ctor));
 }
 
@@ -2080,6 +2328,7 @@ fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.
     _ = global;
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 4);
 
     for (iterator_static) |method| {
         const id = iterator_builtin.staticMethodId(method.name) orelse return error.InvalidBuiltinRegistry;
@@ -2106,28 +2355,39 @@ fn installIteratorExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.
         core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.PrototypeMethod.dispose)),
     );
 
-    const constructor_getter = try function_builtin.nativeFunction(rt, "get constructor", 0);
-    defer constructor_getter.free(rt);
-    expectObject(constructor_getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.constructor_getter));
-    const constructor_setter = try function_builtin.nativeFunction(rt, "set constructor", 1);
-    defer constructor_setter.free(rt);
-    expectObject(constructor_setter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.constructor_setter));
-    try defineAccessorAtom(rt, proto, core.atom.ids.constructor, constructor_getter, constructor_setter, accessor_flags);
+    try defineLazyNativeAccessorPairAtom(
+        rt,
+        proto,
+        core.atom.ids.constructor,
+        "get constructor",
+        core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.constructor_getter)),
+        1,
+        core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.constructor_setter)),
+        accessor_flags,
+        null,
+    );
 
-    const tag_getter = try function_builtin.nativeFunction(rt, "get [Symbol.toStringTag]", 0);
-    defer tag_getter.free(rt);
-    expectObject(tag_getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.to_string_tag_getter));
-    const tag_setter = try function_builtin.nativeFunction(rt, "set [Symbol.toStringTag]", 1);
-    defer tag_setter.free(rt);
-    expectObject(tag_setter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.to_string_tag_setter));
-    try defineAccessorAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_getter, tag_setter, accessor_flags);
+    try defineLazyNativeAccessorPairAtom(
+        rt,
+        proto,
+        core.atom.predefinedId("Symbol.toStringTag", .symbol).?,
+        "get [Symbol.toStringTag]",
+        core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.to_string_tag_getter)),
+        1,
+        core.function.nativeBuiltinId(.iterator, @intFromEnum(iterator_builtin.AccessorMethod.to_string_tag_setter)),
+        accessor_flags,
+        null,
+    );
 }
 
-fn installStringPrototypeAliases(rt: *core.JSRuntime, ctor: *core.Object) !void {
+fn installStringPrototypeAliases(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 4);
     try defineData(rt, proto, "length", core.JSValue.int32(0), Flags{ .writable = false, .enumerable = false, .configurable = true });
-    try aliasPrototypeMethod(rt, proto, "trimLeft", "trimStart");
-    try aliasPrototypeMethod(rt, proto, "trimRight", "trimEnd");
+    const trim_start_id = core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.PrototypeMethod.trim_start));
+    try installSharedLazyNativeMethodAlias(rt, proto, global, "trimStart", "trimLeft", "trimStart", 0, trim_start_id, shared_lazy_string_trim_start_slot);
+    const trim_end_id = core.function.nativeBuiltinId(.string, @intFromEnum(string_builtin.PrototypeMethod.trim_end));
+    try installSharedLazyNativeMethodAlias(rt, proto, global, "trimEnd", "trimRight", "trimEnd", 0, trim_end_id, shared_lazy_string_trim_end_slot);
     const iterator_flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
     try proto.defineAutoInitProperty(rt, core.atom.predefinedId("Symbol.iterator", .symbol).?, "[Symbol.iterator]", 0, iterator_flags);
 }
@@ -2135,13 +2395,9 @@ fn installStringPrototypeAliases(rt: *core.JSRuntime, ctor: *core.Object) !void 
 fn installObjectPrototypeExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
 
-    const getter = try function_builtin.nativeFunction(rt, "get __proto__", 0);
-    defer getter.free(rt);
-    const setter = try function_builtin.nativeFunction(rt, "set __proto__", 1);
-    defer setter.free(rt);
     const proto_key = try rt.internAtom("__proto__");
     defer rt.atoms.free(proto_key);
-    try defineAccessorAtom(rt, proto, proto_key, getter, setter, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineLazyNativeAccessorPairAtom(rt, proto, proto_key, "get __proto__", 0, 1, 0, Flags{ .writable = false, .enumerable = false, .configurable = true }, null);
 }
 
 fn tagArrayPrototypeMethods(rt: *core.JSRuntime, ctor: *core.Object) !void {
@@ -2225,6 +2481,7 @@ fn primitivePrototypeTagForKind(kind: ConstructorKind) ?i32 {
 fn installRegExpExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     try bindRegExpPrototypeNativeRecords(rt, proto);
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 21);
 
     const escape_key = try rt.internAtom("escape");
     defer rt.atoms.free(escape_key);
@@ -2242,6 +2499,7 @@ fn installRegExpExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
         .{ .symbol = "Symbol.search", .name = "[Symbol.search]", .length = 1 },
         .{ .symbol = "Symbol.split", .name = "[Symbol.split]", .length = 2 },
     };
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + symbol_methods.len + 10);
     for (symbol_methods) |method| {
         const id = regexp_builtin.prototypeMethodId(method.name) orelse return error.InvalidBuiltinRegistry;
         const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
@@ -2257,66 +2515,66 @@ fn installRegExpExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     }
 
     const accessor_flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    const accessors = [_][]const u8{
-        "source",
-        "flags",
-        "global",
-        "ignoreCase",
-        "multiline",
-        "dotAll",
-        "unicode",
-        "sticky",
-        "hasIndices",
-        "unicodeSets",
+    const accessors = [_]struct {
+        property_name: []const u8,
+        getter_name: []const u8,
+    }{
+        .{ .property_name = "source", .getter_name = "get source" },
+        .{ .property_name = "flags", .getter_name = "get flags" },
+        .{ .property_name = "global", .getter_name = "get global" },
+        .{ .property_name = "ignoreCase", .getter_name = "get ignoreCase" },
+        .{ .property_name = "multiline", .getter_name = "get multiline" },
+        .{ .property_name = "dotAll", .getter_name = "get dotAll" },
+        .{ .property_name = "unicode", .getter_name = "get unicode" },
+        .{ .property_name = "sticky", .getter_name = "get sticky" },
+        .{ .property_name = "hasIndices", .getter_name = "get hasIndices" },
+        .{ .property_name = "unicodeSets", .getter_name = "get unicodeSets" },
     };
-    for (accessors) |name| {
-        var getter_name_buf: [64]u8 = undefined;
-        const getter_name = try std.fmt.bufPrint(&getter_name_buf, "get {s}", .{name});
-        const getter = try function_builtin.nativeFunction(rt, getter_name, 0);
-        defer getter.free(rt);
-        if (regexp_builtin.accessorMethodId(name)) |id| {
-            expectObject(getter).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.regexp, id);
-        }
-        const key = core.atom.predefinedId(name, .string) orelse return error.InvalidBuiltinRegistry;
-        try defineAccessorAtom(rt, proto, key, getter, core.JSValue.undefinedValue(), accessor_flags);
+    for (accessors) |accessor| {
+        const native_id = if (regexp_builtin.accessorMethodId(accessor.property_name)) |id|
+            core.function.nativeBuiltinId(.regexp, id)
+        else
+            0;
+        const key = core.atom.predefinedId(accessor.property_name, .string) orelse return error.InvalidBuiltinRegistry;
+        try defineLazyNativeGetterAtom(rt, proto, key, accessor.getter_name, native_id, accessor_flags);
     }
 
-    const species_getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer species_getter.free(rt);
-    try defineAccessorAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, species_getter, core.JSValue.undefinedValue(), accessor_flags);
+    try defineLazyNativeGetterAtom(rt, ctor, core.atom.predefinedId("Symbol.species", .symbol).?, "get [Symbol.species]", 0, accessor_flags);
 
     try installRegExpLegacyAccessors(rt, ctor);
 }
 
 fn installRegExpLegacyAccessors(rt: *core.JSRuntime, ctor: *core.Object) !void {
-    _ = try ctor.ensureRegExpLegacyStatics(rt);
     const flags = Flags{ .writable = false, .enumerable = false, .configurable = true };
-    try defineRegExpLegacyAccessor(rt, ctor, "input", .get_input, .set_input, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "$_", .get_input, .set_input, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "lastMatch", .get_last_match, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "$&", .get_last_match, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "lastParen", .get_last_paren, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "$+", .get_last_paren, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "leftContext", .get_left_context, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "$`", .get_left_context, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "rightContext", .get_right_context, null, flags);
-    try defineRegExpLegacyAccessor(rt, ctor, "$'", .get_right_context, null, flags);
-
-    const capture_methods = [_]regexp_builtin.LegacyAccessorMethod{
-        .get_capture_1,
-        .get_capture_2,
-        .get_capture_3,
-        .get_capture_4,
-        .get_capture_5,
-        .get_capture_6,
-        .get_capture_7,
-        .get_capture_8,
-        .get_capture_9,
+    const accessors = [_]struct {
+        name: []const u8,
+        getter_name: []const u8,
+        getter: regexp_builtin.LegacyAccessorMethod,
+        setter: ?regexp_builtin.LegacyAccessorMethod = null,
+    }{
+        .{ .name = "input", .getter_name = "get input", .getter = .get_input, .setter = .set_input },
+        .{ .name = "$_", .getter_name = "get $_", .getter = .get_input, .setter = .set_input },
+        .{ .name = "lastMatch", .getter_name = "get lastMatch", .getter = .get_last_match },
+        .{ .name = "$&", .getter_name = "get $&", .getter = .get_last_match },
+        .{ .name = "lastParen", .getter_name = "get lastParen", .getter = .get_last_paren },
+        .{ .name = "$+", .getter_name = "get $+", .getter = .get_last_paren },
+        .{ .name = "leftContext", .getter_name = "get leftContext", .getter = .get_left_context },
+        .{ .name = "$`", .getter_name = "get $`", .getter = .get_left_context },
+        .{ .name = "rightContext", .getter_name = "get rightContext", .getter = .get_right_context },
+        .{ .name = "$'", .getter_name = "get $'", .getter = .get_right_context },
+        .{ .name = "$1", .getter_name = "get $1", .getter = .get_capture_1 },
+        .{ .name = "$2", .getter_name = "get $2", .getter = .get_capture_2 },
+        .{ .name = "$3", .getter_name = "get $3", .getter = .get_capture_3 },
+        .{ .name = "$4", .getter_name = "get $4", .getter = .get_capture_4 },
+        .{ .name = "$5", .getter_name = "get $5", .getter = .get_capture_5 },
+        .{ .name = "$6", .getter_name = "get $6", .getter = .get_capture_6 },
+        .{ .name = "$7", .getter_name = "get $7", .getter = .get_capture_7 },
+        .{ .name = "$8", .getter_name = "get $8", .getter = .get_capture_8 },
+        .{ .name = "$9", .getter_name = "get $9", .getter = .get_capture_9 },
     };
-    for (capture_methods, 1..) |method, index| {
-        var name_buf: [3]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buf, "${d}", .{index});
-        try defineRegExpLegacyAccessor(rt, ctor, name, method, null, flags);
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + accessors.len);
+    for (accessors) |accessor| {
+        try defineRegExpLegacyAccessor(rt, ctor, accessor.name, accessor.getter_name, accessor.getter, accessor.setter, flags);
     }
 }
 
@@ -2324,38 +2582,29 @@ fn defineRegExpLegacyAccessor(
     rt: *core.JSRuntime,
     ctor: *core.Object,
     name: []const u8,
+    getter_name: []const u8,
     getter_method: regexp_builtin.LegacyAccessorMethod,
     setter_method: ?regexp_builtin.LegacyAccessorMethod,
     flags: Flags,
 ) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    const getter = try regExpLegacyNativeFunction(rt, ctor, "get ", name, getter_method, 0);
-    defer getter.free(rt);
-    const setter = if (setter_method) |method|
-        try regExpLegacyNativeFunction(rt, ctor, "set ", name, method, 1)
-    else
-        core.JSValue.undefinedValue();
-    defer if (setter_method != null) setter.free(rt);
-    try defineAccessorAtom(rt, ctor, key, getter, setter, flags);
-}
-
-fn regExpLegacyNativeFunction(
-    rt: *core.JSRuntime,
-    ctor: *core.Object,
-    prefix: []const u8,
-    name: []const u8,
-    method: regexp_builtin.LegacyAccessorMethod,
-    length: i32,
-) !core.JSValue {
-    var function_name_buf: [64]u8 = undefined;
-    const function_name = try std.fmt.bufPrint(&function_name_buf, "{s}{s}", .{ prefix, name });
-    const value = try function_builtin.nativeFunction(rt, function_name, length);
-    errdefer value.free(rt);
-    const object = expectObject(value);
-    object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.regexp, @intFromEnum(method));
-    try object.setFunctionRealmGlobalPtr(rt, ctor.functionRealmGlobalPtr());
-    return value;
+    const getter_id = core.function.nativeBuiltinId(.regexp, @intFromEnum(getter_method));
+    if (setter_method) |method| {
+        try defineLazyNativeAccessorPairAtom(
+            rt,
+            ctor,
+            key,
+            getter_name,
+            getter_id,
+            1,
+            core.function.nativeBuiltinId(.regexp, @intFromEnum(method)),
+            flags,
+            ctor.functionRealmGlobalPtr(),
+        );
+    } else {
+        try defineLazyNativeGetterAtomWithRealm(rt, ctor, key, getter_name, getter_id, flags, ctor.functionRealmGlobalPtr());
+    }
 }
 
 fn bindRegExpPrototypeNativeRecords(rt: *core.JSRuntime, proto: *core.Object) !void {
@@ -2365,14 +2614,23 @@ fn bindRegExpPrototypeNativeRecords(rt: *core.JSRuntime, proto: *core.Object) !v
     }
 }
 
-fn aliasPrototypeMethod(rt: *core.JSRuntime, proto: *core.Object, alias: []const u8, target: []const u8) !void {
-    const target_key = try rt.internAtom(target);
-    defer rt.atoms.free(target_key);
-    const alias_key = try rt.internAtom(alias);
-    defer rt.atoms.free(alias_key);
-    const target_value = proto.getProperty(target_key);
-    defer target_value.free(rt);
-    try proto.defineOwnProperty(rt, alias_key, core.Descriptor.data(target_value, true, false, true));
+fn installSharedLazyNativeMethodAlias(
+    rt: *core.JSRuntime,
+    proto: *core.Object,
+    global: *core.Object,
+    target: []const u8,
+    alias: []const u8,
+    function_name: []const u8,
+    length: i32,
+    native_builtin_id: i32,
+    shared_cache_slot: u8,
+) !void {
+    const target_key = try temporaryStringAtom(rt, target);
+    defer freeTemporaryStringAtom(rt, target_key);
+    const alias_key = try temporaryStringAtom(rt, alias);
+    defer freeTemporaryStringAtom(rt, alias_key);
+    try replaceSharedLazyNativeMethod(rt, proto, global, target_key, function_name, length, native_builtin_id, shared_cache_slot);
+    try defineSharedLazyNativeMethod(rt, proto, global, alias_key, function_name, length, native_builtin_id, shared_cache_slot);
 }
 
 fn installCollectionExtras(rt: *core.JSRuntime, global: *core.Object, name: []const u8, ctor: *core.Object) !void {
@@ -2380,25 +2638,19 @@ fn installCollectionExtras(rt: *core.JSRuntime, global: *core.Object, name: []co
     try bindCollectionStaticNativeRecords(rt, ctor, name);
     try wireCollectionPrototypeGraph(rt, global, ctor);
     try tagCollectionPrototypeMethods(rt, name, ctor);
-    try installCollectionPrototypeSymbols(rt, name, ctor);
+    try installCollectionPrototypeSymbols(rt, global, name, ctor);
 }
 
 fn installCollectionSpecies(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.InvalidBuiltinRegistry;
-    const getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer getter.free(rt);
-    const getter_object = expectObject(getter);
-    try function_builtin.defineNativeMethod(rt, getter_object, "call", 1);
-    try defineAccessorAtom(rt, ctor, species_atom, getter, core.JSValue.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
+    try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installTypedArraySpecies(rt: *core.JSRuntime, ctor: *core.Object) !void {
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.InvalidBuiltinRegistry;
-    const getter = try function_builtin.nativeFunction(rt, "get [Symbol.species]", 0);
-    defer getter.free(rt);
-    const getter_object = expectObject(getter);
-    try function_builtin.defineNativeMethod(rt, getter_object, "call", 1);
-    try defineAccessorAtom(rt, ctor, species_atom, getter, core.JSValue.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + 1);
+    try defineLazyNativeGetterAtom(rt, ctor, species_atom, "get [Symbol.species]", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installTypedArrayArrayBufferPrototype(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
@@ -2424,54 +2676,55 @@ fn wireCollectionPrototypeGraph(rt: *core.JSRuntime, global: *core.Object, ctor:
     try ctor.setPrototype(rt, function_proto);
 }
 
-fn installCollectionPrototypeSymbols(rt: *core.JSRuntime, name: []const u8, ctor: *core.Object) !void {
+fn installCollectionPrototypeSymbols(rt: *core.JSRuntime, global: *core.Object, name: []const u8, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    const extra_count: usize = if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) 3 else 1;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + extra_count);
 
     if (std.mem.eql(u8, name, "Map") or std.mem.eql(u8, name, "Set")) {
-        const size_getter = try function_builtin.nativeFunction(rt, "get size", 0);
-        defer size_getter.free(rt);
-        const size_getter_object = expectObject(size_getter);
         const owner_class = if (std.mem.eql(u8, name, "Map")) core.class.ids.map else core.class.ids.set;
-        if (!size_getter_object.addCollectionMethodOwnerClass(owner_class)) return error.InvalidBuiltinRegistry;
-        size_getter_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(collection_builtin.PrototypeMethod.size_getter));
-        try defineAccessorAtom(rt, proto, core.atom.predefinedId("size", .string).?, size_getter, core.JSValue.undefinedValue(), Flags{ .writable = false, .enumerable = false, .configurable = true });
+        const size_atom = core.atom.predefinedId("size", .string).?;
+        const native_id = core.function.nativeBuiltinId(.collection, @intFromEnum(collection_builtin.PrototypeMethod.size_getter));
+        try defineLazyNativeGetterAtom(rt, proto, size_atom, "get size", native_id, Flags{ .writable = false, .enumerable = false, .configurable = true });
+        if (!tagAutoInitCollectionOwnerByAtom(proto, size_atom, owner_class)) return error.InvalidBuiltinRegistry;
     }
 
     if (std.mem.eql(u8, name, "Map")) {
-        const entries_atom = try rt.internAtom("entries");
-        defer rt.atoms.free(entries_atom);
-        const entries_value = proto.getProperty(entries_atom);
-        defer entries_value.free(rt);
-        try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, entries_value, method_flags);
+        const entries_atom = core.atom.predefinedId("entries", .string).?;
+        const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
+        const entries_native_id = core.function.nativeBuiltinId(.collection, @intFromEnum(collection_builtin.PrototypeMethod.entries));
+        try replaceSharedLazyNativeMethod(rt, proto, global, entries_atom, "entries", 0, entries_native_id, shared_lazy_map_entries_slot);
+        try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "entries", 0, entries_native_id, shared_lazy_map_entries_slot);
+        if (!tagAutoInitCollectionOwnerByAtom(proto, entries_atom, core.class.ids.map)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(proto, iterator_atom, core.class.ids.map)) return error.InvalidBuiltinRegistry;
     } else if (std.mem.eql(u8, name, "Set")) {
-        const values_atom = try rt.internAtom("values");
-        defer rt.atoms.free(values_atom);
-        const values_value = proto.getProperty(values_atom);
-        defer values_value.free(rt);
-        try defineDataAtom(rt, proto, core.atom.predefinedId("keys", .string).?, values_value, method_flags);
-        try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.iterator", .symbol).?, values_value, method_flags);
+        const values_atom = core.atom.predefinedId("values", .string).?;
+        const keys_atom = core.atom.predefinedId("keys", .string).?;
+        const iterator_atom = core.atom.predefinedId("Symbol.iterator", .symbol).?;
+        const values_native_id = core.function.nativeBuiltinId(.collection, @intFromEnum(collection_builtin.PrototypeMethod.values));
+        try replaceSharedLazyNativeMethod(rt, proto, global, values_atom, "values", 0, values_native_id, shared_lazy_set_values_slot);
+        try replaceSharedLazyNativeMethod(rt, proto, global, keys_atom, "values", 0, values_native_id, shared_lazy_set_values_slot);
+        try defineSharedLazyNativeMethod(rt, proto, global, iterator_atom, "values", 0, values_native_id, shared_lazy_set_values_slot);
+        if (!tagAutoInitCollectionOwnerByAtom(proto, values_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(proto, keys_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
+        if (!tagAutoInitCollectionOwnerByAtom(proto, iterator_atom, core.class.ids.set)) return error.InvalidBuiltinRegistry;
     }
 
-    const tag_value = try createBuiltinAsciiStringValue(rt, collectionTag(name) orelse return error.InvalidBuiltinRegistry);
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, collectionTag(name) orelse return error.InvalidBuiltinRegistry, Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installNamespaceToStringTag(rt: *core.JSRuntime, namespace: *core.Object, tag_name: []const u8) !void {
-    const tag_value = try createBuiltinAsciiStringValue(rt, tag_name);
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, namespace, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, namespace, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_name, Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installPrototypeToStringTag(rt: *core.JSRuntime, tag_name: []const u8, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
-    const tag_value = try constructorNameStringValueOrCreate(rt, ctor, tag_name);
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_name, Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
-fn installDisposableStackExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
+fn installDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 3);
 
     const method_tags = [_]struct { name: []const u8, id: u8 }{
         .{ .name = "use", .id = 1 },
@@ -2490,31 +2743,23 @@ fn installDisposableStackExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
         if (!expectObject(value).addDisposableStackMethod(tag.id)) return error.InvalidBuiltinRegistry;
     }
 
-    const getter = try function_builtin.nativeFunction(rt, "get disposed", 0);
-    defer getter.free(rt);
-    if (!expectObject(getter).addDisposableStackMethod(6)) return error.InvalidBuiltinRegistry;
     const disposed_key = try temporaryStringAtom(rt, "disposed");
     defer freeTemporaryStringAtom(rt, disposed_key);
-    try defineAccessorAtom(
-        rt,
-        proto,
-        disposed_key,
-        getter,
-        core.JSValue.undefinedValue(),
-        Flags{ .writable = false, .enumerable = false, .configurable = true },
-    );
+    try defineLazyNativeGetterAtom(rt, proto, disposed_key, "get disposed", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    if (!tagAutoInitDisposableStackMethodByAtom(proto, disposed_key, 6)) return error.InvalidBuiltinRegistry;
 
-    const dispose_value = proto.getProperty(core.atom.predefinedId("dispose", .string).?);
-    defer dispose_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.ids.Symbol_dispose, dispose_value, method_flags);
+    const dispose_atom = core.atom.predefinedId("dispose", .string).?;
+    try replaceSharedLazyNativeMethod(rt, proto, global, dispose_atom, "dispose", 0, 0, shared_lazy_disposable_stack_dispose_slot);
+    try defineSharedLazyNativeMethod(rt, proto, global, core.atom.ids.Symbol_dispose, "dispose", 0, 0, shared_lazy_disposable_stack_dispose_slot);
+    if (!tagAutoInitDisposableStackMethodByAtom(proto, dispose_atom, 4)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitDisposableStackMethodByAtom(proto, core.atom.ids.Symbol_dispose, 4)) return error.InvalidBuiltinRegistry;
 
-    const tag_value = try createBuiltinAsciiStringValue(rt, "DisposableStack");
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "DisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
-fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
+fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, global: *core.Object, ctor: *core.Object) !void {
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + 3);
 
     const method_tags = [_]struct { name: []const u8, id: u8 }{
         .{ .name = "use", .id = 1 },
@@ -2533,38 +2778,30 @@ fn installAsyncDisposableStackExtras(rt: *core.JSRuntime, ctor: *core.Object) !v
         if (!expectObject(value).addAsyncDisposableStackMethod(tag.id)) return error.InvalidBuiltinRegistry;
     }
 
-    const getter = try function_builtin.nativeFunction(rt, "get disposed", 0);
-    defer getter.free(rt);
-    if (!expectObject(getter).addAsyncDisposableStackMethod(6)) return error.InvalidBuiltinRegistry;
     const disposed_key = try temporaryStringAtom(rt, "disposed");
     defer freeTemporaryStringAtom(rt, disposed_key);
-    try defineAccessorAtom(
-        rt,
-        proto,
-        disposed_key,
-        getter,
-        core.JSValue.undefinedValue(),
-        Flags{ .writable = false, .enumerable = false, .configurable = true },
-    );
+    try defineLazyNativeGetterAtom(rt, proto, disposed_key, "get disposed", 0, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    if (!tagAutoInitAsyncDisposableStackMethodByAtom(proto, disposed_key, 6)) return error.InvalidBuiltinRegistry;
 
     const dispose_async_key = try temporaryStringAtom(rt, "disposeAsync");
     defer freeTemporaryStringAtom(rt, dispose_async_key);
-    const dispose_value = proto.getProperty(dispose_async_key);
-    defer dispose_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.ids.Symbol_asyncDispose, dispose_value, method_flags);
+    try replaceSharedLazyNativeMethod(rt, proto, global, dispose_async_key, "disposeAsync", 0, 0, shared_lazy_async_disposable_stack_dispose_slot);
+    try defineSharedLazyNativeMethod(rt, proto, global, core.atom.ids.Symbol_asyncDispose, "disposeAsync", 0, 0, shared_lazy_async_disposable_stack_dispose_slot);
+    if (!tagAutoInitAsyncDisposableStackMethodByAtom(proto, dispose_async_key, 4)) return error.InvalidBuiltinRegistry;
+    if (!tagAutoInitAsyncDisposableStackMethodByAtom(proto, core.atom.ids.Symbol_asyncDispose, 4)) return error.InvalidBuiltinRegistry;
 
-    const tag_value = try createBuiltinAsciiStringValue(rt, "AsyncDisposableStack");
-    defer tag_value.free(rt);
-    try defineDataAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, tag_value, Flags{ .writable = false, .enumerable = false, .configurable = true });
+    try defineStringConstantAtomAssumingNew(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "AsyncDisposableStack", Flags{ .writable = false, .enumerable = false, .configurable = true });
 }
 
 fn installDOMExceptionExtras(rt: *core.JSRuntime, ctor: *core.Object) !void {
     try installPrototypeToStringTag(rt, "DOMException", ctor);
     const proto = constructorPrototypeObject(rt, ctor) orelse return error.InvalidBuiltinRegistry;
     const flags = Flags{ .writable = false, .enumerable = true, .configurable = false };
+    try ctor.reserveOwnPropertyCapacityAssumingPlain(rt, ctor.properties.len + dom_exception_constants.len);
+    try proto.reserveOwnPropertyCapacityAssumingPlain(rt, proto.properties.len + dom_exception_constants.len);
     for (dom_exception_constants) |constant| {
-        try defineData(rt, ctor, constant.name, core.JSValue.int32(constant.code), flags);
-        try defineData(rt, proto, constant.name, core.JSValue.int32(constant.code), flags);
+        try defineDataAssumingNew(rt, ctor, constant.name, core.JSValue.int32(constant.code), flags);
+        try defineDataAssumingNew(rt, proto, constant.name, core.JSValue.int32(constant.code), flags);
     }
 }
 

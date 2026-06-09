@@ -196,9 +196,8 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 1), core.atom.ids.null_);
     try std.testing.expectEqual(@as(core.Atom, 2), core.atom.ids.false_);
     try std.testing.expectEqual(@as(core.Atom, 3), core.atom.ids.true_);
-    // The core predefined atom layout keeps QuickJS keyword/symbol ordering and
-    // excludes CLI/test262 harness names, which are installed dynamically by the
-    // runner layer.
+    // The core predefined atom layout keeps QuickJS keyword/symbol ordering.
+    // zjs startup-only names live after the registry/setup bands.
     try std.testing.expectEqual(@as(core.Atom, 46), core.atom.last_keyword);
     try std.testing.expectEqual(@as(core.Atom, 45), core.atom.last_strict_keyword);
     try std.testing.expectEqual(@as(core.Atom, 229), core.atom.ids.Symbol_asyncIterator);
@@ -210,8 +209,9 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 381), core.atom.ids.zjs_last_global_setup_name);
     try std.testing.expectEqual(@as(core.Atom, 419), core.atom.ids.zjs_last_global_extra_name);
     try std.testing.expectEqual(@as(core.Atom, 586), core.atom.ids.zjs_last_registry_extra_name);
-    try std.testing.expectEqual(@as(core.Atom, 625), core.atom.ids.zjs_last_startup_name);
-    try std.testing.expectEqual(@as(usize, 625), core.atom.predefined_count);
+    try std.testing.expectEqual(@as(core.Atom, 626), core.atom.ids.scriptArgs);
+    try std.testing.expectEqual(@as(core.Atom, 656), core.atom.ids.zjs_last_startup_name);
+    try std.testing.expectEqual(@as(usize, 656), core.atom.predefined_count);
 
     const brand = core.atom.predefinedById(core.atom.ids.Private_brand).?;
     try std.testing.expectEqual(core.atom.AtomKind.private, brand.kind);

@@ -136,6 +136,9 @@ pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
 }
 
 pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    if (global.cachedRealmValue(.array_prototype)) |stored| {
+        return property_ops.expectObject(stored) catch null;
+    }
     if (global.getOwnDataObjectBorrowed(core.atom.ids.Array)) |constructor| {
         if (constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return prototype;
     }
@@ -601,7 +604,7 @@ pub fn tryFuseTypedArrayConstructLengthPrint(
     if (pc + 5 > code.len or code[pc] != op.get_var) return null;
     const print_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (print_atom != core.atom.predefinedId("print", .string).?) return null;
-    if (!globalHostOutputAutoInit(global, print_atom)) return null;
+    if (!globalHostOutputAutoInit(ctx.runtime, global, print_atom)) return null;
     pc += 5;
     const local_get = decodeTypedArrayLengthPrintLocalGet(code, pc) orelse return null;
     if (local_get.idx != store.local_index) return null;
@@ -2942,6 +2945,23 @@ pub fn qjsArrayPopCall(
     const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
     set_length.free(ctx.runtime);
     try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, index);
+    return value;
+}
+
+pub fn qjsFastDensePrimitiveArrayPop(object: *core.Object) ?core.JSValue {
+    if (!object.is_array or !object.length_writable) return null;
+    if (object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
+    if (object.properties.len != 0) return null;
+    if (object.length == 0) return null;
+
+    const index = object.length - 1;
+    const elements = object.arrayElementsSlot();
+    if (index >= elements.*.len) return null;
+    const value = elements.*[@intCast(index)] orelse return null;
+    if (!qjsCanFastJoinPrimitive(value)) return null;
+
+    elements.*[@intCast(index)] = null;
+    object.length = index;
     return value;
 }
 
@@ -6010,7 +6030,7 @@ pub fn qjsCollectionNativeRecord(
         .entries,
         .get_or_insert,
         .size_getter,
-        => builtins.collection.methodCallWithGlobal(ctx, global, this_value, id, args, &.{}) catch |err| switch (err) {
+        => builtins.collection.methodCallObjectWithGlobal(ctx, global, receiver, id, args, &.{}) catch |err| switch (err) {
             error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
             else => err,
         },

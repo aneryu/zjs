@@ -69,6 +69,7 @@ pub const SimpleNumericKind = enum(u8) {
     arg0_const,
     arg0_arg1,
     capture0_arg0,
+    capture0_post_inc_return,
 };
 
 pub const SimpleStringKind = enum(u8) {

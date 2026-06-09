@@ -215,10 +215,6 @@ pub fn main(init: std.process.Init) !void {
     } else if (runtime_options.perf_json) {
         _ = zjs.activateOpcodeProfile(&opcode_profile);
     }
-    zjs.host.defineArgvGlobals(runtime.context, args[0], args) catch |err| {
-        try printError(io, "zjs: argv setup failed: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
-    };
     zjs.host.defineScriptArgs(runtime.context, commandScriptArgs(command)) catch |err| {
         try printError(io, "zjs: scriptArgs setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);

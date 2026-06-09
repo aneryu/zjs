@@ -242,6 +242,11 @@ fn cacheSimpleNumericBytecode(fb: *bytecode_function.FunctionBytecode) void {
         return;
     }
 
+    if (simpleCapture0PostIncReturn(fb)) {
+        fb.simple_numeric_kind = .capture0_post_inc_return;
+        return;
+    }
+
     if (simplePercentHexBytecode(fb)) fb.simple_string_kind = .percent_hex_byte;
 }
 
@@ -303,6 +308,73 @@ fn isSimpleNumericBinop(opcode_id: u8) bool {
         op.add, op.sub, op.mul, op.div, op.mod => true,
         else => false,
     };
+}
+
+const VarRefOp = struct {
+    idx: u16,
+    next_pc: usize,
+};
+
+fn decodeVarRefGet(code: []const u8, pc: usize) ?VarRefOp {
+    const op = opcode.op;
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.get_var_ref, op.get_var_ref_check => blk: {
+            if (pc + 3 > code.len) return null;
+            break :blk .{
+                .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                .next_pc = pc + 3,
+            };
+        },
+        op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3 => .{
+            .idx = @intCast(code[pc] - op.get_var_ref0),
+            .next_pc = pc + 1,
+        },
+        else => null,
+    };
+}
+
+fn decodeVarRefPut(code: []const u8, pc: usize) ?VarRefOp {
+    const op = opcode.op;
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.put_var_ref, op.put_var_ref_check => blk: {
+            if (pc + 3 > code.len) return null;
+            break :blk .{
+                .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little),
+                .next_pc = pc + 3,
+            };
+        },
+        op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3 => .{
+            .idx = @intCast(code[pc] - op.put_var_ref0),
+            .next_pc = pc + 1,
+        },
+        else => null,
+    };
+}
+
+fn simpleCapture0PostIncReturn(fb: *const bytecode_function.FunctionBytecode) bool {
+    const op = opcode.op;
+    if (fb.is_class_constructor or fb.func_kind != .normal) return false;
+    if (fb.var_count != 0 or fb.cpool_count != 0) return false;
+
+    const code = fb.byte_code;
+    const first_get = decodeVarRefGet(code, 0) orelse return false;
+    if (first_get.idx != 0) return false;
+    var pc = first_get.next_pc;
+    if (pc >= code.len or code[pc] != op.post_inc) return false;
+    pc += 1;
+    const put = decodeVarRefPut(code, pc) orelse return false;
+    if (put.idx != 0) return false;
+    pc = put.next_pc;
+    if (pc >= code.len or code[pc] != op.drop) return false;
+    pc += 1;
+    const second_get = decodeVarRefGet(code, pc) orelse return false;
+    if (second_get.idx != 0) return false;
+    pc = second_get.next_pc;
+    if (pc >= code.len or code[pc] != op.@"return") return false;
+    pc += 1;
+    return pc == code.len;
 }
 
 fn simplePercentHexBytecode(fb: *const bytecode_function.FunctionBytecode) bool {

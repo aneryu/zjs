@@ -126,8 +126,6 @@ pub const host = struct {
         try object.defineStringArrayGlobal(ctx, "execArgv", exec_argv);
     }
 
-
-
     pub fn evalGlobalScriptSource(
         ctx: *JSContext,
         output: ?*std.Io.Writer,
@@ -173,7 +171,6 @@ pub const host = struct {
         defer ctx.runtimePtr().memory.allocator.free(source);
         return evalGlobalScriptSourceCore(ctx, output, global, source, filename);
     }
-
 };
 
 pub const object = struct {
@@ -424,30 +421,43 @@ pub const object = struct {
     }
 
     pub fn defineStringArrayGlobal(ctx: *JSContext, name: []const u8, items: []const []const u8) !void {
-        const rt = ctx.runtimePtr();
-        const global = fromCore(try ctx.globalObject());
-        const values = try rt.memory.alloc(value.Value, items.len);
-        defer rt.memory.free(value.Value, values);
-        var initialized: usize = 0;
-        defer {
-            for (values[0..initialized]) |item| item.free(rt);
-        }
-        for (items, 0..) |item, index| {
-            values[index] = try value.createString(rt, item);
-            initialized += 1;
+        if (items.len == 0) {
+            try defineEmptyArrayGlobal(ctx, name);
+            return;
         }
 
-        const array_prototype = try constructorPrototypeObject(rt, global, "Array");
-        const array = try createArray(rt, array_prototype);
+        const rt = ctx.runtimePtr();
+        const global = fromCore(try ctx.globalObject());
+        const array_prototype = cachedArrayPrototype(global) orelse try constructorPrototypeObject(rt, global, "Array");
+        const array = fromCore(try CoreObject.createArrayWithOwnPropertyCapacity(rt, optionalToCore(array_prototype), items.len));
         const array_value = toValue(array);
         errdefer array_value.free(rt);
         const array_core = toCore(array);
-        for (values, 0..) |item, index| {
-            try array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item, true, true, true));
+        for (items, 0..) |item, index| {
+            const item_value = try value.createString(rt, item);
+            array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item_value, true, true, true)) catch |err| {
+                item_value.free(rt);
+                return err;
+            };
+            item_value.free(rt);
         }
         array_core.length = @intCast(items.len);
         try defineValueProperty(rt, global, name, array_value);
         array_value.free(rt);
+    }
+
+    fn cachedArrayPrototype(global: *Object) ?*Object {
+        const stored = toCore(global).cachedRealmValue(.array_prototype) orelse return null;
+        return fromCore(coreFromValue(stored) orelse return null);
+    }
+
+    fn defineEmptyArrayGlobal(ctx: *JSContext, name: []const u8) !void {
+        const rt = ctx.runtimePtr();
+        const global = fromCore(try ctx.globalObject());
+        const key = try rt.internAtom(name);
+        defer rt.atoms.free(key);
+        const flags = zjs_core.property.Flags.data(true, true, true);
+        try toCore(global).defineEmptyArrayAutoInitProperty(rt, key, flags, toCore(global));
     }
 
     pub fn constructorPrototypeObject(rt: *JSRuntime, global: *Object, name: []const u8) !?*Object {
@@ -489,6 +499,31 @@ test "public object appendArrayValue maintains array length once" {
     defer second.free(rt);
     try std.testing.expectEqual(@as(?i32, 1), first.asInt32());
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
+}
+
+test "public host defineScriptArgs materializes empty array on first read" {
+    const rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try JSContext.create(rt);
+    defer ctx.destroy();
+
+    try host.defineScriptArgs(ctx, &.{"stale"});
+    try host.defineScriptArgs(ctx, &.{});
+    try host.defineScriptArgs(ctx, &.{});
+    const result = try ctx.eval(
+        \\var desc = Object.getOwnPropertyDescriptor(globalThis, "scriptArgs");
+        \\desc.writable === true &&
+        \\desc.enumerable === true &&
+        \\desc.configurable === true &&
+        \\Array.isArray(desc.value) &&
+        \\desc.value.length === 0 &&
+        \\Object.getPrototypeOf(scriptArgs) === Array.prototype &&
+        \\(scriptArgs.push("ok"), scriptArgs.length === 1 && scriptArgs[0] === "ok") &&
+        \\delete globalThis.scriptArgs &&
+        \\!("scriptArgs" in globalThis);
+    , .{});
+    defer result.free(rt);
+    try std.testing.expectEqual(true, result.asBool().?);
 }
 
 test "public Buffer helpers create and copy Uint8Array bytes" {

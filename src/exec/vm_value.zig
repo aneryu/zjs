@@ -281,22 +281,56 @@ fn pushFusedAsciiAtomStringConcat(
 ) !bool {
     const code = function.code;
     const second_op_pc = frame.pc + 4;
-    if (second_op_pc + 6 > code.len) return false;
-    if (code[second_op_pc] != op.push_atom_value) return false;
-    const second_atom = readInt(u32, code[second_op_pc + 1 ..][0..4]);
-    if (code[second_op_pc + 5] != op.add) return false;
-
     var first_buf: [10]u8 = undefined;
-    var second_buf: [10]u8 = undefined;
     const first = atomAsciiText(ctx.runtime, first_atom, &first_buf) orelse return false;
-    const second = atomAsciiText(ctx.runtime, second_atom, &second_buf) orelse return false;
+    if (second_op_pc < code.len and code[second_op_pc] == op.push_atom_value) {
+        if (second_op_pc + 6 > code.len) return false;
+        const second_atom = readInt(u32, code[second_op_pc + 1 ..][0..4]);
+        if (code[second_op_pc + 5] != op.add) return false;
 
-    const out = try core.string.String.createLatin1Concat(ctx.runtime, first, second);
+        var second_buf: [10]u8 = undefined;
+        const second = atomAsciiText(ctx.runtime, second_atom, &second_buf) orelse return false;
+        const out = try core.string.String.createLatin1Concat(ctx.runtime, first, second);
+        const value = out.value();
+        errdefer value.free(ctx.runtime);
+        try stack.pushOwned(value);
+        frame.pc = second_op_pc + 6;
+        return true;
+    }
+    const second_int = immediateInt32Operand(code, second_op_pc) orelse return false;
+    if (second_int.next_pc >= code.len or code[second_int.next_pc] != op.add) return false;
+
+    var int_buf: [16]u8 = undefined;
+    const digits = formatI32Decimal(&int_buf, second_int.value);
+    const out = try core.string.String.createLatin1Concat(ctx.runtime, first, digits);
     const value = out.value();
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
-    frame.pc = second_op_pc + 6;
+    frame.pc = second_int.next_pc + 1;
     return true;
+}
+
+fn formatI32Decimal(buffer: *[16]u8, value: i32) []const u8 {
+    if (value == 0) {
+        buffer[buffer.len - 1] = '0';
+        return buffer[buffer.len - 1 ..];
+    }
+
+    var index = buffer.len;
+    var magnitude: u32 = if (value < 0)
+        @as(u32, @intCast(-(value + 1))) + 1
+    else
+        @intCast(value);
+    while (magnitude != 0) {
+        index -= 1;
+        buffer[index] = '0' + @as(u8, @intCast(magnitude % 10));
+        magnitude /= 10;
+    }
+    if (value < 0) {
+        index -= 1;
+        buffer[index] = '-';
+    }
+    return buffer[index..];
 }
 
 fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: *[10]u8) ?[]const u8 {

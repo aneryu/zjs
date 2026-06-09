@@ -101,7 +101,6 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, kind: u32, prototype: ?*core.
     const class_id = collectionClassId(kind) orelse return error.TypeError;
     const object = try core.Object.create(rt, class_id, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    if (class_id == core.class.ids.map or class_id == core.class.ids.set) try defineCollectionSizeProperty(rt, object, 0);
     if (prototype == null) try defineNativeMethods(rt, object, class_id);
     return object.value();
 }
@@ -146,6 +145,25 @@ pub fn methodCallWithGlobal(
 ) !core.JSValue {
     const object = try expectObject(object_value);
     return methodCallResolved(ctx.runtime, ctx, global, object, method, args, globals);
+}
+
+pub fn methodCallObjectWithGlobal(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    object: *core.Object,
+    method: u32,
+    args: []const core.JSValue,
+    globals: []globals_mod.Slot,
+) !core.JSValue {
+    return methodCallResolved(ctx.runtime, ctx, global, object, method, args, globals);
+}
+
+pub fn readOnlyMethodCallObject(rt: *core.JSRuntime, object: *core.Object, method: PrototypeMethod, key: core.JSValue) !core.JSValue {
+    return switch (method) {
+        .get => mapGet(rt, object, key),
+        .has => collectionHas(rt, object, key),
+        else => error.TypeError,
+    };
 }
 
 fn methodCallResolved(
@@ -230,6 +248,11 @@ pub fn methodCallDroppedResult(rt: *core.JSRuntime, object: *core.Object, method
             try setAddNoResult(rt, object, value);
             return true;
         },
+        @intFromEnum(PrototypeMethod.delete) => {
+            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            try collectionDeleteNoResult(rt, object, key);
+            return true;
+        },
         else => return false,
     }
 }
@@ -270,7 +293,8 @@ fn mapSet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: c
 
 fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     if (object.class_id == core.class.ids.weakmap) {
-        try setWeakMapEntry(rt, object, key, value);
+        const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
+        try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
         return;
     }
 
@@ -286,18 +310,22 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
         old_value.free(rt);
     } else {
         const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
-        try appendStrongEntryAndUpdateSize(rt, object, entry);
+        try appendStrongEntryOwned(rt, object, entry);
     }
 }
 
 pub fn setWeakMapEntry(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     if (object.class_id != core.class.ids.weakmap) return error.TypeError;
     const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
-    try setWeakMapEntryByIdentity(rt, object, key_identity, value);
+    try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
 }
 
 pub fn setWeakMapEntryByIdentity(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (object.class_id != core.class.ids.weakmap) return error.TypeError;
+    try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
+}
+
+fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (findWeakEntry(object, key_identity)) |index| {
         const entry = &object.weakCollectionEntriesSlot().*[index];
         try rt.writeBarrierValueAt(&object.header, value, &entry.value);
@@ -378,10 +406,7 @@ pub fn mapSetLatin1PrefixInt32Range(
         inserted = true;
     }
 
-    if (inserted) {
-        try defineCollectionSizeProperty(rt, object, @intCast(strongSize(object)));
-        inserted = false;
-    }
+    if (inserted) inserted = false;
 }
 
 const CollectionIteratorKind = enum(u8) {
@@ -795,7 +820,7 @@ fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value.dup();
     const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
-    try appendStrongEntryAndUpdateSize(rt, object, entry);
+    try appendStrongEntryOwned(rt, object, entry);
     return value.dup();
 }
 
@@ -849,7 +874,7 @@ fn mapGetOrInsertComputed(
         return value;
     }
     const entry = core.object.CollectionEntry{ .key = canonical_key.dup(), .value = value.dup() };
-    try appendStrongEntryAndUpdateSize(rt, object, entry);
+    try appendStrongEntryOwned(rt, object, entry);
     return value;
 }
 
@@ -896,22 +921,30 @@ fn collectionHas(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !
 }
 
 fn collectionDelete(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
+    return core.JSValue.boolean(try collectionDeleteBool(rt, object, key));
+}
+
+fn collectionDeleteNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !void {
+    _ = try collectionDeleteBool(rt, object, key);
+}
+
+fn collectionDeleteBool(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !bool {
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return core.JSValue.boolean(false);
-        const index = findWeakEntry(object, key_identity) orelse return core.JSValue.boolean(false);
+        const key_identity = weakKeyIdentity(rt, key) orelse return false;
+        const index = findWeakEntry(object, key_identity) orelse return false;
         try removeWeakEntry(rt, object, index);
-        return core.JSValue.boolean(true);
+        return true;
     }
 
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
-    const index = findStrongEntry(object, key) orelse return core.JSValue.boolean(false);
-    try removeStrongEntryAndUpdateSize(rt, object, index);
-    return core.JSValue.boolean(true);
+    const index = findStrongEntry(object, key) orelse return false;
+    removeStrongEntry(rt, object, index);
+    return true;
 }
 
 fn collectionClear(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.set) {
-        try clearStrongEntriesAndUpdateSize(rt, object);
+        clearStrongEntries(rt, object);
         return core.JSValue.undefinedValue();
     }
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
@@ -942,7 +975,7 @@ fn setAddNoResult(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue
     defer canonical_value.free(rt);
     if (findStrongEntry(object, canonical_value) == null) {
         const entry = core.object.CollectionEntry{ .key = canonical_value.dup(), .value = core.JSValue.undefinedValue() };
-        try appendStrongEntryAndUpdateSize(rt, object, entry);
+        try appendStrongEntryOwned(rt, object, entry);
     }
 }
 
@@ -988,7 +1021,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
                     const canonical_key = canonicalizeKey(key);
                     defer canonical_key.free(rt);
                     if (findStrongEntry(result, canonical_key)) |index| {
-                        try removeStrongEntryAndUpdateSize(rt, result, index);
+                        removeStrongEntry(rt, result, index);
                     }
                 }
             } else {
@@ -1037,7 +1070,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
 
                 if (findStrongEntry(object, canonical_key) != null) {
                     if (findStrongEntry(result, canonical_key)) |index| {
-                        try removeStrongEntryAndUpdateSize(rt, result, index);
+                        removeStrongEntry(rt, result, index);
                     }
                 } else if (findStrongEntry(result, canonical_key) == null) {
                     const out = try setAdd(rt, result, canonical_key);
@@ -1389,7 +1422,7 @@ fn deleteStringFromSet(rt: *core.JSRuntime, set: *core.Object, bytes: []const u8
     const value = try makeString(rt, bytes);
     defer value.free(rt);
     if (findStrongEntry(set, value)) |index| {
-        try removeStrongEntryAndUpdateSize(rt, set, index);
+        removeStrongEntry(rt, set, index);
     }
 }
 
@@ -1880,14 +1913,13 @@ fn appendStrongEntryWithHash(rt: *core.JSRuntime, object: *core.Object, entry: c
     return index;
 }
 
-fn appendStrongEntryAndUpdateSize(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
+fn appendStrongEntryOwned(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
     var entry_owned = true;
     errdefer if (entry_owned) entry.destroy(rt);
     const index = try appendStrongEntry(rt, object, entry);
     entry_owned = false;
     var inserted = true;
     errdefer if (inserted) rollbackLastStrongEntry(rt, object, index);
-    try defineCollectionSizeProperty(rt, object, @intCast(strongSize(object)));
     inserted = false;
 }
 
@@ -1964,7 +1996,7 @@ fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object
     const entries_slot = object.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(object);
-    try rt.registerBorrowedReferenceHolder(object);
+    if (inserted_holder) try rt.registerBorrowedReferenceHolder(object);
     errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(object);
     try ensureWeakIndexForInsert(rt, object, index + 1);
     try object.ensureWeakCollectionEntryCapacity(rt, index + 1);
@@ -2026,13 +2058,8 @@ fn relinkWeakIndex(object: *core.Object) void {
     }
 }
 
-fn removeStrongEntryAndUpdateSize(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
+fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) void {
     const removed = takeStrongEntry(object, index) orelse return;
-    var committed = false;
-    errdefer if (!committed) restoreStrongEntry(object, index, removed);
-
-    try defineCollectionSizeProperty(rt, object, @intCast(strongSize(object)));
-    committed = true;
     removed.destroy(rt);
 }
 
@@ -2061,40 +2088,18 @@ fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !voi
     entries_slot.* = entries_slot.*.ptr[0 .. entries_slot.*.len - 1];
     relinkWeakIndex(object);
     entry.destroy(rt);
-    relinkWeakIndex(object);
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
 
-const RemovedStrongEntry = struct {
-    index: usize,
-    entry: core.object.CollectionEntry,
-};
-
-fn clearStrongEntriesAndUpdateSize(rt: *core.JSRuntime, object: *core.Object) !void {
+fn clearStrongEntries(rt: *core.JSRuntime, object: *core.Object) void {
     const active_count = object.collectionActiveCount();
-    if (active_count == 0) {
-        try defineCollectionSizeProperty(rt, object, 0);
-        return;
-    }
-
-    const removed = try rt.memory.alloc(RemovedStrongEntry, active_count);
-    defer rt.memory.free(RemovedStrongEntry, removed);
-
-    var removed_count: usize = 0;
-    var committed = false;
-    errdefer if (!committed) restoreStrongEntries(object, removed[0..removed_count]);
+    if (active_count == 0) return;
 
     var index: usize = 0;
     while (index < object.collectionEntriesSlot().*.len) : (index += 1) {
         const entry = takeStrongEntry(object, index) orelse continue;
-        removed[removed_count] = .{ .index = index, .entry = entry };
-        removed_count += 1;
+        entry.destroy(rt);
     }
-
-    try defineCollectionSizeProperty(rt, object, 0);
-    committed = true;
-
-    for (removed[0..removed_count]) |item| item.entry.destroy(rt);
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len != 0) @memset(heads.*, strong_no_entry);
 }
@@ -2108,27 +2113,6 @@ fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEn
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
     return entry;
-}
-
-fn restoreStrongEntry(object: *core.Object, index: usize, entry: core.object.CollectionEntry) void {
-    const entries_slot = object.collectionEntriesSlot();
-    std.debug.assert(index < entries_slot.*.len);
-    std.debug.assert(!entries_slot.*[index].active);
-
-    var restored = entry;
-    restored.hash_next = strong_no_entry;
-    entries_slot.*[index] = restored;
-    object.collectionActiveCountSlot().* += 1;
-    linkStrongEntry(object, index);
-}
-
-fn restoreStrongEntries(object: *core.Object, entries: []const RemovedStrongEntry) void {
-    var index = entries.len;
-    while (index != 0) {
-        index -= 1;
-        const item = entries[index];
-        restoreStrongEntry(object, item.index, item.entry);
-    }
 }
 
 fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void {
@@ -2207,13 +2191,6 @@ fn expectObject(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
-}
-
-fn defineCollectionSizeProperty(rt: *core.JSRuntime, object: *core.Object, value: i32) !void {
-    const key = core.atom.predefinedId("size", .string).?;
-    const new_value = core.JSValue.int32(value);
-    if (try object.setOwnWritableDataProperty(rt, key, new_value)) return;
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(new_value, true, true, true));
 }
 
 fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {

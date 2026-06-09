@@ -59,7 +59,8 @@ pub const ids = struct {
     pub const zjs_last_global_setup_name: Atom = 381;
     pub const zjs_last_global_extra_name: Atom = 419;
     pub const zjs_last_registry_extra_name: Atom = 586;
-    pub const zjs_last_startup_name: Atom = 625;
+    pub const scriptArgs: Atom = 626;
+    pub const zjs_last_startup_name: Atom = 656;
 };
 
 pub const last_keyword = ids.await;
@@ -693,6 +694,37 @@ pub const predefined_atoms = [_]PredefinedAtom{
     .{ .id = 623, .name = "Infinity" },
     .{ .id = 624, .name = "__zjs_throw_type_error_function_proto" },
     .{ .id = 625, .name = "__zjs_throw_type_error_intrinsic" },
+    .{ .id = 626, .name = "scriptArgs" },
+    .{ .id = 627, .name = "$_" },
+    .{ .id = 628, .name = "lastMatch" },
+    .{ .id = 629, .name = "$&" },
+    .{ .id = 630, .name = "lastParen" },
+    .{ .id = 631, .name = "$+" },
+    .{ .id = 632, .name = "leftContext" },
+    .{ .id = 633, .name = "$`" },
+    .{ .id = 634, .name = "rightContext" },
+    .{ .id = 635, .name = "$'" },
+    .{ .id = 636, .name = "$1" },
+    .{ .id = 637, .name = "$2" },
+    .{ .id = 638, .name = "$3" },
+    .{ .id = 639, .name = "$4" },
+    .{ .id = 640, .name = "$5" },
+    .{ .id = 641, .name = "$6" },
+    .{ .id = 642, .name = "$7" },
+    .{ .id = 643, .name = "$8" },
+    .{ .id = 644, .name = "$9" },
+    .{ .id = 645, .name = "SuppressedError" },
+    .{ .id = 646, .name = "DisposableStack" },
+    .{ .id = 647, .name = "use" },
+    .{ .id = 648, .name = "adopt" },
+    .{ .id = 649, .name = "defer" },
+    .{ .id = 650, .name = "move" },
+    .{ .id = 651, .name = "disposed" },
+    .{ .id = 652, .name = "AsyncDisposableStack" },
+    .{ .id = 653, .name = "disposeAsync" },
+    .{ .id = 654, .name = "allKeyed" },
+    .{ .id = 655, .name = "allSettledKeyed" },
+    .{ .id = 656, .name = "immutable" },
 };
 
 const PredefinedMapEntry = struct { []const u8, Atom };

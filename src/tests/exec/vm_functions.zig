@@ -195,6 +195,26 @@ test "M1.3: nested FunctionDef captured parent var survives returned closure" {
     try std.testing.expectEqual(@as(i32, 42), result.asInt32().?);
 }
 
+test "M1.3: returned closure can update and return captured counter" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    const result = try parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function(){
+        \\  function counter() {
+        \\    let n = 0;
+        \\    return function next() { n++; return n; };
+        \\  }
+        \\  var next = counter();
+        \\  return next() * 100 + next() * 10 + next();
+        \\})()
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+}
+
 test "M1.3: nested FunctionDef declaration captures var declared later" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
@@ -537,6 +557,19 @@ test "TDZ: closure write to captured const throws TypeError" {
     try std.testing.expectError(error.TypeError, parseStmtAndRunWithTopLevelChildren(rt, ctx,
         \\const k = 11;
         \\function f() { k = 22; }
+        \\f();
+    ));
+}
+
+test "TDZ: closure update and return of captured const throws TypeError" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.Context.create(rt);
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.TypeError, parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\const k = 11;
+        \\function f() { k++; return k; }
         \\f();
     ));
 }

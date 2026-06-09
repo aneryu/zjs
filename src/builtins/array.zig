@@ -36,6 +36,13 @@ const RootedValueCopies = struct {
     }
 };
 
+fn valuesRequireNoRoots(values: []const core.JSValue) bool {
+    for (values) |value| {
+        if (value.requiresRefCount()) return false;
+    }
+    return true;
+}
+
 pub const StaticMethod = enum(u32) {
     from = 1,
     is_array = 2,
@@ -215,6 +222,19 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
 }
 
 pub fn constructLiteralWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    if (valuesRequireNoRoots(values)) {
+        const object = try core.Object.createArray(rt, prototype);
+        var object_owned = true;
+        errdefer if (object_owned) core.Object.destroyFromHeader(rt, &object.header);
+
+        if (try object.initDenseArrayLiteralValuesAssumingEmpty(rt, values)) {
+            object_owned = false;
+            return object.value();
+        }
+        core.Object.destroyFromHeader(rt, &object.header);
+        object_owned = false;
+    }
+
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
     const root_frame = core.runtime.ValueRootFrame{

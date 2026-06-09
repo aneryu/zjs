@@ -806,12 +806,22 @@ pub fn tryFuseLocalStringAppend(
     const code = function.code;
     var store_pc = frame.pc;
     var drop_pc: ?usize = null;
+    var completion_store: ?LocalPut = null;
     if (store_pc < code.len and code[store_pc] == op.dup) {
         store_pc += 1;
         const decoded_store = decodeLocalPut(code, store_pc) orelse return false;
-        const candidate_drop_pc = decoded_store.operand_pc + decoded_store.consume;
-        if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
+        const candidate_next_pc = decoded_store.operand_pc + decoded_store.consume;
+        if (candidate_next_pc < code.len and code[candidate_next_pc] == op.drop) {
+            drop_pc = candidate_next_pc;
+        } else {
+            const candidate_completion = decodeLocalPut(code, candidate_next_pc) orelse return false;
+            if (candidate_completion.idx >= frame.locals.len or candidate_completion.idx >= frame.locals_uninit.len) return false;
+            if (candidate_completion.checked) return false;
+            if (candidate_completion.idx < function.var_is_lexical.len and function.var_is_lexical[candidate_completion.idx]) return false;
+            if (shared_vm.varRefCellFromValue(frame.locals[candidate_completion.idx]) != null) return false;
+            if (candidate_completion.idx < function.var_is_const.len and function.var_is_const[candidate_completion.idx]) return false;
+            completion_store = candidate_completion;
+        }
     }
     const store = decodeLocalPut(code, store_pc) orelse return false;
     const idx = store.idx;
@@ -828,12 +838,27 @@ pub fn tryFuseLocalStringAppend(
         frame.global_lexical_sync_checked and
         idx < frame.global_lexical_sync_slots.len and
         frame.global_lexical_sync_slots[idx];
-    const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
+    const has_completion_ref =
+        completion_store != null and
+        completion_store.?.idx != idx and
+        completion_store.?.idx < frame.locals.len and
+        frame.locals[completion_store.?.idx].same(lhs);
+    const base_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
+    const max_ref_count = base_ref_count + @as(usize, @intFromBool(has_completion_ref));
     if (!try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, max_ref_count)) return false;
 
     const rhs_owned = try stack.pop();
     const lhs_owned = try stack.pop();
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
+    if (completion_store) |completion| {
+        try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], lhs_owned.dup());
+        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+    }
+    frame.pc = if (drop_pc) |drop|
+        drop + 1
+    else if (completion_store) |completion|
+        completion.operand_pc + completion.consume
+    else
+        store.operand_pc + store.consume;
     rhs_owned.free(ctx.runtime);
     lhs_owned.free(ctx.runtime);
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
@@ -991,22 +1016,27 @@ const LocalPut = struct {
     idx: u16,
     operand_pc: usize,
     consume: u8,
+    checked: bool,
 };
 
 fn decodeLocalPut(code: []const u8, pc: usize) ?LocalPut {
     if (pc >= code.len) return null;
     return switch (code[pc]) {
-        op.put_loc0 => .{ .idx = 0, .operand_pc = pc + 1, .consume = 0 },
-        op.put_loc1 => .{ .idx = 1, .operand_pc = pc + 1, .consume = 0 },
-        op.put_loc2 => .{ .idx = 2, .operand_pc = pc + 1, .consume = 0 },
-        op.put_loc3 => .{ .idx = 3, .operand_pc = pc + 1, .consume = 0 },
+        op.put_loc0 => .{ .idx = 0, .operand_pc = pc + 1, .consume = 0, .checked = false },
+        op.put_loc1 => .{ .idx = 1, .operand_pc = pc + 1, .consume = 0, .checked = false },
+        op.put_loc2 => .{ .idx = 2, .operand_pc = pc + 1, .consume = 0, .checked = false },
+        op.put_loc3 => .{ .idx = 3, .operand_pc = pc + 1, .consume = 0, .checked = false },
         op.put_loc8 => blk: {
             if (pc + 2 > code.len) return null;
-            break :blk .{ .idx = code[pc + 1], .operand_pc = pc + 1, .consume = 1 };
+            break :blk .{ .idx = code[pc + 1], .operand_pc = pc + 1, .consume = 1, .checked = false };
         },
-        op.put_loc, op.put_loc_check => blk: {
+        op.put_loc => blk: {
             if (pc + 3 > code.len) return null;
-            break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .operand_pc = pc + 1, .consume = 2 };
+            break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .operand_pc = pc + 1, .consume = 2, .checked = false };
+        },
+        op.put_loc_check => blk: {
+            if (pc + 3 > code.len) return null;
+            break :blk .{ .idx = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little), .operand_pc = pc + 1, .consume = 2, .checked = true };
         },
         else => null,
     };

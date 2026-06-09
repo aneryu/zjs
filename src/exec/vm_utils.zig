@@ -7,6 +7,24 @@ pub fn ensureLocalsCapacity(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: 
     if (idx < frame.locals.len and idx < frame.locals_uninit.len) return;
     const next_len = @max(idx + 1, @max(frame.locals.len, frame.locals_uninit.len));
 
+    if (!frame.locals_on_heap and !frame.locals_uninit_on_heap and
+        next_len <= frame.inline_locals.len and next_len <= frame.inline_locals_uninit.len)
+    {
+        const next_locals = frame.inline_locals[0..next_len];
+        const next_uninit = frame.inline_locals_uninit[0..next_len];
+        if (frame.locals.len != 0 and frame.locals.ptr != next_locals.ptr) {
+            @memcpy(next_locals[0..frame.locals.len], frame.locals);
+        }
+        if (next_len > frame.locals.len) @memset(next_locals[frame.locals.len..next_len], core.JSValue.undefinedValue());
+        if (frame.locals_uninit.len != 0 and frame.locals_uninit.ptr != next_uninit.ptr) {
+            @memcpy(next_uninit[0..frame.locals_uninit.len], frame.locals_uninit);
+        }
+        if (next_len > frame.locals_uninit.len) @memset(next_uninit[frame.locals_uninit.len..next_len], false);
+        frame.locals = next_locals;
+        frame.locals_uninit = next_uninit;
+        return;
+    }
+
     const next_locals = try ctx.runtime.memory.alloc(core.JSValue, next_len);
     errdefer ctx.runtime.memory.free(core.JSValue, next_locals);
     const next_uninit = try ctx.runtime.memory.alloc(bool, next_len);
@@ -19,22 +37,38 @@ pub fn ensureLocalsCapacity(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: 
 
     const old_locals = frame.locals;
     const old_locals_uninit = frame.locals_uninit;
+    const old_locals_on_heap = frame.locals_on_heap;
+    const old_locals_uninit_on_heap = frame.locals_uninit_on_heap;
     frame.locals = next_locals;
     frame.locals_uninit = next_uninit;
-    if (old_locals.len != 0) ctx.runtime.memory.free(core.JSValue, old_locals);
-    if (old_locals_uninit.len != 0) ctx.runtime.memory.free(bool, old_locals_uninit);
+    frame.locals_on_heap = true;
+    frame.locals_uninit_on_heap = true;
+    if (old_locals.len != 0 and old_locals_on_heap) ctx.runtime.memory.free(core.JSValue, old_locals);
+    if (old_locals_uninit.len != 0 and old_locals_uninit_on_heap) ctx.runtime.memory.free(bool, old_locals_uninit);
 }
 
 pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize) !void {
     if (idx < frame.var_refs.len) return;
     const next_len = idx + 1;
+    if (!frame.var_refs_on_heap and next_len <= frame.inline_var_refs.len) {
+        const next = frame.inline_var_refs[0..next_len];
+        if (frame.var_refs.len != 0 and frame.var_refs.ptr != next.ptr) {
+            @memcpy(next[0..frame.var_refs.len], frame.var_refs);
+        }
+        @memset(next[frame.var_refs.len..next_len], core.JSValue.undefinedValue());
+        frame.var_refs = next;
+        return;
+    }
+
     const next = try ctx.runtime.memory.alloc(core.JSValue, next_len);
     errdefer ctx.runtime.memory.free(core.JSValue, next);
     for (frame.var_refs, 0..) |value, i| next[i] = value;
     @memset(next[frame.var_refs.len..next_len], core.JSValue.undefinedValue());
     const old_var_refs = frame.var_refs;
+    const old_var_refs_on_heap = frame.var_refs_on_heap;
     frame.var_refs = next;
-    if (old_var_refs.len != 0) ctx.runtime.memory.free(core.JSValue, old_var_refs);
+    frame.var_refs_on_heap = true;
+    if (old_var_refs.len != 0 and old_var_refs_on_heap) ctx.runtime.memory.free(core.JSValue, old_var_refs);
 }
 
 pub fn catchTargetFromMarker(marker: core.JSValue) ?usize {

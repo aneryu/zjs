@@ -255,6 +255,7 @@ pub fn initializeModuleFunctionDeclarations(
     defer frame_var_refs_root.deinit();
     if (module_var_refs.len != 0) {
         frame.var_refs = try ctx.runtime.memory.alloc(core.JSValue, module_var_refs.len);
+        frame.var_refs_on_heap = true;
         for (module_var_refs, 0..) |value, idx| frame.var_refs[idx] = value.dup();
         rooted_frame_var_refs = frame.var_refs;
     }

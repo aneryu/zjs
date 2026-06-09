@@ -89,6 +89,11 @@ pub fn saveGeneratorExecutionState(
     frame.var_refs = &.{};
     frame.locals_uninit = &.{};
     frame.locals_uninit_count = 0;
+    frame.locals_on_heap = false;
+    frame.locals_uninit_on_heap = false;
+    frame.args_on_heap = false;
+    frame.original_args_on_heap = false;
+    frame.var_refs_on_heap = false;
 
     for (old_stack) |stored| stored.free(ctx.runtime);
     if (old_stack_capacity != 0) {
@@ -161,12 +166,15 @@ fn resumeExecutionStateRaw(
     frame.pc = resume_pc;
     frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
     frame.locals = generator.generatorFrameLocals();
+    frame.locals_on_heap = frame.locals.len != 0;
     frame.args = generator.generatorFrameArgs();
     frame.original_args = &.{};
     frame.args_on_heap = true;
     frame.original_args_on_heap = false;
     frame.var_refs = generator.generatorFrameVarRefs();
+    frame.var_refs_on_heap = frame.var_refs.len != 0;
     frame.locals_uninit = generator.generatorFrameLocalsUninit();
+    frame.locals_uninit_on_heap = frame.locals_uninit.len != 0;
     frame.recomputeLocalsUninitCount();
     frame.global_lexical_sync_slots = &.{};
     frame.global_lexical_sync_indices = &.{};

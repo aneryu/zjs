@@ -613,6 +613,7 @@ pub const GeStats = struct {
     large_alloc_count: usize = 0,
 
     external_bytes: usize = 0,
+    external_untracked_bytes: usize = 0,
     peak_external_bytes: usize = 0,
     external_alloc_count: usize = 0,
     external_free_count: usize = 0,
@@ -668,6 +669,7 @@ pub const Stats = struct {
     nursery_object_count: usize = 0,
 
     external_bytes: usize = 0,
+    external_untracked_bytes: usize = 0,
     peak_external_bytes: usize = 0,
     external_alloc_count: usize = 0,
     external_free_count: usize = 0,
@@ -892,9 +894,26 @@ pub const Registry = struct {
         };
     }
 
+    pub fn reportExternalAllocUntracked(self: *Registry, bytes: usize) void {
+        if (bytes == 0) return;
+        self.stats.external_bytes = std.math.add(usize, self.stats.external_bytes, bytes) catch std.math.maxInt(usize);
+        self.stats.external_untracked_bytes = std.math.add(usize, self.stats.external_untracked_bytes, bytes) catch std.math.maxInt(usize);
+        self.stats.peak_external_bytes = @max(self.stats.peak_external_bytes, self.stats.external_bytes);
+        self.stats.external_alloc_count +|= 1;
+        const weighted = std.math.mul(usize, bytes, self.policy.external_weight) catch std.math.maxInt(usize);
+        self.stats.allocation_debt = std.math.add(usize, self.stats.allocation_debt, weighted) catch std.math.maxInt(usize);
+    }
+
     pub fn reportExternalFree(self: *Registry, bytes: usize) void {
         if (bytes == 0) return;
         self.stats.external_bytes -|= bytes;
+        self.stats.external_free_count +|= 1;
+    }
+
+    pub fn reportExternalFreeUntracked(self: *Registry, bytes: usize) void {
+        if (bytes == 0) return;
+        self.stats.external_bytes -|= bytes;
+        self.stats.external_untracked_bytes -|= bytes;
         self.stats.external_free_count +|= 1;
     }
 
@@ -1169,6 +1188,7 @@ pub const Registry = struct {
             .nursery_tracked_bytes = self.nurseryTrackedBytes(),
             .nursery_object_count = self.nursery_entries.len,
             .external_bytes = self.stats.external_bytes,
+            .external_untracked_bytes = self.stats.external_untracked_bytes,
             .peak_external_bytes = self.stats.peak_external_bytes,
             .external_alloc_count = self.stats.external_alloc_count,
             .external_free_count = self.stats.external_free_count,
@@ -1901,7 +1921,8 @@ pub const Registry = struct {
         if (young_live_bytes != self.stats.young_live_bytes) return error.YoungLiveBytesMismatch;
         if (old_live_bytes != self.stats.old_live_bytes) return error.OldLiveBytesMismatch;
         if (large_object_bytes != self.stats.large_object_bytes) return error.LargeObjectBytesMismatch;
-        if (external_token_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
+        const accounted_external_bytes = std.math.add(usize, external_token_bytes, self.stats.external_untracked_bytes) catch std.math.maxInt(usize);
+        if (accounted_external_bytes != self.stats.external_bytes) return error.ExternalTokenBytesMismatch;
         if (old_live_bytes != self.old_space.live_bytes) return error.OldSpaceLiveBytesMismatch;
         if (large_object_bytes != self.large_space.live_bytes) return error.LargeSpaceLiveBytesMismatch;
         if (self.old_space.live_bytes +| self.old_space.free_bytes > self.old_space.committed_bytes) return error.OldSpaceCommittedBytesMismatch;
@@ -1913,6 +1934,7 @@ pub const Registry = struct {
     pub fn verifyNoExternalTokenLeaks(self: Registry) InvariantError!void {
         if (self.external_tokens.len != 0) return error.LeakedExternalMemoryToken;
         if (self.stats.external_bytes != 0) return error.ExternalTokenBytesMismatch;
+        if (self.stats.external_untracked_bytes != 0) return error.ExternalTokenBytesMismatch;
     }
 
     fn spacePageStateMatches(self: Registry, space: SpaceAccount) bool {

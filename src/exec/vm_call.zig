@@ -77,14 +77,27 @@ pub fn initFrameLocals(
     frame: *frame_mod.Frame,
     eval_local_names: []const core.Atom,
     eval_local_slots: []core.JSValue,
+    use_inline_storage: bool,
 ) !void {
     if (function.var_count == 0) return;
+    var storage_transferred = false;
+    errdefer if (!storage_transferred) frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
 
-    const locals = try ctx.runtime.memory.alloc(core.JSValue, function.var_count);
+    const locals = if (use_inline_storage and function.var_count <= frame.inline_locals.len)
+        frame.inline_locals[0..function.var_count]
+    else blk: {
+        frame.locals_on_heap = true;
+        break :blk try ctx.runtime.memory.alloc(core.JSValue, function.var_count);
+    };
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
 
-    const uninit = try ctx.runtime.memory.alloc(bool, function.var_count);
+    const uninit = if (use_inline_storage and function.var_count <= frame.inline_locals_uninit.len)
+        frame.inline_locals_uninit[0..function.var_count]
+    else blk: {
+        frame.locals_uninit_on_heap = true;
+        break :blk try ctx.runtime.memory.alloc(bool, function.var_count);
+    };
     @memset(uninit, false);
     frame.locals_uninit = uninit;
 
@@ -92,19 +105,30 @@ pub fn initFrameLocals(
         shared_vm.initializeEvalFrameLocals(ctx, function, frame, eval_local_names, eval_local_slots);
     }
     try linkDerivedConstructorThisLocal(ctx, function, frame);
+    storage_transferred = true;
 }
 
-pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, var_refs: []const core.JSValue) !void {
+pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, var_refs: []const core.JSValue, use_inline_storage: bool) !void {
     if (var_refs.len > 0) {
-        const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
+        const owned_refs = if (use_inline_storage and var_refs.len <= frame.inline_var_refs.len)
+            frame.inline_var_refs[0..var_refs.len]
+        else blk: {
+            frame.var_refs_on_heap = true;
+            break :blk try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
+        };
         for (var_refs, 0..) |value, idx| owned_refs[idx] = value.dup();
         frame.var_refs = owned_refs;
         return;
     }
 
     if (function.var_ref_names.len == 0) return;
-    const owned_refs = try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
-    errdefer ctx.runtime.memory.free(core.JSValue, owned_refs);
+    const owned_refs = if (use_inline_storage and function.var_ref_names.len <= frame.inline_var_refs.len)
+        frame.inline_var_refs[0..function.var_ref_names.len]
+    else blk: {
+        frame.var_refs_on_heap = true;
+        break :blk try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
+    };
+    errdefer if (frame.var_refs_on_heap) ctx.runtime.memory.free(core.JSValue, owned_refs);
     var initialized: usize = 0;
     errdefer {
         for (owned_refs[0..initialized]) |*val| val.free(ctx.runtime);
@@ -373,12 +397,13 @@ fn tryFastSimpleNumericCall(
     stack: *stack_mod.Stack,
     argc: u16,
 ) !bool {
-    if (argc == 0 or argc > 2) return false;
+    if (argc > 2) return false;
     const frame_len = @as(usize, argc) + 1;
     if (stack.values.len < frame_len) return false;
     const base = stack.values.len - frame_len;
     const func = stack.values[base];
     const simple = simpleNumericCallable(func) orelse return false;
+    if (argc == 0 and simple.kind != .capture0_post_inc_return) return false;
     const args = stack.values[base + 1 .. stack.values.len];
     const result = simpleNumericCallResult(ctx.runtime, simple, args) catch |err| switch (err) {
         error.NotSimpleNumericCall => return false,
@@ -400,26 +425,29 @@ const SimpleNumericCallable = struct {
     binop: u8,
     rhs: i32,
     capture0: ?core.JSValue = null,
+    capture0_slot: ?core.JSValue = null,
 };
 
 fn simpleNumericCallable(func: core.JSValue) ?SimpleNumericCallable {
     if (func.isFunctionBytecode()) {
         const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
-        return simpleNumericCallableFromBytecode(fb, null);
+        return simpleNumericCallableFromBytecode(fb, null, null);
     }
     const object = shared_vm.functionObjectFromValue(func) orelse return null;
     const function_value = object.functionBytecodeSlot().* orelse return null;
     const fb = shared_vm.functionBytecodeFromValue(function_value) orelse return null;
     const captures = object.functionCapturesSlot().*;
-    const capture0 = if (captures.len != 0) shared_vm.slotValueBorrow(captures[0]) else null;
-    return simpleNumericCallableFromBytecode(fb, capture0);
+    const capture0_slot = if (captures.len != 0) captures[0] else null;
+    const capture0 = if (capture0_slot) |slot| shared_vm.slotValueBorrow(slot) else null;
+    return simpleNumericCallableFromBytecode(fb, capture0, capture0_slot);
 }
 
-fn simpleNumericCallableFromBytecode(fb: *const bytecode.FunctionBytecode, capture0: ?core.JSValue) ?SimpleNumericCallable {
+fn simpleNumericCallableFromBytecode(fb: *const bytecode.FunctionBytecode, capture0: ?core.JSValue, capture0_slot: ?core.JSValue) ?SimpleNumericCallable {
     return switch (fb.simple_numeric_kind) {
         .arg0_const => .{ .kind = .arg0_const, .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs },
         .arg0_arg1 => .{ .kind = .arg0_arg1, .binop = fb.simple_numeric_op, .rhs = 0 },
         .capture0_arg0 => .{ .kind = .capture0_arg0, .binop = fb.simple_numeric_op, .rhs = 0, .capture0 = capture0 orelse return null },
+        .capture0_post_inc_return => .{ .kind = .capture0_post_inc_return, .binop = 0, .rhs = 0, .capture0_slot = capture0_slot orelse return null },
         .none => null,
     };
 }
@@ -440,8 +468,20 @@ fn simpleNumericCallResult(rt: *core.JSRuntime, simple: SimpleNumericCallable, a
             if (!captured.isNumber()) return error.NotSimpleNumericCall;
             return simpleNumericBinary(rt, simple.binop, captured, args[0]);
         },
+        .capture0_post_inc_return => try simpleCapture0PostIncReturn(rt, simple.capture0_slot orelse return error.NotSimpleNumericCall),
         .none => error.NotSimpleNumericCall,
     };
+}
+
+fn simpleCapture0PostIncReturn(rt: *core.JSRuntime, capture0_slot: core.JSValue) !core.JSValue {
+    const cell = shared_vm.varRefCellFromValue(capture0_slot) orelse return error.NotSimpleNumericCall;
+    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return error.NotSimpleNumericCall;
+    const slot = cell.varRefValueSlot();
+    const current_value = slot.* orelse return error.NotSimpleNumericCall;
+    const current = current_value.asInt32() orelse return error.NotSimpleNumericCall;
+    const updated = fastInt32Add(current, 1);
+    try cell.setVarRefValue(rt, updated);
+    return updated;
 }
 
 fn simpleNumericBinary(rt: *core.JSRuntime, binop: u8, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {

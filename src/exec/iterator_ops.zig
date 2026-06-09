@@ -686,6 +686,11 @@ fn simpleForInNext(
     iterator: *core.Object,
     comptime hasValueProperty: anytype,
 ) !void {
+    const atom_keys = iterator.iteratorAtomKeys();
+    if (atom_keys.len != 0) {
+        return try simpleForInNextAtomKeys(ctx, output, global, stack, iterator, atom_keys, hasValueProperty);
+    }
+
     while (true) {
         const index = iterator.iteratorIndexSlot().*;
         if (index >= iterator.length) {
@@ -709,6 +714,42 @@ fn simpleForInNext(
         }
 
         stack.pushAssumeCapacity(key_value);
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+        return;
+    }
+}
+
+fn simpleForInNextAtomKeys(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    iterator: *core.Object,
+    atom_keys: []const core.Atom,
+    comptime hasValueProperty: anytype,
+) !void {
+    while (true) {
+        const index = iterator.iteratorIndexSlot().*;
+        if (index >= atom_keys.len) {
+            try stack.reserveAdditional(2);
+            iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
+            stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+            stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
+            return;
+        }
+
+        const key_atom = atom_keys[index];
+        iterator.iteratorIndexSlot().* = index + 1;
+
+        if ((iterator.iteratorTargetSlot().*)) |source_value| {
+            const source = try property_ops.expectObject(source_value);
+            if (!try hasValueProperty(ctx, output, global, source_value, source, key_atom, null, null)) continue;
+        }
+
+        const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key_atom);
+        errdefer key_value.free(ctx.runtime);
+        try stack.reserveAdditional(2);
+        stack.pushOwnedAssumeCapacity(key_value);
         stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
         return;
     }

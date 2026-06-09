@@ -172,9 +172,10 @@ export const cases = [
         'obj.b = 2;',
         'print(obj.b);',
     ]),
-    supported('prop_delete', 'prop_delete', 'object', 'Delete-like observable missing property result.', [
+    supported('prop_delete', 'prop_delete', 'object', 'Property delete observable result.', [
         'let obj = { a: 1 };',
-        'print(obj.b === undefined);',
+        'print(delete obj.a);',
+        'print(obj.a === undefined);',
     ]),
     supported('array_write', 'array_write', 'array', 'Array indexed write observable result.', [
         'let tab = [7];',
@@ -198,8 +199,8 @@ export const cases = [
         'print(tab.length);',
     ]),
     supported('array_pop', 'array_pop', 'array', 'Array pop observable result.', [
-        'let tab = [2];',
-        'print(tab[0]);',
+        'let tab = [1, 2];',
+        'print(tab.pop());',
         'print(tab.length);',
     ]),
     supported('typed_array_read', 'typed_array_read', 'typedarray', 'Typed array indexed read observable result.', [
@@ -208,7 +209,8 @@ export const cases = [
     ]),
     supported('typed_array_write', 'typed_array_write', 'typedarray', 'Typed array indexed write observable result.', [
         'let tab = new Int32Array(new ArrayBuffer(16));',
-        'print(tab.length);',
+        'tab[0] = 7;',
+        'print(tab[0]);',
     ]),
     supported('global_read', 'global_read', 'global', 'Global variable read observable result.', [
         'let g = 5;',
@@ -340,7 +342,8 @@ export const cases = [
         'print(s.substring(2));',
     ]),
     supported('sort_bench', 'sort_bench', 'sort', 'Sort benchmark deterministic ordered result.', [
-        'let tab = [1, 2, 3];',
+        'let tab = [3, 1, 2];',
+        'tab.sort();',
         'print(tab.join(","));',
     ]),
     supported('int_to_string', 'int_to_string', 'conversion', 'Integer String conversion observable result.', [

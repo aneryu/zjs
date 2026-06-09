@@ -373,6 +373,8 @@ pub const PendingPromiseJob = struct {
     }
 };
 
+const class_prototype_inline_capacity: usize = class.ids.init_count;
+
 pub const JSContext = struct {
     pub const Options = ContextOptions;
     pub const EvalOptions = ContextEvalOptions;
@@ -392,6 +394,7 @@ pub const JSContext = struct {
     backtrace_frames: []BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
     class_prototypes: []JSValue = &.{},
+    class_prototypes_inline: [class_prototype_inline_capacity]JSValue = @splat(JSValue.nullValue()),
     /// Global object, populated lazily by the eval entry path.
     /// Sharing the global across `eval` calls matches QuickJS semantics
     /// (`JS_Eval` reuses the per-context globals) and skips rebuilding every
@@ -425,22 +428,26 @@ pub const JSContext = struct {
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
-        const prototypes = try rt.memory.alloc(JSValue, rt.classes.records.len);
-        errdefer rt.memory.free(JSValue, prototypes);
         self.* = .{
             .runtime = rt,
             .stack_limit = options.stack_size orelse rt.stackSize(),
             .track_unhandled_rejections = options.track_unhandled_rejections,
-            .class_prototypes = prototypes,
             .dynamic_import_callback = options.dynamic_import_callback,
             .dynamic_import_userdata = options.dynamic_import_userdata,
         };
-        @memset(self.class_prototypes, JSValue.nullValue());
+        const initial_len = rt.classes.records.len;
+        if (initial_len <= self.class_prototypes_inline.len) {
+            self.class_prototypes = self.class_prototypes_inline[0..initial_len];
+        } else {
+            const prototypes = try rt.memory.alloc(JSValue, initial_len);
+            errdefer rt.memory.free(JSValue, prototypes);
+            @memset(prototypes, JSValue.nullValue());
+            self.class_prototypes = prototypes;
+        }
         var provider_registered = false;
         errdefer {
             if (provider_registered) rt.unregisterRootProvider(self.rootProvider());
-            rt.memory.free(JSValue, self.class_prototypes);
-            self.class_prototypes = &.{};
+            self.deinitClassPrototypeSlots();
         }
         try rt.registerRootProvider(self.rootProvider());
         provider_registered = true;
@@ -488,6 +495,25 @@ pub const JSContext = struct {
         return self.host_event_loop;
     }
 
+    fn usingInlineClassPrototypes(self: *const JSContext) bool {
+        return self.class_prototypes.ptr == self.class_prototypes_inline[0..].ptr;
+    }
+
+    fn deinitClassPrototypeSlots(self: *JSContext) void {
+        const rt = self.runtime;
+        const class_prototypes = self.class_prototypes;
+        const using_inline = self.usingInlineClassPrototypes();
+        self.class_prototypes = &.{};
+        for (class_prototypes) |*slot| {
+            const value = slot.*;
+            slot.* = JSValue.nullValue();
+            value.free(rt);
+        }
+        if (!using_inline and class_prototypes.len != 0) {
+            rt.memory.free(JSValue, class_prototypes);
+        }
+    }
+
     pub fn ensureClassPrototypeSlot(self: *JSContext, class_id: class.ClassId) !*JSValue {
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) {
@@ -500,8 +526,13 @@ pub const JSContext = struct {
             @memset(next[self.class_prototypes.len..], JSValue.nullValue());
 
             const old = self.class_prototypes;
+            const old_using_inline = self.usingInlineClassPrototypes();
             self.class_prototypes = next;
-            if (old.len != 0) self.runtime.memory.free(JSValue, old);
+            if (old_using_inline) {
+                @memset(old, JSValue.nullValue());
+            } else if (old.len != 0) {
+                self.runtime.memory.free(JSValue, old);
+            }
         }
         return &self.class_prototypes[index];
     }
@@ -562,14 +593,7 @@ pub const JSContext = struct {
             rt.atoms.free(frame.filename);
         }
         if (backtrace_capacity != 0) rt.memory.free(BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
-        const class_prototypes = self.class_prototypes;
-        self.class_prototypes = &.{};
-        for (class_prototypes) |*slot| {
-            const value = slot.*;
-            slot.* = JSValue.nullValue();
-            value.free(rt);
-        }
-        if (class_prototypes.len != 0) rt.memory.free(JSValue, class_prototypes);
+        self.deinitClassPrototypeSlots();
     }
 
     pub fn destroy(self: *JSContext) void {
@@ -610,13 +634,9 @@ pub const JSContext = struct {
         }
     }
 
-
-
     pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
         return store.toArrayBuffer(self);
     }
-
-
 
     fn rootProvider(self: *JSContext) runtime_mod.RootProvider {
         return .{
@@ -788,8 +808,6 @@ pub const JSContext = struct {
         self.backtrace_frames[idx].line_num = line_num;
         self.backtrace_frames[idx].col_num = col_num;
     }
-
-
 
     pub fn takePendingException(self: *JSContext) JSValue {
         if (self.hasUnhandledRejection()) {

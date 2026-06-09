@@ -107,11 +107,17 @@ pub const Frame = struct {
     locals: []JSValue = &.{},
     args: []JSValue = &.{},
     original_args: []JSValue = &.{},
+    inline_locals: [8]JSValue = undefined,
+    inline_locals_uninit: [8]bool = undefined,
     inline_args: [4]JSValue = undefined,
     inline_original_args: [4]JSValue = undefined,
+    inline_var_refs: [4]JSValue = undefined,
+    locals_on_heap: bool = false,
+    locals_uninit_on_heap: bool = false,
     args_on_heap: bool = false,
     original_args_on_heap: bool = false,
     var_refs: []JSValue = &.{},
+    var_refs_on_heap: bool = false,
     eval_local_names: []const Atom = &.{},
     eval_local_slots: []JSValue = &.{},
     eval_var_ref_names: []const Atom = &.{},
@@ -226,9 +232,12 @@ pub const Frame = struct {
         const locals = self.locals;
         const args = self.args;
         const original_args = self.original_args;
+        const locals_on_heap = self.locals_on_heap;
+        const locals_uninit_on_heap = self.locals_uninit_on_heap;
         const args_on_heap = self.args_on_heap;
         const original_args_on_heap = self.original_args_on_heap;
         const var_refs = self.var_refs;
+        const var_refs_on_heap = self.var_refs_on_heap;
         const locals_uninit = self.locals_uninit;
         const global_lexical_sync_slots = self.global_lexical_sync_slots;
         const global_lexical_sync_indices = self.global_lexical_sync_indices;
@@ -236,9 +245,12 @@ pub const Frame = struct {
         self.locals = &.{};
         self.args = &.{};
         self.original_args = &.{};
+        self.locals_on_heap = false;
+        self.locals_uninit_on_heap = false;
         self.args_on_heap = false;
         self.original_args_on_heap = false;
         self.var_refs = &.{};
+        self.var_refs_on_heap = false;
         self.locals_uninit = &.{};
         self.locals_uninit_count = 0;
         self.global_lexical_sync_env = null;
@@ -251,11 +263,11 @@ pub const Frame = struct {
         releaseValueSlice(rt, original_args);
         releaseValueSlice(rt, var_refs);
 
-        if (locals.len != 0) account.free(JSValue, locals);
+        if (locals.len != 0 and locals_on_heap) account.free(JSValue, locals);
         if (args.len != 0 and args_on_heap) account.free(JSValue, args);
         if (original_args.len != 0 and original_args_on_heap) account.free(JSValue, original_args);
-        if (var_refs.len != 0) account.free(JSValue, var_refs);
-        if (locals_uninit.len != 0) account.free(bool, locals_uninit);
+        if (var_refs.len != 0 and var_refs_on_heap) account.free(JSValue, var_refs);
+        if (locals_uninit.len != 0 and locals_uninit_on_heap) account.free(bool, locals_uninit);
         if (global_lexical_sync_slots.len != 0) account.free(bool, global_lexical_sync_slots);
         if (global_lexical_sync_indices.len != 0) account.free(usize, global_lexical_sync_indices);
     }
@@ -288,17 +300,28 @@ pub const Frame = struct {
 
     pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, rt: anytype, index: usize, value: JSValue) !void {
         if (index >= self.locals.len) {
-            const next = try account.alloc(JSValue, index + 1);
-            errdefer account.free(JSValue, next);
-            @memset(next, JSValue.undefinedValue());
-            if (self.locals.len != 0) {
-                const old_locals = self.locals;
-                @memcpy(next[0..self.locals.len], self.locals);
-                self.locals = next;
-                account.free(JSValue, old_locals);
+            const next_len = index + 1;
+            const old_len = self.locals.len;
+            const old_locals_on_heap = self.locals_on_heap;
+            var next_on_heap = false;
+            const next = if (!old_locals_on_heap and next_len <= self.inline_locals.len)
+                self.inline_locals[0..next_len]
+            else blk: {
+                const allocated = try account.alloc(JSValue, next_len);
+                next_on_heap = true;
+                break :blk allocated;
+            };
+            errdefer if (next_on_heap) account.free(JSValue, next);
+            const old_locals = self.locals;
+            if (old_len != 0 and old_locals.ptr == next.ptr) {
+                @memset(next[old_len..], JSValue.undefinedValue());
             } else {
-                self.locals = next;
+                @memset(next, JSValue.undefinedValue());
+                if (old_len != 0) @memcpy(next[0..old_len], old_locals);
             }
+            self.locals = next;
+            self.locals_on_heap = next_on_heap;
+            if (old_locals_on_heap) account.free(JSValue, old_locals);
         } else {
             const next_value = value.dup();
             const old_value = self.locals[index];
@@ -336,4 +359,24 @@ fn dupAtomSlice(rt: *JSRuntime, atoms: []const Atom) ![]Atom {
 fn freeAtomSlice(rt: *JSRuntime, atoms: []Atom) void {
     for (atoms) |atom_id| rt.atoms.free(atom_id);
     if (atoms.len != 0) rt.memory.free(Atom, atoms);
+}
+
+test "Frame setLocal preserves inline locals while growing" {
+    var rt = try JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("frame-inline-local-growth-test");
+    defer rt.atoms.free(name);
+    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer function.deinit(rt);
+
+    var exec_frame = Frame.init(&function);
+    defer exec_frame.deinit(&rt.memory, rt);
+
+    try exec_frame.setLocal(&rt.memory, rt, 0, JSValue.int32(11));
+    try exec_frame.setLocal(&rt.memory, rt, 1, JSValue.int32(22));
+
+    try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].asInt32());
+    try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].asInt32());
+    try std.testing.expect(!exec_frame.locals_on_heap);
 }

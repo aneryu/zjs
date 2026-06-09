@@ -162,6 +162,43 @@ test "latin1 string literal append range fast path accepts i8 loop limits" {
     try std.testing.expectEqual(@as(u64, 0), profile.count[op.add]);
 }
 
+test "host output Number static literal fast path materializes lazy constructor" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var profile = core.OpcodeProfile{};
+    js.runtime.setOpcodeProfile(&profile);
+    defer js.runtime.setOpcodeProfile(null);
+
+    var output_buffer: [32]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print(Number.parseInt("12345", 10));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("12345\n", stream.buffered());
+    try std.testing.expectEqual(@as(u64, 0), profile.count[op.get_field2]);
+    try std.testing.expectEqual(@as(u64, 0), profile.count[op.call1]);
+}
+
+test "empty script eval skips VM frame startup" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var profile = core.OpcodeProfile{};
+    js.runtime.setOpcodeProfile(&profile);
+    defer js.runtime.setOpcodeProfile(null);
+
+    const result = try js.eval("");
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqual(@as(u64, 0), profile.totalOpcodeCount());
+    try std.testing.expectEqual(@as(u64, 0), profile.call_frame_count);
+}
+
 test "short BigInt induction sum range fast path preserves exact results" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -382,11 +419,36 @@ test "Array.prototype.push fast path observes inherited indexed setter" {
     try std.testing.expectEqualStrings("3\n3\n3\nundefined\nfalse\n", stream.buffered());
 }
 
+test "sparse array literal fast paths preserve holes and length semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [160]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\"use strict";
+        \\let a = [1, , 3];
+        \\print(a.length, 0 in a, 1 in a, 2 in a, a[1] === undefined);
+        \\let b = [, ,];
+        \\print(b.length, 0 in b, 1 in b);
+        \\let c = [1];
+        \\Object.defineProperty(c, "0", { configurable: false });
+        \\try { c.length = 0; print("shrink-ok"); } catch (e) { print("shrink-err"); }
+        \\print(c.length, c[0]);
+        \\c.length = 2;
+        \\print(c.length, c[0]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3 true false true true\n2 false false\nshrink-err\n1 1\n2 1\n", stream.buffered());
+}
+
 test "dense array indexed append range preserves ordinary set guards" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    var output_buffer: [256]u8 = undefined;
+    var output_buffer: [512]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\let fast = [];
@@ -394,6 +456,9 @@ test "dense array indexed append range preserves ordinary set guards" {
         \\let sum = 0;
         \\for (let i = 0; i < fast.length; i++) sum += fast[i];
         \\print(fast.length, sum, fast[7]);
+        \\print(eval("let completionArray=[]; for (let i=0; i<4; i++) completionArray[i]=i;"));
+        \\print(eval("let skippedArray=[]; for (let i=4; i<4; i++) skippedArray[i]=i;"));
+        \\print(eval("let contentArray=[]; for (let i=0; i<4; i++) contentArray[i]=i; contentArray.join(',');"));
         \\let masked = [];
         \\let maskedSum = 0;
         \\for (let i = 0; i < 8; i++) masked[i] = (i * 7) & 255;
@@ -434,12 +499,81 @@ test "dense array indexed append range preserves ordinary set guards" {
         \\  print(values[1]);
         \\}
         \\varMaskedGuarded();
+        \\let overwrite = [0,1,2,3,4,5,6,7];
+        \\for (let i = 0; i < 1000; i++) overwrite[i & 7] = i;
+        \\print(overwrite[0], overwrite[7], overwrite.join(","));
+        \\print(eval("let overwriteEval=[0,1,2,3,4,5,6,7]; for (let i=0; i<10; i++) overwriteEval[i&7]=i;"));
+        \\let guardedOverwrite = [,1,2,3,4,5,6,7];
+        \\for (let i = 0; i < 8; i++) guardedOverwrite[i & 7] = i;
+        \\print(seen);
+        \\print(guardedOverwrite.length);
+        \\print(guardedOverwrite[0]);
+        \\print(Object.prototype.hasOwnProperty.call(guardedOverwrite, "0"));
+        \\print(guardedOverwrite[7]);
         \\delete Array.prototype[0];
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("8 28 7\n8 0 49 196\n8:0:49\n0:\n2\n99\nfalse\n0:0:\n2\n99\nfalse\n7\n0:0:0:\n2\n99\nfalse\n7\n", stream.buffered());
+    try std.testing.expectEqualStrings("8 28 7\n3\nundefined\n0,1,2,3\n8 0 49 196\n8:0:49\n0:\n2\n99\nfalse\n0:0:\n2\n99\nfalse\n7\n0:0:0:\n2\n99\nfalse\n7\n992 999 992,993,994,995,996,997,998,999\n9\n0:0:0:0:\n8\n99\nfalse\n7\n", stream.buffered());
+}
+
+test "array map simple callback range preserves closed induction and completion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\const a = [1,2,3,4,5,6,7,8,9,10];
+        \\let out;
+        \\for (let i = 0; i < 100; i++) out = a.map(x => x + 1);
+        \\print(out.length, out[0], out[9]);
+        \\print(eval("const e=[1,2]; let r; for (let j=0; j<4; j++) r=e.map(x=>x+1);"));
+        \\print(eval("const s=[1,2]; let r; for (let k=4; k<4; k++) r=s.map(x=>x+1);"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("10 2 11\n2,3\nundefined\n", stream.buffered());
+}
+
+test "global var induction add range preserves completion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\var sum = 0;
+        \\for (var i = 0; i < 1000; i++) sum += i;
+        \\print(sum, i);
+        \\print(eval("var evalSum=0; for (var j=0; j<4; j++) evalSum += j;"));
+        \\print(eval("var skippedSum=0; for (var k=4; k<4; k++) skippedSum += k;"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("499500 1000\n6\nundefined\n", stream.buffered());
+}
+
+test "short BigInt induction add range preserves completion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let x = 0n;
+        \\for (let i = 0n; i < 4n; i++) x += i;
+        \\print(x);
+        \\print(eval("let y=0n; for (let j=0n; j<4n; j++) y += j;"));
+        \\print(eval("let z=0n; for (let k=4n; k<4n; k++) z += k;"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("6\n6\nundefined\n", stream.buffered());
 }
 
 test "Engine eval executes simple direct eval strings" {
@@ -457,6 +591,27 @@ test "Engine eval executes simple direct eval strings" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("2\n4\n", stream.buffered());
+}
+
+test "Engine eval executes declaration-only side effects" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [192]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\delete globalThis.evalDeclOnlyVar;
+        \\delete globalThis.evalDeclOnlyFunc;
+        \\const indirectEval = (0, eval);
+        \\print(indirectEval("var evalDeclOnlyVar;"));
+        \\print("evalDeclOnlyVar" in globalThis, globalThis.evalDeclOnlyVar);
+        \\print(indirectEval("function evalDeclOnlyFunc(){}"));
+        \\print(typeof evalDeclOnlyFunc, typeof globalThis.evalDeclOnlyFunc);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("undefined\ntrue undefined\nundefined\nfunction function\n", stream.buffered());
 }
 
 test "Engine direct eval follows resolved intrinsic eval binding" {
@@ -1218,6 +1373,215 @@ test "TypedArray defineProperty value conversion may detach buffer" {
         \\    }
         \\}), true);
         \\assert.sameValue(big[0], undefined);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "TypedArray and species accessors follow inherited QuickJS shape" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var typedDesc = Object.getOwnPropertyDescriptor(TypedArray, Symbol.species);
+        \\assert.sameValue(typedDesc.set, undefined);
+        \\assert.sameValue(typeof typedDesc.get, "function");
+        \\assert.sameValue(typedDesc.enumerable, false);
+        \\assert.sameValue(typedDesc.configurable, true);
+        \\assert.sameValue(typedDesc.get.length, 0);
+        \\assert.sameValue(typedDesc.get.name, "get [Symbol.species]");
+        \\assert.sameValue(Object.hasOwn(typedDesc.get, "call"), false);
+        \\assert.sameValue(typedDesc.get.call(Uint8Array), Uint8Array);
+        \\assert.sameValue(Object.hasOwn(Uint8Array, Symbol.species), false);
+        \\assert.sameValue(Object.hasOwn(Float16Array, Symbol.species), false);
+        \\assert.sameValue(Uint8Array[Symbol.species], Uint8Array);
+        \\assert.sameValue(Float16Array[Symbol.species], Float16Array);
+        \\var arrayGetter = Object.getOwnPropertyDescriptor(Array, Symbol.species).get;
+        \\assert.sameValue(Object.hasOwn(arrayGetter, "call"), false);
+        \\assert.sameValue(arrayGetter.call(Array), Array);
+        \\for (var C of [Promise, Map, Set]) {
+        \\    var getter = Object.getOwnPropertyDescriptor(C, Symbol.species).get;
+        \\    assert.sameValue(Object.hasOwn(getter, "call"), false);
+        \\    assert.sameValue(getter.call(C), C);
+        \\}
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Well-known symbol method aliases share lazy native identity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\assert.sameValue(Array.prototype[Symbol.iterator], Array.prototype.values);
+        \\assert.sameValue(Array.prototype[Symbol.iterator].name, "values");
+        \\assert.sameValue([1, 2][Symbol.iterator]().next().value, 1);
+        \\
+        \\assert.sameValue(TypedArray.prototype[Symbol.iterator], TypedArray.prototype.values);
+        \\assert.sameValue(TypedArray.prototype[Symbol.iterator].name, "values");
+        \\assert.sameValue(new Uint8Array([3, 4])[Symbol.iterator]().next().value, 3);
+        \\
+        \\assert.sameValue(Map.prototype[Symbol.iterator], Map.prototype.entries);
+        \\assert.sameValue(Map.prototype[Symbol.iterator].name, "entries");
+        \\assert.sameValue(new Map([["k", 5]])[Symbol.iterator]().next().value[1], 5);
+        \\
+        \\assert.sameValue(Set.prototype.keys, Set.prototype.values);
+        \\assert.sameValue(Set.prototype[Symbol.iterator], Set.prototype.values);
+        \\assert.sameValue(Set.prototype.keys.name, "values");
+        \\assert.sameValue(new Set([6])[Symbol.iterator]().next().value, 6);
+        \\
+        \\assert.sameValue(DisposableStack.prototype[Symbol.dispose], DisposableStack.prototype.dispose);
+        \\assert.sameValue(DisposableStack.prototype[Symbol.dispose].name, "dispose");
+        \\
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose], AsyncDisposableStack.prototype.disposeAsync);
+        \\assert.sameValue(AsyncDisposableStack.prototype[Symbol.asyncDispose].name, "disposeAsync");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Lazy standard native accessors preserve descriptors and receiver markers" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var symbolDesc = Object.getOwnPropertyDescriptor(Symbol.prototype, "description");
+        \\assert.sameValue(typeof symbolDesc.get, "function");
+        \\assert.sameValue(symbolDesc.get.name, "get description");
+        \\assert.sameValue(symbolDesc.get.length, 0);
+        \\assert.sameValue(symbolDesc.set, undefined);
+        \\assert.sameValue(symbolDesc.enumerable, false);
+        \\assert.sameValue(symbolDesc.configurable, true);
+        \\assert.sameValue(symbolDesc.get.call(Symbol("lazy-symbol")), "lazy-symbol");
+        \\
+        \\var mapSizeDesc = Object.getOwnPropertyDescriptor(Map.prototype, "size");
+        \\assert.sameValue(typeof mapSizeDesc.get, "function");
+        \\assert.sameValue(mapSizeDesc.get.name, "get size");
+        \\assert.sameValue(mapSizeDesc.get.length, 0);
+        \\assert.sameValue(mapSizeDesc.set, undefined);
+        \\assert.sameValue(mapSizeDesc.get.call(new Map([["k", 1]])), 1);
+        \\assert.throws(TypeError, function() { mapSizeDesc.get.call(new Set([1])); });
+        \\
+        \\var setSizeDesc = Object.getOwnPropertyDescriptor(Set.prototype, "size");
+        \\assert.sameValue(typeof setSizeDesc.get, "function");
+        \\assert.sameValue(setSizeDesc.get.name, "get size");
+        \\assert.sameValue(setSizeDesc.get.length, 0);
+        \\assert.sameValue(setSizeDesc.set, undefined);
+        \\assert.sameValue(setSizeDesc.get.call(new Set([1, 2])), 2);
+        \\assert.throws(TypeError, function() { setSizeDesc.get.call(new Map()); });
+        \\
+        \\var disposedDesc = Object.getOwnPropertyDescriptor(DisposableStack.prototype, "disposed");
+        \\assert.sameValue(typeof disposedDesc.get, "function");
+        \\assert.sameValue(disposedDesc.get.name, "get disposed");
+        \\assert.sameValue(disposedDesc.get.length, 0);
+        \\assert.sameValue(disposedDesc.set, undefined);
+        \\assert.sameValue(disposedDesc.get.call(new DisposableStack()), false);
+        \\assert.throws(TypeError, function() { disposedDesc.get.call({}); });
+        \\
+        \\var asyncDisposedDesc = Object.getOwnPropertyDescriptor(AsyncDisposableStack.prototype, "disposed");
+        \\assert.sameValue(typeof asyncDisposedDesc.get, "function");
+        \\assert.sameValue(asyncDisposedDesc.get.name, "get disposed");
+        \\assert.sameValue(asyncDisposedDesc.get.length, 0);
+        \\assert.sameValue(asyncDisposedDesc.set, undefined);
+        \\assert.sameValue(asyncDisposedDesc.get.call(new AsyncDisposableStack()), false);
+        \\assert.throws(TypeError, function() { asyncDisposedDesc.get.call({}); });
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "RegExp lazy native accessors preserve descriptor and mutation semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var sourceDesc = Object.getOwnPropertyDescriptor(RegExp.prototype, "source");
+        \\assert.sameValue(typeof sourceDesc.get, "function");
+        \\assert.sameValue(sourceDesc.get.name, "get source");
+        \\assert.sameValue(sourceDesc.get.length, 0);
+        \\assert.sameValue(sourceDesc.set, undefined);
+        \\assert.sameValue(sourceDesc.enumerable, false);
+        \\assert.sameValue(sourceDesc.configurable, true);
+        \\assert.sameValue(sourceDesc.get.call(/ab+c/i), "ab+c");
+        \\assert.sameValue(/ab+c/i.source, "ab+c");
+        \\assert.sameValue(/ab+c/i.flags, "i");
+        \\
+        \\var speciesDesc = Object.getOwnPropertyDescriptor(RegExp, Symbol.species);
+        \\assert.sameValue(typeof speciesDesc.get, "function");
+        \\assert.sameValue(speciesDesc.get.name, "get [Symbol.species]");
+        \\assert.sameValue(speciesDesc.get.length, 0);
+        \\assert.sameValue(speciesDesc.set, undefined);
+        \\assert.sameValue(speciesDesc.get.call(RegExp), RegExp);
+        \\
+        \\(function() {
+        \\  "use strict";
+        \\  var threw = false;
+        \\  try { RegExp.prototype.unicodeSets = 1; } catch (e) { threw = e instanceof TypeError; }
+        \\  assert.sameValue(threw, true);
+        \\})();
+        \\var unicodeSetsDesc = Object.getOwnPropertyDescriptor(RegExp.prototype, "unicodeSets");
+        \\assert.sameValue(typeof unicodeSetsDesc.get, "function");
+        \\assert.sameValue(unicodeSetsDesc.set, undefined);
+        \\
+        \\Object.defineProperty(RegExp.prototype, "dotAll", {});
+        \\var dotAllDesc = Object.getOwnPropertyDescriptor(RegExp.prototype, "dotAll");
+        \\assert.sameValue(typeof dotAllDesc.get, "function");
+        \\assert.sameValue(dotAllDesc.set, undefined);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Buffer and TypedArray lazy native accessors preserve descriptor semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var buffer = new ArrayBuffer(8);
+        \\var byteLengthDesc = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength");
+        \\assert.sameValue(typeof byteLengthDesc.get, "function");
+        \\assert.sameValue(byteLengthDesc.get.name, "get byteLength");
+        \\assert.sameValue(byteLengthDesc.get.length, 0);
+        \\assert.sameValue(byteLengthDesc.set, undefined);
+        \\assert.sameValue(byteLengthDesc.get.call(buffer), 8);
+        \\assert.sameValue(buffer.byteLength, 8);
+        \\
+        \\var arrayBufferSpecies = Object.getOwnPropertyDescriptor(ArrayBuffer, Symbol.species);
+        \\assert.sameValue(typeof arrayBufferSpecies.get, "function");
+        \\assert.sameValue(arrayBufferSpecies.get.name, "get [Symbol.species]");
+        \\assert.sameValue(arrayBufferSpecies.get.call(ArrayBuffer), ArrayBuffer);
+        \\
+        \\(function() {
+        \\  "use strict";
+        \\  var threw = false;
+        \\  try { ArrayBuffer.prototype.resizable = 1; } catch (e) { threw = e instanceof TypeError; }
+        \\  assert.sameValue(threw, true);
+        \\})();
+        \\
+        \\var view = new DataView(buffer, 2, 4);
+        \\var viewOffsetDesc = Object.getOwnPropertyDescriptor(DataView.prototype, "byteOffset");
+        \\assert.sameValue(typeof viewOffsetDesc.get, "function");
+        \\assert.sameValue(viewOffsetDesc.get.name, "get byteOffset");
+        \\assert.sameValue(viewOffsetDesc.set, undefined);
+        \\assert.sameValue(viewOffsetDesc.get.call(view), 2);
+        \\
+        \\var typed = new Uint8Array(buffer);
+        \\var typedLengthDesc = Object.getOwnPropertyDescriptor(TypedArray.prototype, "length");
+        \\assert.sameValue(typeof typedLengthDesc.get, "function");
+        \\assert.sameValue(typedLengthDesc.get.name, "get length");
+        \\assert.sameValue(typedLengthDesc.set, undefined);
+        \\assert.sameValue(typedLengthDesc.get.call(typed), 8);
+        \\var tagDesc = Object.getOwnPropertyDescriptor(TypedArray.prototype, Symbol.toStringTag);
+        \\assert.sameValue(typeof tagDesc.get, "function");
+        \\assert.sameValue(tagDesc.get.name, "get [Symbol.toStringTag]");
+        \\assert.sameValue(tagDesc.set, undefined);
+        \\assert.sameValue(tagDesc.get.call(typed), "Uint8Array");
     );
     defer result.free(js.runtime);
 
@@ -2180,6 +2544,57 @@ test "URI globals use observable string coercion and reject malformed UTF-8" {
         \\try { decodeURIComponent("%ED%A0%80"); } catch (e) { threw = e instanceof URIError; }
         \\assert.sameValue(threw, true);
         \\assert.sameValue(encodeURI(), "undefined");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "URI four byte decode range preserves globals and completion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\function decimalToPercentHexString(n) {
+        \\  var hex = "0123456789ABCDEF";
+        \\  return "%" + hex[(n >> 4) & 0xf] + hex[n & 0xf];
+        \\}
+        \\var count = 0;
+        \\for (var indexB3 = 0x80; indexB3 <= 0x80; indexB3++) {
+        \\  var hexB1_B2_B3 = "%F0%A0" + decimalToPercentHexString(indexB3);
+        \\  for (var indexB4 = 0x80; indexB4 <= 0x83; indexB4++) {
+        \\    var hexB1_B2_B3_B4 = hexB1_B2_B3 + decimalToPercentHexString(indexB4);
+        \\    var index = (0xF0 & 0x07) * 0x40000 + (0xA0 & 0x3F) * 0x1000 + (indexB3 & 0x3F) * 0x40 + (indexB4 & 0x3F);
+        \\    var L = ((index - 0x10000) & 0x03FF) + 0xDC00;
+        \\    var H = (((index - 0x10000) >> 10) & 0x03FF) + 0xD800;
+        \\    if (decodeURIComponent(hexB1_B2_B3_B4) === String.fromCharCode(H, L)) count++;
+        \\  }
+        \\}
+        \\assert.sameValue(count, 4);
+        \\assert.sameValue(indexB3, 0x81);
+        \\assert.sameValue(indexB4, 0x84);
+        \\assert.sameValue(hexB1_B2_B3, "%F0%A0%80");
+        \\assert.sameValue(hexB1_B2_B3_B4, "%F0%A0%80%83");
+        \\assert.sameValue(index, 131075);
+        \\assert.sameValue(H, 55360);
+        \\assert.sameValue(L, 56323);
+        \\assert.sameValue(eval(`
+        \\function d(n) {
+        \\  var hex = "0123456789ABCDEF";
+        \\  return "%" + hex[(n >> 4) & 0xf] + hex[n & 0xf];
+        \\}
+        \\var c = 0;
+        \\for (var b3 = 0x80; b3 <= 0x80; b3++) {
+        \\  var h3 = "%F0%A0" + d(b3);
+        \\  for (var b4 = 0x80; b4 <= 0x83; b4++) {
+        \\    var h4 = h3 + d(b4);
+        \\    var cp = (0xF0 & 0x07) * 0x40000 + (0xA0 & 0x3F) * 0x1000 + (b3 & 0x3F) * 0x40 + (b4 & 0x3F);
+        \\    var lo = ((cp - 0x10000) & 0x03FF) + 0xDC00;
+        \\    var hi = (((cp - 0x10000) >> 10) & 0x03FF) + 0xD800;
+        \\    if (decodeURI(h4) === String.fromCharCode(hi, lo)) c++;
+        \\  }
+        \\}
+        \\`), 3);
     );
     defer result.free(js.runtime);
 

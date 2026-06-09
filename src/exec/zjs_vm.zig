@@ -95,7 +95,12 @@ pub fn runModuleWithOutputAndVarRefsState(
 /// keeping it cached avoids paying that cost on every eval call.
 pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     if (ctx.global) |existing| return existing;
-    const global_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    const global_object = try core.Object.createWithOwnPropertyCapacity(
+        ctx.runtime,
+        core.class.ids.object,
+        null,
+        call_mod.contextGlobalOwnPropertyCapacity(),
+    );
     errdefer global_object.value().free(ctx.runtime);
     global_object.is_global = true;
     try call_mod.installHostGlobals(ctx.runtime, global_object);
@@ -201,9 +206,10 @@ pub fn runWithArgsState(
     frame_roots.init(ctx.runtime, stack, &frame, &frame_eval_var_refs);
     defer frame_roots.deinit();
 
-    try call_vm.initFrameLocals(ctx, function, &frame, eval_local_names, eval_local_slots);
-    try frame.initArguments(&ctx.runtime.memory, args, generator_state == null and !function.flags.is_generator and !function.flags.is_async);
-    try call_vm.initFrameVarRefs(ctx, global, function, &frame, var_refs);
+    const use_inline_frame_storage = generator_state == null and !function.flags.is_generator and !function.flags.is_async;
+    try call_vm.initFrameLocals(ctx, function, &frame, eval_local_names, eval_local_slots, use_inline_frame_storage);
+    try frame.initArguments(&ctx.runtime.memory, args, use_inline_frame_storage);
+    try call_vm.initFrameVarRefs(ctx, global, function, &frame, var_refs, use_inline_frame_storage);
 
     const resume_state = try gen_async_vm.resumeExecutionState(ctx, stack, function, &frame, generator_state, resume_value, generatorYieldStarSuspended, generatorResumeCompletionType, setGeneratorYieldStarSuspended, setGeneratorResumeCompletionType);
     errdefer {

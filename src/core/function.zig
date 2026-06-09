@@ -3,6 +3,7 @@ const memory = @import("memory.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;
 const Descriptor = @import("descriptor.zig").Descriptor;
+const property = @import("property.zig");
 const string = @import("string.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const class = @import("class.zig");
@@ -275,7 +276,7 @@ fn isAsciiBuiltinName(bytes: []const u8) bool {
 }
 
 pub fn nativeFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
-    const function_object = try Object.create(rt, class.ids.c_function, null);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, 2);
     errdefer function_object.value().free(rt);
 
     const length_key = atom.predefinedId("length", .string).?;
@@ -292,6 +293,31 @@ pub fn nativeFunction(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
 
     const name_key = atom.predefinedId("name", .string).?;
     try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));
+
+    function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
+
+    return function_object.value();
+}
+
+/// `name` must outlive the function object. This is intended for standard
+/// builtin tables whose names have static storage.
+pub fn nativeFunctionWithLazyName(rt: *JSRuntime, name: []const u8, length: i32) !JSValue {
+    return nativeFunctionWithLazyNameAndCapacity(rt, name, length, 2);
+}
+
+/// `name` must outlive the function object. This is intended for standard
+/// builtin tables whose names have static storage.
+pub fn nativeFunctionWithLazyNameAndCapacity(rt: *JSRuntime, name: []const u8, length: i32, capacity: usize) !JSValue {
+    std.debug.assert(capacity >= 2);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, null, capacity);
+    errdefer function_object.value().free(rt);
+
+    const length_key = atom.predefinedId("length", .string).?;
+    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
+
+    const name_key = atom.predefinedId("name", .string).?;
+    const name_flags = property.Flags.data(false, false, true);
+    try function_object.defineStringConstantAutoInitProperty(rt, name_key, name, name_flags);
 
     function_object.nativeDispatchNameSlot().* = try rt.internAtom(name);
 

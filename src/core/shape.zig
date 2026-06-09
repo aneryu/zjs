@@ -128,6 +128,11 @@ pub const Registry = struct {
         return self.createShape(proto_id, true);
     }
 
+    pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto_id: ?usize, property_capacity: usize) !*Shape {
+        if (property_capacity == 0) return self.createObjectRoot(proto_id);
+        return self.createShapeWithPropertyCapacity(proto_id, false, property_capacity);
+    }
+
     fn createShape(self: *Registry, proto_id: ?usize, is_transition_cacheable: bool) !*Shape {
         const shape = try self.memory.create(Shape);
         errdefer self.memory.destroy(Shape, shape);
@@ -139,6 +144,35 @@ pub const Registry = struct {
         };
         @memset(shape.props, .{});
         errdefer self.memory.free(Property, shape.props);
+        try self.link(shape);
+        shape.is_hashed = true;
+        return shape;
+    }
+
+    fn createShapeWithPropertyCapacity(
+        self: *Registry,
+        proto_id: ?usize,
+        is_transition_cacheable: bool,
+        property_capacity: usize,
+    ) !*Shape {
+        std.debug.assert(property_capacity != 0);
+        const shape = try self.memory.create(Shape);
+        errdefer self.memory.destroy(Shape, shape);
+        shape.* = .{
+            .is_transition_cacheable = is_transition_cacheable,
+            .proto_id = proto_id,
+            .props = try self.memory.alloc(Property, property_capacity),
+            .hash = initialHash(proto_id),
+        };
+        @memset(shape.props, .{});
+        errdefer self.memory.free(Property, shape.props);
+        if (property_capacity >= small_shape_linear_limit) {
+            const bucket_count = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
+            shape.hash_buckets = try self.memory.alloc(u32, bucket_count);
+            @memset(shape.hash_buckets, no_property_index);
+            shape.prop_hash_mask = @intCast(bucket_count - 1);
+        }
+        errdefer if (shape.hash_buckets.len != 0) self.memory.free(u32, shape.hash_buckets);
         try self.link(shape);
         shape.is_hashed = true;
         return shape;
@@ -246,6 +280,14 @@ pub const Registry = struct {
         const minimum = needed + shape.deleted_prop_count;
         if (shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1) return;
         try self.rebuildPropertyHash(shape, @max(initial_hash_size, nextPowerOfTwo(minimum + 1)));
+    }
+
+    pub fn hasReservedOwnPropertyCapacity(self: *Registry, shape: *const Shape, needed: usize) bool {
+        _ = self;
+        if (needed > shape.props.len) return false;
+        if (needed < small_shape_linear_limit) return true;
+        const minimum = needed + shape.deleted_prop_count;
+        return shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1;
     }
 
     pub fn release(self: *Registry, shape: *Shape) void {

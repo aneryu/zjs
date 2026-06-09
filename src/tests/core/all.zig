@@ -310,8 +310,9 @@ test "predefined atoms preserve QuickJS order and kinds" {
     try std.testing.expectEqual(@as(core.Atom, 381), core.atom.ids.zjs_last_global_setup_name);
     try std.testing.expectEqual(@as(core.Atom, 419), core.atom.ids.zjs_last_global_extra_name);
     try std.testing.expectEqual(@as(core.Atom, 586), core.atom.ids.zjs_last_registry_extra_name);
-    try std.testing.expectEqual(@as(core.Atom, 637), core.atom.ids.zjs_last_startup_name);
-    try std.testing.expectEqual(@as(usize, 637), core.atom.predefined_count);
+    try std.testing.expectEqual(@as(core.Atom, 626), core.atom.ids.scriptArgs);
+    try std.testing.expectEqual(@as(core.Atom, 656), core.atom.ids.zjs_last_startup_name);
+    try std.testing.expectEqual(@as(usize, 656), core.atom.predefined_count);
 
     const brand = core.atom.predefinedById(core.atom.ids.Private_brand).?;
     try std.testing.expectEqual(core.atom.AtomKind.private, brand.kind);

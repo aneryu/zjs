@@ -56,8 +56,29 @@ test "typed array intrinsic species accessor is installed" {
         \\assert.sameValue(desc.configurable, true);
         \\assert.sameValue(desc.get.length, 0);
         \\assert.sameValue(desc.get.name, "get [Symbol.species]");
+        \\assert.sameValue(Object.hasOwn(desc.get, "call"), false);
         \\var marker = {};
         \\assert.sameValue(desc.get.call(marker), marker);
+        \\assert.sameValue(Object.hasOwn(Uint8Array, Symbol.species), false);
+        \\assert.sameValue(Object.hasOwn(Float16Array, Symbol.species), false);
+        \\assert.sameValue(Uint8Array[Symbol.species], Uint8Array);
+        \\assert.sameValue(Float16Array[Symbol.species], Float16Array);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "species accessors inherit Function.prototype.call" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\for (var C of [Promise, Map, Set, TypedArray]) {
+        \\  var getter = Object.getOwnPropertyDescriptor(C, Symbol.species).get;
+        \\  assert.sameValue(Object.hasOwn(getter, "call"), false);
+        \\  assert.sameValue(getter.call(C), C);
+        \\}
     );
     defer result.free(js.runtime);
 

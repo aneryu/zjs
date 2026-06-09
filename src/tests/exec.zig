@@ -3769,6 +3769,170 @@ test "Engine eval routes host output through global function calls" {
     try std.testing.expectEqualStrings("1\nx\n5 function\nok\nalias\n", stream.buffered());
 }
 
+test "Engine eval preserves local numeric add host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let a = 1;
+        \\let b = 2;
+        \\print(a + b);
+        \\let max = 2147483647;
+        \\print(max + 1);
+        \\let oldPrint = print;
+        \\print = function(x) { globalThis.seen = "custom:" + x; };
+        \\print(a + b);
+        \\oldPrint(globalThis.seen);
+        \\print = oldPrint;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3\n2147483648\ncustom:3\n", stream.buffered());
+}
+
+test "Engine eval preserves collection read host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let map = new Map();
+        \\map.set("a", 1);
+        \\print(map.get("a"));
+        \\print(map.has("a"));
+        \\let key = {};
+        \\let weak = new WeakMap();
+        \\weak.set(key, 2);
+        \\print(weak.get(key));
+        \\print(weak.has(key));
+        \\let set = new Set();
+        \\set.add("s");
+        \\print(set.has("s"));
+        \\let weakSetKey = {};
+        \\let weakSet = new WeakSet();
+        \\weakSet.add(weakSetKey);
+        \\print(weakSet.has(weakSetKey));
+        \\let oldGet = Map.prototype.get;
+        \\Map.prototype.get = function(k) { return "custom:" + k; };
+        \\print(map.get("a"));
+        \\Map.prototype.get = oldGet;
+        \\map.get = function(k) { return "own:" + k; };
+        \\print(map.get("a"));
+        \\delete map.get;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\ntrue\n2\ntrue\ntrue\ntrue\ncustom:a\nown:a\n", stream.buffered());
+}
+
+test "Engine eval preserves regexp UTF-16 test host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let re = new RegExp("\u00e9+", "");
+        \\print(re.test("\u00e9\u00e9"));
+        \\let oldTest = RegExp.prototype.test;
+        \\RegExp.prototype.test = function(input) { return input.length + ":" + (this === re); };
+        \\print(re.test("\u00e9\u00e9"));
+        \\RegExp.prototype.test = oldTest;
+        \\re.test = function(input) { return input.charCodeAt(0); };
+        \\print(re.test("\u00e9\u00e9"));
+        \\delete re.test;
+        \\print(re.test("aa"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\n2:true\n233\nfalse\n", stream.buffered());
+}
+
+test "Engine eval preserves dense array join host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let tab = [3, 1, 2];
+        \\tab.sort();
+        \\print(tab.join(","));
+        \\let oldJoin = Array.prototype.join;
+        \\Array.prototype.join = function(separator) { return "custom:" + separator + ":" + this.length; };
+        \\print(tab.join("|"));
+        \\Array.prototype.join = oldJoin;
+        \\tab.join = function(separator) { return "own:" + separator; };
+        \\print(tab.join(","));
+        \\delete tab.join;
+        \\tab[0] = { toString: function() { globalThis.seenJoinObject = "object"; return "obj"; } };
+        \\print(tab.join(","));
+        \\print(globalThis.seenJoinObject);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1,2,3\ncustom:|:3\nown:,\nobj,2,3\nobject\n", stream.buffered());
+}
+
+test "Engine eval preserves dense array pop host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let tab = [1, 2];
+        \\print(tab.pop());
+        \\print(tab.length);
+        \\let oldPop = Array.prototype.pop;
+        \\Array.prototype.pop = function() { return "custom:" + this.length; };
+        \\print(tab.pop());
+        \\Array.prototype.pop = oldPop;
+        \\tab.pop = function() { return "own:" + this.length; };
+        \\print(tab.pop());
+        \\delete tab.pop;
+        \\let accessorTab = [1];
+        \\Object.defineProperty(accessorTab, "0", { get: function() { globalThis.seenPopGetter = "getter"; return 9; }, configurable: true });
+        \\print(accessorTab.pop());
+        \\print(accessorTab.length);
+        \\print(globalThis.seenPopGetter);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("2\n1\ncustom:1\nown:1\n9\n0\ngetter\n", stream.buffered());
+}
+
+test "Engine eval preserves simple closure call host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function counter() { let n = 0; return function () { n++; return n; }; }
+        \\let next = counter();
+        \\print(next());
+        \\print(next());
+        \\let oldPrint = print;
+        \\print = function(x) { globalThis.seenClosureCall = "[" + x + "]"; };
+        \\print(next());
+        \\oldPrint(globalThis.seenClosureCall);
+        \\print = oldPrint;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("1\n2\n[3]\n", stream.buffered());
+}
+
 test "Engine eval preserves one-shot array literal host output semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -4059,6 +4223,78 @@ test "Engine eval preserves one-shot object missing field host output semantics"
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("true\nfalse\ncustom:true\nfalse\n", stream.buffered());
+}
+
+test "Engine eval preserves local string substring host output semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let s = "abcdef";
+        \\print(s.substring(4, 1));
+        \\print(s.substring(2));
+        \\print(s.substring());
+        \\let oldSubstring = String.prototype.substring;
+        \\String.prototype.substring = function(start, end) {
+        \\  return "custom:" + this + ":" + start + ":" + end;
+        \\};
+        \\print(s.substring(4, 1));
+        \\String.prototype.substring = oldSubstring;
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("bcd\ncdef\nabcdef\ncustom:abcdef:4:1\n", stream.buffered());
+}
+
+test "Engine eval preserves ASCII string integer literal concat semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\print("a" + 1);
+        \\print("a" + -1);
+        \\print("" + 12345);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("a1\na-1\n12345\n", stream.buffered());
+}
+
+test "Engine eval preserves simple for-in mutation semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let obj = { a: 1, b: 2, c: 3 };
+        \\let keys = "";
+        \\for (var k in obj) {
+        \\  keys += k;
+        \\  if (k === "a") delete obj.b;
+        \\}
+        \\print(keys);
+        \\let obj2 = { a: 1, b: 2 };
+        \\keys = "";
+        \\for (var k in obj2) {
+        \\  keys += k;
+        \\  if (k === "a") {
+        \\    delete obj2.b;
+        \\    obj2.b = 3;
+        \\  }
+        \\}
+        \\print(keys);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("ac\nab\n", stream.buffered());
 }
 
 test "Engine runJobs preserves pending JS exceptions for callers" {

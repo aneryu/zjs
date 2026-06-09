@@ -374,7 +374,13 @@ const SimpleJsonParser = struct {
 
     fn parseObject(self: *SimpleJsonParser) !core.JSValue {
         self.expectByte('{') catch return error.UnsupportedSimpleJson;
-        const object = try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global));
+        self.skipWhitespace();
+        const object = try core.Object.createWithOwnPropertyCapacity(
+            self.rt,
+            core.class.ids.object,
+            objectPrototypeFromGlobal(self.rt, self.global),
+            if (self.peek() == '}') 0 else 4,
+        );
         var object_value = object.value();
         var root_values = [_]core.runtime.ValueRootValue{
             .{ .value = &object_value },
@@ -390,7 +396,6 @@ const SimpleJsonParser = struct {
             object_value = core.JSValue.undefinedValue();
             failed_object.free(self.rt);
         }
-        self.skipWhitespace();
         if (self.consumeByte('}')) return object_value;
 
         while (true) {
@@ -627,11 +632,25 @@ fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.
 }
 
 fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
+    if (cachedRealmObject(global, .object_prototype)) |prototype| return prototype;
     return constructorPrototypeFromGlobal(rt, global, "Object");
 }
 
 fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
+    if (cachedRealmObject(global, .array_prototype)) |prototype| return prototype;
     return constructorPrototypeFromGlobal(rt, global, "Array");
+}
+
+fn cachedRealmObject(global: ?*core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
+    const global_object = global orelse return null;
+    const stored = global_object.cachedRealmValue(slot) orelse return null;
+    return objectFromValue(stored);
+}
+
+fn objectFromValue(value: core.JSValue) ?*core.Object {
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
 }
 
 fn constructorPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8) ?*core.Object {

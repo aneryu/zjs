@@ -1,6 +1,22 @@
 const std = @import("std");
 const build_options = @import("build_options");
 
+const ProfileCase = struct {
+    name: []const u8,
+    source: []const u8,
+    expected_stdout_prefix: []const u8,
+    max_opcodes: u64,
+};
+
+fn perfOpcodeCount(stderr: []const u8) !u64 {
+    const needle = "\"opcodes_executed\": ";
+    const start = (std.mem.indexOf(u8, stderr, needle) orelse return error.MissingOpcodeCount) + needle.len;
+    var end = start;
+    while (end < stderr.len and std.ascii.isDigit(stderr[end])) : (end += 1) {}
+    if (end == start) return error.MissingOpcodeCount;
+    return try std.fmt.parseInt(u64, stderr[start..end], 10);
+}
+
 test "zjs CLI behavior" {
     const allocator = std.testing.allocator;
     const zjs_path = build_options.zjs_executable_path;
@@ -68,7 +84,8 @@ test "zjs CLI behavior" {
             \\console.log(scriptArgs.length);
             \\console.log(scriptArgs[0]);
             \\console.log(scriptArgs[1]);
-            \\console.log(argv0);
+            \\console.log(typeof argv0);
+            \\console.log(typeof execArgv);
         ;
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{
             .sub_path = temp_filename,
@@ -90,6 +107,128 @@ test "zjs CLI behavior" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "3\n") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "temp_smoke_args.js") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "foo") != null);
-        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "zjs") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "undefined\nundefined") != null);
+    }
+
+    // 5. CLI string append loops should hit the top-level range fast path.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{
+                zjs_path,
+                "--profile-opcodes",
+                "--perf-json",
+                "-e",
+                "let s = ''; for (let i = 0; i < 2000; i++) s += 'x'; print(s.length);",
+            },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expect(std.mem.startsWith(u8, result.stdout, "2000\n"));
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ZJS opcode profile") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "\"name\": \"add\"") == null);
+    }
+}
+
+test "CLI top-level range fast paths collapse completion-store loops" {
+    const allocator = std.testing.allocator;
+    const zjs_path = build_options.zjs_executable_path;
+
+    const cases = [_]ProfileCase{
+        .{
+            .name = "int_sum",
+            .source = "let sum = 0; for (let i = 0; i < 2000; i++) sum += i; print(sum);",
+            .expected_stdout_prefix = "1999000\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "array_read",
+            .source = "let tab = [3]; let sum = 0; for (let i = 0; i < 2000; i++) sum += tab[0]; print(sum);",
+            .expected_stdout_prefix = "6000\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "global_read_loop",
+            .source = "var x = 1; let s = 0; for (let i = 0; i < 2000; i++) s += x; print(s);",
+            .expected_stdout_prefix = "2000\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "prop_read_mono",
+            .source = "const o = { a: 1, b: 2, c: 3 }; let s = 0; for (let i = 0; i < 2000; i++) s += o.b; print(s);",
+            .expected_stdout_prefix = "4000\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "prop_read_poly3",
+            .source = "const a = { x: 1, y: 0 }; const b = { y: 0, x: 2 }; const c = { z: 0, x: 3 }; const arr = [a, b, c]; let s = 0; for (let i = 0; i < 2000; i++) s += arr[i % 3].x; print(s);",
+            .expected_stdout_prefix = "3999\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "proto_read",
+            .source = "const p = { x: 1 }; const o = Object.create(p); let s = 0; for (let i = 0; i < 2000; i++) s += o.x; print(s);",
+            .expected_stdout_prefix = "2000\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "func_call",
+            .source = "function f(x) { return x + 1; } let s = 0; for (let i = 0; i < 40000; i++) s += f(i); print(s);",
+            .expected_stdout_prefix = "800020000\n",
+            .max_opcodes = 140,
+        },
+        .{
+            .name = "call2_loop",
+            .source = "function f(a, b) { return a + b; } let s = 0; for (let i = 0; i < 40000; i++) s += f(i, 1); print(s);",
+            .expected_stdout_prefix = "800020000\n",
+            .max_opcodes = 140,
+        },
+        .{
+            .name = "closure_call_loop",
+            .source = "function make(x) { return function(y) { return x + y; }; } const f = make(1); let s = 0; for (let i = 0; i < 40000; i++) s += f(i); print(s);",
+            .expected_stdout_prefix = "800020000\n",
+            .max_opcodes = 160,
+        },
+        .{
+            .name = "math_min",
+            .source = "let s = 0; for (let i = 0; i < 40000; i++) s += Math.min(i, 500); print(s);",
+            .expected_stdout_prefix = "19874750\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "map_string_keys",
+            .source = "const m = new Map(); for (let i = 0; i < 10000; i++) m.set(\"k\" + i, i); let s = 0; for (let i = 0; i < 10000; i++) s += m.get(\"k\" + i); print(s);",
+            .expected_stdout_prefix = "49995000\n",
+            .max_opcodes = 180,
+        },
+    };
+
+    for (cases) |case| {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{
+                zjs_path,
+                "--profile-opcodes",
+                "--perf-json",
+                "-e",
+                case.source,
+            },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expect(std.mem.startsWith(u8, result.stdout, case.expected_stdout_prefix));
+
+        const opcodes = try perfOpcodeCount(result.stderr);
+        try std.testing.expect(opcodes <= case.max_opcodes);
     }
 }

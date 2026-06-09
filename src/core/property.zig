@@ -43,6 +43,7 @@ pub const Accessor = struct {
 
 pub const AutoInitKind = enum(u8) {
     native_function,
+    native_accessor,
     console,
     math_namespace,
     json_namespace,
@@ -53,6 +54,8 @@ pub const AutoInitKind = enum(u8) {
     array_unscopables,
     number_constant,
     int32_constant,
+    string_constant,
+    empty_array,
 };
 
 pub const ArrayBuiltinMarker = enum(u8) {
@@ -94,6 +97,10 @@ pub const AutoInit = struct {
     length: i32,
     rt: *JSRuntime,
     kind: AutoInitKind = .native_function,
+    // Kind-specific payload reused by host function autoinit and by native
+    // accessor pairs. For `.native_accessor`, `host_function_kind > 0` means
+    // an accessor setter exists; it stores the setter length, while
+    // `external_host_function_id` stores the setter native-builtin id.
     host_function_kind: i32 = 0,
     external_host_function_id: u32 = 0,
     host_function_prototype: bool = false,

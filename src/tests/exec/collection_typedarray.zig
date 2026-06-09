@@ -780,6 +780,35 @@ test "Engine eval executes Map groupBy and iterable construction" {
     try std.testing.expectEqualStrings("2\nodd,even\n1,3\n2\n2\n", stream.buffered());
 }
 
+test "Map and Set size live on prototype getter rather than instances" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const mapDescriptor = Object.getOwnPropertyDescriptor(Map.prototype, "size");
+        \\assert.sameValue(typeof mapDescriptor.get, "function");
+        \\assert.sameValue(mapDescriptor.enumerable, false);
+        \\assert.sameValue(mapDescriptor.configurable, true);
+        \\const map = new Map();
+        \\assert.sameValue(Object.hasOwn(map, "size"), false);
+        \\assert.sameValue(map.size, 0);
+        \\map.set("key", "value");
+        \\assert.sameValue(map.size, 1);
+        \\map.delete("key");
+        \\assert.sameValue(map.size, 0);
+        \\Object.defineProperty(map, "size", { value: 99 });
+        \\assert.sameValue(Object.hasOwn(map, "size"), true);
+        \\assert.sameValue(map.size, 99);
+        \\const set = new Set();
+        \\assert.sameValue(Object.hasOwn(set, "size"), false);
+        \\set.add(1);
+        \\assert.sameValue(set.size, 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Map and Set iterator next lives on iterator prototypes" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -907,6 +936,29 @@ test "Engine eval executes typed array smoke subset" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("16\n[object ArrayBuffer]\n16\n16\n0\n16\n8\n8\n4\n3\nundefined\n4\n4\n2\n[object ArrayBuffer]\n16\n0\n3\n3\n768\n768\n50331648\n50331648\n3.76158192263132e-37\n3.13151306251402e-294\n4294967295\n4294967295\n1\n2\n52\n18\n4660\n52\n18\n2\n52\n18\n-1\n18446744073709551615\n0\n16\n", stream.buffered());
+}
+
+test "typed array instances keep concrete class identity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var int32 = new Int32Array(new ArrayBuffer(16));
+        \\assert.sameValue(Object.getPrototypeOf(int32), Int32Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(int32), "[object Int32Array]");
+        \\var uint8 = new Uint8Array(4);
+        \\assert.sameValue(Object.getPrototypeOf(uint8), Uint8Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(uint8), "[object Uint8Array]");
+        \\var float64 = new Float64Array([1, 2]);
+        \\assert.sameValue(Object.getPrototypeOf(float64), Float64Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(float64), "[object Float64Array]");
+        \\var big = new BigUint64Array([1n]);
+        \\assert.sameValue(Object.getPrototypeOf(big), BigUint64Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(big), "[object BigUint64Array]");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
 }
 
 test "BigInt typed arrays wrap values to low 64 bits" {

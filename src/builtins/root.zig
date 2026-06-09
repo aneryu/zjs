@@ -28,7 +28,12 @@ pub const Intrinsics = struct {
     global: *core.Object,
 
     pub fn init(rt: *core.JSRuntime) !Intrinsics {
-        const global = try core.Object.create(rt, core.class.ids.object, null);
+        const global = try core.Object.createWithOwnPropertyCapacity(
+            rt,
+            core.class.ids.object,
+            null,
+            registry.standardGlobalOwnPropertyCapacity(),
+        );
         errdefer global.value().free(rt);
         try registry.installStandardGlobals(rt, global);
         return .{ .global = global };

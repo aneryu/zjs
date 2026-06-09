@@ -355,6 +355,32 @@ pub fn typedArrayConstruct(rt: *core.JSRuntime, element_size: u32, buffer_value:
     return typedArrayConstructWithOptions(rt, element_size, 2, buffer_value, &.{buffer_value}, null);
 }
 
+fn typedArrayClassIdForKind(kind: u8) ?core.class.ClassId {
+    return switch (kind) {
+        1 => core.class.ids.int8_array,
+        2 => core.class.ids.uint8_array,
+        3 => core.class.ids.uint8c_array,
+        4 => core.class.ids.int16_array,
+        5 => core.class.ids.uint16_array,
+        6 => core.class.ids.int32_array,
+        7 => core.class.ids.uint32_array,
+        8 => core.class.ids.float16_array,
+        9 => core.class.ids.float32_array,
+        10 => core.class.ids.float64_array,
+        11 => core.class.ids.big_int64_array,
+        12 => core.class.ids.big_uint64_array,
+        else => null,
+    };
+}
+
+fn createTypedArrayInstance(rt: *core.JSRuntime, kind: u8, prototype: ?*core.Object) !*core.Object {
+    const class_id = typedArrayClassIdForKind(kind) orelse core.class.ids.object;
+    const object = try core.Object.create(rt, class_id, prototype);
+    errdefer core.Object.destroyFromHeader(rt, &object.header);
+    if (class_id == core.class.ids.object) try object.ensureTypedArrayPayload(rt);
+    return object;
+}
+
 pub fn typedArrayConstructWithOptions(rt: *core.JSRuntime, element_size: u32, kind: u8, buffer_value: core.JSValue, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     if (element_size == 0) return error.TypeError;
     const buffer = try expectArrayBufferObject(buffer_value);
@@ -374,9 +400,8 @@ pub fn typedArrayConstructWithOptions(rt: *core.JSRuntime, element_size: u32, ki
         if (remaining % element_size != 0) return error.RangeError;
         break :blk @as(u32, @intCast(@divTrunc(remaining, element_size)));
     } else null;
-    const object = try core.Object.create(rt, core.class.ids.object, prototype);
+    const object = try createTypedArrayInstance(rt, kind, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try object.ensureTypedArrayPayload(rt);
     try object.setOptionalValueSlot(rt, object.typedArrayBufferSlot(), buffer.value().dup());
     object.typedArrayByteOffsetSlot().* = byte_offset;
     object.typedArrayElementSizeSlot().* = element_size;
@@ -400,9 +425,8 @@ pub fn typedArrayConstructFullBufferOwned(rt: *core.JSRuntime, element_size: u32
     const length = @divTrunc(buffer_length, element_size);
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
 
-    const object = try core.Object.create(rt, core.class.ids.object, prototype);
+    const object = try createTypedArrayInstance(rt, kind, prototype);
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try object.ensureTypedArrayPayload(rt);
     try object.setOptionalValueSlot(rt, object.typedArrayBufferSlot(), owned_buffer_value);
     owned_buffer_value = core.JSValue.undefinedValue();
     object.typedArrayByteOffsetSlot().* = 0;
@@ -888,9 +912,11 @@ fn createArrayBufferWithPrototype(rt: *core.JSRuntime, byte_length: usize, max_b
     errdefer core.Object.destroyFromHeader(rt, &object.header);
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    const bytes = try rt.memory.alloc(u8, byte_length);
-    errdefer rt.memory.free(u8, bytes);
-    try object.installByteStorage(rt, bytes);
+    if (!try object.installInlineByteStorage(rt, byte_length)) {
+        const bytes = try rt.memory.alloc(u8, byte_length);
+        errdefer rt.memory.free(u8, bytes);
+        try object.installByteStorage(rt, bytes);
+    }
     @memset(object.byteStorage(), 0);
     object.arrayBufferMaxByteLengthSlot().* = max_byte_length;
     return object.value();

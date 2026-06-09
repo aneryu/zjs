@@ -55,7 +55,7 @@ fn tryFuseOneShotObjectFieldUndefinedPrint(
     const put = decodeArrayLengthPrintStore(code, pc) orelse return false;
     pc = put.next_pc;
 
-    if (!decodeDefaultPrintGet(global, code, &pc)) return false;
+    if (!decodeDefaultPrintGet(ctx.runtime, global, code, &pc)) return false;
     switch (put.kind) {
         .local => |idx| {
             const local_get = decodeLocalGet(code, pc) orelse return false;
@@ -182,7 +182,7 @@ fn tryFuseOneShotArrayNamedPropertyPrint(
     if (!canFastSetFreshArrayNamedProperty(ctx.runtime, global, field_atom, arrayPrototypeFromGlobal)) return false;
     pc = put_field.next_pc;
 
-    if (!decodeDefaultPrintGet(global, code, &pc)) return false;
+    if (!decodeDefaultPrintGet(ctx.runtime, global, code, &pc)) return false;
     if (decodeStoredArrayGet(code, pc, put)) |next_pc| {
         pc = next_pc;
     } else return false;
@@ -257,7 +257,7 @@ fn tryFuseOneElementArrayValueAndLengthPrint(
     const put = decodeArrayLengthPrintStore(code, frame.pc) orelse return false;
     var pc = put.next_pc;
 
-    if (!decodeDefaultPrintGet(global, code, &pc)) return false;
+    if (!decodeDefaultPrintGet(ctx.runtime, global, code, &pc)) return false;
     switch (put.kind) {
         .local => |idx| {
             const local_get = decodeLocalGet(code, pc) orelse return false;
@@ -273,7 +273,7 @@ fn tryFuseOneElementArrayValueAndLengthPrint(
     if (pc + 4 > code.len or code[pc] != op.push_0 or code[pc + 1] != op.get_array_el or code[pc + 2] != op.call1 or code[pc + 3] != op.drop) return false;
     pc += 4;
 
-    if (!decodeDefaultPrintGet(global, code, &pc)) return false;
+    if (!decodeDefaultPrintGet(ctx.runtime, global, code, &pc)) return false;
     switch (put.kind) {
         .local => |idx| {
             const local_get = decodeLocalGet(code, pc) orelse return false;
@@ -301,11 +301,11 @@ fn tryFuseOneElementArrayValueAndLengthPrint(
     return true;
 }
 
-fn decodeDefaultPrintGet(global: *core.Object, code: []const u8, pc: *usize) bool {
+fn decodeDefaultPrintGet(rt: *core.JSRuntime, global: *core.Object, code: []const u8, pc: *usize) bool {
     if (pc.* + 5 > code.len or code[pc.*] != op.get_var) return false;
     const print_atom = readInt(u32, code[pc.* + 1 ..][0..4]);
     if (print_atom != atom_print) return false;
-    if (!globalHostOutputAutoInit(global, print_atom)) return false;
+    if (!globalHostOutputAutoInit(rt, global, print_atom)) return false;
     pc.* += 5;
     return true;
 }
@@ -321,7 +321,7 @@ fn tryFuseOneShotArrayLengthPrint(
     const code = function.code;
     const put = decodeArrayLengthPrintStore(code, frame.pc) orelse return false;
     var pc = put.next_pc;
-    if (!decodeDefaultPrintGet(global, code, &pc)) return false;
+    if (!decodeDefaultPrintGet(ctx.runtime, global, code, &pc)) return false;
     switch (put.kind) {
         .local => |idx| {
             const local_get = decodeLocalGet(code, pc) orelse return false;
@@ -490,13 +490,15 @@ fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame
     return false;
 }
 
-fn globalHostOutputAutoInit(global: *core.Object, atom_id: core.Atom) bool {
+fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
     if (global.exotic != null) return false;
     for (global.properties) |*entry| {
         if (entry.flags.deleted or entry.atom_id != atom_id) continue;
         if (entry.flags.accessor) return false;
         return switch (entry.slot) {
-            .auto_init => |info| info.host_function_kind == core.host_function.ids.output,
+            .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
+                (info.host_function_kind == core.host_function.ids.external_host and
+                    shared_vm.isOutputExternalHostFunctionId(rt, info.external_host_function_id)),
             .data, .accessor, .deleted => false,
         };
     }
@@ -519,9 +521,22 @@ pub fn defineField(
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const value = try stack.pop();
+    const obj = stack.peekBorrowed() orelse return error.StackUnderflow;
+    if (!value.requiresRefCount() and ctx.runtime.atoms.kind(atom_id) != .private) {
+        if (property_ops.expectObject(obj)) |target| {
+            if (target.class_id == core.class.ids.object and
+                target.exotic == null and
+                target.proxyTarget() == null and
+                !target.is_array and
+                target.properties.len == 0)
+            {
+                try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+                return .done;
+            }
+        } else |_| {}
+    }
     var rooted_value = value;
     defer value.free(ctx.runtime);
-    const obj = stack.peekBorrowed() orelse return error.StackUnderflow;
     var rooted_obj = obj;
     var root_values = [_]core.runtime.ValueRootValue{
         .{ .value = &rooted_value },
@@ -542,6 +557,11 @@ pub fn defineField(
             target.truncateArrayElements(ctx.runtime, new_len);
             target.length = new_len;
             return .done;
+        }
+    }
+    if (target.is_array) {
+        if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, effective_atom)) |index| {
+            if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return .done;
         }
     }
     if (ctx.runtime.atoms.kind(effective_atom) == .private) {

@@ -481,8 +481,9 @@ const RegExpSimpleClassAlternationCacheEntry = struct {
     pattern: object_mod.RegExpSimpleClassAlternationPattern = .{},
 };
 
-pub const shared_lazy_native_function_slots = 8;
+pub const shared_lazy_native_function_slots = 12;
 pub const internal_destructuring_helper_slots = 14;
+const root_provider_inline_capacity = 1;
 
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
@@ -501,6 +502,7 @@ pub const JSRuntime = struct {
     borrowed_reference_holders_capacity: usize = 0,
     root_providers: []RootProvider = &.{},
     root_providers_capacity: usize = 0,
+    root_providers_inline: [root_provider_inline_capacity]RootProvider = undefined,
     local_root_slots: []*RootSlot = &.{},
     local_root_slots_capacity: usize = 0,
     persistent_root_slots: []*RootSlot = &.{},
@@ -627,7 +629,7 @@ pub const JSRuntime = struct {
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
         rt.atoms = atom.AtomTable.init(&rt.memory);
-        rt.classes = try class.Table.init(&rt.memory, &rt.atoms);
+        try rt.classes.initInPlace(&rt.memory, &rt.atoms);
         errdefer {
             rt.classes.deinit();
         }
@@ -637,8 +639,9 @@ pub const JSRuntime = struct {
         rt.materialize_context_global_cb = null;
         rt.borrowed_reference_holders = &.{};
         rt.borrowed_reference_holders_capacity = 0;
-        rt.root_providers = &.{};
-        rt.root_providers_capacity = 0;
+        rt.root_providers_inline = undefined;
+        rt.root_providers = rt.root_providers_inline[0..0];
+        rt.root_providers_capacity = rt.root_providers_inline.len;
         rt.local_root_slots = &.{};
         rt.local_root_slots_capacity = 0;
         rt.persistent_root_slots = &.{};
@@ -784,7 +787,7 @@ pub const JSRuntime = struct {
         self.classes.deinit();
         self.atoms.deinit();
         const borrowed_reference_holders: []*Object = if (self.borrowed_reference_holders_capacity != 0) self.borrowed_reference_holders.ptr[0..self.borrowed_reference_holders_capacity] else self.borrowed_reference_holders[0..0];
-        const root_providers: []RootProvider = if (self.root_providers_capacity != 0) self.root_providers.ptr[0..self.root_providers_capacity] else self.root_providers[0..0];
+        const root_providers: []RootProvider = if (self.root_providers_capacity != 0 and !self.rootProvidersUsingInline()) self.root_providers.ptr[0..self.root_providers_capacity] else self.root_providers[0..0];
         const local_root_slots: []*RootSlot = if (self.local_root_slots_capacity != 0) self.local_root_slots.ptr[0..self.local_root_slots_capacity] else self.local_root_slots[0..0];
         const persistent_root_slots: []*RootSlot = if (self.persistent_root_slots_capacity != 0) self.persistent_root_slots.ptr[0..self.persistent_root_slots_capacity] else self.persistent_root_slots[0..0];
         const weak_root_slots: []*WeakRootSlot = if (self.weak_root_slots_capacity != 0) self.weak_root_slots.ptr[0..self.weak_root_slots_capacity] else self.weak_root_slots[0..0];
@@ -926,7 +929,29 @@ pub const JSRuntime = struct {
         for (self.root_providers) |registered| {
             if (registered.context == provider.context and registered.trace == provider.trace) return;
         }
-        try appendRuntimeRootProvider(&self.memory, &self.root_providers, &self.root_providers_capacity, provider);
+        try self.appendRootProvider(provider);
+    }
+
+    fn rootProvidersUsingInline(self: *const JSRuntime) bool {
+        return self.root_providers.ptr == self.root_providers_inline[0..].ptr;
+    }
+
+    fn appendRootProvider(self: *JSRuntime, provider: RootProvider) !void {
+        if (self.root_providers.len == self.root_providers_capacity) {
+            const next_capacity = if (self.root_providers_capacity == 0) root_provider_inline_capacity else self.root_providers_capacity * 2;
+            const next = try self.memory.alloc(RootProvider, next_capacity);
+            errdefer self.memory.free(RootProvider, next);
+            @memcpy(next[0..self.root_providers.len], self.root_providers);
+            const old_capacity = self.root_providers_capacity;
+            const old_using_inline = self.rootProvidersUsingInline();
+            const old = if (!old_using_inline and old_capacity != 0) self.root_providers.ptr[0..old_capacity] else self.root_providers[0..0];
+            self.root_providers = next[0..self.root_providers.len];
+            self.root_providers_capacity = next_capacity;
+            if (old.len != 0) self.memory.free(RootProvider, old);
+        }
+        const len = self.root_providers.len;
+        self.root_providers = self.root_providers.ptr[0 .. len + 1];
+        self.root_providers[len] = provider;
     }
 
     pub fn unregisterRootProvider(self: *JSRuntime, provider: RootProvider) void {
@@ -943,9 +968,14 @@ pub const JSRuntime = struct {
         }
         self.root_providers = self.root_providers[0 .. self.root_providers.len - 1];
         if (self.root_providers.len == 0 and self.root_providers_capacity != 0) {
+            if (self.rootProvidersUsingInline()) {
+                self.root_providers = self.root_providers_inline[0..0];
+                self.root_providers_capacity = self.root_providers_inline.len;
+                return;
+            }
             const old_providers = self.root_providers.ptr[0..self.root_providers_capacity];
-            self.root_providers = &.{};
-            self.root_providers_capacity = 0;
+            self.root_providers = self.root_providers_inline[0..0];
+            self.root_providers_capacity = self.root_providers_inline.len;
             self.memory.free(RootProvider, old_providers);
         }
     }
@@ -1833,8 +1863,16 @@ pub const JSRuntime = struct {
         return token;
     }
 
+    pub fn reportExternalAllocUntracked(self: *JSRuntime, bytes: usize) void {
+        self.gc.reportExternalAllocUntracked(bytes);
+    }
+
     pub fn reportExternalFree(self: *JSRuntime, bytes: usize) void {
         self.gc.reportExternalFree(bytes);
+    }
+
+    pub fn reportExternalFreeUntracked(self: *JSRuntime, bytes: usize) void {
+        self.gc.reportExternalFreeUntracked(bytes);
     }
 
     pub fn externalMemoryBytes(self: JSRuntime) usize {
@@ -2817,23 +2855,6 @@ fn appendRuntimeExternalHostFunction(
         slice.* = next[0..slice.*.len];
         capacity.* = next_capacity;
         if (old_capacity != 0) account.free(host_function.ExternalRecord, old);
-    }
-    const len = slice.*.len;
-    slice.* = slice.*.ptr[0 .. len + 1];
-    slice.*[len] = item;
-}
-
-fn appendRuntimeRootProvider(account: *memory.MemoryAccount, slice: *[]RootProvider, capacity: *usize, item: RootProvider) !void {
-    if (slice.*.len == capacity.*) {
-        const next_capacity = if (capacity.* == 0) 4 else capacity.* * 2;
-        const next = try account.alloc(RootProvider, next_capacity);
-        errdefer account.free(RootProvider, next);
-        @memcpy(next[0..slice.*.len], slice.*);
-        const old_capacity = capacity.*;
-        const old = if (old_capacity != 0) slice.*.ptr[0..old_capacity] else slice.*[0..0];
-        slice.* = next[0..slice.*.len];
-        capacity.* = next_capacity;
-        if (old_capacity != 0) account.free(RootProvider, old);
     }
     const len = slice.*.len;
     slice.* = slice.*.ptr[0 .. len + 1];

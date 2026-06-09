@@ -335,6 +335,7 @@ pub fn validatePatternAndFlags(pattern: []const u8, flags: []const u8) bool {
     if (seen_u and seen_v) return false;
     if (isNativeFunctionMatcherUnicodeClass(pattern, flags)) return true;
     if (isFastValidatedAsciiSequencePattern(pattern, flags)) return true;
+    if (isFastValidatedUtf8LiteralSequencePattern(pattern, flags)) return true;
     if (isFastValidatedUnicodePropertyPattern(pattern, flags)) return true;
 
     var compiled = quickjs_regexp.compile(std.heap.page_allocator, pattern, flags) catch |err| switch (err) {
@@ -454,12 +455,43 @@ fn isFastValidatedAsciiSequencePattern(pattern: []const u8, flags: []const u8) b
     return true;
 }
 
+fn isFastValidatedUtf8LiteralSequencePattern(pattern: []const u8, flags: []const u8) bool {
+    if (pattern.len == 0 or !fastAsciiValidationFlags(flags)) return false;
+    if (bytesAreAscii(pattern)) return false;
+
+    var index: usize = 0;
+    while (index < pattern.len) {
+        if (!consumeFastUtf8LiteralAtom(pattern, &index)) return false;
+        if (index < pattern.len and isSimpleQuantifierByte(pattern[index])) {
+            index += 1;
+            if (index < pattern.len and pattern[index] == '?') index += 1;
+        }
+    }
+    return true;
+}
+
+test "fast regexp validation accepts simple utf8 literal sequences conservatively" {
+    try std.testing.expect(isFastValidatedUtf8LiteralSequencePattern("é+", ""));
+    try std.testing.expect(isFastValidatedUtf8LiteralSequencePattern("éé?", "g"));
+    try std.testing.expect(!isFastValidatedUtf8LiteralSequencePattern("abc+", ""));
+    try std.testing.expect(!isFastValidatedUtf8LiteralSequencePattern("é++", ""));
+    try std.testing.expect(!isFastValidatedUtf8LiteralSequencePattern("é{2}", ""));
+    try std.testing.expect(!isFastValidatedUtf8LiteralSequencePattern("é+", "i"));
+}
+
 fn fastAsciiValidationFlags(flags: []const u8) bool {
     for (flags) |flag| {
         switch (flag) {
             'd', 'g', 'y' => {},
             else => return false,
         }
+    }
+    return true;
+}
+
+fn bytesAreAscii(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte >= 0x80) return false;
     }
     return true;
 }
@@ -479,6 +511,23 @@ fn consumeFastAsciiAtom(pattern: []const u8, index: *usize) bool {
     }
     if (byte >= 0x80 or isFastAsciiRegExpSyntaxByte(byte)) return false;
     index.* += 1;
+    return true;
+}
+
+fn consumeFastUtf8LiteralAtom(pattern: []const u8, index: *usize) bool {
+    if (index.* >= pattern.len) return false;
+    const byte = pattern[index.*];
+    if (byte < 0x80) {
+        if (isFastAsciiRegExpSyntaxByte(byte)) return false;
+        index.* += 1;
+        return true;
+    }
+
+    const width = std.unicode.utf8ByteSequenceLength(byte) catch return false;
+    if (index.* + width > pattern.len) return false;
+    const code_point = std.unicode.utf8Decode(pattern[index.* .. index.* + width]) catch return false;
+    if (code_point > std.math.maxInt(u16)) return false;
+    index.* += width;
     return true;
 }
 

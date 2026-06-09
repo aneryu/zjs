@@ -147,15 +147,23 @@ pub fn returnThis(this_value: core.JSValue) core.JSValue {
 /// QuickJS source map: JS_CallInternal() dispatches callable objects after the
 /// VM has prepared callee/argument values. This Zig slice currently owns the
 /// host callables installed for the CLI-visible global object.
+pub fn hostGlobalOwnPropertyCapacity() usize {
+    return builtins.registry.standardGlobalOwnPropertyCapacity() + 6; // print, globalThis, NaN, Infinity, undefined, console
+}
+
+pub fn contextGlobalOwnPropertyCapacity() usize {
+    return hostGlobalOwnPropertyCapacity() + 1; // scriptArgs, installed by the public CLI host setup
+}
+
 pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
-    try global.reserveOwnPropertyCapacityAssumingPlain(rt, 99);
+    try global.reserveOwnPropertyCapacityAssumingPlain(rt, hostGlobalOwnPropertyCapacity());
     const output_external_id = try registerOutputExternalHostFunction(rt);
     try definePredefinedExternalHostFunction(rt, global, "print", hostFunctionLength(.output), output_external_id);
     try installStandardGlobals(rt, global);
     try defineGlobalThisProperty(rt, global);
     try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
     try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
-    try defineConstantPropertyAssumingNew(rt, global, "undefined", core.JSValue.undefinedValue());
+    try global.defineOwnPropertyAssumingNew(rt, core.atom.ids.undefined_, core.Descriptor.data(core.JSValue.undefinedValue(), false, false, false));
 
     try defineConsoleObject(rt, global, output_external_id);
 }
@@ -164,18 +172,23 @@ pub fn installLegacyStdOsGlobals(ctx: *core.JSContext) !void {
     const rt = ctx.runtimePtr();
     const global = try ctx.globalObject();
 
-    const std_object = try core.Object.create(rt, core.class.ids.object, null);
+    const std_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, legacy_std_object_property_count);
     const std_value = std_object.value();
     defer std_value.free(rt);
     try installLegacyStdObject(rt, global, std_object);
     try defineObjectProperty(rt, global, "std", std_value);
 
-    const os_object = try core.Object.create(rt, core.class.ids.object, null);
+    const os_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, legacy_os_object_property_count);
     const os_value = os_object.value();
     defer os_value.free(rt);
     try installLegacyOsObject(rt, os_object);
     try defineObjectProperty(rt, global, "os", os_value);
 }
+
+const legacy_std_object_property_count: usize = 20 + 3 + 1 + 3;
+const legacy_os_object_property_count: usize = 41 + 1 + 7 + 10 + 1 + 17;
+const legacy_std_error_property_count: usize = 11;
+const std_file_prototype_property_count: usize = 17;
 
 fn installLegacyStdObject(rt: *core.JSRuntime, global: *core.Object, target: *core.Object) !void {
     const functions = [_]struct { name: []const u8, kind: HostFunction }{
@@ -306,7 +319,7 @@ fn defineLegacyHostFunction(rt: *core.JSRuntime, target: *core.Object, name: []c
 }
 
 fn defineLegacyStdErrorObject(rt: *core.JSRuntime, target: *core.Object) !void {
-    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, legacy_std_error_property_count);
     const object_value = object.value();
     defer object_value.free(rt);
 
@@ -1103,7 +1116,11 @@ fn freeTemporaryStringAtom(rt: *core.JSRuntime, atom_id: core.Atom) void {
 }
 
 fn createHostFunction(rt: *core.JSRuntime, kind: HostFunction) !*core.Object {
-    const function_object = try core.Object.create(rt, core.class.ids.c_function, null);
+    return createHostFunctionWithOwnPropertyCapacity(rt, kind, 0);
+}
+
+fn createHostFunctionWithOwnPropertyCapacity(rt: *core.JSRuntime, kind: HostFunction, capacity: usize) !*core.Object {
+    const function_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.c_function, null, capacity);
     errdefer function_object.value().free(rt);
     function_object.hostFunctionKindSlot().* = @intFromEnum(kind);
     return function_object;
@@ -1140,7 +1157,7 @@ fn internalDestructuringHelperForSubtype(subtype: u8) ?struct { slot: usize, kin
 }
 
 fn createNamedHostFunctionValue(rt: *core.JSRuntime, name: []const u8, kind: HostFunction) !core.JSValue {
-    const function_object = try createHostFunction(rt, kind);
+    const function_object = try createHostFunctionWithOwnPropertyCapacity(rt, kind, 2);
     errdefer function_object.value().free(rt);
     try defineStringPropertyAssumingNew(rt, function_object, "name", name);
     try defineIntPropertyAssumingNew(rt, function_object, "length", hostFunctionLength(kind));
@@ -1175,9 +1192,7 @@ fn defineObjectPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, na
 }
 
 fn defineGlobalThisProperty(rt: *core.JSRuntime, global: *core.Object) !void {
-    const key = try rt.internAtom("globalThis");
-    defer rt.atoms.free(key);
-    try global.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(global.value(), true, false, true));
+    try global.defineOwnPropertyAssumingNew(rt, core.atom.predefinedId("globalThis", .string).?, core.Descriptor.data(global.value(), true, false, true));
 }
 
 fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
@@ -1215,7 +1230,11 @@ fn defineNumberConstantProperty(rt: *core.JSRuntime, object: *core.Object, name:
 }
 
 fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: f64) !void {
-    try defineConstantPropertyAssumingNew(rt, object, name, value_ops.numberToValue(value));
+    const key = core.atom.predefinedId(name, .string) orelse {
+        try defineConstantPropertyAssumingNew(rt, object, name, value_ops.numberToValue(value));
+        return;
+    };
+    try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value_ops.numberToValue(value), false, false, false));
 }
 
 fn defineStringProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: []const u8) !void {
@@ -3176,9 +3195,14 @@ fn callBufferNativeFunctionRecord(
 }
 
 pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
-    const realm = try core.Object.create(rt, core.class.ids.object, null);
+    const realm = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 1);
     errdefer realm.value().free(rt);
-    const realm_global = try core.Object.create(rt, core.class.ids.object, null);
+    const realm_global = try core.Object.createWithOwnPropertyCapacity(
+        rt,
+        core.class.ids.object,
+        null,
+        builtins.registry.standardGlobalOwnPropertyCapacity() + 1,
+    );
     var realm_global_owned = true;
     errdefer if (realm_global_owned) realm_global.value().free(rt);
     realm_global.is_global = true;
@@ -5740,6 +5764,16 @@ fn registerOutputExternalHostFunction(rt: *core.JSRuntime) !u32 {
     });
 }
 
+pub fn isOutputExternalHostFunction(rt: *core.JSRuntime, object: *const core.Object) bool {
+    if (object.hostFunctionKind() != core.host_function.ids.external_host) return false;
+    return isOutputExternalHostFunctionId(rt, object.externalHostFunctionId());
+}
+
+pub fn isOutputExternalHostFunctionId(rt: *core.JSRuntime, id: u32) bool {
+    const record = rt.externalHostFunction(id) orelse return false;
+    return record.ptr == @as(*anyopaque, @ptrCast(&output_external_host_context)) and record.call == externalHostOutput;
+}
+
 fn externalHostOutput(_: *anyopaque, call: core.host_function.ExternalCall) anyerror!core.JSValue {
     const ctx: *core.JSContext = @ptrCast(@alignCast(call.ctx));
     return hostOutputValues(ctx.runtime, call.output, call.args);
@@ -7400,7 +7434,7 @@ fn stdFilePrototype(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
         if (thisObject(existing)) |proto| return proto;
     }
 
-    const proto = core.Object.create(rt, core.class.ids.object, null) catch return null;
+    const proto = core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, std_file_prototype_property_count) catch return null;
     var proto_owned = true;
     defer if (proto_owned) proto.value().free(rt);
     const names = [_]struct { name: []const u8, kind: HostFunction }{

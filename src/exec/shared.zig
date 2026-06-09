@@ -74,6 +74,8 @@ pub const callReplaceFunction = string_ops.callReplaceFunction;
 pub const callSimpleStringBytecode = string_ops.callSimpleStringBytecode;
 pub const callStringReplaceMethod = string_ops.callStringReplaceMethod;
 pub const callStringWellKnownMethod = string_ops.callStringWellKnownMethod;
+pub const isOutputExternalHostFunction = call_mod.isOutputExternalHostFunction;
+pub const isOutputExternalHostFunctionId = call_mod.isOutputExternalHostFunctionId;
 pub const captureReplaceMatch = string_ops.captureReplaceMatch;
 pub const classEscapeUnitMatches = string_ops.classEscapeUnitMatches;
 pub const codePointFromSurrogatePair = string_ops.codePointFromSurrogatePair;
@@ -370,6 +372,7 @@ pub const qjsArrayUnshiftSparseLarge = array_ops.qjsArrayUnshiftSparseLarge;
 pub const qjsCanFastJoinPrimitive = array_ops.qjsCanFastJoinPrimitive;
 pub const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrTypedArrayElement;
 pub const qjsDenseArrayMapSimpleNumericArg0 = array_ops.qjsDenseArrayMapSimpleNumericArg0;
+pub const qjsFastDensePrimitiveArrayPop = array_ops.qjsFastDensePrimitiveArrayPop;
 pub const qjsFastDensePrimitiveArrayJoin = array_ops.qjsFastDensePrimitiveArrayJoin;
 pub const qjsGeneratorSlice = array_ops.qjsGeneratorSlice;
 pub const qjsIteratorZipFlattenableRecord = array_ops.qjsIteratorZipFlattenableRecord;
@@ -869,24 +872,39 @@ pub fn createSimpleForInIterator(rt: *core.JSRuntime, object_value: core.JSValue
     if (!object_value.isObject()) return null;
     const source = objectFromValue(object_value) orelse return null;
     if (!simpleForInRootCanUseFastPath(rt, source)) return null;
+    const key_count = simpleForInEnumerableStringKeyCount(rt, source);
+    const out_length = std.math.cast(u32, key_count) orelse return null;
 
     const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
     errdefer core.Object.destroyFromHeader(rt, &iterator.header);
-    var out_index: u32 = 0;
-    for (source.properties) |entry| {
-        if (entry.flags.deleted or !entry.flags.enumerable) continue;
-        if (rt.atoms.kind(entry.atom_id) != .string) continue;
-        const key_value = try rt.atoms.toStringValue(rt, entry.atom_id);
-        defer key_value.free(rt);
-        try iterator.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(key_value, true, true, true));
-        out_index += 1;
+    if (key_count != 0) {
+        const keys = try rt.memory.alloc(core.Atom, key_count);
+        errdefer rt.memory.free(core.Atom, keys);
+        var out_index: usize = 0;
+        for (source.properties) |entry| {
+            if (entry.flags.deleted or !entry.flags.enumerable) continue;
+            if (rt.atoms.kind(entry.atom_id) != .string) continue;
+            keys[out_index] = rt.atoms.dup(entry.atom_id);
+            out_index += 1;
+        }
+        iterator.iteratorAtomKeysSlot().* = keys;
     }
-    iterator.length = out_index;
+    iterator.length = out_length;
 
     iterator.iteratorKindSlot().* = iter_vm.simple_for_in_iterator_kind;
     iterator.iteratorIndexSlot().* = 0;
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), object_value.dup());
     return iterator.value();
+}
+
+fn simpleForInEnumerableStringKeyCount(rt: *core.JSRuntime, source: *core.Object) usize {
+    var count: usize = 0;
+    for (source.properties) |entry| {
+        if (entry.flags.deleted or !entry.flags.enumerable) continue;
+        if (rt.atoms.kind(entry.atom_id) != .string) continue;
+        count += 1;
+    }
+    return count;
 }
 
 pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) bool {
@@ -3040,9 +3058,22 @@ pub fn callSimpleNumericBytecode(
             if (!captured.isNumber()) return null;
             return try simpleNumericBinary(rt, fb.simple_numeric_op, captured, args[0]);
         },
+        .capture0_post_inc_return => return try callSimpleCapture0PostIncReturn(rt, captures),
         .none => {},
     }
     return null;
+}
+
+fn callSimpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSValue) !?core.JSValue {
+    if (captures.len == 0) return null;
+    const cell = varRefCellFromValue(captures[0]) orelse return null;
+    if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
+    const slot = cell.varRefValueSlot();
+    const current_value = slot.* orelse return null;
+    const current = current_value.asInt32() orelse return null;
+    const updated = simpleInt32Add(current, 1);
+    try cell.setVarRefValue(rt, updated);
+    return updated;
 }
 
 pub fn simpleNumericCapture0Arg0Bytecode(fb: *const bytecode.FunctionBytecode) ?u8 {
@@ -3893,7 +3924,7 @@ pub fn qjsRegExpTestFastNoResult(
             if (isSimpleUnicodeLiteralSource(borrowed.source)) {
                 return simpleUnicodeLiteralMatch(borrowed.source, string_value, 0, false, flags) != null;
             }
-            if (parseSimpleClassSequenceSource(borrowed.source, flags)) |pattern| {
+            if (parseSimpleClassSequenceLatin1Source(borrowed.source, flags)) |pattern| {
                 return simpleClassSequenceMatchPattern(pattern, string_value, 0, false, flags) != null;
             }
             if (parseSimpleCaptureSequenceSource(borrowed.source, flags)) |pattern| {
@@ -3941,26 +3972,6 @@ pub fn simpleClassEscapeTestFast(source: []const u8, flags: []const u8, string_v
     if (!isSimpleStringClassEscapeSource(source)) return null;
     if (regExpFlagsContain(flags, 'i')) return null;
     return findStringClassEscapeMatch(string_value, source, 0) != null;
-}
-
-pub fn qjsRegExpTestFastNoResultLatin1(
-    ctx: *core.JSContext,
-    regexp_object: *core.Object,
-    input: []const u8,
-) !?bool {
-    const borrowed = regexpBorrowedLatin1SourceFlags(regexp_object) orelse return null;
-    const flags = borrowed.flags;
-    const is_global = std.mem.indexOfScalar(u8, flags, 'g') != null;
-    const is_sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
-    if (is_global or is_sticky) return null;
-    if (!regExpLastIndexCanSkipCoercion(regexp_object)) return null;
-    if (regexpSourceUsesZigPropertyFallback(borrowed.source, flags)) return null;
-
-    _ = ctx;
-    if (simpleAsciiLiteralPlusLiteralMatchBytes(borrowed.source, flags, input)) |matched| {
-        return matched;
-    }
-    return null;
 }
 
 pub fn simpleAsciiLiteralTestFast(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
@@ -4908,7 +4919,7 @@ pub fn qjsRegExpExecNoCaptureLengthLoopAll(
                 }
             }
         } else {
-            const pattern = parseSimpleClassSequenceSource(borrowed.source, borrowed.flags) orelse return .unsupported;
+            const pattern = parseSimpleClassSequenceLatin1Source(borrowed.source, borrowed.flags) orelse return .unsupported;
             if (simpleClassSequenceSingleUnitLengthLoop(pattern, string_value, search_start, is_sticky)) |result| {
                 total_len += result.total_len;
                 last_found = result.last_found;
@@ -4968,7 +4979,7 @@ pub fn qjsRegExpExecNoCaptureCountLoopAll(
                 }
             }
         } else {
-            const pattern = parseSimpleClassSequenceSource(borrowed.source, borrowed.flags) orelse return .unsupported;
+            const pattern = parseSimpleClassSequenceLatin1Source(borrowed.source, borrowed.flags) orelse return .unsupported;
             if (simpleClassSequenceSingleUnitLengthLoop(pattern, string_value, search_start, is_sticky)) |result| {
                 count += result.match_count;
                 last_found = result.last_found;
@@ -6279,6 +6290,19 @@ pub fn parseSimpleUnicodeLiteralSource(source: []const u8) ?SimpleUnicodeLiteral
 }
 
 pub fn parseSimpleClassSequenceSource(source: []const u8, flags: []const u8) ?SimpleClassSequencePattern {
+    return parseSimpleClassSequenceSourceWithEncoding(source, flags, .utf8);
+}
+
+pub fn parseSimpleClassSequenceLatin1Source(source: []const u8, flags: []const u8) ?SimpleClassSequencePattern {
+    return parseSimpleClassSequenceSourceWithEncoding(source, flags, .latin1);
+}
+
+const SimpleClassSequenceSourceEncoding = enum {
+    utf8,
+    latin1,
+};
+
+fn parseSimpleClassSequenceSourceWithEncoding(source: []const u8, flags: []const u8, comptime encoding: SimpleClassSequenceSourceEncoding) ?SimpleClassSequencePattern {
     if (source.len == 0 or hasFlag(flags, 'i')) return null;
     if (hasFlag(flags, 'v') and std.mem.indexOfScalar(u8, source, '[') != null) return null;
     var pattern = SimpleClassSequencePattern{};
@@ -6323,7 +6347,10 @@ pub fn parseSimpleClassSequenceSource(source: []const u8, flags: []const u8) ?Si
             }
         } else {
             atom.kind = .literal;
-            atom.literal = parseSimpleClassSequenceLiteral(source, &index, end_limit) orelse return null;
+            atom.literal = switch (encoding) {
+                .utf8 => parseSimpleClassSequenceLiteral(source, &index, end_limit),
+                .latin1 => parseSimpleClassSequenceLatin1Literal(source, &index, end_limit),
+            } orelse return null;
         }
 
         if (index < end_limit) {
@@ -6608,6 +6635,23 @@ pub fn parseSimpleClassSequenceLiteral(source: []const u8, index: *usize, end_li
     if (code_point > 0xffff) return null;
     index.* += width;
     return @intCast(code_point);
+}
+
+pub fn parseSimpleClassSequenceLatin1Literal(source: []const u8, index: *usize, end_limit: usize) ?u16 {
+    if (index.* >= end_limit or isRegExpSyntaxByte(source[index.*])) return null;
+    const unit = source[index.*];
+    index.* += 1;
+    return unit;
+}
+
+test "Latin1 RegExp source parser accepts raw non-ASCII simple literal sequence" {
+    const latin1_source = [_]u8{ 0xe9, '+' };
+    const pattern = parseSimpleClassSequenceLatin1Source(&latin1_source, "") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), pattern.len);
+    try std.testing.expectEqual(@as(u16, 0xe9), pattern.atoms[0].literal);
+    try std.testing.expectEqual(@as(usize, 1), pattern.atoms[0].min_repeat);
+    try std.testing.expectEqual(std.math.maxInt(usize), pattern.atoms[0].max_repeat);
+    try std.testing.expect(parseSimpleClassSequenceSource(&latin1_source, "") == null);
 }
 
 pub fn parseSimpleClassSequenceEscapedLiteral(source: []const u8, index: *usize, end_limit: usize) ?u16 {
@@ -7594,13 +7638,15 @@ fn constructExternalHostFunction(
     return instance;
 }
 
-pub fn globalHostOutputAutoInit(global: *core.Object, atom_id: core.Atom) bool {
+pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
     if (global.exotic != null) return false;
     for (global.properties) |*entry| {
         if (entry.flags.deleted or entry.atom_id != atom_id) continue;
         if (entry.flags.accessor) return false;
         return switch (entry.slot) {
-            .auto_init => |info| info.host_function_kind == core.host_function.ids.output,
+            .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
+                (info.host_function_kind == core.host_function.ids.external_host and
+                    call_mod.isOutputExternalHostFunctionId(rt, info.external_host_function_id)),
             .data, .accessor, .deleted => false,
         };
     }
