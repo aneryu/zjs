@@ -193,7 +193,7 @@
   { "dir": "language/global-code", "passed": 42, "failed": 0, "known_failed": 0 },
   { "dir": "language/identifier-resolution", "passed": 14, "failed": 0, "known_failed": 0 },
   { "dir": "language/identifiers", "passed": 268, "failed": 0, "known_failed": 0 },
-  { "dir": "language/import", "passed": 21, "failed": 0, "known_failed": 0 },
+  { "dir": "language/import", "passed": 21, "failed": 0, "known_failed": 5 },
   { "dir": "language/keywords", "passed": 25, "failed": 0, "known_failed": 0 },
   { "dir": "language/line-terminators", "passed": 41, "failed": 0, "known_failed": 0 },
   { "dir": "language/literals", "passed": 533, "failed": 0, "known_failed": 0 },

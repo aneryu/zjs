@@ -1147,6 +1147,22 @@ test "Engine top-level var probes preserve cross-realm global identity" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "Engine cross-realm eval keeps global lexical declarations per realm" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\let crossRealmLexicalProbe = 1;
+        \\var other = $262.createRealm().global;
+        \\other.eval("var crossRealmLexicalProbe = 2;");
+        \\assert.sameValue(crossRealmLexicalProbe, 1);
+        \\assert.sameValue(other.crossRealmLexicalProbe, 2);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "native builtin records use callee realm for errors and created objects" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -1021,7 +1021,7 @@ fn defineValuePropertyFlags(rt: *core.JSRuntime, object: *core.Object, name: []c
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, enumerable, true));
 }
 
-fn markArrayBufferImmutable(rt: *core.JSRuntime, object: *core.Object) !void {
+pub fn markArrayBufferImmutable(rt: *core.JSRuntime, object: *core.Object) !void {
     _ = rt;
     object.arrayBufferImmutableSlot().* = true;
 }
