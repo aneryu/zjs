@@ -6,6 +6,7 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const shared_vm = @import("shared.zig");
 const stack_mod = @import("stack.zig");
+const value_ops = @import("value_ops.zig");
 
 const op = bytecode.opcode.op;
 
@@ -321,7 +322,7 @@ fn decodeLiteralLengthScan(rt: *core.JSRuntime, code: []const u8, pc: usize) ?Li
     if (regexp_get.idx != regexp_put.idx) return null;
     if (regexp_get.next_pc + 5 > code.len or code[regexp_get.next_pc] != op.get_field2) return null;
     const method_atom = std.mem.readInt(u32, code[regexp_get.next_pc + 1 ..][0..4], .little);
-    if (!atomNameEql(rt, method_atom, "exec")) return null;
+    if (!value_ops.atomNameEql(rt, method_atom, "exec")) return null;
     const input_get = decodeLocalGet(code, regexp_get.next_pc + 5) orelse return null;
     if (input_get.idx != input_put.idx) return null;
     if (input_get.next_pc + 3 > code.len or code[input_get.next_pc] != op.call_method or std.mem.readInt(u16, code[input_get.next_pc + 1 ..][0..2], .little) != 1) return null;
@@ -348,10 +349,6 @@ fn decodeLiteralLengthScan(rt: *core.JSRuntime, code: []const u8, pc: usize) ?Li
     if (exit_get.next_pc >= code.len or code[exit_get.next_pc] != op.@"return") return null;
 
     return .{ .input_atom = input_push.atom, .return_pc = exit_get.next_pc };
-}
-
-fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool {
-    return if (rt.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
 fn atomStringBytes(rt: *core.JSRuntime, atom_id: core.Atom, buf: *[10]u8) ?[]const u8 {

@@ -2,6 +2,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const value_ops = @import("value_ops.zig");
 
 fn objectFromValue(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
@@ -170,7 +171,7 @@ pub fn functionOwnNativeBuiltinRefForFastPath(
 fn functionOwnDataPropertyObject(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?*core.Object {
     const object = objectFromValue(value) orelse return null;
     if (!isFunctionLikeClassId(object.class_id)) return null;
-    if (atom_id == core.atom.ids.arguments or atomNameEql(rt, atom_id, "caller")) return null;
+    if (atom_id == core.atom.ids.arguments or value_ops.atomNameEql(rt, atom_id, "caller")) return null;
     return object;
 }
 
@@ -185,10 +186,6 @@ fn isFunctionLikeClassId(class_id: core.ClassId) bool {
         class_id == core.class.ids.bound_function or
         class_id == core.class.ids.c_function_data or
         class_id == core.class.ids.c_closure;
-}
-
-fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bool {
-    return if (rt.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
 fn installOwnDataIc(
