@@ -2396,7 +2396,7 @@ fn consumeUnicodeEscape(pattern: []const u8, index: *usize) bool {
         var saw_digit = false;
         var value: u32 = 0;
         while (scan < pattern.len and pattern[scan] != '}') : (scan += 1) {
-            const digit = std.fmt.charToDigit(pattern[scan], 16) catch return true;
+            const digit = unicode.asciiHexDigitValueByte(pattern[scan]) orelse return true;
             saw_digit = true;
             if (value > 0x10ffff / 16) return true;
             value = value * 16 + digit;
@@ -2415,7 +2415,7 @@ fn hasHexDigits(pattern: []const u8, start: usize, count: usize) bool {
     if (start + count > pattern.len) return false;
     var offset: usize = 0;
     while (offset < count) : (offset += 1) {
-        _ = std.fmt.charToDigit(pattern[start + offset], 16) catch return false;
+        if (unicode.asciiHexDigitValueByte(pattern[start + offset]) == null) return false;
     }
     return true;
 }
@@ -2863,7 +2863,7 @@ fn readFixedHexClassRangeAtom(pattern: []const u8, index: *usize, prefix_len: us
     var value: u32 = 0;
     var count: usize = 0;
     while (count < digit_count) : (count += 1) {
-        const digit = std.fmt.charToDigit(pattern[scan + count], 16) catch {
+        const digit = unicode.asciiHexDigitValueByte(pattern[scan + count]) orelse {
             index.* += prefix_len;
             return .{ .kind = .single, .value = pattern[index.* - 1] };
         };
@@ -2880,7 +2880,7 @@ fn readUnicodeClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom
         var value: u32 = 0;
         var saw_digit = false;
         while (scan < pattern.len and pattern[scan] != '}') : (scan += 1) {
-            const digit = std.fmt.charToDigit(pattern[scan], 16) catch {
+            const digit = unicode.asciiHexDigitValueByte(pattern[scan]) orelse {
                 index.* += 2;
                 return .{ .kind = .single, .value = 'u' };
             };
@@ -3115,7 +3115,7 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) ?u32 {
         var value: u32 = 0;
         var saw_digit = false;
         while (pos < pattern.len and pattern[pos] != '}') : (pos += 1) {
-            const digit = std.fmt.charToDigit(pattern[pos], 16) catch return null;
+            const digit = unicode.asciiHexDigitValueByte(pattern[pos]) orelse return null;
             saw_digit = true;
             if (value > 0x10ffff / 16) return null;
             value = value * 16 + digit;
@@ -3125,15 +3125,15 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) ?u32 {
         index.* = pos + 1;
         return value;
     }
-    if (pos >= pattern.len or !std.ascii.isHex(pattern[pos])) return null;
+    if (pos >= pattern.len or unicode.asciiHexDigitValueByte(pattern[pos]) == null) return null;
     var available_hex: usize = 0;
-    while (pos + available_hex < pattern.len and available_hex < 4 and std.ascii.isHex(pattern[pos + available_hex])) : (available_hex += 1) {}
+    while (pos + available_hex < pattern.len and available_hex < 4 and unicode.asciiHexDigitValueByte(pattern[pos + available_hex]) != null) : (available_hex += 1) {}
     if (available_hex == 0) return null;
     const digit_count: usize = if (available_hex >= 4) 4 else available_hex;
     var value: u32 = 0;
     var count: usize = 0;
     while (count < digit_count) : (count += 1) {
-        const digit = std.fmt.charToDigit(pattern[pos + count], 16) catch return null;
+        const digit = unicode.asciiHexDigitValueByte(pattern[pos + count]) orelse return null;
         value = value * 16 + digit;
     }
     index.* = pos + digit_count;

@@ -5581,7 +5581,7 @@ pub fn singleUnicodeEscapeUnit(source: []const u8) ?u16 {
     var value: u16 = 0;
     var index: usize = 2;
     while (index < source.len) : (index += 1) {
-        const digit = std.fmt.charToDigit(source[index], 16) catch return null;
+        const digit = hexNibble(source[index]) orelse return null;
         value = value * 16 + @as(u16, @intCast(digit));
     }
     return value;
@@ -5602,7 +5602,7 @@ pub fn singleUnicodeClassEscapeUnit(source: []const u8) ?u16 {
     var value: u16 = 0;
     var index: usize = 3;
     while (index < 7) : (index += 1) {
-        const digit = std.fmt.charToDigit(source[index], 16) catch return null;
+        const digit = hexNibble(source[index]) orelse return null;
         value = value * 16 + @as(u16, @intCast(digit));
     }
     return value;
@@ -6223,7 +6223,7 @@ pub fn parseSimpleUnicodeLiteralSource(source: []const u8) ?SimpleUnicodeLiteral
                         var saw_digit = false;
                         var value: u32 = 0;
                         while (scan < end_limit and source[scan] != '}') : (scan += 1) {
-                            const digit = std.fmt.charToDigit(source[scan], 16) catch return null;
+                            const digit = hexNibble(source[scan]) orelse return null;
                             saw_digit = true;
                             if (value > 0x10ffff / 16) return null;
                             value = value * 16 + digit;
@@ -6247,7 +6247,7 @@ pub fn parseSimpleUnicodeLiteralSource(source: []const u8) ?SimpleUnicodeLiteral
                     var value: u16 = 0;
                     var digit_index = index + 2;
                     while (digit_index < index + 6) : (digit_index += 1) {
-                        const digit = std.fmt.charToDigit(source[digit_index], 16) catch return null;
+                        const digit = hexNibble(source[digit_index]) orelse return null;
                         value = value * 16 + @as(u16, @intCast(digit));
                     }
                     pattern.units[pattern.len] = value;
@@ -6686,7 +6686,7 @@ pub fn parseSimpleClassSequenceEscapedLiteral(source: []const u8, index: *usize,
             var value: u16 = 0;
             var digit_index = index.* + 2;
             while (digit_index < index.* + 4) : (digit_index += 1) {
-                const digit = std.fmt.charToDigit(source[digit_index], 16) catch return null;
+                const digit = hexNibble(source[digit_index]) orelse return null;
                 value = value * 16 + @as(u16, @intCast(digit));
             }
             index.* += 4;
@@ -6698,7 +6698,7 @@ pub fn parseSimpleClassSequenceEscapedLiteral(source: []const u8, index: *usize,
                 var saw_digit = false;
                 var value: u32 = 0;
                 while (scan < end_limit and source[scan] != '}') : (scan += 1) {
-                    const digit = std.fmt.charToDigit(source[scan], 16) catch return null;
+                    const digit = hexNibble(source[scan]) orelse return null;
                     saw_digit = true;
                     if (value > 0xffff / 16) return null;
                     value = value * 16 + digit;
@@ -6712,7 +6712,7 @@ pub fn parseSimpleClassSequenceEscapedLiteral(source: []const u8, index: *usize,
             var value: u16 = 0;
             var digit_index = index.* + 2;
             while (digit_index < index.* + 6) : (digit_index += 1) {
-                const digit = std.fmt.charToDigit(source[digit_index], 16) catch return null;
+                const digit = hexNibble(source[digit_index]) orelse return null;
                 value = value * 16 + @as(u16, @intCast(digit));
             }
             index.* += 6;
@@ -6779,7 +6779,7 @@ pub fn readFixedUnicodeEscapeUnit(source: []const u8, index: *usize) ?u16 {
     var value: u16 = 0;
     var pos = index.* + 2;
     while (pos < index.* + 6) : (pos += 1) {
-        const digit = std.fmt.charToDigit(source[pos], 16) catch return null;
+        const digit = hexNibble(source[pos]) orelse return null;
         value = value * 16 + @as(u16, @intCast(digit));
     }
     index.* += 6;
@@ -7114,7 +7114,7 @@ pub fn readRegExpGroupNameEscape(name: []const u8, index: *usize) ?u21 {
         var value: u32 = 0;
         var saw_digit = false;
         while (pos < name.len and name[pos] != '}') : (pos += 1) {
-            const digit = std.fmt.charToDigit(name[pos], 16) catch return null;
+            const digit = hexNibble(name[pos]) orelse return null;
             saw_digit = true;
             value = value * 16 + digit;
             if (value > 0x10ffff) return null;
@@ -7123,14 +7123,14 @@ pub fn readRegExpGroupNameEscape(name: []const u8, index: *usize) ?u21 {
         index.* = pos + 1;
         return @intCast(value);
     }
-    if (pos >= name.len or !std.ascii.isHex(name[pos])) return null;
+    if (pos >= name.len or hexNibble(name[pos]) == null) return null;
     var available_hex: usize = 0;
-    while (pos + available_hex < name.len and available_hex < 4 and std.ascii.isHex(name[pos + available_hex])) : (available_hex += 1) {}
+    while (pos + available_hex < name.len and available_hex < 4 and hexNibble(name[pos + available_hex]) != null) : (available_hex += 1) {}
     const digit_count: usize = if (available_hex >= 4) 4 else available_hex;
     var value: u32 = 0;
     var count: usize = 0;
     while (count < digit_count) : (count += 1) {
-        const digit = std.fmt.charToDigit(name[pos + count], 16) catch return null;
+        const digit = hexNibble(name[pos + count]) orelse return null;
         value = value * 16 + digit;
     }
     index.* = pos + digit_count;
