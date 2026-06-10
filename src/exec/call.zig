@@ -2593,7 +2593,9 @@ fn callNativeBuiltin(
                 };
             }
             if (builtins.regexp.legacyPrototypeMethodId(name)) |method| {
-                const native_method = regexpNativePrototypeMethodId(function_object) orelse break :regexp_dispatch;
+                const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse break :regexp_dispatch;
+                if (native_ref.domain != .regexp) break :regexp_dispatch;
+                const native_method = builtins.regexp.decodePrototypeMethodId(native_ref.id) orelse break :regexp_dispatch;
                 if (native_method != method) break :regexp_dispatch;
                 const arg: ?core.JSValue = if (method == 1 or args.len == 0) null else args[0];
                 return builtins.regexp.methodCall(ctx.runtime, this_value, method, arg) catch |err| switch (err) {
@@ -5511,12 +5513,6 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (!object.is_proxy or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
-}
-
-fn regexpNativePrototypeMethodId(function_object: *core.Object) ?u32 {
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
-    if (native_ref.domain != .regexp) return null;
-    return builtins.regexp.decodePrototypeMethodId(native_ref.id);
 }
 
 fn bigIntStaticUnsigned(name: []const u8) ?bool {
