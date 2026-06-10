@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const bignum = @import("../libs/bignum.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
 const AppendStringError = error{
@@ -300,7 +301,7 @@ fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.J
             var index: usize = 0;
             while (index < units.len) : (index += 1) {
                 const unit = units[index];
-                if (unit >= 0xd800 and unit <= 0xdbff) {
+                if (unicode.isHighSurrogateUnit(unit)) {
                     const next = units[index + 1];
                     const high: u21 = unit - 0xd800;
                     const low: u21 = next - 0xdc00;
@@ -336,12 +337,12 @@ fn hasUnpairedSurrogate(units: []const u16) bool {
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
-        if (unit >= 0xd800 and unit <= 0xdbff) {
+        if (unicode.isHighSurrogateUnit(unit)) {
             if (index + 1 >= units.len) return true;
             const next = units[index + 1];
-            if (next < 0xdc00 or next > 0xdfff) return true;
+            if (!unicode.isLowSurrogateUnit(next)) return true;
             index += 1;
-        } else if (unit >= 0xdc00 and unit <= 0xdfff) {
+        } else if (unicode.isLowSurrogateUnit(unit)) {
             return true;
         }
     }

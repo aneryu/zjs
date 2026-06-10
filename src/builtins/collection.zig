@@ -5,6 +5,7 @@ const symbol_builtin = @import("symbol.zig");
 const globals_mod = core.global_slots;
 const bignum = @import("../libs/bignum.zig");
 const dtoa = @import("../libs/dtoa.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
 pub const CallbackError = error{
@@ -1897,11 +1898,11 @@ fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, inde
 }
 
 fn isHighSurrogate(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode.isHighSurrogateUnit(unit);
 }
 
 fn isLowSurrogate(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn isCallableClosure(value: core.JSValue) bool {

@@ -4293,9 +4293,9 @@ pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), u
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
-        if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < units.len) {
+        if (isHighSurrogateUnit(unit) and index + 1 < units.len) {
             const next = units[index + 1];
-            if (next >= 0xdc00 and next <= 0xdfff) {
+            if (isLowSurrogateUnit(next)) {
                 try appendCodepointUtf8(rt, buffer, codePointFromSurrogatePair(unit, next));
                 index += 1;
                 continue;
@@ -7020,11 +7020,11 @@ pub fn isAsciiWordUnit(unit: u16) bool {
 }
 
 pub fn isHighSurrogateUnit(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode_lib.isHighSurrogateUnit(unit);
 }
 
 pub fn isLowSurrogateUnit(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode_lib.isLowSurrogateUnit(unit);
 }
 
 pub const RegExpCapture = struct {

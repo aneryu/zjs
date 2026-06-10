@@ -274,9 +274,9 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
 
     const index: usize = @intCast((iterator_object.iteratorIndexSlot().*));
     const first = string_value.codeUnitAt(index);
-    if (first >= 0xd800 and first <= 0xdbff and index + 1 < string_value.len()) {
+    if (isHighSurrogateUnit(first) and index + 1 < string_value.len()) {
         const second = string_value.codeUnitAt(index + 1);
-        if (second >= 0xdc00 and second <= 0xdfff) {
+        if (isLowSurrogateUnit(second)) {
             iterator_object.iteratorIndexSlot().* += 2;
             const units: [2]u16 = .{ first, second };
             const out = try core.string.String.createUtf16(rt, &units);
@@ -564,11 +564,11 @@ fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !c
 }
 
 fn isHighSurrogateUnit(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode.isHighSurrogateUnit(unit);
 }
 
 fn isLowSurrogateUnit(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn substr(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
@@ -1025,9 +1025,9 @@ const CodePointSpan = struct {
 fn codePointAtStringIndex(string_value: core.string.String, index: usize) CodePointSpan {
     const first = string_value.codeUnitAt(index);
     const next_index = index + 1;
-    if (first >= 0xd800 and first <= 0xdbff and next_index < string_value.len()) {
+    if (isHighSurrogateUnit(first) and next_index < string_value.len()) {
         const second = string_value.codeUnitAt(next_index);
-        if (second >= 0xdc00 and second <= 0xdfff) {
+        if (isLowSurrogateUnit(second)) {
             const code_point = 0x10000 + ((@as(u32, first) - 0xd800) << 10) + (@as(u32, second) - 0xdc00);
             return .{ .value = @intCast(code_point), .start = index, .end = index + 2 };
         }
@@ -1039,10 +1039,10 @@ fn codePointBeforeStringIndex(string_value: core.string.String, end: usize) ?Cod
     if (end == 0) return null;
     const last_index = end - 1;
     const last = string_value.codeUnitAt(last_index);
-    if (last >= 0xdc00 and last <= 0xdfff and last_index > 0) {
+    if (isLowSurrogateUnit(last) and last_index > 0) {
         const first_index = last_index - 1;
         const first = string_value.codeUnitAt(first_index);
-        if (first >= 0xd800 and first <= 0xdbff) {
+        if (isHighSurrogateUnit(first)) {
             const code_point = 0x10000 + ((@as(u32, first) - 0xd800) << 10) + (@as(u32, last) - 0xdc00);
             return .{ .value = @intCast(code_point), .start = first_index, .end = end };
         }
@@ -1179,9 +1179,9 @@ fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.undefinedValue();
     const unit = string_value.codeUnitAt(@intCast(index));
-    if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < string_value.len()) {
+    if (isHighSurrogateUnit(unit) and index + 1 < string_value.len()) {
         const next = string_value.codeUnitAt(@intCast(index + 1));
-        if (next >= 0xdc00 and next <= 0xdfff) {
+        if (isLowSurrogateUnit(next)) {
             const code_point = 0x10000 + ((@as(u32, unit) - 0xd800) << 10) + (@as(u32, next) - 0xdc00);
             return core.JSValue.int32(@intCast(code_point));
         }

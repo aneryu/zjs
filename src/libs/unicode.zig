@@ -22,6 +22,10 @@ pub fn asciiCategory(c: u21) Category {
 pub const case_mapping_max_len = 3;
 const unicode_limit: u21 = 0x110000;
 const max_code_point: u21 = 0x10ffff;
+const high_surrogate_min: u21 = 0xd800;
+const high_surrogate_max: u21 = 0xdbff;
+const low_surrogate_min: u21 = 0xdc00;
+const low_surrogate_max: u21 = 0xdfff;
 
 pub const CaseMapping = struct {
     codepoints: [case_mapping_max_len]u21,
@@ -93,6 +97,22 @@ pub fn isCaseIgnorable(c: u21) bool {
 
 pub fn isWhiteSpace(c: u21) bool {
     return isInTable(c, data.unicode_prop_White_Space_table[0..], data.unicode_prop_White_Space_index[0..]);
+}
+
+pub fn isHighSurrogateUnit(unit: u16) bool {
+    return isHighSurrogateCodePoint(@intCast(unit));
+}
+
+pub fn isLowSurrogateUnit(unit: u16) bool {
+    return isLowSurrogateCodePoint(@intCast(unit));
+}
+
+pub fn isHighSurrogateCodePoint(cp: u21) bool {
+    return cp >= high_surrogate_min and cp <= high_surrogate_max;
+}
+
+pub fn isLowSurrogateCodePoint(cp: u21) bool {
+    return cp >= low_surrogate_min and cp <= low_surrogate_max;
 }
 
 /// Returns owned UTF-32 code points. Caller must free with the same allocator.
@@ -1309,6 +1329,23 @@ test "unicode functionality" {
     try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x0e01f0));
     try std.testing.expect(rangesContain(unknown_script_ext_ranges, 0x10ffff));
     try std.testing.expect(!rangesContain(unknown_script_ext_ranges, 0x03c0));
+}
+
+test "unicode surrogate range helpers cover boundaries" {
+    try std.testing.expect(!isHighSurrogateUnit(0xd7ff));
+    try std.testing.expect(isHighSurrogateUnit(0xd800));
+    try std.testing.expect(isHighSurrogateUnit(0xdbff));
+    try std.testing.expect(!isHighSurrogateUnit(0xdc00));
+
+    try std.testing.expect(!isLowSurrogateUnit(0xdbff));
+    try std.testing.expect(isLowSurrogateUnit(0xdc00));
+    try std.testing.expect(isLowSurrogateUnit(0xdfff));
+    try std.testing.expect(!isLowSurrogateUnit(0xe000));
+
+    try std.testing.expect(isHighSurrogateCodePoint(0xd800));
+    try std.testing.expect(isLowSurrogateCodePoint(0xdfff));
+    try std.testing.expect(!isHighSurrogateCodePoint(0x10000));
+    try std.testing.expect(!isLowSurrogateCodePoint(0x10ffff));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {

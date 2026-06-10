@@ -2,6 +2,7 @@ const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
+const unicode_lib = @import("../libs/unicode.zig");
 const symbol_builtin = @import("../builtins/symbol.zig");
 const std = @import("std");
 
@@ -733,9 +734,9 @@ fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []c
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
-        if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < units.len) {
+        if (unicode_lib.isHighSurrogateUnit(unit) and index + 1 < units.len) {
             const next = units[index + 1];
-            if (next >= 0xdc00 and next <= 0xdfff) {
+            if (unicode_lib.isLowSurrogateUnit(next)) {
                 const high: u32 = @intCast(unit - 0xd800);
                 const low: u32 = @intCast(next - 0xdc00);
                 try appendUtf8CodePoint(rt, buffer, 0x10000 + (high << 10) + low);

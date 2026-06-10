@@ -1,4 +1,5 @@
 const std = @import("std");
+const unicode = @import("../libs/unicode.zig");
 const string_mod = @import("string.zig");
 
 pub fn JSString(comptime Value: type) type {
@@ -189,11 +190,11 @@ fn writeUtf8CodePoint(out: []u8, code_point: u32) usize {
 }
 
 fn isHighSurrogate(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode.isHighSurrogateUnit(unit);
 }
 
 fn isLowSurrogate(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn surrogatePairCodePoint(high: u16, low: u16) u32 {

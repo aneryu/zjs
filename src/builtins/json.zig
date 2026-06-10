@@ -1,4 +1,5 @@
 const core = @import("../core/root.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
 const JsonStringifyError = std.mem.Allocator.Error || error{
@@ -986,10 +987,10 @@ fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8),
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
-        if (unit >= 0xd800 and unit <= 0xdbff) {
+        if (unicode.isHighSurrogateUnit(unit)) {
             if (index + 1 < units.len) {
                 const next = units[index + 1];
-                if (next >= 0xdc00 and next <= 0xdfff) {
+                if (unicode.isLowSurrogateUnit(next)) {
                     const high: u32 = @intCast(unit - 0xd800);
                     const low: u32 = @intCast(next - 0xdc00);
                     try appendUtf8CodePoint(rt, buffer, 0x10000 + (high << 10) + low);
@@ -998,7 +999,7 @@ fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8),
                 }
             }
             try appendEscapedJsonUnit(rt, buffer, unit);
-        } else if (unit >= 0xdc00 and unit <= 0xdfff) {
+        } else if (unicode.isLowSurrogateUnit(unit)) {
             try appendEscapedJsonUnit(rt, buffer, unit);
         } else if (unit <= 0x7f) {
             try appendEscapedJsonByte(rt, buffer, @intCast(unit));
@@ -1049,9 +1050,9 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             var index: usize = 0;
             while (index < units.len) : (index += 1) {
                 const unit = units[index];
-                if (unit >= 0xd800 and unit <= 0xdbff and index + 1 < units.len) {
+                if (unicode.isHighSurrogateUnit(unit) and index + 1 < units.len) {
                     const next = units[index + 1];
-                    if (next >= 0xdc00 and next <= 0xdfff) {
+                    if (unicode.isLowSurrogateUnit(next)) {
                         const high: u32 = @intCast(unit - 0xd800);
                         const low: u32 = @intCast(next - 0xdc00);
                         try appendUtf8CodePoint(rt, buffer, 0x10000 + (high << 10) + low);

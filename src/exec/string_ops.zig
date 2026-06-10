@@ -1440,9 +1440,9 @@ pub fn qjsRegExpSymbolSplitGeneric(
 pub fn advanceStringIndexUnits(units: []const u16, index: usize, unicode: bool) usize {
     if (!unicode or index + 1 >= units.len) return index + 1;
     const first = units[index];
-    if (first < 0xd800 or first > 0xdbff) return index + 1;
+    if (!isHighSurrogateUnit(first)) return index + 1;
     const second = units[index + 1];
-    return if (second >= 0xdc00 and second <= 0xdfff) index + 2 else index + 1;
+    return if (isLowSurrogateUnit(second)) index + 2 else index + 1;
 }
 
 pub fn qjsRegExpSymbolSearchGeneric(
@@ -3893,9 +3893,9 @@ pub fn anchoredCodePointPredicateMatches(
 
 pub fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
     const high = units[index.*];
-    if (high >= 0xd800 and high <= 0xdbff and index.* + 1 < units.len) {
+    if (isHighSurrogateUnit(high) and index.* + 1 < units.len) {
         const low = units[index.* + 1];
-        if (low >= 0xdc00 and low <= 0xdfff) {
+        if (isLowSurrogateUnit(low)) {
             index.* += 2;
             return @intCast(0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00));
         }
@@ -4232,11 +4232,11 @@ pub fn appendUtf8CodePointForRegExpName(rt: *core.JSRuntime, out: *std.ArrayList
 }
 
 pub fn isHighSurrogateCodePoint(cp: u21) bool {
-    return cp >= 0xd800 and cp <= 0xdbff;
+    return unicode_lib.isHighSurrogateCodePoint(cp);
 }
 
 pub fn isLowSurrogateCodePoint(cp: u21) bool {
-    return cp >= 0xdc00 and cp <= 0xdfff;
+    return unicode_lib.isLowSurrogateCodePoint(cp);
 }
 
 pub fn combinedSurrogateCodePoint(high: u16, low: u16) u21 {

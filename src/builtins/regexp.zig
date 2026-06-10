@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
 const AppendStringError = error{
@@ -3167,7 +3168,7 @@ fn isInvalidRegExpGroupNameStart(cp: u21) bool {
 }
 
 fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
-    if (cp >= 0xd800 and cp <= 0xdfff) return true;
+    if (unicode.isHighSurrogateCodePoint(cp) or unicode.isLowSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,
@@ -3175,11 +3176,11 @@ fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
 }
 
 fn isGroupNameHighSurrogate(cp: u32) bool {
-    return cp >= 0xd800 and cp <= 0xdbff;
+    return cp <= std.math.maxInt(u16) and unicode.isHighSurrogateUnit(@intCast(cp));
 }
 
 fn isGroupNameLowSurrogate(cp: u32) bool {
-    return cp >= 0xdc00 and cp <= 0xdfff;
+    return cp <= std.math.maxInt(u16) and unicode.isLowSurrogateUnit(@intCast(cp));
 }
 
 fn groupNameSurrogateCodePoint(high: u16, low: u16) u21 {
@@ -3649,11 +3650,11 @@ fn isEscapedWhitespaceOrLineTerminator(unit: u16) bool {
 }
 
 fn isHighSurrogate(unit: u16) bool {
-    return unit >= 0xd800 and unit <= 0xdbff;
+    return unicode.isHighSurrogateUnit(unit);
 }
 
 fn isLowSurrogate(unit: u16) bool {
-    return unit >= 0xdc00 and unit <= 0xdfff;
+    return unicode.isLowSurrogateUnit(unit);
 }
 
 fn surrogateCodePoint(high: u16, low: u16) u32 {
