@@ -4215,16 +4215,11 @@ fn proxyReflectHasProperty(
     const trap = try getValueProperty(ctx, output, global, globals, handler_value, has_atom);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return reflectHasProperty(ctx, output, global, globals, target, atom_id);
-    const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
+    const key_value = try shared_vm.proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
     const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, handler_value, trap, &.{ target_value, key_value });
     defer result.free(ctx.runtime);
     return try shared_vm.validateProxyHasResult(ctx.runtime, target, atom_id, value_ops.isTruthy(result));
-}
-
-fn proxyTrapKeyValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
-    if ((rt.atoms.kind(atom_id) orelse .string) == .symbol) return core.JSValue.symbol(atom_id);
-    return rt.atoms.toStringValue(rt, atom_id);
 }
 
 fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
