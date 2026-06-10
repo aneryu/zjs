@@ -657,7 +657,7 @@ pub const Lexer = struct {
         // (e.g. `123abc` is a single error per spec, not two tokens).
         if (self.pos < self.source.len) {
             const nc = self.peek();
-            if (isAsciiIdentStart(nc) or std.ascii.isDigit(nc) or (nc >= 0x80 and !self.startsUtf8Trivia())) {
+            if (isAsciiIdentContinue(nc) or (nc >= 0x80 and !self.startsUtf8Trivia())) {
                 return error.InvalidNumber;
             }
         }
@@ -1327,11 +1327,11 @@ pub const Lexer = struct {
 };
 
 fn isAsciiIdentStart(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '$';
+    return unicode.isAsciiIdentifierStartByte(c);
 }
 
 fn isAsciiIdentContinue(c: u8) bool {
-    return isAsciiIdentStart(c) or (c >= '0' and c <= '9');
+    return unicode.isAsciiIdentifierPartByte(c);
 }
 
 fn hexNibble(c: u8) u16 {
@@ -2576,11 +2576,11 @@ fn textEql(a: []const u8, b: []const u8) bool {
 }
 
 fn tsIsIdentStart(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '_' or c == '$' or c >= 0x80;
+    return unicode.isAsciiIdentifierStartByte(c) or c >= 0x80;
 }
 
 fn tsIsIdentContinue(c: u8) bool {
-    return tsIsIdentStart(c) or std.ascii.isDigit(c);
+    return tsIsIdentStart(c) or unicode.isAsciiDigitCodePoint(c);
 }
 
 pub const RegExpLiteral = struct {
@@ -2621,7 +2621,7 @@ pub fn scanRegExpLiteral(source: []const u8, slash_offset: usize) !RegExpLiteral
     const pattern = source[slash_offset + 1 .. i];
     i += 1;
     const flags_start = i;
-    while (i < source.len and (std.ascii.isAlphabetic(source[i]) or std.ascii.isDigit(source[i]) or source[i] == '_' or source[i] == '$')) : (i += 1) {}
+    while (i < source.len and unicode.isAsciiIdentifierPartByte(source[i])) : (i += 1) {}
     return .{
         .pattern = pattern,
         .flags = source[flags_start..i],

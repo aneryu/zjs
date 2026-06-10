@@ -27,6 +27,7 @@ const core_bigint = @import("../core/bigint.zig");
 const core = @import("../core/root.zig");
 const regexp_builtin = @import("../builtins/regexp.zig");
 const libs_bignum = @import("../libs/bignum.zig");
+const unicode = @import("../libs/unicode.zig");
 const memory = @import("../core/memory.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 
@@ -7251,11 +7252,7 @@ fn startsKeywordAt(source: []const u8, index: usize, keyword: []const u8) bool {
 }
 
 fn isAsciiIdentifierContinue(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or
-        (c >= 'A' and c <= 'Z') or
-        (c >= '0' and c <= '9') or
-        c == '_' or
-        c == '$';
+    return unicode.isAsciiIdentifierPartByte(c);
 }
 
 fn emitStringLiteralValue(s: *ParseState, bytes: []const u8) Error!void {

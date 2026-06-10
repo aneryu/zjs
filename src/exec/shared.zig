@@ -10270,11 +10270,11 @@ pub fn canDeclareGlobalFunction(ctx: *core.JSContext, global: *core.Object, atom
 }
 
 pub fn isIdentifierStartByte(ch: u8) bool {
-    return std.ascii.isAlphabetic(ch) or ch == '_' or ch == '$';
+    return unicode_lib.isAsciiIdentifierStartByte(ch);
 }
 
 pub fn isIdentifierPartByte(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '$';
+    return unicode_lib.isAsciiIdentifierPartByte(ch);
 }
 
 pub fn directEvalThisValue(
@@ -10528,7 +10528,7 @@ pub fn startsWithKeyword(source: []const u8, keyword: []const u8) bool {
     if (!std.mem.startsWith(u8, source, keyword)) return false;
     if (source.len == keyword.len) return true;
     const next = source[keyword.len];
-    return !std.ascii.isAlphanumeric(next) and next != '_' and next != '$';
+    return !isIdentifierPartByte(next);
 }
 
 pub fn appendIdentifierEscape(rt: *core.JSRuntime, out: *std.ArrayList(u8), source: []const u8, index: *usize) !void {
@@ -10951,7 +10951,7 @@ pub fn directEvalVarNameIsNonLeadingFunctionCallerArg(
         const idx = search_start + rel;
         if (idx > 0) {
             const prev = source[idx - 1];
-            if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == '$') {
+            if (isIdentifierPartByte(prev)) {
                 search_start = idx + "function".len;
                 continue;
             }
@@ -12073,9 +12073,9 @@ pub fn evalSimpleCallerExpression(
 
 pub fn isSimpleIdentifierName(name: []const u8) bool {
     if (name.len == 0) return false;
-    if (!(std.ascii.isAlphabetic(name[0]) or name[0] == '_' or name[0] == '$')) return false;
+    if (!unicode_lib.isAsciiIdentifierStartByte(name[0])) return false;
     for (name[1..]) |ch| {
-        if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '$')) return false;
+        if (!unicode_lib.isAsciiIdentifierPartByte(ch)) return false;
     }
     return true;
 }
@@ -12096,7 +12096,7 @@ pub fn simpleVarDeclarationName(source: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, trimmed, "var ")) return null;
     const rest = std.mem.trim(u8, trimmed["var ".len..], " \t\r\n");
     var end: usize = 0;
-    while (end < rest.len and (std.ascii.isAlphanumeric(rest[end]) or rest[end] == '_' or rest[end] == '$')) : (end += 1) {}
+    while (end < rest.len and isIdentifierPartByte(rest[end])) : (end += 1) {}
     if (end == 0) return null;
     const name = rest[0..end];
     const tail = std.mem.trim(u8, rest[end..], " \t\r\n");

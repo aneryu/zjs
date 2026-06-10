@@ -115,6 +115,14 @@ pub fn isAsciiWordUnit(unit: u16) bool {
     return isAsciiWordCodePoint(@intCast(unit));
 }
 
+pub fn isAsciiIdentifierStartByte(byte: u8) bool {
+    return isAsciiAlphaCodePoint(byte) or byte == '_' or byte == '$';
+}
+
+pub fn isAsciiIdentifierPartByte(byte: u8) bool {
+    return isAsciiIdentifierStartByte(byte) or isAsciiDigitCodePoint(byte);
+}
+
 pub fn isAsciiDigitCodePoint(cp: u21) bool {
     return cp >= '0' and cp <= '9';
 }
@@ -1419,6 +1427,22 @@ test "unicode ascii character helpers cover ECMAScript regexp sets" {
     try std.testing.expect(isAsciiWordUnit('9'));
     try std.testing.expect(!isAsciiWordUnit('-'));
     try std.testing.expect(!isAsciiWordCodePoint(0x80));
+}
+
+test "unicode ascii identifier byte helpers cover ECMAScript starts and parts" {
+    try std.testing.expect(isAsciiIdentifierStartByte('A'));
+    try std.testing.expect(isAsciiIdentifierStartByte('z'));
+    try std.testing.expect(isAsciiIdentifierStartByte('_'));
+    try std.testing.expect(isAsciiIdentifierStartByte('$'));
+    try std.testing.expect(!isAsciiIdentifierStartByte('0'));
+    try std.testing.expect(!isAsciiIdentifierStartByte(0x80));
+
+    try std.testing.expect(isAsciiIdentifierPartByte('A'));
+    try std.testing.expect(isAsciiIdentifierPartByte('9'));
+    try std.testing.expect(isAsciiIdentifierPartByte('_'));
+    try std.testing.expect(isAsciiIdentifierPartByte('$'));
+    try std.testing.expect(!isAsciiIdentifierPartByte('-'));
+    try std.testing.expect(!isAsciiIdentifierPartByte(0x80));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {
