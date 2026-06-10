@@ -2654,7 +2654,7 @@ pub fn callNativeFunctionRecord(
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     return switch (native_ref.domain) {
         .math => {
-            if (native_ref.id == 37) {
+            if (native_ref.id == builtins.math.sum_precise_method_id) {
                 if (global) |global_object| return try shared_vm.qjsMathSumPrecise(ctx, output, global_object, args, caller_function, caller_frame);
                 return error.TypeError;
             }
