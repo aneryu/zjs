@@ -1079,7 +1079,7 @@ fn dataViewBuffer(view: *core.Object) !*core.Object {
 }
 
 fn numberResult(value: f64) core.JSValue {
-    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !isNegativeZero(value)) {
+    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !std.math.isNegativeZero(value)) {
         return core.JSValue.int32(@intFromFloat(value));
     }
     return core.JSValue.float64(value);
@@ -1292,7 +1292,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
@@ -1373,8 +1373,4 @@ fn isTruthy(value: core.JSValue) bool {
         return string_value.len() != 0;
     }
     return true;
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
 }

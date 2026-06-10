@@ -375,7 +375,7 @@ fn primitiveToStringValueFast(rt: *core.JSRuntime, value: core.JSValue) !?core.J
         if (std.math.isNan(float_value)) return try createAsciiStringValue(rt, "NaN");
         if (std.math.isPositiveInf(float_value)) return try createAsciiStringValue(rt, "Infinity");
         if (std.math.isNegativeInf(float_value)) return try createAsciiStringValue(rt, "-Infinity");
-        if (isNegativeZero(float_value)) return try createAsciiStringValue(rt, "0");
+        if (std.math.isNegativeZero(float_value)) return try createAsciiStringValue(rt, "0");
         var float_buf: [64]u8 = undefined;
         return try createAsciiStringValue(rt, try formatFiniteNumber(&float_buf, float_value));
     }
@@ -462,7 +462,7 @@ pub fn asN(rt: *core.JSRuntime, bits_value: core.JSValue, bigint_value: core.JSV
 pub fn numberToValue(value: f64) core.JSValue {
     if (value >= -2147483648 and value <= 2147483647) {
         const int_val: i32 = @intFromFloat(value);
-        if (@as(f64, @floatFromInt(int_val)) == value and !isNegativeZero(value)) {
+        if (@as(f64, @floatFromInt(int_val)) == value and !std.math.isNegativeZero(value)) {
             return core.JSValue.int32(int_val);
         }
     }
@@ -667,7 +667,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
             try buffer.appendSlice(rt.memory.allocator, "Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try buffer.appendSlice(rt.memory.allocator, "-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try buffer.append(rt.memory.allocator, '0');
         } else {
             var float_buf: [64]u8 = undefined;
@@ -1155,10 +1155,6 @@ fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.Big
         .left => if (negative_shift) lhs.shr(allocator, amount) else lhs.shl(allocator, amount),
         .right => if (negative_shift) lhs.shl(allocator, amount) else lhs.shr(allocator, amount),
     };
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
 }
 
 fn parseJsNumber(bytes: []const u8) f64 {

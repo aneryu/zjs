@@ -600,7 +600,7 @@ fn numberValue(value: core.JSValue) ?f64 {
 }
 
 fn numberResult(value: f64) core.JSValue {
-    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !isNegativeZero(value)) {
+    if (std.math.isFinite(value) and @floor(value) == value and value >= @as(f64, @floatFromInt(std.math.minInt(i32))) and value <= @as(f64, @floatFromInt(std.math.maxInt(i32))) and !std.math.isNegativeZero(value)) {
         return core.JSValue.int32(@intFromFloat(value));
     }
     return core.JSValue.float64(value);
@@ -1128,8 +1128,4 @@ fn civilFromDays(days_since_epoch: i64) struct { year: i64, month: i64, day: i64
     const month = mp + if (mp < 10) @as(i64, 3) else @as(i64, -9);
     year += if (month <= 2) 1 else 0;
     return .{ .year = year, .month = month, .day = day };
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.isNegativeInf(1.0 / value);
 }

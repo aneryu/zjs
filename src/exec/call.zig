@@ -512,7 +512,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
             try writer.writeAll("Infinity");
         } else if (std.math.isNegativeInf(float_value)) {
             try writer.writeAll("-Infinity");
-        } else if (isNegativeZero(float_value)) {
+        } else if (std.math.isNegativeZero(float_value)) {
             try writer.writeAll("0");
         } else {
             var float_buf: [64]u8 = undefined;
@@ -7735,10 +7735,6 @@ fn isFunctionClass(class_id: core.ClassId) bool {
         class_id == core.class.ids.bound_function or
         class_id == core.class.ids.c_function_data or
         class_id == core.class.ids.c_closure;
-}
-
-fn isNegativeZero(value: f64) bool {
-    return value == 0 and std.math.signbit(value);
 }
 
 fn printNativeFunction(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) !void {
