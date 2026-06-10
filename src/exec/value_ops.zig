@@ -963,36 +963,13 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
     }
 
     var int_buf: [16]u8 = undefined;
-    const digits = formatI32Decimal(&int_buf, int_value);
+    const digits = dtoa.formatInt32(&int_buf, int_value);
 
     const out = switch (position) {
         .prefix => try core.string.String.createLatin1Concat(rt, digits, string_bytes),
         .suffix => try core.string.String.createLatin1Concat(rt, string_bytes, digits),
     };
     return out.value();
-}
-
-fn formatI32Decimal(buffer: *[16]u8, value: i32) []const u8 {
-    if (value == 0) {
-        buffer[buffer.len - 1] = '0';
-        return buffer[buffer.len - 1 ..];
-    }
-
-    var index = buffer.len;
-    var magnitude: u32 = if (value < 0)
-        @as(u32, @intCast(-(value + 1))) + 1
-    else
-        @intCast(value);
-    while (magnitude != 0) {
-        index -= 1;
-        buffer[index] = '0' + @as(u8, @intCast(magnitude % 10));
-        magnitude /= 10;
-    }
-    if (value < 0) {
-        index -= 1;
-        buffer[index] = '-';
-    }
-    return buffer[index..];
 }
 
 fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {

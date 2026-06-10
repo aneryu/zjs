@@ -3,6 +3,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const dtoa = @import("../libs/dtoa.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
@@ -301,36 +302,13 @@ fn pushFusedAsciiAtomStringConcat(
     if (second_int.next_pc >= code.len or code[second_int.next_pc] != op.add) return false;
 
     var int_buf: [16]u8 = undefined;
-    const digits = formatI32Decimal(&int_buf, second_int.value);
+    const digits = dtoa.formatInt32(&int_buf, second_int.value);
     const out = try core.string.String.createLatin1Concat(ctx.runtime, first, digits);
     const value = out.value();
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
     frame.pc = second_int.next_pc + 1;
     return true;
-}
-
-fn formatI32Decimal(buffer: *[16]u8, value: i32) []const u8 {
-    if (value == 0) {
-        buffer[buffer.len - 1] = '0';
-        return buffer[buffer.len - 1 ..];
-    }
-
-    var index = buffer.len;
-    var magnitude: u32 = if (value < 0)
-        @as(u32, @intCast(-(value + 1))) + 1
-    else
-        @intCast(value);
-    while (magnitude != 0) {
-        index -= 1;
-        buffer[index] = '0' + @as(u8, @intCast(magnitude % 10));
-        magnitude /= 10;
-    }
-    if (value < 0) {
-        index -= 1;
-        buffer[index] = '-';
-    }
-    return buffer[index..];
 }
 
 fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: *[10]u8) ?[]const u8 {

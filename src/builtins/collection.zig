@@ -4,6 +4,7 @@ const object_builtin = @import("object.zig");
 const symbol_builtin = @import("symbol.zig");
 const globals_mod = core.global_slots;
 const bignum = @import("../libs/bignum.zig");
+const dtoa = @import("../libs/dtoa.zig");
 const std = @import("std");
 
 pub const CallbackError = error{
@@ -596,7 +597,7 @@ fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JS
 pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_value: i32) ?core.JSValue {
     if (object.class_id != core.class.ids.map) return null;
     var int_buf: [16]u8 = undefined;
-    const digits = formatI32Decimal(&int_buf, int_value);
+    const digits = dtoa.formatInt32(&int_buf, int_value);
     const hash = strongEntryHashLatin1Concat(prefix, digits);
     const index = findStrongEntryLatin1Concat(object, prefix, digits, hash) orelse return null;
     return object.collectionEntriesSlot().*[index].value.dup();
@@ -624,7 +625,7 @@ pub fn mapSetLatin1PrefixInt32Range(
     var int_buf: [16]u8 = undefined;
     var int_value = start;
     while (int_value < limit) : (int_value += 1) {
-        const digits = formatI32Decimal(&int_buf, int_value);
+        const digits = dtoa.formatInt32(&int_buf, int_value);
         const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, prefix_seed);
         if (findStrongEntryLatin1Concat(object, prefix, digits, hash)) |index| {
             const entry = &object.collectionEntriesSlot().*[index];
@@ -2046,29 +2047,6 @@ fn utf16EqlLatin1Concat(units: []const u16, prefix: []const u8, digits: []const 
         if (units[prefix.len + digit_index] != byte) return false;
     }
     return true;
-}
-
-fn formatI32Decimal(buffer: *[16]u8, value: i32) []const u8 {
-    if (value == 0) {
-        buffer[buffer.len - 1] = '0';
-        return buffer[buffer.len - 1 ..];
-    }
-
-    var index = buffer.len;
-    var magnitude: u32 = if (value < 0)
-        @as(u32, @intCast(-(value + 1))) + 1
-    else
-        @intCast(value);
-    while (magnitude != 0) {
-        index -= 1;
-        buffer[index] = '0' + @as(u8, @intCast(magnitude % 10));
-        magnitude /= 10;
-    }
-    if (value < 0) {
-        index -= 1;
-        buffer[index] = '-';
-    }
-    return buffer[index..];
 }
 
 const BigIntHashParts = struct {
