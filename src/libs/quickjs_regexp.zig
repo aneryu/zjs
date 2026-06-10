@@ -266,7 +266,7 @@ fn appendPatternByte(
         try out.append(allocator, byte);
         return;
     }
-    if (isAsciiAlpha(byte)) {
+    if (unicode.isAsciiAlphaCodePoint(byte)) {
         try appendCaseInsensitiveAsciiAtom(allocator, out, byte);
     } else if (byte < 0x80) {
         try out.append(allocator, byte);
@@ -344,7 +344,7 @@ fn appendEscapedPatternAtom(
             index.* = parsed.end;
         },
         else => {
-            if (isAsciiAlpha(escaped)) return error.InvalidPattern;
+            if (unicode.isAsciiAlphaCodePoint(escaped)) return error.InvalidPattern;
             try appendRawEscapedPatternAtom(allocator, pattern, index, out);
         },
     }
@@ -481,7 +481,7 @@ fn appendCaseInsensitiveCharacterClass(
         if (byte == '-' and index.* != content_start and index.* + 1 < pattern.len and pattern[index.* + 1] != ']') {
             return error.InvalidPattern;
         }
-        if (isAsciiAlpha(byte)) {
+        if (unicode.isAsciiAlphaCodePoint(byte)) {
             try appendCaseInsensitiveAsciiClassAtom(allocator, out, byte);
         } else if (byte < 0x80) {
             try out.append(allocator, byte);
@@ -527,7 +527,7 @@ fn appendEscapedClassAtom(
         'p', 'P', 'k' => return error.InvalidPattern,
         '1'...'9' => return error.InvalidPattern,
         else => {
-            if (isAsciiAlpha(escaped)) return error.InvalidPattern;
+            if (unicode.isAsciiAlphaCodePoint(escaped)) return error.InvalidPattern;
             try appendRawEscapedPatternAtom(allocator, pattern, index, out);
         },
     }
@@ -622,7 +622,7 @@ fn appendCaseInsensitiveEscapedCodePoint(
     raw_escape: []const u8,
     code_point: u21,
 ) NormalizeError!void {
-    if (code_point <= 0x7f and isAsciiAlpha(@intCast(code_point))) {
+    if (code_point <= 0x7f and unicode.isAsciiAlphaCodePoint(code_point)) {
         try appendCaseInsensitiveAsciiAtom(allocator, out, @intCast(code_point));
     } else if (code_point < 0x80) {
         try out.appendSlice(allocator, raw_escape);
@@ -637,7 +637,7 @@ fn appendCaseInsensitiveClassEscapedCodePoint(
     raw_escape: []const u8,
     code_point: u21,
 ) NormalizeError!void {
-    if (code_point <= 0x7f and isAsciiAlpha(@intCast(code_point))) {
+    if (code_point <= 0x7f and unicode.isAsciiAlphaCodePoint(code_point)) {
         try appendCaseInsensitiveAsciiClassAtom(allocator, out, @intCast(code_point));
     } else if (code_point < 0x80) {
         try out.appendSlice(allocator, raw_escape);
@@ -682,7 +682,7 @@ fn appendCaseInsensitiveCaptureLiteral(allocator: std.mem.Allocator, out: *std.A
             }
             continue;
         }
-        if (isAsciiAlpha(byte)) {
+        if (unicode.isAsciiAlphaCodePoint(byte)) {
             try appendCaseInsensitiveAsciiAtom(allocator, out, byte);
         } else if (byte < 0x80 and !isRegExpSyntaxByte(byte)) {
             try out.append(allocator, byte);
@@ -694,8 +694,8 @@ fn appendCaseInsensitiveCaptureLiteral(allocator: std.mem.Allocator, out: *std.A
 }
 
 fn appendCaseInsensitiveAsciiClassAtom(allocator: std.mem.Allocator, out: *std.ArrayList(u8), byte: u8) NormalizeError!void {
-    const lower = asciiLower(byte);
-    const upper = asciiUpper(byte);
+    const lower = unicode.toLowerAscii(byte);
+    const upper = unicode.toUpperAscii(byte);
     try out.append(allocator, lower);
     try out.append(allocator, upper);
 }
@@ -767,7 +767,7 @@ fn isSimpleLiteralCapture(body: []const u8) bool {
                 },
                 'd', 'D', 's', 'S', 'w', 'W', 'b', 'B', 'p', 'P', 'k', '0'...'9' => return false,
                 else => {
-                    if (isAsciiAlpha(escaped)) return false;
+                    if (unicode.isAsciiAlphaCodePoint(escaped)) return false;
                     index += 2;
                 },
             }
@@ -841,20 +841,6 @@ fn isRegExpSyntaxByte(byte: u8) bool {
         '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|' => true,
         else => false,
     };
-}
-
-fn isAsciiAlpha(byte: u8) bool {
-    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z');
-}
-
-fn asciiLower(byte: u8) u8 {
-    if (byte >= 'A' and byte <= 'Z') return byte + ('a' - 'A');
-    return byte;
-}
-
-fn asciiUpper(byte: u8) u8 {
-    if (byte >= 'a' and byte <= 'z') return byte - ('a' - 'A');
-    return byte;
 }
 
 fn hexValue(byte: u8) ?u21 {
