@@ -7009,14 +7009,11 @@ pub fn isUnknownScriptName(name: []const u8) bool {
 pub const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
-    return unit >= '0' and unit <= '9';
+    return unicode_lib.isAsciiDigitUnit(unit);
 }
 
 pub fn isAsciiWordUnit(unit: u16) bool {
-    return (unit >= '0' and unit <= '9') or
-        (unit >= 'A' and unit <= 'Z') or
-        unit == '_' or
-        (unit >= 'a' and unit <= 'z');
+    return unicode_lib.isAsciiWordUnit(unit);
 }
 
 pub fn isHighSurrogateUnit(unit: u16) bool {

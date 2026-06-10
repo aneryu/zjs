@@ -3607,18 +3607,12 @@ pub fn simpleCaptureSequenceAtomMatches(atom: SimpleCaptureSequenceAtom, unit: u
 pub fn simpleClassPredicateMatches(predicate: SimpleClassPredicate, source: []const u8, unit: u16) bool {
     return switch (predicate) {
         .generic => builtins.regexp.classMatchesUtf16Unit(source, unit),
-        .ascii_digit, .ascii_decimal => unit >= '0' and unit <= '9',
-        .ascii_not_digit => !(unit >= '0' and unit <= '9'),
-        .ascii_word => (unit >= '0' and unit <= '9') or
-            (unit >= 'A' and unit <= 'Z') or
-            unit == '_' or
-            (unit >= 'a' and unit <= 'z'),
-        .ascii_not_word => !((unit >= '0' and unit <= '9') or
-            (unit >= 'A' and unit <= 'Z') or
-            unit == '_' or
-            (unit >= 'a' and unit <= 'z')),
-        .ascii_lower => unit >= 'a' and unit <= 'z',
-        .ascii_alpha => (unit >= 'A' and unit <= 'Z') or (unit >= 'a' and unit <= 'z'),
+        .ascii_digit, .ascii_decimal => isAsciiDigitUnit(unit),
+        .ascii_not_digit => !isAsciiDigitUnit(unit),
+        .ascii_word => isAsciiWordUnit(unit),
+        .ascii_not_word => !isAsciiWordUnit(unit),
+        .ascii_lower => unicode_lib.isAsciiLowerUnit(unit),
+        .ascii_alpha => unicode_lib.isAsciiAlphaUnit(unit),
     };
 }
 

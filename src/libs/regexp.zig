@@ -1007,10 +1007,7 @@ fn isLineTerminator(code_point: u21) bool {
 }
 
 fn isWordChar(code_point: u21) bool {
-    return (code_point >= '0' and code_point <= '9') or
-        (code_point >= 'a' and code_point <= 'z') or
-        (code_point >= 'A' and code_point <= 'Z') or
-        code_point == '_';
+    return unicode.isAsciiWordCodePoint(code_point);
 }
 
 fn isHiSurrogate(code_unit: u21) bool {
@@ -2665,7 +2662,7 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) CompileError!u
 
 fn isRegExpGroupNameStart(cp: u21) bool {
     if (cp == '$' or cp == '_') return true;
-    if ((cp >= 'A' and cp <= 'Z') or (cp >= 'a' and cp <= 'z')) return true;
+    if (unicode.isAsciiAlphaCodePoint(cp)) return true;
     if (isInvalidRegExpGroupNameStart(cp)) return false;
     return cp > 0x7f;
 }

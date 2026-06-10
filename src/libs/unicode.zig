@@ -99,6 +99,46 @@ pub fn isWhiteSpace(c: u21) bool {
     return isInTable(c, data.unicode_prop_White_Space_table[0..], data.unicode_prop_White_Space_index[0..]);
 }
 
+pub fn isAsciiDigitUnit(unit: u16) bool {
+    return isAsciiDigitCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiAlphaUnit(unit: u16) bool {
+    return isAsciiAlphaCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiLowerUnit(unit: u16) bool {
+    return isAsciiLowerCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiWordUnit(unit: u16) bool {
+    return isAsciiWordCodePoint(@intCast(unit));
+}
+
+pub fn isAsciiDigitCodePoint(cp: u21) bool {
+    return cp >= '0' and cp <= '9';
+}
+
+pub fn isAsciiUpperCodePoint(cp: u21) bool {
+    return cp >= 'A' and cp <= 'Z';
+}
+
+pub fn isAsciiLowerCodePoint(cp: u21) bool {
+    return cp >= 'a' and cp <= 'z';
+}
+
+pub fn isAsciiAlphaCodePoint(cp: u21) bool {
+    return isAsciiUpperCodePoint(cp) or isAsciiLowerCodePoint(cp);
+}
+
+pub fn isAsciiAlphanumericCodePoint(cp: u21) bool {
+    return isAsciiAlphaCodePoint(cp) or isAsciiDigitCodePoint(cp);
+}
+
+pub fn isAsciiWordCodePoint(cp: u21) bool {
+    return isAsciiAlphanumericCodePoint(cp) or cp == '_';
+}
+
 pub fn isHighSurrogateUnit(unit: u16) bool {
     return isHighSurrogateCodePoint(@intCast(unit));
 }
@@ -1361,6 +1401,24 @@ test "unicode surrogate range helpers cover boundaries" {
     try std.testing.expectEqual(@as(u21, 0x10000), codePointFromSurrogatePair(0xd800, 0xdc00));
     try std.testing.expectEqual(@as(u21, 0x1f600), codePointFromSurrogatePair(0xd83d, 0xde00));
     try std.testing.expectEqual(@as(u21, 0x10ffff), codePointFromSurrogatePair(0xdbff, 0xdfff));
+}
+
+test "unicode ascii character helpers cover ECMAScript regexp sets" {
+    try std.testing.expect(isAsciiDigitUnit('0'));
+    try std.testing.expect(isAsciiDigitUnit('9'));
+    try std.testing.expect(!isAsciiDigitUnit('/'));
+    try std.testing.expect(!isAsciiDigitUnit(':'));
+
+    try std.testing.expect(isAsciiAlphaCodePoint('A'));
+    try std.testing.expect(isAsciiAlphaCodePoint('z'));
+    try std.testing.expect(!isAsciiAlphaCodePoint('_'));
+    try std.testing.expect(!isAsciiAlphaCodePoint(0x80));
+
+    try std.testing.expect(isAsciiWordUnit('_'));
+    try std.testing.expect(isAsciiWordUnit('a'));
+    try std.testing.expect(isAsciiWordUnit('9'));
+    try std.testing.expect(!isAsciiWordUnit('-'));
+    try std.testing.expect(!isAsciiWordCodePoint(0x80));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {

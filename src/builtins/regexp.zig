@@ -2957,14 +2957,11 @@ fn characterClassEscapeUnitMatches(byte: u8, unit: u16) ?bool {
 }
 
 fn isAsciiDigitUnit(unit: u16) bool {
-    return unit >= '0' and unit <= '9';
+    return unicode.isAsciiDigitUnit(unit);
 }
 
 fn isAsciiWordUnit(unit: u16) bool {
-    return (unit >= '0' and unit <= '9') or
-        (unit >= 'A' and unit <= 'Z') or
-        unit == '_' or
-        (unit >= 'a' and unit <= 'z');
+    return unicode.isAsciiWordUnit(unit);
 }
 
 fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
@@ -3145,7 +3142,7 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) ?u32 {
 
 fn isRegExpGroupNameStart(cp: u21) bool {
     if (cp == '$' or cp == '_') return true;
-    if ((cp >= 'A' and cp <= 'Z') or (cp >= 'a' and cp <= 'z')) return true;
+    if (unicode.isAsciiAlphaCodePoint(cp)) return true;
     if (isInvalidRegExpGroupNameStart(cp)) return false;
     return cp > 0x7f;
 }
@@ -3602,7 +3599,7 @@ fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []c
 }
 
 fn isAsciiAlphaNumeric(byte: u8) bool {
-    return (byte >= '0' and byte <= '9') or (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z');
+    return unicode.isAsciiAlphanumericCodePoint(byte);
 }
 
 fn syntaxEscapeChar(byte: u8) bool {
