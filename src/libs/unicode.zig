@@ -209,6 +209,22 @@ pub fn appendUtf8CodePoint(allocator: std.mem.Allocator, buffer: *std.ArrayList(
     }
 }
 
+pub fn appendUtf16UnitsAsUtf8(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), units: []const u16) std.mem.Allocator.Error!void {
+    var index: usize = 0;
+    while (index < units.len) : (index += 1) {
+        const unit = units[index];
+        if (isHighSurrogateUnit(unit) and index + 1 < units.len) {
+            const next = units[index + 1];
+            if (isLowSurrogateUnit(next)) {
+                try appendUtf8CodePoint(allocator, buffer, codePointFromSurrogatePair(unit, next));
+                index += 1;
+                continue;
+            }
+        }
+        try appendUtf8CodePoint(allocator, buffer, unit);
+    }
+}
+
 /// Returns owned UTF-32 code points. Caller must free with the same allocator.
 pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: NormalizationForm) std.mem.Allocator.Error![]u32 {
     if (form == .nfc) {
@@ -1467,6 +1483,14 @@ test "unicode UTF-8 append helper preserves existing surrogate-half encoding" {
     out.clearRetainingCapacity();
     try appendUtf8CodePoint(std.testing.allocator, &out, 0x1f600);
     try std.testing.expectEqualSlices(u8, "\xf0\x9f\x98\x80", out.items);
+}
+
+test "unicode UTF-16 append helper combines surrogate pairs and preserves lone halves" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendUtf16UnitsAsUtf8(std.testing.allocator, &out, &.{ 'A', 0x00e9, 0xd83d, 0xde00, 0xd800 });
+    try std.testing.expectEqualSlices(u8, "A\xc3\xa9\xf0\x9f\x98\x80\xed\xa0\x80", out.items);
 }
 
 test "unicode ascii character helpers cover ECMAScript regexp sets" {

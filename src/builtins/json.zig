@@ -1044,21 +1044,7 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
-        .utf16 => |units| {
-            var index: usize = 0;
-            while (index < units.len) : (index += 1) {
-                const unit = units[index];
-                if (unicode.isHighSurrogateUnit(unit) and index + 1 < units.len) {
-                    const next = units[index + 1];
-                    if (unicode.isLowSurrogateUnit(next)) {
-                        try appendUtf8CodePoint(rt, buffer, @intCast(unicode.codePointFromSurrogatePair(unit, next)));
-                        index += 1;
-                        continue;
-                    }
-                }
-                try appendUtf8CodePoint(rt, buffer, unit);
-            }
-        },
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
     }
 }
 

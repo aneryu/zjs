@@ -4290,19 +4290,7 @@ pub fn appendNamedCaptureSubstitution(
 }
 
 pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    var index: usize = 0;
-    while (index < units.len) : (index += 1) {
-        const unit = units[index];
-        if (isHighSurrogateUnit(unit) and index + 1 < units.len) {
-            const next = units[index + 1];
-            if (isLowSurrogateUnit(next)) {
-                try appendCodepointUtf8(rt, buffer, codePointFromSurrogatePair(unit, next));
-                index += 1;
-                continue;
-            }
-        }
-        try appendCodepointUtf8(rt, buffer, @intCast(unit));
-    }
+    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
 }
 
 pub fn qjsRegExpExecGeneric(

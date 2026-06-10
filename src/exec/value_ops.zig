@@ -710,19 +710,7 @@ fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32)
 }
 
 fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    var index: usize = 0;
-    while (index < units.len) : (index += 1) {
-        const unit = units[index];
-        if (unicode_lib.isHighSurrogateUnit(unit) and index + 1 < units.len) {
-            const next = units[index + 1];
-            if (unicode_lib.isLowSurrogateUnit(next)) {
-                try appendUtf8CodePoint(rt, buffer, @intCast(unicode_lib.codePointFromSurrogatePair(unit, next)));
-                index += 1;
-                continue;
-            }
-        }
-        try appendUtf8CodePoint(rt, buffer, unit);
-    }
+    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
 }
 
 fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
