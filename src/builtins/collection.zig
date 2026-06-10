@@ -119,6 +119,21 @@ pub const StaticMethod = enum(u32) {
     group_by = 101,
 };
 
+pub const ConstructorKind = enum(u32) {
+    map = 1,
+    set = 2,
+    weak_map = 3,
+    weak_set = 4,
+};
+
+pub fn constructorId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "Map")) return @intFromEnum(ConstructorKind.map);
+    if (std.mem.eql(u8, name, "Set")) return @intFromEnum(ConstructorKind.set);
+    if (std.mem.eql(u8, name, "WeakMap")) return @intFromEnum(ConstructorKind.weak_map);
+    if (std.mem.eql(u8, name, "WeakSet")) return @intFromEnum(ConstructorKind.weak_set);
+    return null;
+}
+
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "groupBy")) return @intFromEnum(StaticMethod.group_by);
     return null;

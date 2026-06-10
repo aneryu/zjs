@@ -3307,7 +3307,7 @@ pub fn constructBuiltinSuperConstructor(
     }
     if (std.mem.eql(u8, name, "DisposableStack")) return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
     if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
-    if (collectionConstructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
+    if (builtins.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
     if (std.mem.eql(u8, name, "DataView")) return try builtins.buffer.dataViewConstruct(ctx.runtime, args, prototype);
     if (construct_mod.typedArrayElement(name)) |element| return try construct_mod.constructTypedArrayValue(ctx.runtime, prototype, element, args, global);
 
@@ -7516,7 +7516,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
         }
         if (std.mem.eql(u8, name, "RegExp")) return qjsRegExpConstructCall(ctx, output, global, new_target, args, caller_function, caller_frame);
-        if (collectionConstructorId(name)) |kind| return constructCollectionFromVm(ctx, output, global, func, kind, args);
+        if (builtins.collection.constructorId(name)) |kind| return constructCollectionFromVm(ctx, output, global, func, kind, args);
         if (std.mem.eql(u8, name, "ArrayBuffer") or std.mem.eql(u8, name, "SharedArrayBuffer")) {
             const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
             return qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype, std.mem.eql(u8, name, "SharedArrayBuffer"));
@@ -8115,14 +8115,6 @@ pub fn closeIteratorFromVmImpl(
     const out = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
     defer out.free(ctx.runtime);
     if (!out.isObject()) return error.TypeError;
-}
-
-pub fn collectionConstructorId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "Map")) return 1;
-    if (std.mem.eql(u8, name, "Set")) return 2;
-    if (std.mem.eql(u8, name, "WeakMap")) return 3;
-    if (std.mem.eql(u8, name, "WeakSet")) return 4;
-    return null;
 }
 
 pub fn isBuiltinConstructorName(name: []const u8) bool {

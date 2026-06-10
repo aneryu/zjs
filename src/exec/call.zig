@@ -3344,7 +3344,7 @@ fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals: []
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
             return construct_mod.weakRefWithPrototype(rt, target_value, prototype);
         }
-        if (collectionConstructorId(name)) |kind| {
+        if (builtins.collection.constructorId(name)) |kind| {
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
             return builtins.collection.constructWithPrototype(rt, kind, prototype) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
@@ -5648,14 +5648,6 @@ fn promiseStaticId(name: []const u8) ?u32 {
 fn bigIntStaticUnsigned(name: []const u8) ?bool {
     if (std.mem.eql(u8, name, "asIntN")) return false;
     if (std.mem.eql(u8, name, "asUintN")) return true;
-    return null;
-}
-
-fn collectionConstructorId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "Map")) return 1;
-    if (std.mem.eql(u8, name, "Set")) return 2;
-    if (std.mem.eql(u8, name, "WeakMap")) return 3;
-    if (std.mem.eql(u8, name, "WeakSet")) return 4;
     return null;
 }
 

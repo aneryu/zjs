@@ -77,7 +77,7 @@ pub fn constructValue(rt: *core.JSRuntime, callee: core.JSValue, args: []const c
 
     if (try constructorName(rt, constructor)) |name| {
         defer rt.memory.allocator.free(name);
-        if (collectionConstructorId(name)) |kind| return constructCollectionValue(rt, kind, prototype, rooted_args, globals);
+        if (builtins.collection.constructorId(name)) |kind| return constructCollectionValue(rt, kind, prototype, rooted_args, globals);
         if (std.mem.eql(u8, name, "Function")) return constructFunctionValue(rt, constructor);
         if (std.mem.eql(u8, name, "Object")) return constructObjectValue(rt, rooted_args, constructor);
         if (std.mem.eql(u8, name, "Array")) return builtins.array.constructConstructorWithPrototype(rt, rooted_args, prototype);
@@ -1233,14 +1233,6 @@ fn constructorName(rt: *core.JSRuntime, constructor: *core.Object) !?[]u8 {
     errdefer buffer.deinit(rt.memory.allocator);
     try value_ops.appendRawString(rt, &buffer, value);
     return try buffer.toOwnedSlice(rt.memory.allocator);
-}
-
-fn collectionConstructorId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "Map")) return 1;
-    if (std.mem.eql(u8, name, "Set")) return 2;
-    if (std.mem.eql(u8, name, "WeakMap")) return 3;
-    if (std.mem.eql(u8, name, "WeakSet")) return 4;
-    return null;
 }
 
 fn collectionName(kind: u32) ?[]const u8 {
