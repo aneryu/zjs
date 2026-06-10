@@ -553,9 +553,9 @@ fn parseHexEscape(pattern: []const u8, start: usize, digit_count: usize) ?Parsed
 fn parseDecimalEscape(pattern: []const u8, start: usize) ?ParsedEscape {
     if (start + 1 >= pattern.len or pattern[start] != '\\') return null;
     var pos = start + 1;
-    if (pattern[pos] < '1' or pattern[pos] > '9') return null;
+    if (!unicode.isAsciiDigitByte(pattern[pos]) or pattern[pos] == '0') return null;
     var value: u21 = 0;
-    while (pos < pattern.len and pattern[pos] >= '0' and pattern[pos] <= '9') : (pos += 1) {
+    while (pos < pattern.len and unicode.isAsciiDigitByte(pattern[pos])) : (pos += 1) {
         value = value * 10 + (pattern[pos] - '0');
         if (value >= max_captures) return null;
     }

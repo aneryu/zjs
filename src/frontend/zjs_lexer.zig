@@ -1359,15 +1359,15 @@ fn isHexDigit(c: u8) bool {
 }
 
 fn isOctalDigit(c: u8) bool {
-    return c >= '0' and c <= '7';
+    return unicode.isAsciiOctalDigitByte(c);
 }
 
 fn isBinaryDigit(c: u8) bool {
-    return c == '0' or c == '1';
+    return unicode.isAsciiBinaryDigitByte(c);
 }
 
 fn isDecimalDigit(c: u8) bool {
-    return unicode.isAsciiDigitCodePoint(c);
+    return unicode.isAsciiDigitByte(c);
 }
 
 fn consumeDigitRun(self: *Lexer, comptime isDigit: fn (u8) bool) bool {
@@ -2555,7 +2555,7 @@ fn tsIsIdentStart(c: u8) bool {
 }
 
 fn tsIsIdentContinue(c: u8) bool {
-    return tsIsIdentStart(c) or unicode.isAsciiDigitCodePoint(c);
+    return tsIsIdentStart(c) or unicode.isAsciiDigitByte(c);
 }
 
 pub const RegExpLiteral = struct {

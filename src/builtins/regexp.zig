@@ -701,7 +701,7 @@ fn invalidUnicodeEscape(pattern: []const u8, index: *usize, in_class: bool) bool
         'u' => return consumeUnicodeEscape(pattern, index),
         'k' => return consumeNamedBackreference(pattern, index, in_class),
         '0' => {
-            if (index.* + 2 < pattern.len and std.ascii.isDigit(pattern[index.* + 2])) return true;
+            if (index.* + 2 < pattern.len and unicode.isAsciiDigitByte(pattern[index.* + 2])) return true;
             index.* += 2;
             return false;
         },
@@ -2347,7 +2347,7 @@ fn consumeDecimalBackreference(pattern: []const u8, index: *usize, in_class: boo
     if (in_class) return true;
     var scan = index.* + 1;
     var number: usize = 0;
-    while (scan < pattern.len and std.ascii.isDigit(pattern[scan])) : (scan += 1) {
+    while (scan < pattern.len and unicode.isAsciiDigitByte(pattern[scan])) : (scan += 1) {
         number = number * 10 + (pattern[scan] - '0');
     }
     if (number == 0 or number > countCapturingGroups(pattern)) return true;
@@ -2627,17 +2627,17 @@ fn groupPrefixWidth(slice: []const u8) usize {
 }
 
 fn readQuantifier(pattern: []const u8, start: usize, end: *usize) ?bool {
-    if (start + 1 >= pattern.len or pattern[start] != '{' or !std.ascii.isDigit(pattern[start + 1])) return null;
+    if (start + 1 >= pattern.len or pattern[start] != '{' or !unicode.isAsciiDigitByte(pattern[start + 1])) return null;
     var index = start + 1;
     const min_start = index;
-    while (index < pattern.len and std.ascii.isDigit(pattern[index])) : (index += 1) {}
+    while (index < pattern.len and unicode.isAsciiDigitByte(pattern[index])) : (index += 1) {}
     const min_digits = pattern[min_start..index];
 
     if (index < pattern.len and pattern[index] == ',') {
         index += 1;
-        if (index < pattern.len and std.ascii.isDigit(pattern[index])) {
+        if (index < pattern.len and unicode.isAsciiDigitByte(pattern[index])) {
             const max_start = index;
-            while (index < pattern.len and std.ascii.isDigit(pattern[index])) : (index += 1) {}
+            while (index < pattern.len and unicode.isAsciiDigitByte(pattern[index])) : (index += 1) {}
             if (decimalDigitRunLessThan(pattern[max_start..index], min_digits)) return true;
         }
     }
@@ -2841,7 +2841,7 @@ fn readClassRangeAtom(pattern: []const u8, index: *usize) ?ClassRangeAtom {
         '0'...'9' => {
             var scan = index.* + 1;
             var value: u32 = 0;
-            while (scan < pattern.len and pattern[scan] >= '0' and pattern[scan] <= '7') : (scan += 1) {
+            while (scan < pattern.len and unicode.isAsciiOctalDigitByte(pattern[scan])) : (scan += 1) {
                 value = value * 8 + (pattern[scan] - '0');
             }
             index.* = scan;
@@ -3151,7 +3151,7 @@ fn isRegExpGroupNameContinue(cp: u21) bool {
     if (isInvalidRegExpGroupNameContinue(cp)) return false;
     if (cp == 0x104a4) return true;
     if (isRegExpGroupNameStart(cp)) return true;
-    if (cp >= '0' and cp <= '9') return true;
+    if (unicode.isAsciiDigitCodePoint(cp)) return true;
     if (cp == 0x1d7da) return true;
     return false;
 }

@@ -1446,7 +1446,7 @@ const Compiler = struct {
             },
             '0' => {
                 self.index += 2;
-                if (self.index < self.pattern.len and std.ascii.isDigit(self.pattern[self.index]) and self.flags.unicode) return error.InvalidPattern;
+                if (self.index < self.pattern.len and isDecimalDigit(self.pattern[self.index]) and self.flags.unicode) return error.InvalidPattern;
                 const cp = try self.parseLegacyOctalAfterZero();
                 try self.emitCharacterAtom(canonicalizeLiteral(cp, self.flags), is_backward_dir);
                 return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
@@ -1676,7 +1676,7 @@ const Compiler = struct {
                 },
                 '0' => {
                     if (self.flags.unicode) {
-                        if (self.index + 2 < self.pattern.len and std.ascii.isDigit(self.pattern[self.index + 2])) return error.InvalidPattern;
+                        if (self.index + 2 < self.pattern.len and isDecimalDigit(self.pattern[self.index + 2])) return error.InvalidPattern;
                         self.index += 2;
                         return .{ .code_point = 0 };
                     }
@@ -1795,13 +1795,13 @@ const Compiler = struct {
                 max = 1;
             },
             '{' => {
-                if (self.index + 1 >= self.pattern.len or !std.ascii.isDigit(self.pattern[self.index + 1])) return;
+                if (self.index + 1 >= self.pattern.len or !isDecimalDigit(self.pattern[self.index + 1])) return;
                 self.index += 1;
                 min = try self.parseDigits(true);
                 max = min;
                 if (self.index < self.pattern.len and self.pattern[self.index] == ',') {
                     self.index += 1;
-                    if (self.index < self.pattern.len and std.ascii.isDigit(self.pattern[self.index])) {
+                    if (self.index < self.pattern.len and isDecimalDigit(self.pattern[self.index])) {
                         max = try self.parseDigits(true);
                         if (max < min) return error.InvalidPattern;
                     } else {
@@ -1937,7 +1937,7 @@ const Compiler = struct {
     }
 
     fn parseLegacyDecimalEscape(self: *Compiler) CompileError!u21 {
-        if (self.index >= self.pattern.len or !std.ascii.isDigit(self.pattern[self.index])) return error.InvalidPattern;
+        if (self.index >= self.pattern.len or !isDecimalDigit(self.pattern[self.index])) return error.InvalidPattern;
         if (self.pattern[self.index] > '7') {
             const cp = self.pattern[self.index];
             self.index += 1;
@@ -1970,7 +1970,7 @@ const Compiler = struct {
     fn parseLegacyClassDecimalEscape(self: *Compiler) CompileError!u21 {
         std.debug.assert(self.pattern[self.index] == '\\');
         self.index += 1;
-        if (self.index >= self.pattern.len or !std.ascii.isDigit(self.pattern[self.index])) return error.InvalidPattern;
+        if (self.index >= self.pattern.len or !isDecimalDigit(self.pattern[self.index])) return error.InvalidPattern;
         if (!isOctalDigit(self.pattern[self.index])) {
             const cp = self.pattern[self.index];
             self.index += 1;
@@ -2039,7 +2039,7 @@ const Compiler = struct {
     fn parseDigits(self: *Compiler, allow_overflow: bool) CompileError!u32 {
         var value: u64 = 0;
         var saw_digit = false;
-        while (self.index < self.pattern.len and std.ascii.isDigit(self.pattern[self.index])) : (self.index += 1) {
+        while (self.index < self.pattern.len and isDecimalDigit(self.pattern[self.index])) : (self.index += 1) {
             saw_digit = true;
             value = value * 10 + (self.pattern[self.index] - '0');
             if (value >= int32_max) {
@@ -2131,12 +2131,12 @@ const Compiler = struct {
     }
 
     fn looksLikeQuantifier(self: *const Compiler, start: usize) bool {
-        if (start + 1 >= self.pattern.len or !std.ascii.isDigit(self.pattern[start + 1])) return false;
+        if (start + 1 >= self.pattern.len or !isDecimalDigit(self.pattern[start + 1])) return false;
         var pos = start + 1;
-        while (pos < self.pattern.len and std.ascii.isDigit(self.pattern[pos])) : (pos += 1) {}
+        while (pos < self.pattern.len and isDecimalDigit(self.pattern[pos])) : (pos += 1) {}
         if (pos < self.pattern.len and self.pattern[pos] == ',') {
             pos += 1;
-            while (pos < self.pattern.len and std.ascii.isDigit(self.pattern[pos])) : (pos += 1) {}
+            while (pos < self.pattern.len and isDecimalDigit(self.pattern[pos])) : (pos += 1) {}
         }
         return pos < self.pattern.len and self.pattern[pos] == '}';
     }
@@ -2669,7 +2669,7 @@ fn isRegExpGroupNameContinue(cp: u21) bool {
     if (isInvalidRegExpGroupNameContinue(cp)) return false;
     if (cp == 0x104a4) return true;
     if (isRegExpGroupNameStart(cp)) return true;
-    if (cp >= '0' and cp <= '9') return true;
+    if (unicode.isAsciiDigitCodePoint(cp)) return true;
     if (cp == 0x1d7da) return true;
     return false;
 }
@@ -2713,8 +2713,12 @@ fn decodeWtf8Surrogate(bytes: []const u8, index: usize) ?DecodedWtf8 {
     return .{ .code_point = code_point, .len = 3 };
 }
 
+fn isDecimalDigit(byte: u8) bool {
+    return unicode.isAsciiDigitByte(byte);
+}
+
 fn isOctalDigit(byte: u8) bool {
-    return byte >= '0' and byte <= '7';
+    return unicode.isAsciiOctalDigitByte(byte);
 }
 
 fn isClassControlLetter(byte: u8) bool {

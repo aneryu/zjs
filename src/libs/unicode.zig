@@ -125,7 +125,7 @@ pub fn isAsciiIdentifierStartByte(byte: u8) bool {
 }
 
 pub fn isAsciiIdentifierPartByte(byte: u8) bool {
-    return isAsciiIdentifierStartByte(byte) or isAsciiDigitCodePoint(byte);
+    return isAsciiIdentifierStartByte(byte) or isAsciiDigitByte(byte);
 }
 
 pub fn asciiRadixDigitValueByte(byte: u8) ?u8 {
@@ -135,6 +135,18 @@ pub fn asciiRadixDigitValueByte(byte: u8) ?u8 {
     if (byte >= 'g' and byte <= 'z') return byte - 'a' + 10;
     if (byte >= 'G' and byte <= 'Z') return byte - 'A' + 10;
     return null;
+}
+
+pub fn isAsciiBinaryDigitByte(byte: u8) bool {
+    return byte == '0' or byte == '1';
+}
+
+pub fn isAsciiOctalDigitByte(byte: u8) bool {
+    return byte >= '0' and byte <= '7';
+}
+
+pub fn isAsciiDigitByte(byte: u8) bool {
+    return isAsciiDigitCodePoint(byte);
 }
 
 pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
@@ -1570,6 +1582,21 @@ test "unicode ascii identifier byte helpers cover ECMAScript starts and parts" {
     try std.testing.expect(isAsciiIdentifierPartByte('$'));
     try std.testing.expect(!isAsciiIdentifierPartByte('-'));
     try std.testing.expect(!isAsciiIdentifierPartByte(0x80));
+}
+
+test "unicode ascii digit byte helpers cover numeric literal digit sets" {
+    try std.testing.expect(isAsciiBinaryDigitByte('0'));
+    try std.testing.expect(isAsciiBinaryDigitByte('1'));
+    try std.testing.expect(!isAsciiBinaryDigitByte('2'));
+
+    try std.testing.expect(isAsciiOctalDigitByte('0'));
+    try std.testing.expect(isAsciiOctalDigitByte('7'));
+    try std.testing.expect(!isAsciiOctalDigitByte('8'));
+
+    try std.testing.expect(isAsciiDigitByte('0'));
+    try std.testing.expect(isAsciiDigitByte('9'));
+    try std.testing.expect(!isAsciiDigitByte('/'));
+    try std.testing.expect(!isAsciiDigitByte(':'));
 }
 
 test "unicode ascii hex helpers cover digit values" {
