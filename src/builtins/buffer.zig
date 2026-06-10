@@ -813,13 +813,13 @@ pub fn typedArraySetInt32IndexFast(rt: *core.JSRuntime, object: *core.Object, in
     return true;
 }
 
-const TypedArrayCanonicalIndex = union(enum) {
+pub const TypedArrayCanonicalIndex = union(enum) {
     none,
     invalid,
     index: u32,
 };
 
-fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
+pub fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
     if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
     if (rt.atoms.kind(atom_id) != .string) return .none;
     const name = rt.atoms.name(atom_id) orelse return .none;

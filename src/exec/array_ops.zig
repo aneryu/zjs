@@ -4704,7 +4704,7 @@ pub fn typedArrayOwnKeys(rt: *core.JSRuntime, source: *core.Object) ![]core.Atom
     defer core.Object.freeKeys(rt, ordinary);
     for (ordinary) |key| {
         if (rt.atoms.kind(key) == .symbol) continue;
-        if (try typedArrayCanonicalNumericIndex(rt, key) != .none) continue;
+        if (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, key) != .none) continue;
         if (isTypedArrayInternalOwnKey(rt, key)) continue;
         if (atomListContains(keys, key)) continue;
         try appendAtom(rt, &keys, key);
@@ -5425,7 +5425,7 @@ pub fn typedArrayPrototypeSet(
     var current = prototype;
     while (current) |object| : (current = object.getPrototype()) {
         if (!builtins.buffer.isTypedArrayObject(object)) continue;
-        switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+        switch (try builtins.buffer.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
             .none => return null,
             .invalid => {
                 if (sameObjectIdentity(receiver_value, object.value())) {
@@ -5730,14 +5730,8 @@ pub fn popDuplicateConstructorTarget(rt: *core.JSRuntime, stack: *stack_mod.Stac
     duplicate.free(rt);
 }
 
-pub const TypedArrayCanonicalIndex = union(enum) {
-    none,
-    invalid,
-    index: u32,
-};
-
 pub fn typedArrayCanonicalGet(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.JSValue {
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return core.JSValue.undefinedValue(),
         .index => |index| return try builtins.buffer.typedArrayGetIndex(rt, object, index),
@@ -5746,7 +5740,7 @@ pub fn typedArrayCanonicalGet(rt: *core.JSRuntime, object: *core.Object, atom_id
 
 pub fn typedArrayCanonicalOwnDescriptor(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?core.Descriptor {
     if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return null,
         .index => |index| {
@@ -5792,7 +5786,7 @@ pub fn typedArrayDefineOwnPropertyVm(
     desc: core.Descriptor,
 ) !?bool {
     if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
@@ -5828,7 +5822,7 @@ pub fn typedArrayCanonicalSet(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !bool {
-    switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
         .none => return false,
         .invalid => {
             const coerced = try coerceTypedArrayElementInput(ctx, output, global, value);
@@ -5849,7 +5843,7 @@ pub fn typedArrayCanonicalSet(
 
 pub fn typedArrayCanonicalHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) ?bool {
     if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (typedArrayCanonicalNumericIndex(rt, atom_id) catch return false) {
+    switch (builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id) catch return false) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
@@ -5861,7 +5855,7 @@ pub fn typedArrayCanonicalHas(rt: *core.JSRuntime, object: *core.Object, atom_id
 
 pub fn typedArrayCanonicalDelete(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
     if (!builtins.buffer.isTypedArrayObject(object)) return null;
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return true,
         .index => |index| {
@@ -5869,36 +5863,6 @@ pub fn typedArrayCanonicalDelete(rt: *core.JSRuntime, object: *core.Object, atom
             return index >= length;
         },
     }
-}
-
-pub fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
-    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
-    if (rt.atoms.kind(atom_id) != .string) return .none;
-    const name = rt.atoms.name(atom_id) orelse return .none;
-    if (name.len == 0) return .none;
-    if (std.mem.eql(u8, name, "-0")) return .invalid;
-
-    const number: f64 = if (std.mem.eql(u8, name, "NaN"))
-        std.math.nan(f64)
-    else if (std.mem.eql(u8, name, "Infinity"))
-        std.math.inf(f64)
-    else if (std.mem.eql(u8, name, "-Infinity"))
-        -std.math.inf(f64)
-    else
-        std.fmt.parseFloat(f64, name) catch return .none;
-
-    var buffer: [64]u8 = undefined;
-    const printed = if (std.math.isNan(number))
-        "NaN"
-    else if (std.math.isPositiveInf(number))
-        "Infinity"
-    else if (std.math.isNegativeInf(number))
-        "-Infinity"
-    else
-        try value_ops.formatFiniteNumber(&buffer, number);
-    if (!std.mem.eql(u8, name, printed)) return .none;
-    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
-    return .{ .index = @intFromFloat(number) };
 }
 
 // --- Merged from collection.zig ---
