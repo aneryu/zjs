@@ -191,6 +191,24 @@ pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
     return 0x10000 + ((@as(u21, high) - high_surrogate_min) << 10) + (@as(u21, low) - low_surrogate_min);
 }
 
+pub fn appendUtf8CodePoint(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), cp: u32) std.mem.Allocator.Error!void {
+    if (cp <= 0x7f) {
+        try buffer.append(allocator, @intCast(cp));
+    } else if (cp <= 0x7ff) {
+        try buffer.append(allocator, @intCast(0xc0 | (cp >> 6)));
+        try buffer.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    } else if (cp <= 0xffff) {
+        try buffer.append(allocator, @intCast(0xe0 | (cp >> 12)));
+        try buffer.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try buffer.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    } else {
+        try buffer.append(allocator, @intCast(0xf0 | (cp >> 18)));
+        try buffer.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
+        try buffer.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
+        try buffer.append(allocator, @intCast(0x80 | (cp & 0x3f)));
+    }
+}
+
 /// Returns owned UTF-32 code points. Caller must free with the same allocator.
 pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: NormalizationForm) std.mem.Allocator.Error![]u32 {
     if (form == .nfc) {
@@ -1429,6 +1447,26 @@ test "unicode surrogate range helpers cover boundaries" {
     try std.testing.expectEqual(@as(u21, 0x10000), codePointFromSurrogatePair(0xd800, 0xdc00));
     try std.testing.expectEqual(@as(u21, 0x1f600), codePointFromSurrogatePair(0xd83d, 0xde00));
     try std.testing.expectEqual(@as(u21, 0x10ffff), codePointFromSurrogatePair(0xdbff, 0xdfff));
+}
+
+test "unicode UTF-8 append helper preserves existing surrogate-half encoding" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendUtf8CodePoint(std.testing.allocator, &out, 'A');
+    try std.testing.expectEqualStrings("A", out.items);
+
+    out.clearRetainingCapacity();
+    try appendUtf8CodePoint(std.testing.allocator, &out, 0x00e9);
+    try std.testing.expectEqualSlices(u8, "\xc3\xa9", out.items);
+
+    out.clearRetainingCapacity();
+    try appendUtf8CodePoint(std.testing.allocator, &out, 0xd800);
+    try std.testing.expectEqualSlices(u8, "\xed\xa0\x80", out.items);
+
+    out.clearRetainingCapacity();
+    try appendUtf8CodePoint(std.testing.allocator, &out, 0x1f600);
+    try std.testing.expectEqualSlices(u8, "\xf0\x9f\x98\x80", out.items);
 }
 
 test "unicode ascii character helpers cover ECMAScript regexp sets" {

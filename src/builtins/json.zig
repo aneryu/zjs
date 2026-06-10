@@ -1063,19 +1063,5 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
 }
 
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    if (cp <= 0x7f) {
-        try buffer.append(rt.memory.allocator, @intCast(cp));
-    } else if (cp <= 0x7ff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try buffer.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    }
+    return unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
 }

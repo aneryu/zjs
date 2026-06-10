@@ -4208,21 +4208,7 @@ pub fn createStartOfLineUnicodeMatchArray(rt: *core.JSRuntime, global: *core.Obj
 }
 
 pub fn appendUtf8CodePointForRegExpName(rt: *core.JSRuntime, out: *std.ArrayList(u8), cp: u21) !void {
-    if (cp <= 0x7f) {
-        try out.append(rt.memory.allocator, @intCast(cp));
-    } else if (cp <= 0x7ff) {
-        try out.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else if (cp <= 0xffff) {
-        try out.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    } else {
-        try out.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-        try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
-    }
+    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, out, cp);
 }
 
 pub fn isHighSurrogateCodePoint(cp: u21) bool {
@@ -4774,21 +4760,7 @@ pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), v
 }
 
 pub fn appendCodepointUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), codepoint: u21) !void {
-    if (codepoint <= 0x7f) {
-        try buffer.append(rt.memory.allocator, @intCast(codepoint));
-    } else if (codepoint <= 0x7ff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xc0 | (codepoint >> 6)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (codepoint & 0x3f)));
-    } else if (codepoint <= 0xffff) {
-        try buffer.append(rt.memory.allocator, @intCast(0xe0 | (codepoint >> 12)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((codepoint >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (codepoint & 0x3f)));
-    } else {
-        try buffer.append(rt.memory.allocator, @intCast(0xf0 | (codepoint >> 18)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((codepoint >> 12) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | ((codepoint >> 6) & 0x3f)));
-        try buffer.append(rt.memory.allocator, @intCast(0x80 | (codepoint & 0x3f)));
-    }
+    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, buffer, codepoint);
 }
 
 pub fn simpleEvalStringLiteral(rt: *core.JSRuntime, source: []const u8) ?core.JSValue {
