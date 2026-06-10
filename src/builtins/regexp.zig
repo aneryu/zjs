@@ -689,7 +689,7 @@ fn invalidUnicodeEscape(pattern: []const u8, index: *usize, in_class: bool) bool
         },
         'p', 'P' => return consumeUnicodePropertyEscape(pattern, index),
         'c' => {
-            if (index.* + 2 >= pattern.len or !std.ascii.isAlphabetic(pattern[index.* + 2])) return true;
+            if (index.* + 2 >= pattern.len or !unicode.isAsciiAlphaByte(pattern[index.* + 2])) return true;
             index.* += 3;
             return false;
         },
@@ -3527,7 +3527,7 @@ fn regexpFlagChar(name: []const u8) ?u8 {
 fn appendEscapedCodeUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: u16, is_first: bool) !void {
     if (unit <= 0x7f) {
         const byte: u8 = @intCast(unit);
-        if (is_first and isAsciiAlphaNumeric(byte)) return appendHexEscape(rt, buffer, byte);
+        if (is_first and unicode.isAsciiAlphanumericByte(byte)) return appendHexEscape(rt, buffer, byte);
         if (syntaxEscapeChar(byte)) {
             try buffer.append(rt.memory.allocator, '\\');
             try buffer.append(rt.memory.allocator, byte);
@@ -3573,10 +3573,6 @@ fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32)
 
 fn appendUtf16AsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
     return unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
-}
-
-fn isAsciiAlphaNumeric(byte: u8) bool {
-    return unicode.isAsciiAlphanumericCodePoint(byte);
 }
 
 fn syntaxEscapeChar(byte: u8) bool {

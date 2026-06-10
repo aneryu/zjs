@@ -121,7 +121,7 @@ pub fn isAsciiWordUnit(unit: u16) bool {
 }
 
 pub fn isAsciiIdentifierStartByte(byte: u8) bool {
-    return isAsciiAlphaCodePoint(byte) or byte == '_' or byte == '$';
+    return isAsciiAlphaByte(byte) or byte == '_' or byte == '$';
 }
 
 pub fn isAsciiIdentifierPartByte(byte: u8) bool {
@@ -147,6 +147,26 @@ pub fn isAsciiOctalDigitByte(byte: u8) bool {
 
 pub fn isAsciiDigitByte(byte: u8) bool {
     return isAsciiDigitCodePoint(byte);
+}
+
+pub fn isAsciiUpperByte(byte: u8) bool {
+    return isAsciiUpperCodePoint(byte);
+}
+
+pub fn isAsciiLowerByte(byte: u8) bool {
+    return isAsciiLowerCodePoint(byte);
+}
+
+pub fn isAsciiAlphaByte(byte: u8) bool {
+    return isAsciiUpperByte(byte) or isAsciiLowerByte(byte);
+}
+
+pub fn isAsciiAlphanumericByte(byte: u8) bool {
+    return isAsciiAlphaByte(byte) or isAsciiDigitByte(byte);
+}
+
+pub fn isAsciiWordByte(byte: u8) bool {
+    return isAsciiAlphanumericByte(byte) or byte == '_';
 }
 
 pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
@@ -1597,6 +1617,29 @@ test "unicode ascii digit byte helpers cover numeric literal digit sets" {
     try std.testing.expect(isAsciiDigitByte('9'));
     try std.testing.expect(!isAsciiDigitByte('/'));
     try std.testing.expect(!isAsciiDigitByte(':'));
+}
+
+test "unicode ascii alpha byte helpers cover ECMAScript ASCII classes" {
+    try std.testing.expect(isAsciiUpperByte('A'));
+    try std.testing.expect(isAsciiUpperByte('Z'));
+    try std.testing.expect(!isAsciiUpperByte('a'));
+
+    try std.testing.expect(isAsciiLowerByte('a'));
+    try std.testing.expect(isAsciiLowerByte('z'));
+    try std.testing.expect(!isAsciiLowerByte('A'));
+
+    try std.testing.expect(isAsciiAlphaByte('A'));
+    try std.testing.expect(isAsciiAlphaByte('z'));
+    try std.testing.expect(!isAsciiAlphaByte('_'));
+
+    try std.testing.expect(isAsciiAlphanumericByte('A'));
+    try std.testing.expect(isAsciiAlphanumericByte('9'));
+    try std.testing.expect(!isAsciiAlphanumericByte('_'));
+
+    try std.testing.expect(isAsciiWordByte('_'));
+    try std.testing.expect(isAsciiWordByte('a'));
+    try std.testing.expect(isAsciiWordByte('9'));
+    try std.testing.expect(!isAsciiWordByte('-'));
 }
 
 test "unicode ascii hex helpers cover digit values" {

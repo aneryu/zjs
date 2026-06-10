@@ -266,7 +266,7 @@ fn appendPatternByte(
         try out.append(allocator, byte);
         return;
     }
-    if (unicode.isAsciiAlphaCodePoint(byte)) {
+    if (unicode.isAsciiAlphaByte(byte)) {
         try appendCaseInsensitiveAsciiAtom(allocator, out, byte);
     } else if (byte < 0x80) {
         try out.append(allocator, byte);
@@ -344,7 +344,7 @@ fn appendEscapedPatternAtom(
             index.* = parsed.end;
         },
         else => {
-            if (unicode.isAsciiAlphaCodePoint(escaped)) return error.InvalidPattern;
+            if (unicode.isAsciiAlphaByte(escaped)) return error.InvalidPattern;
             try appendRawEscapedPatternAtom(allocator, pattern, index, out);
         },
     }
@@ -481,7 +481,7 @@ fn appendCaseInsensitiveCharacterClass(
         if (byte == '-' and index.* != content_start and index.* + 1 < pattern.len and pattern[index.* + 1] != ']') {
             return error.InvalidPattern;
         }
-        if (unicode.isAsciiAlphaCodePoint(byte)) {
+        if (unicode.isAsciiAlphaByte(byte)) {
             try appendCaseInsensitiveAsciiClassAtom(allocator, out, byte);
         } else if (byte < 0x80) {
             try out.append(allocator, byte);
@@ -527,7 +527,7 @@ fn appendEscapedClassAtom(
         'p', 'P', 'k' => return error.InvalidPattern,
         '1'...'9' => return error.InvalidPattern,
         else => {
-            if (unicode.isAsciiAlphaCodePoint(escaped)) return error.InvalidPattern;
+            if (unicode.isAsciiAlphaByte(escaped)) return error.InvalidPattern;
             try appendRawEscapedPatternAtom(allocator, pattern, index, out);
         },
     }
@@ -682,7 +682,7 @@ fn appendCaseInsensitiveCaptureLiteral(allocator: std.mem.Allocator, out: *std.A
             }
             continue;
         }
-        if (unicode.isAsciiAlphaCodePoint(byte)) {
+        if (unicode.isAsciiAlphaByte(byte)) {
             try appendCaseInsensitiveAsciiAtom(allocator, out, byte);
         } else if (byte < 0x80 and !isRegExpSyntaxByte(byte)) {
             try out.append(allocator, byte);
@@ -767,7 +767,7 @@ fn isSimpleLiteralCapture(body: []const u8) bool {
                 },
                 'd', 'D', 's', 'S', 'w', 'W', 'b', 'B', 'p', 'P', 'k', '0'...'9' => return false,
                 else => {
-                    if (unicode.isAsciiAlphaCodePoint(escaped)) return false;
+                    if (unicode.isAsciiAlphaByte(escaped)) return false;
                     index += 2;
                 },
             }

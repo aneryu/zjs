@@ -1728,7 +1728,7 @@ fn tsSkipNumber(src: []const u8, start: usize) usize {
     var i = start;
     while (i < src.len) {
         const c = src[i];
-        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.') {
+        if (unicode.isAsciiWordByte(c) or c == '.') {
             i += 1;
             continue;
         }

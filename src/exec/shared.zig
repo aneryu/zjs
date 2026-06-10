@@ -6676,7 +6676,7 @@ pub fn parseSimpleClassSequenceEscapedLiteral(source: []const u8, index: *usize,
             return 0x0b;
         },
         'c' => {
-            if (index.* + 2 >= end_limit or !std.ascii.isAlphabetic(source[index.* + 2])) return null;
+            if (index.* + 2 >= end_limit or !unicode_lib.isAsciiAlphaByte(source[index.* + 2])) return null;
             const value: u16 = source[index.* + 2] & 0x1f;
             index.* += 3;
             return value;

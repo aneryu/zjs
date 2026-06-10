@@ -610,7 +610,7 @@ fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: c
 }
 
 fn isAnnexBEscapeUnmodified(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '@' or ch == '*' or ch == '_' or ch == '+' or ch == '-' or ch == '.' or ch == '/';
+    return unicode.isAsciiAlphanumericByte(ch) or ch == '@' or ch == '*' or ch == '_' or ch == '+' or ch == '-' or ch == '.' or ch == '/';
 }
 
 fn isHexCodeUnit(unit: u16) bool {
@@ -632,7 +632,7 @@ fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
 }
 
 fn isUnescaped(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '!' or ch == '~' or ch == '*' or ch == '\'' or ch == '(' or ch == ')';
+    return unicode.isAsciiAlphanumericByte(ch) or ch == '-' or ch == '_' or ch == '.' or ch == '!' or ch == '~' or ch == '*' or ch == '\'' or ch == '(' or ch == ')';
 }
 
 fn isReserved(ch: u8) bool {

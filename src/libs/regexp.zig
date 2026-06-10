@@ -1478,7 +1478,7 @@ const Compiler = struct {
                 return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
             },
             'c' => {
-                if (self.index + 2 >= self.pattern.len or !std.ascii.isAlphabetic(self.pattern[self.index + 2])) {
+                if (self.index + 2 >= self.pattern.len or !unicode.isAsciiAlphaByte(self.pattern[self.index + 2])) {
                     if (self.flags.unicode) return error.InvalidPattern;
                     self.index += 2;
                     try self.emitCharacterAtom('\\', is_backward_dir);
@@ -1692,7 +1692,7 @@ const Compiler = struct {
                 },
                 'c' => {
                     if (self.flags.unicode) {
-                        if (self.index + 2 >= self.pattern.len or !std.ascii.isAlphabetic(self.pattern[self.index + 2])) return error.InvalidPattern;
+                        if (self.index + 2 >= self.pattern.len or !unicode.isAsciiAlphaByte(self.pattern[self.index + 2])) return error.InvalidPattern;
                         const cp: u21 = self.pattern[self.index + 2] & 0x1f;
                         self.index += 3;
                         return .{ .code_point = cp };
@@ -1999,7 +1999,7 @@ const Compiler = struct {
         const name_start = self.index;
         while (self.index < self.pattern.len and self.pattern[self.index] != '}') : (self.index += 1) {
             const byte = self.pattern[self.index];
-            if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '=')) return error.Unsupported;
+            if (!(unicode.isAsciiWordByte(byte) or byte == '=')) return error.Unsupported;
         }
         if (self.index == name_start or self.index >= self.pattern.len or self.pattern[self.index] != '}') return error.InvalidPattern;
         const name = self.pattern[name_start..self.index];
@@ -2722,7 +2722,7 @@ fn isOctalDigit(byte: u8) bool {
 }
 
 fn isClassControlLetter(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_';
+    return unicode.isAsciiWordByte(byte);
 }
 
 test "Zig regexp compiler emits bytecode for common ASCII patterns" {
