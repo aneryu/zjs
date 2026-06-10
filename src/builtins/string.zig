@@ -23,6 +23,8 @@ pub const ConstructorMethod = enum(u32) {
     call = 4,
 };
 
+pub const legacy_normalize_method_id: u32 = 37;
+
 pub const PrototypeMethod = enum(u32) {
     char_at = 100,
     substring = 101,
@@ -121,7 +123,7 @@ pub fn decodePrototypeMethodId(id: u32) ?u32 {
         @intFromEnum(PrototypeMethod.pad_start) => 34,
         @intFromEnum(PrototypeMethod.pad_end) => 35,
         @intFromEnum(PrototypeMethod.locale_compare) => 36,
-        @intFromEnum(PrototypeMethod.normalize) => 37,
+        @intFromEnum(PrototypeMethod.normalize) => legacy_normalize_method_id,
         @intFromEnum(PrototypeMethod.is_well_formed) => 38,
         @intFromEnum(PrototypeMethod.to_well_formed) => 39,
         @intFromEnum(PrototypeMethod.search) => 40,
@@ -430,7 +432,7 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
         34 => pad(rt, bytes.items, args, .start),
         35 => pad(rt, bytes.items, args, .end),
         36 => localeCompare(rt, bytes.items, args),
-        37 => normalize(rt, bytes.items, args),
+        legacy_normalize_method_id => normalize(rt, bytes.items, args),
         38 => unreachable,
         39 => unreachable,
         40 => search(rt, bytes.items, args),

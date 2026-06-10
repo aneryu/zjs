@@ -5569,7 +5569,7 @@ fn stringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "repeat")) return 33;
     if (std.mem.eql(u8, name, "padStart")) return 34;
     if (std.mem.eql(u8, name, "padEnd")) return 35;
-    if (std.mem.eql(u8, name, "normalize")) return 37;
+    if (std.mem.eql(u8, name, "normalize")) return builtins.string.legacy_normalize_method_id;
     if (std.mem.eql(u8, name, "isWellFormed")) return 38;
     if (std.mem.eql(u8, name, "toWellFormed")) return 39;
     if (std.mem.eql(u8, name, "trim")) return 8;

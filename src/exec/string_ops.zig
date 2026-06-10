@@ -2366,7 +2366,7 @@ pub fn qjsStringPrototypeMethod(
     {
         return qjsStringHtmlMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame);
     }
-    if (method_id == 37) {
+    if (method_id == builtins.string.legacy_normalize_method_id) {
         return qjsStringNormalize(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 36) {
@@ -4342,7 +4342,7 @@ pub fn standardStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "padStart")) return 34;
     if (std.mem.eql(u8, name, "padEnd")) return 35;
     if (std.mem.eql(u8, name, "localeCompare")) return 36;
-    if (std.mem.eql(u8, name, "normalize")) return 37;
+    if (std.mem.eql(u8, name, "normalize")) return builtins.string.legacy_normalize_method_id;
     if (std.mem.eql(u8, name, "isWellFormed")) return 38;
     if (std.mem.eql(u8, name, "toWellFormed")) return 39;
     if (std.mem.eql(u8, name, "search")) return 40;
