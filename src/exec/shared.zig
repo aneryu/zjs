@@ -2645,7 +2645,7 @@ pub fn callValueOrBytecodeClassMode(
         if (std.mem.eql(u8, name, "parseFloat")) return qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "isNaN")) return qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
         if (std.mem.eql(u8, name, "isFinite")) return qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
-        if (bigIntStaticUnsigned(name)) |unsigned| {
+        if (builtins.bigint.staticUnsignedMode(name)) |unsigned| {
             return qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "RegExp")) return qjsRegExpFunctionCall(ctx, output, global, args, caller_function, caller_frame);
@@ -7800,12 +7800,6 @@ pub fn qjsDataViewSetCoerceValue(
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     primitive.free(ctx.runtime);
     return number_value;
-}
-
-pub fn bigIntStaticUnsigned(name: []const u8) ?bool {
-    if (std.mem.eql(u8, name, "asIntN")) return false;
-    if (std.mem.eql(u8, name, "asUintN")) return true;
-    return null;
 }
 
 pub fn qjsErrorIsError(args: []const core.JSValue) core.JSValue {

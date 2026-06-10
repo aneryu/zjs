@@ -1083,7 +1083,6 @@ const qjsTypedArrayConstructorName = shared_vm.qjsTypedArrayConstructorName;
 const qjsDataViewAccessor = shared_vm.qjsDataViewAccessor;
 const dataViewGetId = shared_vm.dataViewGetId;
 const dataViewSetId = shared_vm.dataViewSetId;
-const bigIntStaticUnsigned = shared_vm.bigIntStaticUnsigned;
 const qjsArrayBufferAccessor = shared_vm.qjsArrayBufferAccessor;
 const qjsSharedArrayBufferAccessor = shared_vm.qjsSharedArrayBufferAccessor;
 const qjsArrayBufferIsView = shared_vm.qjsArrayBufferIsView;

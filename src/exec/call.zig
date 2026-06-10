@@ -2423,7 +2423,7 @@ fn callNativeBuiltin(
                 }
             }
             if (try constructorNameEql(ctx.runtime, receiver, "BigInt")) {
-                if (bigIntStaticUnsigned(name)) |unsigned| {
+                if (builtins.bigint.staticUnsignedMode(name)) |unsigned| {
                     if (args.len < 2) return error.TypeError;
                     return value_ops.asN(ctx.runtime, args[0], args[1], unsigned) catch |err| switch (err) {
                         error.TypeError, error.RangeError => err,
@@ -5513,12 +5513,6 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (!object.is_proxy or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
-}
-
-fn bigIntStaticUnsigned(name: []const u8) ?bool {
-    if (std.mem.eql(u8, name, "asIntN")) return false;
-    if (std.mem.eql(u8, name, "asUintN")) return true;
-    return null;
 }
 
 fn thisObject(value: core.JSValue) ?*core.Object {
