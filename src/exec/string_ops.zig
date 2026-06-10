@@ -4352,6 +4352,16 @@ pub fn standardStringMethodId(name: []const u8) ?u32 {
     return null;
 }
 
+pub fn primitiveStringMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "toString")) return 9;
+    if (std.mem.eql(u8, name, "concat")) return 10;
+    if (standardStringMethodId(name)) |method_id| {
+        if (method_id == builtins.string.legacy_match_all_method_id) return null;
+        return method_id;
+    }
+    return annexBStringMethodId(name);
+}
+
 pub fn genericTrimStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "trim")) return 8;
     if (std.mem.eql(u8, name, "trimStart")) return 21;

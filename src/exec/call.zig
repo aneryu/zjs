@@ -4683,7 +4683,7 @@ fn callStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, name: []const u
             else => err,
         };
     }
-    if (stringMethodId(name)) |method| {
+    if (shared_vm.primitiveStringMethodId(name)) |method| {
         return builtins.string.methodCall(rt, receiver, method, args) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
@@ -5533,56 +5533,6 @@ fn collectionMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "isSupersetOf")) return 19;
     if (std.mem.eql(u8, name, "symmetricDifference")) return 20;
     if (std.mem.eql(u8, name, "union")) return 21;
-    return null;
-}
-
-fn stringMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "substring")) return 1;
-    if (std.mem.eql(u8, name, "toUpperCase")) return 2;
-    if (std.mem.eql(u8, name, "toLocaleUpperCase")) return 2;
-    if (std.mem.eql(u8, name, "toLowerCase")) return 3;
-    if (std.mem.eql(u8, name, "toLocaleLowerCase")) return 3;
-    if (std.mem.eql(u8, name, "indexOf")) return 4;
-    if (std.mem.eql(u8, name, "lastIndexOf")) return 28;
-    if (std.mem.eql(u8, name, "includes")) return 5;
-    if (std.mem.eql(u8, name, "startsWith")) return 6;
-    if (std.mem.eql(u8, name, "endsWith")) return 7;
-    if (std.mem.eql(u8, name, "localeCompare")) return 36;
-    if (std.mem.eql(u8, name, "repeat")) return 33;
-    if (std.mem.eql(u8, name, "padStart")) return 34;
-    if (std.mem.eql(u8, name, "padEnd")) return 35;
-    if (std.mem.eql(u8, name, "normalize")) return builtins.string.legacy_normalize_method_id;
-    if (std.mem.eql(u8, name, "isWellFormed")) return 38;
-    if (std.mem.eql(u8, name, "toWellFormed")) return 39;
-    if (std.mem.eql(u8, name, "trim")) return 8;
-    if (std.mem.eql(u8, name, "trimLeft")) return 21;
-    if (std.mem.eql(u8, name, "trimStart")) return 21;
-    if (std.mem.eql(u8, name, "trimRight")) return 22;
-    if (std.mem.eql(u8, name, "trimEnd")) return 22;
-    if (std.mem.eql(u8, name, "toString")) return 9;
-    if (std.mem.eql(u8, name, "concat")) return 10;
-    if (std.mem.eql(u8, name, "anchor")) return 11;
-    if (std.mem.eql(u8, name, "big")) return 12;
-    if (std.mem.eql(u8, name, "blink")) return 13;
-    if (std.mem.eql(u8, name, "bold")) return 14;
-    if (std.mem.eql(u8, name, "fixed")) return 15;
-    if (std.mem.eql(u8, name, "fontcolor")) return 16;
-    if (std.mem.eql(u8, name, "fontsize")) return 17;
-    if (std.mem.eql(u8, name, "italics")) return 18;
-    if (std.mem.eql(u8, name, "link")) return 19;
-    if (std.mem.eql(u8, name, "small")) return 20;
-    if (std.mem.eql(u8, name, "strike")) return 23;
-    if (std.mem.eql(u8, name, "sub")) return 24;
-    if (std.mem.eql(u8, name, "substr")) return 25;
-    if (std.mem.eql(u8, name, "sup")) return 26;
-    if (std.mem.eql(u8, name, "split")) return builtins.string.legacy_split_method_id;
-    if (std.mem.eql(u8, name, "charCodeAt")) return 29;
-    if (std.mem.eql(u8, name, "at")) return 30;
-    if (std.mem.eql(u8, name, "codePointAt")) return 31;
-    if (std.mem.eql(u8, name, "slice")) return 32;
-    if (std.mem.eql(u8, name, "search")) return builtins.string.legacy_search_method_id;
-    if (std.mem.eql(u8, name, "match")) return builtins.string.legacy_match_method_id;
-    if (std.mem.eql(u8, name, "replaceAll")) return builtins.string.legacy_replace_all_method_id;
     return null;
 }
 

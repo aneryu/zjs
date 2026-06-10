@@ -227,6 +227,7 @@ pub const simpleEvalStringLiteral = string_ops.simpleEvalStringLiteral;
 pub const simpleUnicodeLiteralMatch = string_ops.simpleUnicodeLiteralMatch;
 pub const singleDotAnchoredMatches = string_ops.singleDotAnchoredMatches;
 pub const standardStringMethodId = string_ops.standardStringMethodId;
+pub const primitiveStringMethodId = string_ops.primitiveStringMethodId;
 pub const stringAtomId = string_ops.stringAtomId;
 pub const stringCodePointAt = string_ops.stringCodePointAt;
 pub const stringIndexOfUnits = string_ops.stringIndexOfUnits;
