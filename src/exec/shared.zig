@@ -7405,7 +7405,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
             }) |value| return value;
             return construct_mod.constructValue(ctx.runtime, func, args, &.{});
         }
-        if (isDateConstructorRecord(function_object)) {
+        if (builtins.date.isConstructorRecord(function_object)) {
             const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
             return date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, args);
         }
@@ -8521,11 +8521,6 @@ pub fn qjsIteratorClose(
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
     result.free(ctx.runtime);
-}
-
-pub fn isDateConstructorRecord(function_object: *core.Object) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
-    return native_ref.domain == .date and native_ref.id == @intFromEnum(builtins.date.ConstructorMethod.construct);
 }
 
 pub const destructuring_iterator_state_kind: u8 = 0xf0;
@@ -13971,7 +13966,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
             return isConstructorLike(ctx, target);
         }
         if (function_object.is_html_dda) return false;
-        if (isDateConstructorRecord(function_object)) return true;
+        if (builtins.date.isConstructorRecord(function_object)) return true;
         if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
         }

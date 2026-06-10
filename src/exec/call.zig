@@ -3271,7 +3271,7 @@ fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals: []
     defer if (target_name) |name| rt.memory.allocator.free(name);
     const new_target = if (args.len >= 3) args[2] else args[0];
     if (!isConstructorValue(rt, new_target)) return error.TypeError;
-    if (isDateConstructorRecord(target)) {
+    if (builtins.date.isConstructorRecord(target)) {
         var construct_args = ReflectConstructArguments{};
         try construct_args.init(rt, args[1]);
         defer construct_args.deinit();
@@ -3445,7 +3445,7 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (!value_ops.isFunctionObject(value)) return false;
     const object = thisObject(value) orelse return false;
     if (object.proxyTarget()) |target| return isConstructorValue(rt, target);
-    if (isDateConstructorRecord(object)) return true;
+    if (builtins.date.isConstructorRecord(object)) return true;
     return switch (object.class_id) {
         core.class.ids.c_function => {
             if (object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
@@ -3461,11 +3461,6 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
         => true,
         else => false,
     };
-}
-
-fn isDateConstructorRecord(object: *core.Object) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
-    return native_ref.domain == .date and native_ref.id == @intFromEnum(builtins.date.ConstructorMethod.construct);
 }
 
 fn reflectConstructPrototype(rt: *core.JSRuntime, target_name: []const u8, new_target: core.JSValue, target: core.JSValue) !?*core.Object {

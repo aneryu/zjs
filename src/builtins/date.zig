@@ -16,6 +16,11 @@ pub const ConstructorMethod = enum(u32) {
     construct = 100,
 };
 
+pub fn isConstructorRecord(function_object: *core.Object) bool {
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
+    return native_ref.domain == .date and native_ref.id == @intFromEnum(ConstructorMethod.construct);
+}
+
 pub const PrototypeMethod = enum(u32) {
     get_time = 101,
     value_of = 102,

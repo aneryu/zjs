@@ -17,6 +17,11 @@ pub const ConstructorMethod = enum(u32) {
     construct = 1000,
 };
 
+pub fn isConstructorRecord(function_object: *core.Object) bool {
+    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
+    return native_ref.domain == .regexp and native_ref.id == @intFromEnum(ConstructorMethod.construct);
+}
+
 pub const PrototypeMethod = enum(u32) {
     to_string = 101,
     test_ = 102,

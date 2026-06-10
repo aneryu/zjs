@@ -66,8 +66,8 @@ pub fn constructValue(rt: *core.JSRuntime, callee: core.JSValue, args: []const c
             .kind = constructor.typedArrayKind(),
         }, rooted_args, activeGlobalObject(rt, globals) catch null);
     }
-    if (isDateConstructorRecord(constructor)) return builtins.date.constructWithPrototype(rt, rooted_args, prototype);
-    if (isRegExpConstructorRecord(constructor)) {
+    if (builtins.date.isConstructorRecord(constructor)) return builtins.date.constructWithPrototype(rt, rooted_args, prototype);
+    if (builtins.regexp.isConstructorRecord(constructor)) {
         const pattern = if (rooted_args.len >= 1) rooted_args[0] else try value_ops.createStringValue(rt, "");
         defer if (rooted_args.len < 1) pattern.free(rt);
         const flags = if (rooted_args.len >= 2) rooted_args[1] else try value_ops.createStringValue(rt, "");
@@ -1226,16 +1226,6 @@ fn collectionName(kind: u32) ?[]const u8 {
         4 => "WeakSet",
         else => null,
     };
-}
-
-fn isDateConstructorRecord(object: *core.Object) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
-    return native_ref.domain == .date and native_ref.id == @intFromEnum(builtins.date.ConstructorMethod.construct);
-}
-
-fn isRegExpConstructorRecord(object: *core.Object) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
-    return native_ref.domain == .regexp and native_ref.id == @intFromEnum(builtins.regexp.ConstructorMethod.construct);
 }
 
 fn isCallableObject(value: core.JSValue) bool {
