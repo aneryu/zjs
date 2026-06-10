@@ -1959,27 +1959,6 @@ fn promiseThenOrCatchCall(
     return builtins.promise.fulfilledWithPrototype(ctx.runtime, callback_result, promise_proto);
 }
 
-fn isPromiseStaticBuiltinCallee(
-    rt: *core.JSRuntime,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    function_object: *core.Object,
-    name: []const u8,
-) !bool {
-    const active_global = try activeGlobalObject(rt, global, globals);
-    const global_object = active_global orelse return false;
-    const ctor_key = try rt.internAtom("Promise");
-    defer rt.atoms.free(ctor_key);
-    const ctor_value = global_object.getProperty(ctor_key);
-    defer ctor_value.free(rt);
-    const ctor_object = thisObject(ctor_value) orelse return false;
-    const method_key = try rt.internAtom(name);
-    defer rt.atoms.free(method_key);
-    const method_value = ctor_object.getProperty(method_key);
-    defer method_value.free(rt);
-    return builtins.object.sameValue(method_value, function_object.value());
-}
-
 fn promiseCombinatorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2144,7 +2123,11 @@ fn callNativeBuiltin(
             mode == @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) or
             mode == @intFromEnum(builtins.promise.LegacyStaticMethod.any))
         {
-            if (try isPromiseStaticBuiltinCallee(ctx.runtime, global, globals, function_object, name)) {
+            const is_static_builtin = if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object|
+                try shared_vm.qjsPromiseStaticBuiltinCallee(ctx.runtime, global_object, function_object, name)
+            else
+                false;
+            if (is_static_builtin) {
                 const receiver = thisObject(this_value) orelse return error.TypeError;
                 if (!isCallableObjectValue(this_value)) return error.TypeError;
                 if (try constructorNameEql(ctx.runtime, receiver, "Promise")) {
