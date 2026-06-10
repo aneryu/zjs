@@ -191,11 +191,6 @@ pub fn qjsDateToPrimitiveCall(
     };
 }
 
-pub fn qjsDateMethodId(name: []const u8) ?u32 {
-    const native_id = builtins.date.prototypeMethodId(name) orelse return null;
-    return builtins.date.decodePrototypeMethodId(native_id);
-}
-
 fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
     if (shared_vm.stringValueUnitsEqualBytes(value, "string") or shared_vm.stringValueUnitsEqualBytes(value, "default")) return .string;

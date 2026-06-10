@@ -1073,7 +1073,6 @@ const annexBStringMethodId = shared_vm.annexBStringMethodId;
 const qjsDateSetYear = date_vm.qjsDateSetYear;
 const qjsDateSetTime = date_vm.qjsDateSetTime;
 const qjsDateStaticId = date_vm.qjsDateStaticId;
-const qjsDateMethodId = date_vm.qjsDateMethodId;
 const toNumberForDateMethod = shared_vm.toNumberForDateMethod;
 const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
 const constructValueOrBytecodeWithNewTarget = shared_vm.constructValueOrBytecodeWithNewTarget;
