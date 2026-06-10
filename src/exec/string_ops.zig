@@ -3677,7 +3677,7 @@ pub fn stringCodePointAt(string_value: core.string.String, pos: usize) ?struct {
 }
 
 pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
 pub fn surrogatePairFromCodePoint(code_point: u21) struct { high: u16, low: u16 } {
@@ -3897,7 +3897,7 @@ pub fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
         const low = units[index.* + 1];
         if (isLowSurrogateUnit(low)) {
             index.* += 2;
-            return @intCast(0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00));
+            return unicode_lib.codePointFromSurrogatePair(high, low);
         }
     }
     index.* += 1;
@@ -4240,7 +4240,7 @@ pub fn isLowSurrogateCodePoint(cp: u21) bool {
 }
 
 pub fn combinedSurrogateCodePoint(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
 pub fn createRegExpMatchArrayFromStringValue(rt: *core.JSRuntime, input_value: core.JSValue, found: RegExpMatch) !core.JSValue {

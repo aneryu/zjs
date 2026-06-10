@@ -3160,7 +3160,7 @@ fn isRegExpGroupNameContinue(cp: u21) bool {
 }
 
 fn isInvalidRegExpGroupNameStart(cp: u21) bool {
-    if (cp >= 0xd800 and cp <= 0xdfff) return true;
+    if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x104a4, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,
@@ -3168,7 +3168,7 @@ fn isInvalidRegExpGroupNameStart(cp: u21) bool {
 }
 
 fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
-    if (unicode.isHighSurrogateCodePoint(cp) or unicode.isLowSurrogateCodePoint(cp)) return true;
+    if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,
@@ -3184,7 +3184,7 @@ fn isGroupNameLowSurrogate(cp: u32) bool {
 }
 
 fn groupNameSurrogateCodePoint(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode.codePointFromSurrogatePair(high, low);
 }
 
 fn validateUnicodeSetsPattern(pattern: []const u8) bool {
@@ -3658,5 +3658,5 @@ fn isLowSurrogate(unit: u16) bool {
 }
 
 fn surrogateCodePoint(high: u16, low: u16) u32 {
-    return 0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00);
+    return @intCast(unicode.codePointFromSurrogatePair(high, low));
 }

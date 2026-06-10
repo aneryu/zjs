@@ -198,7 +198,7 @@ fn isLowSurrogate(unit: u16) bool {
 }
 
 fn surrogatePairCodePoint(high: u16, low: u16) u32 {
-    return 0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00);
+    return @intCast(unicode.codePointFromSurrogatePair(high, low));
 }
 
 test "JSValue.asString views latin1 units without allocation" {

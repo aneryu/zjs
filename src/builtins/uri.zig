@@ -303,9 +303,7 @@ fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.J
                 const unit = units[index];
                 if (unicode.isHighSurrogateUnit(unit)) {
                     const next = units[index + 1];
-                    const high: u21 = unit - 0xd800;
-                    const low: u21 = next - 0xdc00;
-                    try encodeCodepoint(rt, out, 0x10000 + (high << 10) + low, component);
+                    try encodeCodepoint(rt, out, unicode.codePointFromSurrogatePair(unit, next), component);
                     index += 1;
                 } else {
                     try encodeCodepoint(rt, out, unit, component);
@@ -501,7 +499,7 @@ fn decodeBytesInto(dest: []u8, bytes: []const u8, component: bool, out_len: *usi
 }
 
 fn isSurrogate(codepoint: u21) bool {
-    return codepoint >= 0xd800 and codepoint <= 0xdfff;
+    return unicode.isSurrogateCodePoint(codepoint);
 }
 
 fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {

@@ -1028,8 +1028,7 @@ fn codePointAtStringIndex(string_value: core.string.String, index: usize) CodePo
     if (isHighSurrogateUnit(first) and next_index < string_value.len()) {
         const second = string_value.codeUnitAt(next_index);
         if (isLowSurrogateUnit(second)) {
-            const code_point = 0x10000 + ((@as(u32, first) - 0xd800) << 10) + (@as(u32, second) - 0xdc00);
-            return .{ .value = @intCast(code_point), .start = index, .end = index + 2 };
+            return .{ .value = unicode.codePointFromSurrogatePair(first, second), .start = index, .end = index + 2 };
         }
     }
     return .{ .value = @intCast(first), .start = index, .end = next_index };
@@ -1043,8 +1042,7 @@ fn codePointBeforeStringIndex(string_value: core.string.String, end: usize) ?Cod
         const first_index = last_index - 1;
         const first = string_value.codeUnitAt(first_index);
         if (isHighSurrogateUnit(first)) {
-            const code_point = 0x10000 + ((@as(u32, first) - 0xd800) << 10) + (@as(u32, last) - 0xdc00);
-            return .{ .value = @intCast(code_point), .start = first_index, .end = end };
+            return .{ .value = unicode.codePointFromSurrogatePair(first, last), .start = first_index, .end = end };
         }
     }
     return .{ .value = @intCast(last), .start = last_index, .end = end };
@@ -1182,8 +1180,7 @@ fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
     if (isHighSurrogateUnit(unit) and index + 1 < string_value.len()) {
         const next = string_value.codeUnitAt(@intCast(index + 1));
         if (isLowSurrogateUnit(next)) {
-            const code_point = 0x10000 + ((@as(u32, unit) - 0xd800) << 10) + (@as(u32, next) - 0xdc00);
-            return core.JSValue.int32(@intCast(code_point));
+            return core.JSValue.int32(@intCast(unicode.codePointFromSurrogatePair(unit, next)));
         }
     }
     return core.JSValue.int32(unit);

@@ -991,9 +991,7 @@ fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8),
             if (index + 1 < units.len) {
                 const next = units[index + 1];
                 if (unicode.isLowSurrogateUnit(next)) {
-                    const high: u32 = @intCast(unit - 0xd800);
-                    const low: u32 = @intCast(next - 0xdc00);
-                    try appendUtf8CodePoint(rt, buffer, 0x10000 + (high << 10) + low);
+                    try appendUtf8CodePoint(rt, buffer, @intCast(unicode.codePointFromSurrogatePair(unit, next)));
                     index += 1;
                     continue;
                 }
@@ -1053,9 +1051,7 @@ fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
                 if (unicode.isHighSurrogateUnit(unit) and index + 1 < units.len) {
                     const next = units[index + 1];
                     if (unicode.isLowSurrogateUnit(next)) {
-                        const high: u32 = @intCast(unit - 0xd800);
-                        const low: u32 = @intCast(next - 0xdc00);
-                        try appendUtf8CodePoint(rt, buffer, 0x10000 + (high << 10) + low);
+                        try appendUtf8CodePoint(rt, buffer, @intCast(unicode.codePointFromSurrogatePair(unit, next)));
                         index += 1;
                         continue;
                     }

@@ -115,6 +115,14 @@ pub fn isLowSurrogateCodePoint(cp: u21) bool {
     return cp >= low_surrogate_min and cp <= low_surrogate_max;
 }
 
+pub fn isSurrogateCodePoint(cp: u21) bool {
+    return isHighSurrogateCodePoint(cp) or isLowSurrogateCodePoint(cp);
+}
+
+pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
+    return 0x10000 + ((@as(u21, high) - high_surrogate_min) << 10) + (@as(u21, low) - low_surrogate_min);
+}
+
 /// Returns owned UTF-32 code points. Caller must free with the same allocator.
 pub fn normalizeAlloc(allocator: std.mem.Allocator, src: []const u32, form: NormalizationForm) std.mem.Allocator.Error![]u32 {
     if (form == .nfc) {
@@ -1346,6 +1354,13 @@ test "unicode surrogate range helpers cover boundaries" {
     try std.testing.expect(isLowSurrogateCodePoint(0xdfff));
     try std.testing.expect(!isHighSurrogateCodePoint(0x10000));
     try std.testing.expect(!isLowSurrogateCodePoint(0x10ffff));
+    try std.testing.expect(isSurrogateCodePoint(0xd800));
+    try std.testing.expect(isSurrogateCodePoint(0xdfff));
+    try std.testing.expect(!isSurrogateCodePoint(0xe000));
+
+    try std.testing.expectEqual(@as(u21, 0x10000), codePointFromSurrogatePair(0xd800, 0xdc00));
+    try std.testing.expectEqual(@as(u21, 0x1f600), codePointFromSurrogatePair(0xd83d, 0xde00));
+    try std.testing.expectEqual(@as(u21, 0x10ffff), codePointFromSurrogatePair(0xdbff, 0xdfff));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {

@@ -1014,15 +1014,15 @@ fn isWordChar(code_point: u21) bool {
 }
 
 fn isHiSurrogate(code_unit: u21) bool {
-    return code_unit >= 0xd800 and code_unit <= 0xdbff;
+    return unicode.isHighSurrogateCodePoint(code_unit);
 }
 
 fn isLoSurrogate(code_unit: u21) bool {
-    return code_unit >= 0xdc00 and code_unit <= 0xdfff;
+    return unicode.isLowSurrogateCodePoint(code_unit);
 }
 
 fn fromSurrogate(high: u16, low: u16) u21 {
-    return 0x10000 + ((@as(u21, high) - 0xd800) << 10) + (@as(u21, low) - 0xdc00);
+    return unicode.codePointFromSurrogatePair(high, low);
 }
 
 fn headerCaptureCount() usize {
@@ -2680,7 +2680,7 @@ fn isRegExpGroupNameContinue(cp: u21) bool {
 }
 
 fn isInvalidRegExpGroupNameStart(cp: u21) bool {
-    if (cp >= 0xd800 and cp <= 0xdfff) return true;
+    if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x104a4, 0x1d7da, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,
@@ -2688,7 +2688,7 @@ fn isInvalidRegExpGroupNameStart(cp: u21) bool {
 }
 
 fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
-    if (cp >= 0xd800 and cp <= 0xdfff) return true;
+    if (unicode.isSurrogateCodePoint(cp)) return true;
     return switch (cp) {
         0x275e, 0x2764, 0x1f08b, 0x1f415, 0x1f712, 0x1f98a, 0x10ffff => true,
         else => false,

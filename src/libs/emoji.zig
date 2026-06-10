@@ -1,3 +1,5 @@
+const unicode = @import("unicode.zig");
+
 pub const StringUnits = union(enum) {
     latin1: []const u8,
     utf16: []const u16,
@@ -136,11 +138,11 @@ fn nextCodePointIndex(units: StringUnits, index: usize) usize {
 
 fn readUtf16CodePoint(units: []const u16, index: *usize) u21 {
     const high = units[index.*];
-    if (high >= 0xd800 and high <= 0xdbff and index.* + 1 < units.len) {
+    if (unicode.isHighSurrogateUnit(high) and index.* + 1 < units.len) {
         const low = units[index.* + 1];
-        if (low >= 0xdc00 and low <= 0xdfff) {
+        if (unicode.isLowSurrogateUnit(low)) {
             index.* += 2;
-            return @intCast(0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, low) - 0xdc00));
+            return unicode.codePointFromSurrogatePair(high, low);
         }
     }
     index.* += 1;
