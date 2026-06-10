@@ -10,11 +10,9 @@
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const frontend = @import("../frontend/root.zig");
 const call_mod = @import("call.zig");
-const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const arith_vm = @import("vm_arith.zig");
