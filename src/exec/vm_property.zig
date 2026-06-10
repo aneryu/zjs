@@ -8684,9 +8684,9 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
         (@as(i32, byte2 & 0x3f) * 0x40) +
         (final_b4 & 0x3f);
     if (codepoint < 0x10000 or codepoint > 0x10ffff) return false;
-    const adjusted = codepoint - 0x10000;
-    const low = (adjusted & 0x03ff) + 0xdc00;
-    const high = ((adjusted >> 10) & 0x03ff) + 0xd800;
+    const pair = shared_vm.surrogatePairFromCodePoint(@intCast(codepoint));
+    const low: i32 = @intCast(pair.low);
+    const high: i32 = @intCast(pair.high);
     const final_induction = @addWithOverflow(final_b4, 1);
     if (final_induction[1] != 0) return false;
 

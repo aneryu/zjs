@@ -1,4 +1,5 @@
 const gc = @import("gc.zig");
+const unicode = @import("../libs/unicode.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
@@ -696,9 +697,9 @@ fn decodeUtf8(bytes: []const u8, latin1: ?[]u8, utf16: ?[]u16) StringError!usize
                 out[out_i] = @intCast(decoded.codepoint);
                 out_i += 1;
             } else {
-                const cp = decoded.codepoint - 0x10000;
-                out[out_i] = @intCast(0xd800 + (cp >> 10));
-                out[out_i + 1] = @intCast(0xdc00 + (cp & 0x3ff));
+                const pair = unicode.surrogatePairFromCodePoint(decoded.codepoint);
+                out[out_i] = pair.high;
+                out[out_i + 1] = pair.low;
                 out_i += 2;
             }
         }
