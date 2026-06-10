@@ -2,6 +2,7 @@ const core = @import("../core/root.zig");
 const regexp = @import("regexp.zig");
 const regexp_bytecode = regexp;
 const regexp_compile = regexp;
+const unicode = @import("unicode.zig");
 const std = @import("std");
 
 pub const max_captures = regexp_bytecode.max_captures;
@@ -857,12 +858,8 @@ fn asciiUpper(byte: u8) u8 {
 }
 
 fn hexValue(byte: u8) ?u21 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => 10 + byte - 'a',
-        'A'...'F' => 10 + byte - 'A',
-        else => null,
-    };
+    const value = unicode.asciiHexDigitValueByte(byte) orelse return null;
+    return @intCast(value);
 }
 
 pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?Match {

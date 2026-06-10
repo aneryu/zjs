@@ -123,6 +123,18 @@ pub fn isAsciiIdentifierPartByte(byte: u8) bool {
     return isAsciiIdentifierStartByte(byte) or isAsciiDigitCodePoint(byte);
 }
 
+pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    return null;
+}
+
+pub fn asciiHexDigitValueUnit(unit: u16) ?u8 {
+    if (unit > std.math.maxInt(u8)) return null;
+    return asciiHexDigitValueByte(@intCast(unit));
+}
+
 pub fn isAsciiDigitCodePoint(cp: u21) bool {
     return cp >= '0' and cp <= '9';
 }
@@ -1443,6 +1455,20 @@ test "unicode ascii identifier byte helpers cover ECMAScript starts and parts" {
     try std.testing.expect(isAsciiIdentifierPartByte('$'));
     try std.testing.expect(!isAsciiIdentifierPartByte('-'));
     try std.testing.expect(!isAsciiIdentifierPartByte(0x80));
+}
+
+test "unicode ascii hex helpers cover digit values" {
+    try std.testing.expectEqual(@as(u8, 0), asciiHexDigitValueByte('0'));
+    try std.testing.expectEqual(@as(u8, 9), asciiHexDigitValueByte('9'));
+    try std.testing.expectEqual(@as(u8, 10), asciiHexDigitValueByte('a'));
+    try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueByte('f'));
+    try std.testing.expectEqual(@as(u8, 10), asciiHexDigitValueByte('A'));
+    try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueByte('F'));
+    try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueByte('g'));
+    try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueByte('/'));
+
+    try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueUnit('F'));
+    try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueUnit(0x100));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {

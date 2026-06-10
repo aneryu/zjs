@@ -616,13 +616,11 @@ fn isAnnexBEscapeUnmodified(ch: u8) bool {
 }
 
 fn isHexCodeUnit(unit: u16) bool {
-    return (unit >= '0' and unit <= '9') or (unit >= 'a' and unit <= 'f') or (unit >= 'A' and unit <= 'F');
+    return unicode.asciiHexDigitValueUnit(unit) != null;
 }
 
 fn hexCodeUnitValue(unit: u16) u8 {
-    if (unit >= '0' and unit <= '9') return @intCast(unit - '0');
-    if (unit >= 'a' and unit <= 'f') return @intCast(unit - 'a' + 10);
-    return @intCast(unit - 'A' + 10);
+    return unicode.asciiHexDigitValueUnit(unit) orelse unreachable;
 }
 
 fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {

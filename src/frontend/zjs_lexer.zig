@@ -1335,10 +1335,7 @@ fn isAsciiIdentContinue(c: u8) bool {
 }
 
 fn hexNibble(c: u8) u16 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-    unreachable;
+    return unicode.asciiHexDigitValueByte(c) orelse unreachable;
 }
 
 fn appendUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !void {

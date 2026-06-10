@@ -2693,12 +2693,8 @@ fn isInvalidRegExpGroupNameContinue(cp: u21) bool {
 }
 
 fn hexValue(byte: u8) ?u21 {
-    return switch (byte) {
-        '0'...'9' => byte - '0',
-        'a'...'f' => 10 + byte - 'a',
-        'A'...'F' => 10 + byte - 'A',
-        else => null,
-    };
+    const value = unicode.asciiHexDigitValueByte(byte) orelse return null;
+    return @intCast(value);
 }
 
 const DecodedWtf8 = struct {

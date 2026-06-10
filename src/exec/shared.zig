@@ -9746,10 +9746,7 @@ pub fn encodeHexBytes(rt: *core.JSRuntime, bytes: []const u8) !std.ArrayList(u8)
 }
 
 pub fn hexNibble(byte: u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
-    return null;
+    return unicode_lib.asciiHexDigitValueByte(byte);
 }
 
 pub const Base64Chunk = struct {
