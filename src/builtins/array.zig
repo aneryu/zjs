@@ -163,6 +163,11 @@ pub fn decodePrototypeMethodId(id: u32) ?u32 {
     };
 }
 
+pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
+    const native_id = prototypeMethodId(name) orelse return null;
+    return decodePrototypeMethodId(native_id);
+}
+
 pub fn isArrayIndex(bytes: []const u8) bool {
     return core_array.isArrayIndexName(bytes);
 }

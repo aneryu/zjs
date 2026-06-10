@@ -3621,7 +3621,7 @@ fn callArrayMethod(
     if (std.mem.eql(u8, name, "forEach")) return forEachArrayPrint(rt, output, receiver);
     if (std.mem.eql(u8, name, "map")) return arrayMapCallback(rt, receiver, args, globals);
     if (std.mem.eql(u8, name, "join")) return arrayJoinCall(rt, receiver, args);
-    if (arrayMethodId(name)) |method| {
+    if (builtins.array.legacyPrototypeMethodId(name)) |method| {
         return switch (method) {
             1, 2, 4, 5 => builtins.array.methodCall(rt, receiver, method, &.{}),
             else => builtins.array.methodCall(rt, receiver, method, args),
@@ -3638,7 +3638,7 @@ fn isArrayMethodName(name: []const u8) bool {
         std.mem.eql(u8, name, "forEach") or
         std.mem.eql(u8, name, "map") or
         std.mem.eql(u8, name, "join") or
-        arrayMethodId(name) != null;
+        builtins.array.legacyPrototypeMethodId(name) != null;
 }
 
 fn callObjectStatic(
@@ -5533,28 +5533,6 @@ fn collectionMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "isSupersetOf")) return 19;
     if (std.mem.eql(u8, name, "symmetricDifference")) return 20;
     if (std.mem.eql(u8, name, "union")) return 21;
-    return null;
-}
-
-fn arrayMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "filter")) return 1;
-    if (std.mem.eql(u8, name, "reduce")) return 2;
-    if (std.mem.eql(u8, name, "some")) return 4;
-    if (std.mem.eql(u8, name, "every")) return 5;
-    if (std.mem.eql(u8, name, "indexOf")) return 6;
-    if (std.mem.eql(u8, name, "includes")) return 7;
-    if (std.mem.eql(u8, name, "lastIndexOf")) return 8;
-    if (std.mem.eql(u8, name, "at")) return 9;
-    if (std.mem.eql(u8, name, "slice")) return 10;
-    if (std.mem.eql(u8, name, "splice")) return 11;
-    if (std.mem.eql(u8, name, "reverse")) return 12;
-    if (std.mem.eql(u8, name, "push")) return 13;
-    if (std.mem.eql(u8, name, "pop")) return 14;
-    if (std.mem.eql(u8, name, "concat")) return 15;
-    if (std.mem.eql(u8, name, "sort")) return 16;
-    if (std.mem.eql(u8, name, "values")) return 17;
-    if (std.mem.eql(u8, name, "keys")) return 18;
-    if (std.mem.eql(u8, name, "entries")) return 19;
     return null;
 }
 
