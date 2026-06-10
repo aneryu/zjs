@@ -2713,7 +2713,7 @@ pub fn callValueOrBytecodeClassMode(
         if (std.mem.eql(u8, name, "raw")) {
             return qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
         }
-        if (date_vm.qjsDateStaticId(name)) |method_id| {
+        if (builtins.date.staticMethodId(name)) |method_id| {
             if (objectFromValue(this_value)) |receiver_object| {
                 if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
                     if (try date_vm.qjsDateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;

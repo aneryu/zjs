@@ -172,13 +172,6 @@ pub fn qjsDateConstructWithPrototype(
     return builtins.date.constructWithPrototype(ctx.runtime, coerced_args[0..coerced_len], prototype);
 }
 
-pub fn qjsDateStaticId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "UTC")) return 1;
-    if (std.mem.eql(u8, name, "parse")) return 2;
-    if (std.mem.eql(u8, name, "now")) return 3;
-    return null;
-}
-
 pub fn qjsDateToPrimitiveCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -199,41 +192,8 @@ pub fn qjsDateToPrimitiveCall(
 }
 
 pub fn qjsDateMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "getTime")) return 1;
-    if (std.mem.eql(u8, name, "valueOf")) return 2;
-    if (std.mem.eql(u8, name, "getFullYear")) return 3;
-    if (std.mem.eql(u8, name, "getTimezoneOffset")) return 32;
-    if (std.mem.eql(u8, name, "getMonth")) return 4;
-    if (std.mem.eql(u8, name, "getDate")) return 5;
-    if (std.mem.eql(u8, name, "getHours")) return 6;
-    if (std.mem.eql(u8, name, "getMinutes")) return 7;
-    if (std.mem.eql(u8, name, "getSeconds")) return 8;
-    if (std.mem.eql(u8, name, "getMilliseconds")) return 9;
-    if (std.mem.eql(u8, name, "toISOString")) return 10;
-    if (std.mem.eql(u8, name, "toJSON")) return 11;
-    if (std.mem.eql(u8, name, "getUTCFullYear")) return 12;
-    if (std.mem.eql(u8, name, "getUTCMonth")) return 13;
-    if (std.mem.eql(u8, name, "getUTCDate")) return 14;
-    if (std.mem.eql(u8, name, "getUTCHours")) return 15;
-    if (std.mem.eql(u8, name, "getUTCMinutes")) return 16;
-    if (std.mem.eql(u8, name, "getUTCSeconds")) return 17;
-    if (std.mem.eql(u8, name, "getUTCMilliseconds")) return 18;
-    if (std.mem.eql(u8, name, "getUTCDay") or std.mem.eql(u8, name, "getDay")) return 19;
-    if (std.mem.eql(u8, name, "toString") or std.mem.eql(u8, name, "toLocaleString")) return 20;
-    if (std.mem.eql(u8, name, "toUTCString") or std.mem.eql(u8, name, "toGMTString")) return 21;
-    if (std.mem.eql(u8, name, "toDateString") or std.mem.eql(u8, name, "toLocaleDateString")) return 33;
-    if (std.mem.eql(u8, name, "toTimeString") or std.mem.eql(u8, name, "toLocaleTimeString")) return 34;
-    if (std.mem.eql(u8, name, "getYear")) return 22;
-    if (std.mem.eql(u8, name, "setYear")) return 23;
-    if (std.mem.eql(u8, name, "setTime")) return 24;
-    if (std.mem.eql(u8, name, "setMilliseconds") or std.mem.eql(u8, name, "setUTCMilliseconds")) return 25;
-    if (std.mem.eql(u8, name, "setSeconds") or std.mem.eql(u8, name, "setUTCSeconds")) return 26;
-    if (std.mem.eql(u8, name, "setMinutes") or std.mem.eql(u8, name, "setUTCMinutes")) return 27;
-    if (std.mem.eql(u8, name, "setHours") or std.mem.eql(u8, name, "setUTCHours")) return 28;
-    if (std.mem.eql(u8, name, "setDate") or std.mem.eql(u8, name, "setUTCDate")) return 29;
-    if (std.mem.eql(u8, name, "setMonth") or std.mem.eql(u8, name, "setUTCMonth")) return 30;
-    if (std.mem.eql(u8, name, "setFullYear") or std.mem.eql(u8, name, "setUTCFullYear")) return 31;
-    return null;
+    const native_id = builtins.date.prototypeMethodId(name) orelse return null;
+    return builtins.date.decodePrototypeMethodId(native_id);
 }
 
 fn qjsDateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {

@@ -2451,7 +2451,7 @@ fn callNativeBuiltin(
                 }
             }
             if (try constructorNameEql(ctx.runtime, receiver, "Date")) {
-                if (dateStaticId(name)) |method| {
+                if (builtins.date.staticMethodId(name)) |method| {
                     return builtins.date.staticCall(ctx.runtime, method, args) catch |err| switch (err) {
                         error.TypeError => error.TypeError,
                         else => err,
@@ -5617,13 +5617,6 @@ fn regexpAccessorName(name: []const u8) ?[]const u8 {
         std.mem.eql(u8, accessor, "sticky") or
         std.mem.eql(u8, accessor, "hasIndices") or
         std.mem.eql(u8, accessor, "unicodeSets")) return accessor;
-    return null;
-}
-
-fn dateStaticId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "UTC")) return 1;
-    if (std.mem.eql(u8, name, "parse")) return 2;
-    if (std.mem.eql(u8, name, "now")) return 3;
     return null;
 }
 
