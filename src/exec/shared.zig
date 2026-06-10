@@ -8121,18 +8121,7 @@ pub fn isBuiltinConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "FinalizationRegistry") or
         std.mem.eql(u8, name, "DataView") or
         std.mem.eql(u8, name, "TypedArray") or
-        std.mem.eql(u8, name, "Int8Array") or
-        std.mem.eql(u8, name, "Uint8Array") or
-        std.mem.eql(u8, name, "Uint8ClampedArray") or
-        std.mem.eql(u8, name, "Int16Array") or
-        std.mem.eql(u8, name, "Uint16Array") or
-        std.mem.eql(u8, name, "Int32Array") or
-        std.mem.eql(u8, name, "Uint32Array") or
-        std.mem.eql(u8, name, "Float16Array") or
-        std.mem.eql(u8, name, "Float32Array") or
-        std.mem.eql(u8, name, "Float64Array") or
-        std.mem.eql(u8, name, "BigInt64Array") or
-        std.mem.eql(u8, name, "BigUint64Array") or
+        builtins.typed_array_names.isConcrete(name) or
         std.mem.eql(u8, name, "Proxy");
 }
 

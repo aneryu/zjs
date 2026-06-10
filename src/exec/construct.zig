@@ -61,9 +61,10 @@ pub fn constructValue(rt: *core.JSRuntime, callee: core.JSValue, args: []const c
     };
 
     if (constructor.typedArrayElementSize() != 0 and constructor.typedArrayKind() != 0) {
+        const kind = constructor.typedArrayKind();
         return constructTypedArrayValue(rt, prototype, .{
             .size = constructor.typedArrayElementSize(),
-            .kind = constructor.typedArrayKind(),
+            .kind = kind,
         }, rooted_args, activeGlobalObject(rt, globals) catch null);
     }
     if (builtins.date.isConstructorRecord(constructor)) return builtins.date.constructWithPrototype(rt, rooted_args, prototype);
@@ -618,25 +619,10 @@ fn primitivePrototypeFromObjectConstructor(constructor: *core.Object, slot: core
     return expectObject(proto_value) catch null;
 }
 
-pub const TypedArrayElement = struct {
-    size: u32,
-    kind: u8,
-};
+pub const TypedArrayElement = builtins.typed_array_names.Element;
 
 pub fn typedArrayElement(name: []const u8) ?TypedArrayElement {
-    if (std.mem.eql(u8, name, "Int8Array")) return .{ .size = 1, .kind = 1 };
-    if (std.mem.eql(u8, name, "Uint8Array")) return .{ .size = 1, .kind = 2 };
-    if (std.mem.eql(u8, name, "Uint8ClampedArray")) return .{ .size = 1, .kind = 3 };
-    if (std.mem.eql(u8, name, "Int16Array")) return .{ .size = 2, .kind = 4 };
-    if (std.mem.eql(u8, name, "Uint16Array")) return .{ .size = 2, .kind = 5 };
-    if (std.mem.eql(u8, name, "Int32Array")) return .{ .size = 4, .kind = 6 };
-    if (std.mem.eql(u8, name, "Uint32Array")) return .{ .size = 4, .kind = 7 };
-    if (std.mem.eql(u8, name, "Float16Array")) return .{ .size = 2, .kind = 8 };
-    if (std.mem.eql(u8, name, "Float32Array")) return .{ .size = 4, .kind = 9 };
-    if (std.mem.eql(u8, name, "Float64Array")) return .{ .size = 8, .kind = 10 };
-    if (std.mem.eql(u8, name, "BigInt64Array")) return .{ .size = 8, .kind = 11 };
-    if (std.mem.eql(u8, name, "BigUint64Array")) return .{ .size = 8, .kind = 12 };
-    return null;
+    return builtins.typed_array_names.element(name);
 }
 
 fn constructTypedArrayArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, element: TypedArrayElement, source: *core.Object, global: ?*core.Object) !core.JSValue {

@@ -695,9 +695,10 @@ pub fn qjsTypedArrayConstructVm(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    const kind = function_object.typedArrayKind();
     const element = construct_mod.TypedArrayElement{
         .size = function_object.typedArrayElementSize(),
-        .kind = function_object.typedArrayKind(),
+        .kind = kind,
     };
     const constructor_global = objectRealmGlobal(function_object) orelse global;
 
@@ -1092,9 +1093,10 @@ pub fn qjsTypedArrayConstructFromIterable(
     values.length = index;
     if (callableObjectFromValue(constructor)) |function_object| {
         if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != 0) {
+            const kind = function_object.typedArrayKind();
             const element = construct_mod.TypedArrayElement{
                 .size = function_object.typedArrayElementSize(),
-                .kind = function_object.typedArrayKind(),
+                .kind = kind,
             };
             const prototype = try qjsTypedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
             const constructor_global = objectRealmGlobal(function_object) orelse global;
@@ -1115,18 +1117,7 @@ pub fn qjsTypedArrayConstructFromIterable(
 }
 
 pub fn qjsTypedArrayConstructorName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Int8Array") or
-        std.mem.eql(u8, name, "Uint8Array") or
-        std.mem.eql(u8, name, "Uint8ClampedArray") or
-        std.mem.eql(u8, name, "Int16Array") or
-        std.mem.eql(u8, name, "Uint16Array") or
-        std.mem.eql(u8, name, "Int32Array") or
-        std.mem.eql(u8, name, "Uint32Array") or
-        std.mem.eql(u8, name, "Float16Array") or
-        std.mem.eql(u8, name, "Float32Array") or
-        std.mem.eql(u8, name, "Float64Array") or
-        std.mem.eql(u8, name, "BigInt64Array") or
-        std.mem.eql(u8, name, "BigUint64Array");
+    return builtins.typed_array_names.isConcrete(name);
 }
 
 pub fn qjsArrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
@@ -1415,21 +1406,7 @@ pub fn qjsTypedArrayAccessor(ctx: *core.JSContext, receiver: core.JSValue, acces
 }
 
 pub fn typedArrayNameFromKind(kind: u8) ?[]const u8 {
-    return switch (kind) {
-        1 => "Int8Array",
-        2 => "Uint8Array",
-        3 => "Uint8ClampedArray",
-        4 => "Int16Array",
-        5 => "Uint16Array",
-        6 => "Int32Array",
-        7 => "Uint32Array",
-        8 => "Float16Array",
-        9 => "Float32Array",
-        10 => "Float64Array",
-        11 => "BigInt64Array",
-        12 => "BigUint64Array",
-        else => null,
-    };
+    return builtins.typed_array_names.nameFromKind(kind);
 }
 
 pub fn qjsTypedArraySetCall(

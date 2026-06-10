@@ -12,6 +12,7 @@ const regexp_builtin = @import("regexp.zig");
 const string_builtin = @import("string.zig");
 const atomics_builtin = @import("atomics.zig");
 const reflect_builtin = @import("reflect_proxy.zig");
+const typed_array_names = @import("typed_array_names.zig");
 const std = @import("std");
 
 pub const Flags = struct {
@@ -811,8 +812,8 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
                 else => {},
             }
             if (primitivePrototypeTagForKind(spec.kind)) |tag| try bindPrimitivePrototypeNativeRecordsWithTag(rt, constructor, tag);
-            if (typedArrayElementSpecForKind(spec.kind)) |element| {
-                try installTypedArrayElementSize(rt, constructor, element.size, element.kind);
+            if (typed_array_names.element(spec.name)) |element| {
+                try installTypedArrayElementSize(rt, constructor, @intCast(element.size), element.kind);
                 try installTypedArrayArrayBufferPrototype(rt, global, constructor);
             }
             if (spec.kind == .uint8_array) try installUint8ArrayCodecExtras(rt, constructor);
@@ -991,7 +992,7 @@ fn wireTypedArrayConstructorGraph(rt: *core.JSRuntime, constructors: []const ?*c
     const typed_array_proto = constructorPrototypeObject(rt, typed_array_ctor) orelse return;
 
     for (constructor_specs, 0..) |spec, index| {
-        if (!isConcreteTypedArrayKind(spec.kind)) continue;
+        if (!isConcreteTypedArrayName(spec.name)) continue;
         const ctor = constructors[index] orelse continue;
         try ctor.setPrototype(rt, typed_array_ctor);
 
@@ -1001,11 +1002,7 @@ fn wireTypedArrayConstructorGraph(rt: *core.JSRuntime, constructors: []const ?*c
 }
 
 fn isConcreteTypedArrayName(name: []const u8) bool {
-    return typedArrayElementSpec(name) != null;
-}
-
-fn isConcreteTypedArrayKind(kind: ConstructorKind) bool {
-    return typedArrayElementSpecForKind(kind) != null;
+    return typed_array_names.isConcrete(name);
 }
 
 fn installObjectConstructorPrimitivePrototypes(
@@ -1363,45 +1360,6 @@ fn setAutoInitAsyncDisposableStackMethod(info: *core.property.AutoInit, method_i
     if (info.async_disposable_stack_method != 0 and info.async_disposable_stack_method != method_id) return false;
     info.async_disposable_stack_method = method_id;
     return true;
-}
-
-const TypedArrayElementSpec = struct {
-    size: i32,
-    kind: u8,
-};
-
-fn typedArrayElementSpec(name: []const u8) ?TypedArrayElementSpec {
-    if (std.mem.eql(u8, name, "Int8Array")) return .{ .size = 1, .kind = 1 };
-    if (std.mem.eql(u8, name, "Uint8Array")) return .{ .size = 1, .kind = 2 };
-    if (std.mem.eql(u8, name, "Uint8ClampedArray")) return .{ .size = 1, .kind = 3 };
-    if (std.mem.eql(u8, name, "Int16Array")) return .{ .size = 2, .kind = 4 };
-    if (std.mem.eql(u8, name, "Uint16Array")) return .{ .size = 2, .kind = 5 };
-    if (std.mem.eql(u8, name, "Int32Array")) return .{ .size = 4, .kind = 6 };
-    if (std.mem.eql(u8, name, "Uint32Array")) return .{ .size = 4, .kind = 7 };
-    if (std.mem.eql(u8, name, "Float16Array")) return .{ .size = 2, .kind = 8 };
-    if (std.mem.eql(u8, name, "Float32Array")) return .{ .size = 4, .kind = 9 };
-    if (std.mem.eql(u8, name, "Float64Array")) return .{ .size = 8, .kind = 10 };
-    if (std.mem.eql(u8, name, "BigInt64Array")) return .{ .size = 8, .kind = 11 };
-    if (std.mem.eql(u8, name, "BigUint64Array")) return .{ .size = 8, .kind = 12 };
-    return null;
-}
-
-fn typedArrayElementSpecForKind(kind: ConstructorKind) ?TypedArrayElementSpec {
-    return switch (kind) {
-        .int8_array => .{ .size = 1, .kind = 1 },
-        .uint8_array => .{ .size = 1, .kind = 2 },
-        .uint8_clamped_array => .{ .size = 1, .kind = 3 },
-        .int16_array => .{ .size = 2, .kind = 4 },
-        .uint16_array => .{ .size = 2, .kind = 5 },
-        .int32_array => .{ .size = 4, .kind = 6 },
-        .uint32_array => .{ .size = 4, .kind = 7 },
-        .float16_array => .{ .size = 2, .kind = 8 },
-        .float32_array => .{ .size = 4, .kind = 9 },
-        .float64_array => .{ .size = 8, .kind = 10 },
-        .bigint64_array => .{ .size = 8, .kind = 11 },
-        .biguint64_array => .{ .size = 8, .kind = 12 },
-        else => null,
-    };
 }
 
 fn installTypedArrayElementSize(rt: *core.JSRuntime, ctor: *core.Object, size: i32, kind: u8) !void {

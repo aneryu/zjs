@@ -18,6 +18,7 @@ pub const error_names = @import("error_names.zig");
 pub const promise = @import("promise.zig");
 pub const collection = @import("collection.zig");
 pub const buffer = @import("buffer.zig");
+pub const typed_array_names = @import("typed_array_names.zig");
 pub const reflect_proxy = @import("reflect_proxy.zig");
 pub const iterator = @import("iterator.zig");
 pub const atomics = @import("atomics.zig");
