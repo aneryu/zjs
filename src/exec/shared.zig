@@ -2865,14 +2865,14 @@ pub fn callValueOrBytecodeClassMode(
                 else => err,
             };
         }
-        if (dataViewGetId(name)) |method_id| {
+        if (builtins.buffer.dataViewGetMethodId(name)) |method_id| {
             return qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 error.RangeError => error.RangeError,
                 else => err,
             };
         }
-        if (dataViewSetId(name)) |method_id| {
+        if (builtins.buffer.dataViewSetMethodId(name)) |method_id| {
             return qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 error.RangeError => error.RangeError,
@@ -7819,36 +7819,6 @@ pub fn qjsDataViewSetCoerceValue(
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     primitive.free(ctx.runtime);
     return number_value;
-}
-
-pub fn dataViewGetId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "getInt8")) return 1;
-    if (std.mem.eql(u8, name, "getUint8")) return 2;
-    if (std.mem.eql(u8, name, "getInt16")) return 3;
-    if (std.mem.eql(u8, name, "getUint16")) return 4;
-    if (std.mem.eql(u8, name, "getInt32")) return 5;
-    if (std.mem.eql(u8, name, "getUint32")) return 6;
-    if (std.mem.eql(u8, name, "getFloat16")) return 11;
-    if (std.mem.eql(u8, name, "getFloat32")) return 7;
-    if (std.mem.eql(u8, name, "getFloat64")) return 8;
-    if (std.mem.eql(u8, name, "getBigInt64")) return 9;
-    if (std.mem.eql(u8, name, "getBigUint64")) return 10;
-    return null;
-}
-
-pub fn dataViewSetId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "setInt8")) return 1;
-    if (std.mem.eql(u8, name, "setUint8")) return 2;
-    if (std.mem.eql(u8, name, "setInt16")) return 3;
-    if (std.mem.eql(u8, name, "setUint16")) return 4;
-    if (std.mem.eql(u8, name, "setInt32")) return 5;
-    if (std.mem.eql(u8, name, "setUint32")) return 6;
-    if (std.mem.eql(u8, name, "setFloat16")) return 11;
-    if (std.mem.eql(u8, name, "setFloat32")) return 7;
-    if (std.mem.eql(u8, name, "setFloat64")) return 8;
-    if (std.mem.eql(u8, name, "setBigInt64")) return 9;
-    if (std.mem.eql(u8, name, "setBigUint64")) return 10;
-    return null;
 }
 
 pub fn bigIntStaticUnsigned(name: []const u8) ?bool {
