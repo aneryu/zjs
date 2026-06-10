@@ -465,11 +465,13 @@ test "Engine eval executes primitive constructor smoke subset" {
         \\console.log(Boolean(0n));
         \\console.log(typeof new Boolean(1));
         \\console.log(new Boolean(1).valueOf());
+        \\console.log(new Boolean("").valueOf());
+        \\console.log(new Boolean(0n).valueOf());
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("number\n42\nobject\n42\nboolean\nfalse\nfalse\nfalse\nobject\ntrue\n", stream.buffered());
+    try std.testing.expectEqualStrings("number\n42\nobject\n42\nboolean\nfalse\nfalse\nfalse\nobject\ntrue\nfalse\nfalse\n", stream.buffered());
 }
 
 test "Engine eval executes optional property access smoke subset" {

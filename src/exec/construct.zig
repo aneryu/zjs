@@ -128,7 +128,7 @@ pub fn constructValue(rt: *core.JSRuntime, callee: core.JSValue, args: []const c
             const primitive = if (rooted_args.len >= 1) try value_ops.toNumberValue(rt, rooted_args[0]) else core.JSValue.int32(0);
             return constructPrimitiveWrapper(rt, core.class.ids.number, prototype, primitive);
         }
-        if (std.mem.eql(u8, name, "Boolean")) return constructPrimitiveWrapper(rt, core.class.ids.boolean, prototype, core.JSValue.boolean(rooted_args.len >= 1 and isTruthy(rooted_args[0])));
+        if (std.mem.eql(u8, name, "Boolean")) return constructPrimitiveWrapper(rt, core.class.ids.boolean, prototype, core.JSValue.boolean(rooted_args.len >= 1 and value_ops.isTruthy(rooted_args[0])));
         if (isErrorConstructorName(name)) return constructErrorObject(rt, name, constructor.value(), prototype, rooted_args);
     }
 
@@ -777,14 +777,6 @@ fn constructTypedArrayArrayLikeInput(rt: *core.JSRuntime, prototype: ?*core.Obje
         value = core.JSValue.undefinedValue();
     }
     return object_value.dup();
-}
-
-fn isTruthy(value: core.JSValue) bool {
-    if (value_ops.isHTMLDDA(value)) return false;
-    if (value.asBool()) |b| return b;
-    if (value.asInt32()) |n| return n != 0;
-    if (value.asFloat64()) |n| return n != 0 and !std.math.isNan(n);
-    return !(value.isUndefined() or value.isNull());
 }
 
 fn createTypedArrayBackingBuffer(rt: *core.JSRuntime, prototype: ?*core.Object, global: ?*core.Object, byte_length: i32) !core.JSValue {
