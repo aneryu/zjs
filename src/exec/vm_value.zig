@@ -317,15 +317,8 @@ fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: *[10]u8) ?[]co
         return std.fmt.bufPrint(buffer, "{d}", .{core.atom.atomToUInt32(atom_id)}) catch return null;
     }
     const text = rt.atoms.name(atom_id) orelse return null;
-    if (!asciiBytes(text)) return null;
+    if (!core.string.isAsciiBytes(text)) return null;
     return text;
-}
-
-fn asciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte > 0x7f) return false;
-    }
-    return true;
 }
 
 pub fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame) !void {

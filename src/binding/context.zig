@@ -237,7 +237,7 @@ pub const JSContext = struct {
             const cached = try self.core.runtime.emptyString();
             return cached.value().dup();
         }
-        const created = if (isAsciiBytes(bytes_data))
+        const created = if (string.isAsciiBytes(bytes_data))
             try string.String.createAscii(self.core.runtime, bytes_data)
         else
             try string.String.createUtf8(self.core.runtime, bytes_data);
@@ -600,13 +600,6 @@ fn getPropertyString(rt: *JSRuntime, obj: *Object, name: []const u8, allocator: 
     defer temp_list.deinit(rt.memory.allocator);
     try exec.value_ops.appendRawString(rt, &temp_list, val);
     return try allocator.dupe(u8, temp_list.items);
-}
-
-fn isAsciiBytes(bytes_data: []const u8) bool {
-    for (bytes_data) |byte| {
-        if (byte >= 0x80) return false;
-    }
-    return true;
 }
 
 fn arrayObjectFromValue(value: JSValue) !?*Object {

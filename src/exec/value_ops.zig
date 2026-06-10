@@ -475,7 +475,7 @@ pub fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
         const cached = try rt.emptyString();
         return cached.value().dup();
     }
-    const str = if (isAsciiBytes(bytes))
+    const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
         try core.string.String.createUtf8(rt, bytes);
@@ -488,13 +488,6 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
         return cached.value().dup();
     }
     return (try core.string.String.createAscii(rt, bytes)).value();
-}
-
-fn isAsciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte >= 0x80) return false;
-    }
-    return true;
 }
 
 pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {

@@ -1535,13 +1535,6 @@ fn storeRegExpMatchNull(
     }
 }
 
-fn asciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte > 0x7f) return false;
-    }
-    return true;
-}
-
 fn varRefGlobalLexicalWritable(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -2344,7 +2337,7 @@ fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usi
     if (pc + 6 > code.len or code[pc] != op.push_atom_value) return null;
     const prefix_atom = readInt(u32, code[pc + 1 ..][0..4]);
     const prefix = ctx.runtime.atoms.name(prefix_atom) orelse return null;
-    if (!asciiBytes(prefix)) return null;
+    if (!core.string.isAsciiBytes(prefix)) return null;
     const index_get = decodeLocalGet(code, pc + 5) orelse return null;
     if (index_get.idx != local_idx) return null;
     if (index_get.next_pc >= code.len or code[index_get.next_pc] != op.add) return null;
@@ -11220,7 +11213,7 @@ fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: []u8) ?[]const
     }
     if (rt.atoms.kind(atom_id) != .string) return null;
     const text = rt.atoms.name(atom_id) orelse return null;
-    if (!asciiBytes(text)) return null;
+    if (!core.string.isAsciiBytes(text)) return null;
     return text;
 }
 

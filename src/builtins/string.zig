@@ -1392,7 +1392,7 @@ fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), ta
 }
 
 fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
-    const str = if (isAsciiBytes(bytes))
+    const str = if (core.string.isAsciiBytes(bytes))
         try core.string.String.createAscii(rt, bytes)
     else
         try core.string.String.createUtf8(rt, bytes);
@@ -1441,13 +1441,6 @@ fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.St
 
 fn codeUnitStringValue(rt: *core.JSRuntime, unit: u16) !core.JSValue {
     return (try core.string.String.createUtf16(rt, &.{unit})).value();
-}
-
-fn isAsciiBytes(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte >= 0x80) return false;
-    }
-    return true;
 }
 
 fn createLatin1SliceValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {

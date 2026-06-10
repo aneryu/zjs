@@ -22,7 +22,7 @@ pub fn JSString(comptime Value: type) type {
             pub fn init(allocator: std.mem.Allocator, string: Self) !Utf8 {
                 switch (string.ptr.resolveData()) {
                     .latin1 => |latin1| {
-                        if (isAscii(latin1)) {
+                        if (string_mod.isAsciiBytes(latin1)) {
                             return .{ .bytes = latin1 };
                         }
                         const owned = try string.toOwnedUtf8(allocator);
@@ -125,13 +125,6 @@ pub fn JSString(comptime Value: type) type {
             return out;
         }
     };
-}
-
-fn isAscii(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (byte > 0x7f) return false;
-    }
-    return true;
 }
 
 fn utf8LenLatin1(bytes: []const u8) usize {

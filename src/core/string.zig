@@ -37,6 +37,13 @@ pub const Layout = enum(u8) {
     slice,
 };
 
+pub fn isAsciiBytes(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte >= 0x80) return false;
+    }
+    return true;
+}
+
 pub const String = struct {
     header: gc.Header,
     data: Data,
@@ -743,6 +750,13 @@ fn decodeOne(bytes: []const u8, index: usize) StringError!Decoded {
     }
 
     return error.InvalidUtf8;
+}
+
+test "string ascii byte helper covers byte boundary" {
+    try std.testing.expect(isAsciiBytes(""));
+    try std.testing.expect(isAsciiBytes("plain/ascii-127\x7f"));
+    try std.testing.expect(!isAsciiBytes("latin1-\xc3\xa9"));
+    try std.testing.expect(!isAsciiBytes(&.{0x80}));
 }
 
 const std = @import("std");
