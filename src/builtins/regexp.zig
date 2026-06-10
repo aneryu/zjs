@@ -2415,7 +2415,7 @@ fn hasHexDigits(pattern: []const u8, start: usize, count: usize) bool {
     if (start + count > pattern.len) return false;
     var offset: usize = 0;
     while (offset < count) : (offset += 1) {
-        if (unicode.asciiHexDigitValueByte(pattern[start + offset]) == null) return false;
+        if (!unicode.isAsciiHexDigitByte(pattern[start + offset])) return false;
     }
     return true;
 }
@@ -3125,9 +3125,9 @@ fn readUnicodeEscapeCodePoint(pattern: []const u8, index: *usize) ?u32 {
         index.* = pos + 1;
         return value;
     }
-    if (pos >= pattern.len or unicode.asciiHexDigitValueByte(pattern[pos]) == null) return null;
+    if (pos >= pattern.len or !unicode.isAsciiHexDigitByte(pattern[pos])) return null;
     var available_hex: usize = 0;
-    while (pos + available_hex < pattern.len and available_hex < 4 and unicode.asciiHexDigitValueByte(pattern[pos + available_hex]) != null) : (available_hex += 1) {}
+    while (pos + available_hex < pattern.len and available_hex < 4 and unicode.isAsciiHexDigitByte(pattern[pos + available_hex])) : (available_hex += 1) {}
     if (available_hex == 0) return null;
     const digit_count: usize = if (available_hex >= 4) 4 else available_hex;
     var value: u32 = 0;

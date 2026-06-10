@@ -614,7 +614,7 @@ fn isAnnexBEscapeUnmodified(ch: u8) bool {
 }
 
 fn isHexCodeUnit(unit: u16) bool {
-    return unicode.asciiHexDigitValueUnit(unit) != null;
+    return unicode.isAsciiHexDigitUnit(unit);
 }
 
 fn hexCodeUnitValue(unit: u16) u8 {

@@ -755,7 +755,7 @@ pub const Lexer = struct {
                 if (self.remaining() < 2) return error.InvalidEscape;
                 const h1 = self.peek();
                 const h2 = self.peekAt(1);
-                if (!std.ascii.isHex(h1) or !std.ascii.isHex(h2)) return error.InvalidEscape;
+                if (!unicode.isAsciiHexDigitByte(h1) or !unicode.isAsciiHexDigitByte(h2)) return error.InvalidEscape;
                 self.bump();
                 self.bump();
                 try appendUtf8(out, self.allocator, @intCast(hexNibble(h1) * 16 + hexNibble(h2)));
@@ -832,7 +832,7 @@ pub const Lexer = struct {
             var saw_digit = false;
             while (self.pos < self.source.len and self.peek() != '}') {
                 const d = self.peek();
-                if (!std.ascii.isHex(d)) return error.InvalidUnicodeEscape;
+                if (!unicode.isAsciiHexDigitByte(d)) return error.InvalidUnicodeEscape;
                 value = value * 16 + hexNibble(d);
                 if (value > 0x10FFFF) return error.InvalidUnicodeEscape;
                 saw_digit = true;
@@ -879,7 +879,7 @@ pub const Lexer = struct {
         var i: u8 = 0;
         while (i < 4) : (i += 1) {
             const d = self.peek();
-            if (!std.ascii.isHex(d)) return error.InvalidUnicodeEscape;
+            if (!unicode.isAsciiHexDigitByte(d)) return error.InvalidUnicodeEscape;
             v = v * 16 + hexNibble(d);
             self.bump();
         }
@@ -1359,7 +1359,7 @@ fn consumeHexDigits(self: *Lexer) bool {
     var prev_sep = false;
     while (self.pos < self.source.len) {
         const c = self.peek();
-        if (std.ascii.isHex(c)) {
+        if (unicode.isAsciiHexDigitByte(c)) {
             any = true;
             prev_sep = false;
             self.bump();
