@@ -2351,7 +2351,7 @@ fn callNativeBuiltin(
         const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
         return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
     }
-    if (uriCallId(name)) |mode| {
+    if (builtins.uri.methodId(name)) |mode| {
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         return builtins.uri.call(ctx.runtime, mode, input) catch |err| switch (err) {
             error.TypeError, error.URIError => err,
@@ -5617,14 +5617,6 @@ fn regexpAccessorName(name: []const u8) ?[]const u8 {
         std.mem.eql(u8, accessor, "sticky") or
         std.mem.eql(u8, accessor, "hasIndices") or
         std.mem.eql(u8, accessor, "unicodeSets")) return accessor;
-    return null;
-}
-
-fn uriCallId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "encodeURI")) return 1;
-    if (std.mem.eql(u8, name, "encodeURIComponent")) return 2;
-    if (std.mem.eql(u8, name, "decodeURI")) return 3;
-    if (std.mem.eql(u8, name, "decodeURIComponent")) return 4;
     return null;
 }
 
