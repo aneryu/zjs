@@ -5593,14 +5593,14 @@ fn stringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "sub")) return 24;
     if (std.mem.eql(u8, name, "substr")) return 25;
     if (std.mem.eql(u8, name, "sup")) return 26;
-    if (std.mem.eql(u8, name, "split")) return 27;
+    if (std.mem.eql(u8, name, "split")) return builtins.string.legacy_split_method_id;
     if (std.mem.eql(u8, name, "charCodeAt")) return 29;
     if (std.mem.eql(u8, name, "at")) return 30;
     if (std.mem.eql(u8, name, "codePointAt")) return 31;
     if (std.mem.eql(u8, name, "slice")) return 32;
-    if (std.mem.eql(u8, name, "search")) return 40;
-    if (std.mem.eql(u8, name, "match")) return 41;
-    if (std.mem.eql(u8, name, "replaceAll")) return 42;
+    if (std.mem.eql(u8, name, "search")) return builtins.string.legacy_search_method_id;
+    if (std.mem.eql(u8, name, "match")) return builtins.string.legacy_match_method_id;
+    if (std.mem.eql(u8, name, "replaceAll")) return builtins.string.legacy_replace_all_method_id;
     return null;
 }
 

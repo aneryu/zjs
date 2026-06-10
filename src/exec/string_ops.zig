@@ -2342,19 +2342,19 @@ pub fn qjsStringPrototypeMethod(
     if (method_id == 10) {
         return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 27) {
+    if (method_id == builtins.string.legacy_split_method_id) {
         return qjsStringSplit(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 40) {
+    if (method_id == builtins.string.legacy_search_method_id) {
         return qjsStringSearch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 41) {
+    if (method_id == builtins.string.legacy_match_method_id) {
         return qjsStringMatch(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 42) {
+    if (method_id == builtins.string.legacy_replace_all_method_id) {
         return qjsStringReplaceAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
-    if (method_id == 43) {
+    if (method_id == builtins.string.legacy_match_all_method_id) {
         return qjsStringMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame);
     }
     if (method_id == 34 or method_id == 35) {
@@ -3135,7 +3135,7 @@ pub fn qjsStringSplitBuiltinArray(
     string_value: core.JSValue,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const result = try builtins.string.methodCall(ctx.runtime, string_value, 27, args);
+    const result = try builtins.string.methodCall(ctx.runtime, string_value, builtins.string.legacy_split_method_id, args);
     errdefer result.free(ctx.runtime);
     if (objectFromValue(result)) |object| {
         if (object.is_array and object.getPrototype() == null) {
@@ -4345,10 +4345,10 @@ pub fn standardStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "normalize")) return builtins.string.legacy_normalize_method_id;
     if (std.mem.eql(u8, name, "isWellFormed")) return 38;
     if (std.mem.eql(u8, name, "toWellFormed")) return 39;
-    if (std.mem.eql(u8, name, "search")) return 40;
-    if (std.mem.eql(u8, name, "match")) return 41;
-    if (std.mem.eql(u8, name, "replaceAll")) return 42;
-    if (std.mem.eql(u8, name, "matchAll")) return 43;
+    if (std.mem.eql(u8, name, "search")) return builtins.string.legacy_search_method_id;
+    if (std.mem.eql(u8, name, "match")) return builtins.string.legacy_match_method_id;
+    if (std.mem.eql(u8, name, "replaceAll")) return builtins.string.legacy_replace_all_method_id;
+    if (std.mem.eql(u8, name, "matchAll")) return builtins.string.legacy_match_all_method_id;
     return null;
 }
 
@@ -4387,7 +4387,7 @@ pub fn annexBStringMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "sub")) return 24;
     if (std.mem.eql(u8, name, "substr")) return 25;
     if (std.mem.eql(u8, name, "sup")) return 26;
-    if (std.mem.eql(u8, name, "split")) return 27;
+    if (std.mem.eql(u8, name, "split")) return builtins.string.legacy_split_method_id;
     return null;
 }
 

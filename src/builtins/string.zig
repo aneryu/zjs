@@ -23,7 +23,12 @@ pub const ConstructorMethod = enum(u32) {
     call = 4,
 };
 
+pub const legacy_split_method_id: u32 = 27;
 pub const legacy_normalize_method_id: u32 = 37;
+pub const legacy_search_method_id: u32 = 40;
+pub const legacy_match_method_id: u32 = 41;
+pub const legacy_replace_all_method_id: u32 = 42;
+pub const legacy_match_all_method_id: u32 = 43;
 
 pub const PrototypeMethod = enum(u32) {
     char_at = 100,
@@ -113,7 +118,7 @@ pub fn decodePrototypeMethodId(id: u32) ?u32 {
         @intFromEnum(PrototypeMethod.concat) => 10,
         @intFromEnum(PrototypeMethod.trim_start) => 21,
         @intFromEnum(PrototypeMethod.trim_end) => 22,
-        @intFromEnum(PrototypeMethod.split) => 27,
+        @intFromEnum(PrototypeMethod.split) => legacy_split_method_id,
         @intFromEnum(PrototypeMethod.last_index_of) => 28,
         @intFromEnum(PrototypeMethod.char_code_at) => 29,
         @intFromEnum(PrototypeMethod.at) => 30,
@@ -126,10 +131,10 @@ pub fn decodePrototypeMethodId(id: u32) ?u32 {
         @intFromEnum(PrototypeMethod.normalize) => legacy_normalize_method_id,
         @intFromEnum(PrototypeMethod.is_well_formed) => 38,
         @intFromEnum(PrototypeMethod.to_well_formed) => 39,
-        @intFromEnum(PrototypeMethod.search) => 40,
-        @intFromEnum(PrototypeMethod.match) => 41,
-        @intFromEnum(PrototypeMethod.replace_all) => 42,
-        @intFromEnum(PrototypeMethod.match_all) => 43,
+        @intFromEnum(PrototypeMethod.search) => legacy_search_method_id,
+        @intFromEnum(PrototypeMethod.match) => legacy_match_method_id,
+        @intFromEnum(PrototypeMethod.replace_all) => legacy_replace_all_method_id,
+        @intFromEnum(PrototypeMethod.match_all) => legacy_match_all_method_id,
         else => null,
     };
 }
@@ -422,7 +427,7 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
         24 => htmlWrap(rt, bytes.items, "sub"),
         25 => substr(rt, bytes.items, args),
         26 => htmlWrap(rt, bytes.items, "sup"),
-        27 => unreachable,
+        legacy_split_method_id => unreachable,
         28 => unreachable,
         29 => unreachable,
         30 => unreachable,
@@ -435,9 +440,9 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
         legacy_normalize_method_id => normalize(rt, bytes.items, args),
         38 => unreachable,
         39 => unreachable,
-        40 => search(rt, bytes.items, args),
-        41 => match(rt, bytes.items, args),
-        42 => replaceAll(rt, bytes.items, args),
+        legacy_search_method_id => search(rt, bytes.items, args),
+        legacy_match_method_id => match(rt, bytes.items, args),
+        legacy_replace_all_method_id => replaceAll(rt, bytes.items, args),
         else => error.TypeError,
     };
 }
