@@ -4238,7 +4238,7 @@ fn validateProxyHasResult(rt: *core.JSRuntime, target: *core.Object, atom_id: co
 }
 
 fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
-    switch (try typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try shared_vm.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
@@ -4246,40 +4246,6 @@ fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core
             return index < length;
         },
     }
-}
-
-const TypedArrayCanonicalIndex = union(enum) {
-    none,
-    invalid,
-    index: u32,
-};
-
-fn typedArrayCanonicalNumericIndex(rt: *core.JSRuntime, atom_id: core.Atom) !TypedArrayCanonicalIndex {
-    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
-    if ((rt.atoms.kind(atom_id) orelse return .none) != .string) return .none;
-    const name = rt.atoms.name(atom_id) orelse return .none;
-    if (name.len == 0) return .none;
-    if (std.mem.eql(u8, name, "-0")) return .invalid;
-    const number: f64 = if (std.mem.eql(u8, name, "NaN"))
-        std.math.nan(f64)
-    else if (std.mem.eql(u8, name, "Infinity"))
-        std.math.inf(f64)
-    else if (std.mem.eql(u8, name, "-Infinity"))
-        -std.math.inf(f64)
-    else
-        std.fmt.parseFloat(f64, name) catch return .none;
-    var buffer: [64]u8 = undefined;
-    const printed = if (std.math.isNan(number))
-        "NaN"
-    else if (std.math.isPositiveInf(number))
-        "Infinity"
-    else if (std.math.isNegativeInf(number))
-        "-Infinity"
-    else
-        try value_ops.formatFiniteNumber(&buffer, number);
-    if (!std.mem.eql(u8, name, printed)) return .none;
-    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
-    return .{ .index = @intFromFloat(number) };
 }
 
 fn reflectDefineProperty(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
