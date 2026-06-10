@@ -2595,7 +2595,7 @@ pub fn callValueOrBytecodeClassMode(
                 'S' => if (std.mem.eql(u8, name, "String")) {
                     return qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
                 },
-                'd', 'e' => if (qjsUriCallId(name)) |mode| {
+                'd', 'e' => if (builtins.uri.methodId(name)) |mode| {
                     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
                     if (input.isString()) {
                         return builtins.uri.call(ctx.runtime, mode, input) catch |err| switch (err) {
@@ -2909,7 +2909,7 @@ pub fn callValueOrBytecodeClassMode(
                 else => err,
             };
         }
-        if (qjsUriCallId(name)) |mode| {
+        if (builtins.uri.methodId(name)) |mode| {
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const string_value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
             defer string_value.free(ctx.runtime);
@@ -3533,10 +3533,6 @@ pub fn isCurrentSuperConstructor(ctx: *core.JSContext, frame: *frame_mod.Frame, 
         }
     }
     return sameObjectIdentity(super_constructor, func);
-}
-
-pub fn qjsUriCallId(name: []const u8) ?u32 {
-    return builtins.uri.methodId(name);
 }
 
 pub fn qjsUriCallForNativeRecord(
