@@ -798,6 +798,23 @@ fn scopeMakeRefResolvesToGlobal(ctx: *const JSContext, atom_id: u32, scope_level
     return true;
 }
 
+fn functionIsStrict(ctx: *const JSContext) bool {
+    if (ctx.function_def) |fd| return fd.is_strict_mode;
+    return ctx.function.flags.is_strict or ctx.function.flags.runtime_strict;
+}
+
+fn functionDeclaresGlobalVar(ctx: *const JSContext, atom_id: u32) bool {
+    const fd = ctx.function_def orelse return false;
+    for (fd.global_vars) |global_var| {
+        if (global_var.var_name == atom_id) return true;
+    }
+    return false;
+}
+
+fn canOptimizeGlobalRefPutTail(ctx: *const JSContext, atom_id: u32) bool {
+    return !functionIsStrict(ctx) or functionDeclaresGlobalVar(ctx, atom_id);
+}
+
 pub fn run(ctx: *JSContext) !void {
     const func = ctx.function;
 
@@ -1132,7 +1149,7 @@ pub fn run(ctx: *JSContext) !void {
             if (i + 11 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
             const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
-            if (scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+            if (canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
                 if (findGlobalRefPutTail(func.code, i)) |tail| {
                     if (tail.pc < global_ref_tail_kinds.len and global_ref_tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
                         global_ref_tail_atoms[tail.pc] = atom_id;
@@ -1571,7 +1588,7 @@ pub fn run(ctx: *JSContext) !void {
             if (i + 11 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
             const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
-            if (scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+            if (canOptimizeGlobalRefPutTail(ctx, atom_id) and scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
                 if (findGlobalRefPutTail(func.code, i)) |tail| {
                     if (tail.pc < global_ref_tail_kinds.len and
                         global_ref_tail_kinds[tail.pc] != GLOBAL_REF_TAIL_NONE and

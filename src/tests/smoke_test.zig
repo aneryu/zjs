@@ -133,6 +133,48 @@ test "zjs CLI behavior" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "ZJS opcode profile") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stderr, "\"name\": \"add\"") == null);
     }
+
+    // 6. Prepared native Math calls must route sumPrecise through its iterable-aware implementation.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{
+                zjs_path,
+                "-e",
+                "console.log(Math.sumPrecise([1, 2, 3])); console.log(Object.is(Math.sumPrecise([]), -0));",
+            },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expectEqualStrings("6\ntrue\n", result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
+
+    // 7. Phase-1 closure opcodes must not collide with temporary scope opcodes.
+    {
+        const result = try std.process.run(allocator, std.testing.io, .{
+            .argv = &[_][]const u8{
+                zjs_path,
+                "-e",
+                "var a, b; class A {} class B extends A { method() { a = (() => super.x)(); b = 2; } } A.prototype.x = 1; new B().method(); console.log(a); console.log(b);",
+            },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 255,
+        };
+        try std.testing.expectEqual(@as(u8, 0), exit_code);
+        try std.testing.expectEqualStrings("1\n2\n", result.stdout);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
 }
 
 test "prepared method calls capture callee before argument side effects" {

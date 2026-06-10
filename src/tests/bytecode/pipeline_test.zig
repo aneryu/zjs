@@ -878,6 +878,51 @@ test "resolve_variables: global scope_make_ref assignment lowers to put_var" {
     try std.testing.expectEqual(global_atom, bc.atom_operands[0]);
 }
 
+test "resolve_variables: strict global scope_make_ref keeps original reference" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const global_atom = try rt.internAtom("g");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(global_atom);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.is_strict_mode = true;
+    _ = try fd.appendScope(-1);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 18;
+    input[0] = op.scope_make_ref;
+    std.mem.writeInt(u32, input[1..5], global_atom, .little);
+    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u16, input[9..11], 0, .little);
+    input[11] = op.push_i32;
+    std.mem.writeInt(i32, input[12..16], 1, .little);
+    input[16] = op.put_ref_value;
+    input[17] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(global_atom);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 12), bc.code.len);
+    try std.testing.expectEqual(op.make_var_ref, bc.code[0]);
+    try std.testing.expectEqual(global_atom, std.mem.readInt(u32, bc.code[1..5], .little));
+    try std.testing.expectEqual(op.push_i32, bc.code[5]);
+    try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, bc.code[6..10], .little));
+    try std.testing.expectEqual(op.put_ref_value, bc.code[10]);
+    try std.testing.expectEqual(op.return_undef, bc.code[11]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(global_atom, bc.atom_operands[0]);
+}
+
 test "resolve_variables: local scope_make_ref assignment keeps reference path" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

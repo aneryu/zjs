@@ -1471,6 +1471,13 @@ pub const ParseState = struct {
     }
 
     fn emitFClosure8(self: *ParseState, idx: u8) Error!void {
+        // Phase-1 temporary opcodes overlap the short-opcode range that
+        // contains fclosure8. Keep parser output in the wide form until
+        // resolve_labels shortens it after temp opcodes have been erased.
+        if (self.emit_phase1_temp) {
+            try self.emitOpU32(opcode.op.fclosure, idx);
+            return;
+        }
         try self.emitOpU8(opcode.op.fclosure8, idx);
     }
 

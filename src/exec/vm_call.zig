@@ -934,7 +934,10 @@ fn callPreparedNativeTarget(
 ) !core.JSValue {
     const native_ref = target.native_ref;
     switch (native_ref.domain) {
-        .math => return shared_vm.qjsMathCall(ctx, output, global, native_ref.id, args),
+        .math => {
+            if (native_ref.id == 37) return shared_vm.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
+            return shared_vm.qjsMathCall(ctx, output, global, native_ref.id, args);
+        },
         .date => if (native_ref.id == @intFromEnum(builtins.date.StaticMethod.now)) {
             return builtins.date.staticCall(ctx.runtime, native_ref.id, args);
         },
