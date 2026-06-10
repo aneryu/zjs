@@ -4,6 +4,29 @@ const object_builtin = @import("object.zig");
 const jobs = @import("../core/jobs.zig");
 const std = @import("std");
 
+pub const LegacyStaticMethod = enum(u32) {
+    resolve = 1,
+    all = 2,
+    race = 3,
+    reject = 4,
+    all_settled = 5,
+    any = 6,
+    try_ = 7,
+    with_resolvers = 8,
+};
+
+pub fn legacyStaticMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "resolve")) return @intFromEnum(LegacyStaticMethod.resolve);
+    if (std.mem.eql(u8, name, "all")) return @intFromEnum(LegacyStaticMethod.all);
+    if (std.mem.eql(u8, name, "race")) return @intFromEnum(LegacyStaticMethod.race);
+    if (std.mem.eql(u8, name, "reject")) return @intFromEnum(LegacyStaticMethod.reject);
+    if (std.mem.eql(u8, name, "allSettled")) return @intFromEnum(LegacyStaticMethod.all_settled);
+    if (std.mem.eql(u8, name, "any")) return @intFromEnum(LegacyStaticMethod.any);
+    if (std.mem.eql(u8, name, "try")) return @intFromEnum(LegacyStaticMethod.try_);
+    if (std.mem.eql(u8, name, "withResolvers")) return @intFromEnum(LegacyStaticMethod.with_resolvers);
+    return null;
+}
+
 /// QuickJS source map: narrow Promise constructor payload used by transitional
 /// `new_promise` bytecode.
 pub fn construct(rt: *core.JSRuntime) !core.JSValue {
@@ -119,7 +142,7 @@ pub fn staticCallWithPrototype(
     global: ?*core.Object,
 ) !core.JSValue {
     switch (mode) {
-        1 => {
+        @intFromEnum(LegacyStaticMethod.resolve) => {
             const value = payload orelse core.JSValue.undefinedValue();
             if (promiseObject(value)) |promise| {
                 if (prototype == null or promise.getPrototype() == prototype) {
@@ -128,15 +151,15 @@ pub fn staticCallWithPrototype(
             }
             return fulfilledWithPrototype(ctx.runtime, value, prototype);
         },
-        2 => if (payload) |iterable| return promiseAll(ctx, iterable, prototype),
-        3 => if (payload) |iterable| return promiseRace(ctx, iterable, prototype),
-        4 => {
+        @intFromEnum(LegacyStaticMethod.all) => if (payload) |iterable| return promiseAll(ctx, iterable, prototype),
+        @intFromEnum(LegacyStaticMethod.race) => if (payload) |iterable| return promiseRace(ctx, iterable, prototype),
+        @intFromEnum(LegacyStaticMethod.reject) => {
             const value = payload orelse return error.TypeError;
             return rejectedWithUnhandledPrototype(ctx, value, prototype);
         },
-        5 => if (payload) |iterable| return promiseAllSettled(ctx, iterable, prototype),
-        6 => if (payload) |iterable| return promiseAny(ctx, iterable, prototype, global),
-        8 => return withResolvers(ctx.runtime, prototype),
+        @intFromEnum(LegacyStaticMethod.all_settled) => if (payload) |iterable| return promiseAllSettled(ctx, iterable, prototype),
+        @intFromEnum(LegacyStaticMethod.any) => if (payload) |iterable| return promiseAny(ctx, iterable, prototype, global),
+        @intFromEnum(LegacyStaticMethod.with_resolvers) => return withResolvers(ctx.runtime, prototype),
         else => return error.TypeError,
     }
     return constructWithPrototype(ctx.runtime, prototype);

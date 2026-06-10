@@ -2138,8 +2138,12 @@ fn callNativeBuiltin(
 
     if (try callNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, args, null, null)) |value| return value;
 
-    if (promiseStaticId(name)) |mode| {
-        if (mode == 2 or mode == 3 or mode == 5 or mode == 6) {
+    if (builtins.promise.legacyStaticMethodId(name)) |mode| {
+        if (mode == @intFromEnum(builtins.promise.LegacyStaticMethod.all) or
+            mode == @intFromEnum(builtins.promise.LegacyStaticMethod.race) or
+            mode == @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) or
+            mode == @intFromEnum(builtins.promise.LegacyStaticMethod.any))
+        {
             if (try isPromiseStaticBuiltinCallee(ctx.runtime, global, globals, function_object, name)) {
                 const receiver = thisObject(this_value) orelse return error.TypeError;
                 if (!isCallableObjectValue(this_value)) return error.TypeError;
@@ -2153,10 +2157,10 @@ fn callNativeBuiltin(
                         receiver,
                         args,
                         switch (mode) {
-                            2 => .all,
-                            3 => .race,
-                            5 => .all_settled,
-                            6 => .any,
+                            @intFromEnum(builtins.promise.LegacyStaticMethod.all) => .all,
+                            @intFromEnum(builtins.promise.LegacyStaticMethod.race) => .race,
+                            @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) => .all_settled,
+                            @intFromEnum(builtins.promise.LegacyStaticMethod.any) => .any,
                             else => unreachable,
                         },
                     );
@@ -2399,8 +2403,8 @@ fn callNativeBuiltin(
             if (std.mem.eql(u8, name, "valueOf")) return this_value.dup();
             if (receiver.class_id == core.class.ids.c_closure) return error.TypeError;
             if (try constructorNameEql(ctx.runtime, receiver, "Promise")) {
-                if (promiseStaticId(name)) |mode| {
-                    if (mode == 7) {
+                if (builtins.promise.legacyStaticMethodId(name)) |mode| {
+                    if (mode == @intFromEnum(builtins.promise.LegacyStaticMethod.try_)) {
                         const promise_proto = constructorPrototype(ctx.runtime, receiver);
                         const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
                         const callback_args = if (args.len >= 1) args[1..] else args[0..0];
@@ -5631,18 +5635,6 @@ fn regexpNativePrototypeMethodId(function_object: *core.Object) ?u32 {
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     if (native_ref.domain != .regexp) return null;
     return builtins.regexp.decodePrototypeMethodId(native_ref.id);
-}
-
-fn promiseStaticId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "resolve")) return 1;
-    if (std.mem.eql(u8, name, "all")) return 2;
-    if (std.mem.eql(u8, name, "race")) return 3;
-    if (std.mem.eql(u8, name, "reject")) return 4;
-    if (std.mem.eql(u8, name, "allSettled")) return 5;
-    if (std.mem.eql(u8, name, "any")) return 6;
-    if (std.mem.eql(u8, name, "try")) return 7;
-    if (std.mem.eql(u8, name, "withResolvers")) return 8;
-    return null;
 }
 
 fn bigIntStaticUnsigned(name: []const u8) ?bool {
