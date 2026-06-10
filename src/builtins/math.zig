@@ -10,6 +10,8 @@ pub const LOG10E = std.math.log10e;
 pub const SQRT1_2 = std.math.sqrt1_2;
 pub const SQRT2 = std.math.sqrt2;
 
+pub const sum_precise_method_id: u32 = 37;
+
 /// QuickJS source map: Math builtin functions in quickjs.c. This is the
 /// current narrow Math subset used by transitional `math_call` bytecode.
 pub fn call(id: u32, args: []const core.JSValue) !f64 {
@@ -94,7 +96,7 @@ pub fn methodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "sign")) return 34;
     if (std.mem.eql(u8, name, "sinh")) return 35;
     if (std.mem.eql(u8, name, "tanh")) return 36;
-    if (std.mem.eql(u8, name, "sumPrecise")) return 37;
+    if (std.mem.eql(u8, name, "sumPrecise")) return sum_precise_method_id;
     return null;
 }
 

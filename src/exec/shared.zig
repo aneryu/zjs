@@ -2325,7 +2325,7 @@ pub fn callNativeBuiltinRecordForVm(
 ) HostError!?core.JSValue {
     switch (native_ref.domain) {
         .math => {
-            if (native_ref.id == 37) return try qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
+            if (native_ref.id == builtins.math.sum_precise_method_id) return try qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
             return try qjsMathCall(ctx, output, global, native_ref.id, args);
         },
         .number => return try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame),
