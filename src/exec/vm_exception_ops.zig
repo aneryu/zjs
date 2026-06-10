@@ -236,15 +236,7 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
 }
 
 pub fn isErrorConstructorName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Error") or
-        std.mem.eql(u8, name, "AggregateError") or
-        std.mem.eql(u8, name, "SuppressedError") or
-        std.mem.eql(u8, name, "EvalError") or
-        std.mem.eql(u8, name, "RangeError") or
-        std.mem.eql(u8, name, "ReferenceError") or
-        std.mem.eql(u8, name, "SyntaxError") or
-        std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError");
+    return builtins.error_names.isErrorConstructorName(name);
 }
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {

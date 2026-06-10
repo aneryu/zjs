@@ -463,14 +463,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
 }
 
 pub fn isErrorConstructorName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Error") or
-        std.mem.eql(u8, name, "AggregateError") or
-        std.mem.eql(u8, name, "EvalError") or
-        std.mem.eql(u8, name, "RangeError") or
-        std.mem.eql(u8, name, "ReferenceError") or
-        std.mem.eql(u8, name, "SyntaxError") or
-        std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError");
+    return builtins.error_names.isConstructErrorObjectName(name);
 }
 
 fn constructOrdinaryInstance(rt: *core.JSRuntime, prototype: ?*core.Object) !core.JSValue {

@@ -14,6 +14,7 @@ pub const json = @import("json.zig");
 pub const uri = @import("uri.zig");
 pub const regexp = @import("regexp.zig");
 pub const error_ = @import("error.zig");
+pub const error_names = @import("error_names.zig");
 pub const promise = @import("promise.zig");
 pub const collection = @import("collection.zig");
 pub const buffer = @import("buffer.zig");

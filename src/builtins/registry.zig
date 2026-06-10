@@ -4,6 +4,7 @@ const buffer_builtin = @import("buffer.zig");
 const collection_builtin = @import("collection.zig");
 const date_builtin = @import("date.zig");
 const error_builtin = @import("error.zig");
+const error_names = @import("error_names.zig");
 const function_builtin = @import("function.zig");
 const iterator_builtin = @import("iterator.zig");
 const object_builtin = @import("object.zig");
@@ -665,7 +666,7 @@ pub fn defineConstructor(
 }
 
 fn isErrorConstructorSpecName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Error") or isNativeErrorSubclassName(name);
+    return error_names.isErrorConstructorName(name);
 }
 
 fn isErrorConstructorKind(kind: ConstructorKind) bool {
@@ -1028,17 +1029,6 @@ fn installObjectConstructorPrimitivePrototypes(
         const slot = object_ctor.functionPrimitivePrototypeSlot(entry.slot);
         try object_ctor.setOptionalValueSlot(rt, slot, proto.value().dup());
     }
-}
-
-fn isNativeErrorSubclassName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "AggregateError") or
-        std.mem.eql(u8, name, "SuppressedError") or
-        std.mem.eql(u8, name, "EvalError") or
-        std.mem.eql(u8, name, "RangeError") or
-        std.mem.eql(u8, name, "ReferenceError") or
-        std.mem.eql(u8, name, "SyntaxError") or
-        std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError");
 }
 
 fn isNativeErrorSubclassKind(kind: ConstructorKind) bool {

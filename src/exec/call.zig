@@ -7670,14 +7670,7 @@ fn isBuiltinConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "BigInt") or
         std.mem.eql(u8, name, "Date") or
         std.mem.eql(u8, name, "RegExp") or
-        std.mem.eql(u8, name, "Error") or
-        std.mem.eql(u8, name, "SuppressedError") or
-        std.mem.eql(u8, name, "EvalError") or
-        std.mem.eql(u8, name, "RangeError") or
-        std.mem.eql(u8, name, "ReferenceError") or
-        std.mem.eql(u8, name, "SyntaxError") or
-        std.mem.eql(u8, name, "TypeError") or
-        std.mem.eql(u8, name, "URIError") or
+        builtins.error_names.isErrorConstructorName(name) or
         std.mem.eql(u8, name, "Iterator") or
         std.mem.eql(u8, name, "DisposableStack") or
         std.mem.eql(u8, name, "AsyncDisposableStack") or
