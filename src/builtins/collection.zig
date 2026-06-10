@@ -213,6 +213,28 @@ pub fn legacyClosureMethodId(name: []const u8) ?u32 {
     };
 }
 
+pub fn fastPrototypeMethodIdForClass(class_id: core.ClassId, name: []const u8) ?u32 {
+    const id = prototypeMethodId(name) orelse return null;
+    return switch (class_id) {
+        core.class.ids.map, core.class.ids.weakmap => switch (id) {
+            @intFromEnum(PrototypeMethod.set),
+            @intFromEnum(PrototypeMethod.get),
+            @intFromEnum(PrototypeMethod.has),
+            @intFromEnum(PrototypeMethod.delete),
+            => id,
+            else => null,
+        },
+        core.class.ids.set, core.class.ids.weakset => switch (id) {
+            @intFromEnum(PrototypeMethod.add),
+            @intFromEnum(PrototypeMethod.has),
+            @intFromEnum(PrototypeMethod.delete),
+            => id,
+            else => null,
+        },
+        else => null,
+    };
+}
+
 fn legacyBasePrototypeMethodId(id: u32) ?u32 {
     return switch (id) {
         @intFromEnum(PrototypeMethod.set),

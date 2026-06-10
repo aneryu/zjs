@@ -12715,7 +12715,8 @@ fn fastStringPrototypeMethodIsDefault(rt: *core.JSRuntime, global: *core.Object,
 
 fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
-    const expected_id = expectedCollectionMethodId(rt, object.class_id, atom_id) orelse return null;
+    const name = rt.atoms.name(atom_id) orelse return null;
+    const expected_id = builtins.collection.fastPrototypeMethodIdForClass(object.class_id, name) orelse return null;
     if (object.hasOwnProperty(atom_id)) return null;
     const proto = object.getPrototype() orelse return null;
     const lookup = proto.getOwnDataPropertyLookup(atom_id) orelse return null;
@@ -12733,26 +12734,6 @@ fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, 
         return null;
     }
     return method;
-}
-
-fn expectedCollectionMethodId(rt: *core.JSRuntime, class_id: core.ClassId, atom_id: core.Atom) ?u32 {
-    const name = rt.atoms.name(atom_id) orelse return null;
-    return switch (class_id) {
-        core.class.ids.map, core.class.ids.weakmap => {
-            if (std.mem.eql(u8, name, "set")) return @intFromEnum(builtins.collection.PrototypeMethod.set);
-            if (std.mem.eql(u8, name, "get")) return @intFromEnum(builtins.collection.PrototypeMethod.get);
-            if (std.mem.eql(u8, name, "has")) return @intFromEnum(builtins.collection.PrototypeMethod.has);
-            if (std.mem.eql(u8, name, "delete")) return @intFromEnum(builtins.collection.PrototypeMethod.delete);
-            return null;
-        },
-        core.class.ids.set, core.class.ids.weakset => {
-            if (std.mem.eql(u8, name, "add")) return @intFromEnum(builtins.collection.PrototypeMethod.add);
-            if (std.mem.eql(u8, name, "has")) return @intFromEnum(builtins.collection.PrototypeMethod.has);
-            if (std.mem.eql(u8, name, "delete")) return @intFromEnum(builtins.collection.PrototypeMethod.delete);
-            return null;
-        },
-        else => null,
-    };
 }
 
 fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue {
