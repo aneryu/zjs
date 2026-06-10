@@ -35,6 +35,7 @@ const atom_array_buffer = core.atom.predefinedId("ArrayBuffer", .string).?;
 const atom_math = core.atom.predefinedId("Math", .string).?;
 const atom_number = core.atom.predefinedId("Number", .string).?;
 const atom_print = core.atom.predefinedId("print", .string).?;
+const atom_regexp = core.atom.predefinedId("RegExp", .string).?;
 const atom_string = core.atom.predefinedId("String", .string).?;
 
 pub const Step = enum { done, continue_loop };
@@ -466,6 +467,22 @@ const OptionalLocalCompletionTail = struct {
 const DenseArrayPutTail = struct {
     tail_pc: usize,
     completion_put: ?LocalPut = null,
+};
+
+const SparseArrayLiteralLength = struct {
+    length: u32,
+    next_pc: usize,
+};
+
+const SparseArrayLiteralLengthLocalInit = struct {
+    length: u32,
+    local_idx: u16,
+    next_pc: usize,
+};
+
+const StringLiteralRef = struct {
+    atom: ?core.Atom = null,
+    next_pc: usize,
 };
 
 const RegExpExecLengthLoop = struct {
@@ -3154,6 +3171,9 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 5] == op.lt and
                     (code[frame.pc + 6] == op.if_false8 or code[frame.pc + 6] == op.if_false))
                 {
+                    if (try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalRegExpTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalSimpleNumericCallAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
@@ -3170,6 +3190,9 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 3] == op.lt and
                     (code[frame.pc + 4] == op.if_false8 or code[frame.pc + 4] == op.if_false))
                 {
+                    if (try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
@@ -3187,6 +3210,9 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 2] == op.lt and
                     (code[frame.pc + 3] == op.if_false8 or code[frame.pc + 3] == op.if_false))
                 {
+                    if (try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
                     if (try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
@@ -3205,6 +3231,7 @@ pub fn tryFuseCheckedLocalFastPath(
     }
 
     if (try tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+    if (try tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
     if (try tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
     if (frame.pc + 4 <= code.len and
         code[frame.pc] == op.get_loc_check and
@@ -4964,6 +4991,118 @@ fn tryFuseCheckedLocalRegExpTestConstStringCountRange(
     return true;
 }
 
+fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    induction_idx: u16,
+    allow_loop_tail_fusion: bool,
+    sync_global_lexical_locals: bool,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+) !bool {
+    if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
+    if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
+    if (frame.localIsUninitialized(induction_idx)) return false;
+    if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
+
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
+    const code = function.code;
+    const limit_operand = immediateInt32Operand(code, frame.pc) orelse return false;
+    if (limit_operand.next_pc >= code.len or code[limit_operand.next_pc] != op.lt) return false;
+    const exit_branch = decodeFalseBranch(code, limit_operand.next_pc + 1) orelse return false;
+    const limit = limit_operand.value;
+    const current_i = frame.locals[induction_idx].asInt32() orelse return false;
+    if (current_i >= limit) {
+        frame.pc = exit_branch.false_pc;
+        return true;
+    }
+    const iteration_count_i128 = @as(i128, limit) - @as(i128, current_i);
+    if (iteration_count_i128 <= 0 or iteration_count_i128 > std.math.maxInt(i32)) return false;
+    const iteration_count: i32 = @intCast(iteration_count_i128);
+
+    const prefix_completion_tail = decodeOptionalUndefinedLocalCompletionTail(function, frame, exit_branch.true_pc) orelse return false;
+    const source_ref = decodeStringLiteralRef(code, prefix_completion_tail.tail_pc) orelse return false;
+    const flags_ref = decodeStringLiteralRef(code, source_ref.next_pc) orelse return false;
+    const regexp_pc = flags_ref.next_pc;
+    if (regexp_pc >= code.len or code[regexp_pc] != op.regexp) return false;
+    const field_pc = regexp_pc + 1;
+    if (field_pc + 5 > code.len or code[field_pc] != op.get_field2) return false;
+    const method_atom = readInt(u32, code[field_pc + 1 ..][0..4]);
+    if (!value_ops.atomNameEql(ctx.runtime, method_atom, "test")) return false;
+    const input_ref = decodeStringLiteralRef(code, field_pc + 5) orelse return false;
+    const call_pc = input_ref.next_pc;
+    if (call_pc + 3 > code.len or code[call_pc] != op.call_method or readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
+    const test_branch = decodeFalseBranch(code, call_pc + 3) orelse return false;
+
+    const counter_get = decodeBindingGet(code, test_branch.true_pc) orelse return false;
+    if (!counter_get.is_var_ref and counter_get.idx == induction_idx) return false;
+    if (counter_get.next_pc >= code.len or code[counter_get.next_pc] != op.post_inc) return false;
+    const counter_put = decodeBindingPut(code, counter_get.next_pc + 1) orelse return false;
+    if (counter_put.idx != counter_get.idx or counter_put.is_var_ref != counter_get.is_var_ref) return false;
+    if (!bindingStoreWritableForFastPath(ctx, function, global, frame, counter_put)) return false;
+
+    const counter_value = bindingReadableBorrowed(frame, counter_get) orelse return false;
+    const current_count = counter_value.asInt32() orelse return false;
+
+    var true_tail_pc = bindingPutNextPc(counter_put);
+    const counter_completion_tail = decodeOptionalLocalCompletionTail(function, frame, true_tail_pc) orelse return false;
+    true_tail_pc = counter_completion_tail.tail_pc;
+    const if_completion_tail = decodeOptionalUndefinedLocalCompletionTail(function, frame, true_tail_pc) orelse return false;
+    if (test_branch.false_pc != true_tail_pc and test_branch.false_pc != if_completion_tail.tail_pc) return false;
+    const false_branch_runs_if_completion = test_branch.false_pc == true_tail_pc;
+
+    var tail_pc = if_completion_tail.tail_pc;
+    const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
+    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    tail_pc = tail_get.next_pc;
+    if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
+    const induction_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
+    if (induction_put.idx != induction_idx) return false;
+    tail_pc = localPutNextPc(induction_put);
+    if (tail_pc >= code.len or code[tail_pc] != op.drop) return false;
+    const goto_pc = tail_pc + 1;
+    if (goto_pc >= code.len) return false;
+    const goto_target = backwardGotoTarget(code, goto_pc + 1, code[goto_pc]) orelse return false;
+    if (goto_target != condition_pc) return false;
+
+    const regexp_proto = shared_vm.constructorPrototypeFromGlobalAtom(ctx.runtime, global, atom_regexp) orelse return false;
+    if (!ownPrototypeEntryIsNativeBuiltinDefault(regexp_proto, method_atom, .regexp, @intFromEnum(builtins.regexp.PrototypeMethod.test_))) return false;
+
+    const source_value = (try stringLiteralRefValueForFastPath(ctx.runtime, source_ref)) orelse return false;
+    defer source_value.free(ctx.runtime);
+    const flags_value = (try stringLiteralRefValueForFastPath(ctx.runtime, flags_ref)) orelse return false;
+    defer flags_value.free(ctx.runtime);
+    const input_value = (try stringLiteralRefValueForFastPath(ctx.runtime, input_ref)) orelse return false;
+    defer input_value.free(ctx.runtime);
+    const regexp_value = try builtins.regexp.constructPrevalidatedLiteralWithValues(ctx.runtime, source_value, flags_value, regexp_proto);
+    defer regexp_value.free(ctx.runtime);
+    const regexp_object = objectFromValue(regexp_value) orelse return false;
+    const matched = try shared_vm.qjsRegExpTestFastNoResult(ctx, regexp_object, input_value) orelse return false;
+
+    if (matched) {
+        const final_count_i64 = @as(i64, current_count) + @as(i64, iteration_count);
+        if (final_count_i64 < std.math.minInt(i32) or final_count_i64 > std.math.maxInt(i32)) return false;
+        try storeBindingInt32(ctx, function, global, frame, counter_put, @intCast(final_count_i64), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        if (counter_completion_tail.completion_put != null and if_completion_tail.completion_put == null) {
+            const last_post_inc_result = final_count_i64 - 1;
+            try storeLocalCompletionBorrowedValue(ctx, function, global, frame, counter_completion_tail.completion_put, core.JSValue.int32(@intCast(last_post_inc_result)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        } else if (prefix_completion_tail.completion_put != null and counter_completion_tail.completion_put == null and if_completion_tail.completion_put == null) {
+            try storeLocalCompletionBorrowedValue(ctx, function, global, frame, prefix_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        }
+    } else {
+        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, prefix_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    }
+    if (matched or false_branch_runs_if_completion) {
+        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, if_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    }
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    frame.pc = exit_branch.false_pc;
+    return true;
+}
+
 fn tryFuseCheckedLocalSimpleNumericCallAddRange(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -5457,6 +5596,165 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
     if (!fitsI64(final_accumulator)) return false;
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, completion_put, core.JSValue.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
     try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
+    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    frame.pc = exit_branch.false_pc;
+    return true;
+}
+
+fn decodeSideEffectFreeArrayLiteralElement(code: []const u8, pc: usize) ?usize {
+    if (immediateInt32Operand(code, pc)) |immediate| return immediate.next_pc;
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.undefined, op.null, op.push_false, op.push_true => pc + 1,
+        op.push_atom_value => if (pc + 5 <= code.len) pc + 5 else null,
+        else => null,
+    };
+}
+
+fn decodeSparseArrayLiteralLength(rt: *core.JSRuntime, code: []const u8, start_pc: usize) ?SparseArrayLiteralLength {
+    var pc = start_pc;
+    var dense_count: u32 = 0;
+    while (true) {
+        if (pc >= code.len) return null;
+        if (code[pc] == op.array_from) break;
+        const next_pc = decodeSideEffectFreeArrayLiteralElement(code, pc) orelse return null;
+        if (dense_count == std.math.maxInt(u16)) return null;
+        dense_count += 1;
+        pc = next_pc;
+    }
+
+    if (pc + 3 > code.len) return null;
+    const array_from_count = readInt(u16, code[pc + 1 ..][0..2]);
+    if (array_from_count != dense_count) return null;
+    pc += 3;
+
+    var length = dense_count;
+    while (pc < code.len) {
+        if (code[pc] == op.dup) {
+            const explicit_length = immediateInt32Operand(code, pc + 1) orelse return null;
+            if (explicit_length.value < 0) return null;
+            const put_pc = explicit_length.next_pc;
+            if (put_pc + 5 > code.len or code[put_pc] != op.put_field) return null;
+            const field_atom = readInt(u32, code[put_pc + 1 ..][0..4]);
+            if (field_atom != core.atom.ids.length) return null;
+            const final_length: u32 = @intCast(explicit_length.value);
+            if (final_length < length) return null;
+            return .{ .length = final_length, .next_pc = put_pc + 5 };
+        }
+
+        const value_next_pc = decodeSideEffectFreeArrayLiteralElement(code, pc) orelse break;
+        if (value_next_pc + 5 > code.len or code[value_next_pc] != op.define_field) return null;
+        const field_atom = readInt(u32, code[value_next_pc + 1 ..][0..4]);
+        const index = core.array.arrayIndexFromAtom(&rt.atoms, field_atom) orelse return null;
+        const implied_length = index + 1;
+        if (implied_length > length) length = implied_length;
+        pc = value_next_pc + 5;
+    }
+
+    return .{ .length = length, .next_pc = pc };
+}
+
+fn decodePutLocCheckInit(code: []const u8, pc: usize) ?LocalPut {
+    if (pc + 3 > code.len or code[pc] != op.put_loc_check_init) return null;
+    return .{
+        .idx = readInt(u16, code[pc + 1 ..][0..2]),
+        .operand_pc = pc + 1,
+        .consume = 2,
+        .checked = true,
+    };
+}
+
+fn decodeSparseArrayLiteralLengthLocalInit(rt: *core.JSRuntime, code: []const u8, pc: usize) ?SparseArrayLiteralLengthLocalInit {
+    const literal = decodeSparseArrayLiteralLength(rt, code, pc) orelse return null;
+    const local_put = decodePutLocCheckInit(code, literal.next_pc) orelse return null;
+    return .{
+        .length = literal.length,
+        .local_idx = local_put.idx,
+        .next_pc = localPutNextPc(local_put),
+    };
+}
+
+fn skipOptionalCloseLocForLocal(frame: *const frame_mod.Frame, code: []const u8, pc: usize, local_idx: u16) ?usize {
+    if (pc >= code.len or code[pc] != op.close_loc) return pc;
+    if (pc + 3 > code.len) return null;
+    const close_idx = readInt(u16, code[pc + 1 ..][0..2]);
+    if (close_idx != local_idx) return pc;
+    if (local_idx >= frame.locals.len or varRefCellFromValue(frame.locals[local_idx]) != null) return null;
+    return pc + 3;
+}
+
+fn tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    induction_idx: u16,
+    allow_loop_tail_fusion: bool,
+    sync_global_lexical_locals: bool,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+) !bool {
+    if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
+    if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
+    if (frame.localIsUninitialized(induction_idx)) return false;
+    if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
+
+    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
+    const code = function.code;
+    const limit_operand = immediateInt32Operand(code, frame.pc) orelse return false;
+    if (limit_operand.next_pc >= code.len or code[limit_operand.next_pc] != op.lt) return false;
+    const exit_branch = decodeFalseBranch(code, limit_operand.next_pc + 1) orelse return false;
+    const limit = limit_operand.value;
+    const current_i = frame.locals[induction_idx].asInt32() orelse return false;
+    if (current_i >= limit) {
+        frame.pc = exit_branch.false_pc;
+        return true;
+    }
+
+    const iteration_count = @as(i128, limit) - @as(i128, current_i);
+    if (iteration_count <= 0 or iteration_count > std.math.maxInt(i32)) return false;
+
+    const literal = decodeSparseArrayLiteralLengthLocalInit(ctx.runtime, code, exit_branch.true_pc) orelse return false;
+    if (literal.local_idx == induction_idx) return false;
+    if (literal.local_idx >= frame.locals.len or literal.local_idx >= frame.locals_uninit.len) return false;
+    if (literal.local_idx < function.var_is_lexical.len and !function.var_is_lexical[literal.local_idx]) return false;
+    if (sync_global_lexical_locals and frame.global_lexical_sync_checked and
+        literal.local_idx < frame.global_lexical_sync_slots.len and
+        frame.global_lexical_sync_slots[literal.local_idx]) return false;
+
+    const accumulator_get = decodeBindingGet(code, literal.next_pc) orelse return false;
+    if (!accumulator_get.is_var_ref and (accumulator_get.idx == induction_idx or accumulator_get.idx == literal.local_idx)) return false;
+    const literal_get = decodeLocalGet(code, accumulator_get.next_pc) orelse return false;
+    if (!literal_get.checked or literal_get.idx != literal.local_idx) return false;
+    if (literal_get.next_pc + 2 > code.len or code[literal_get.next_pc] != op.get_length or code[literal_get.next_pc + 1] != op.add) return false;
+
+    const store_tail = decodeOptionalBindingStoreTail(function, frame, literal_get.next_pc + 2) orelse return false;
+    const accumulator_put = decodeBindingPut(code, store_tail.store_pc) orelse return false;
+    if (accumulator_put.idx != accumulator_get.idx or accumulator_put.is_var_ref != accumulator_get.is_var_ref) return false;
+    if (!bindingStoreWritableForFastPath(ctx, function, global, frame, accumulator_put)) return false;
+
+    var tail_pc = store_tail.tail_pc orelse bindingPutNextPc(accumulator_put);
+    tail_pc = skipOptionalCloseLocForLocal(frame, code, tail_pc, literal.local_idx) orelse return false;
+    tail_pc = skipOptionalCloseLocForLocal(frame, code, tail_pc, induction_idx) orelse return false;
+    const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
+    if (tail_get.idx != induction_idx) return false;
+    tail_pc = tail_get.next_pc;
+    if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
+    const tail_put = decodeLocalPut(code, tail_pc + 1) orelse return false;
+    if (tail_put.idx != induction_idx) return false;
+    const tail_drop_pc = localPutNextPc(tail_put);
+    if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
+    const goto_pc = tail_drop_pc + 1;
+    const goto_target = decodeGotoTarget(code, goto_pc) orelse return false;
+    if (goto_target != condition_pc) return false;
+
+    const accumulator = (bindingReadableBorrowed(frame, accumulator_get) orelse return false).asInt32() orelse return false;
+    const final_accumulator = @as(i128, accumulator) + @as(i128, literal.length) * iteration_count;
+    if (!safeIntegerI128(final_accumulator)) return false;
+
+    const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
@@ -5976,6 +6274,171 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     const mapped = try shared_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback) orelse return false;
     errdefer mapped.free(ctx.runtime);
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, result_put, store_tail.completion_put, mapped, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    frame.pc = exit_branch.false_pc;
+    return true;
+}
+
+fn tryFuseCheckedLocalGlobalDataStoreInductionRange(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    induction_idx: u16,
+    allow_loop_tail_fusion: bool,
+    sync_global_lexical_locals: bool,
+    eval_local_names: []const core.Atom,
+    eval_var_ref_names: []const core.Atom,
+    eval_with_object: core.JSValue,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+) !bool {
+    if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
+    if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
+    if (frame.localIsUninitialized(induction_idx)) return false;
+    if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
+
+    const pc = frame.pc;
+    const code = function.code;
+    const condition_pc = getConditionPc(code, pc, induction_idx) orelse return false;
+    const limit_operand = immediateInt32Operand(code, pc) orelse return false;
+    if (limit_operand.next_pc >= code.len or code[limit_operand.next_pc] != op.lt) return false;
+    const exit_branch = decodeFalseBranch(code, limit_operand.next_pc + 1) orelse return false;
+    const limit = limit_operand.value;
+
+    const current_i = frame.locals[induction_idx].asInt32() orelse return false;
+    if (current_i >= limit) {
+        frame.pc = exit_branch.false_pc;
+        return true;
+    }
+
+    const value_get = decodeLocalGet(code, exit_branch.true_pc) orelse return false;
+    if (!value_get.checked or value_get.idx != induction_idx) return false;
+
+    var store_pc = value_get.next_pc;
+    var assignment_result_tail = false;
+    if (store_pc < code.len and code[store_pc] == op.dup) {
+        assignment_result_tail = true;
+        store_pc += 1;
+    }
+    const store = decodeGlobalPut(code, store_pc) orelse return false;
+    if (!canUseFastGlobalVarLookup(function, store.atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
+    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom)) return false;
+
+    var tail_pc = store.next_pc;
+    var completion_put: ?LocalPut = null;
+    if (assignment_result_tail) {
+        if (tail_pc < code.len and code[tail_pc] == op.drop) {
+            tail_pc += 1;
+        } else {
+            const completion = decodeLocalPut(code, tail_pc) orelse return false;
+            if (!localCompletionPutWritableForFastPath(function, frame, completion)) return false;
+            completion_put = completion;
+            tail_pc = localPutNextPc(completion);
+        }
+    }
+
+    const induction_get = decodeLocalGet(code, tail_pc) orelse return false;
+    if (!induction_get.checked or induction_get.idx != induction_idx) return false;
+    tail_pc = induction_get.next_pc;
+    if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
+    const induction_store = decodeLocalPut(code, tail_pc + 1) orelse return false;
+    if (induction_store.idx != induction_idx) return false;
+    tail_pc = induction_store.operand_pc + induction_store.consume;
+    if (tail_pc >= code.len or code[tail_pc] != op.drop) return false;
+    tail_pc += 1;
+    if (tail_pc >= code.len) return false;
+    const goto_target = backwardGotoTarget(code, tail_pc + 1, code[tail_pc]) orelse return false;
+    if (goto_target != condition_pc) return false;
+
+    const final_global_value = @subWithOverflow(limit, 1);
+    if (final_global_value[1] != 0) return false;
+    const final_value = core.JSValue.int32(final_global_value[0]);
+    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, final_value)) return false;
+    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    frame.pc = exit_branch.false_pc;
+    return true;
+}
+
+fn tryFuseCheckedLocalArrayPushInt32Range(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    induction_idx: u16,
+    allow_loop_tail_fusion: bool,
+    sync_global_lexical_locals: bool,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+) !bool {
+    if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
+    if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
+    if (frame.localIsUninitialized(induction_idx)) return false;
+    if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
+
+    const pc = frame.pc;
+    const code = function.code;
+    const condition_pc = getConditionPc(code, pc, induction_idx) orelse return false;
+    const limit_operand = immediateInt32Operand(code, pc) orelse return false;
+    if (limit_operand.next_pc >= code.len or code[limit_operand.next_pc] != op.lt) return false;
+    const exit_branch = decodeFalseBranch(code, limit_operand.next_pc + 1) orelse return false;
+    const limit = limit_operand.value;
+
+    const current_i = frame.locals[induction_idx].asInt32() orelse return false;
+    if (current_i >= limit) {
+        frame.pc = exit_branch.false_pc;
+        return true;
+    }
+    const iteration_count_i128 = @as(i128, limit) - @as(i128, current_i);
+    if (iteration_count_i128 <= 0 or iteration_count_i128 > std.math.maxInt(u32)) return false;
+    const iteration_count: u32 = @intCast(iteration_count_i128);
+
+    const receiver_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
+    const field_pc = receiver_get.next_pc;
+    if (field_pc + 5 > code.len or code[field_pc] != op.get_field2) return false;
+    const method_atom = readInt(u32, code[field_pc + 1 ..][0..4]);
+    if (!value_ops.atomNameEql(ctx.runtime, method_atom, "push")) return false;
+
+    const value_get = decodeLocalGet(code, field_pc + 5) orelse return false;
+    if (!value_get.checked or value_get.idx != induction_idx) return false;
+    const call_pc = value_get.next_pc;
+    if (call_pc + 3 > code.len or code[call_pc] != op.call_method or readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
+    const completion_tail = decodeOptionalLocalCompletionTail(function, frame, call_pc + 3) orelse return false;
+
+    var tail_pc = completion_tail.tail_pc;
+    if (tail_pc < code.len and code[tail_pc] == op.close_loc) {
+        if (tail_pc + 3 > code.len) return false;
+        const close_idx = readInt(u16, code[tail_pc + 1 ..][0..2]);
+        if (close_idx != induction_idx) return false;
+        if (varRefCellFromValue(frame.locals[induction_idx]) != null) return false;
+        tail_pc += 3;
+    }
+    const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
+    if (!tail_get.checked or tail_get.idx != induction_idx) return false;
+    tail_pc = tail_get.next_pc;
+    if (tail_pc >= code.len or code[tail_pc] != op.post_inc) return false;
+    const induction_store = decodeLocalPut(code, tail_pc + 1) orelse return false;
+    if (induction_store.idx != induction_idx) return false;
+    tail_pc = induction_store.operand_pc + induction_store.consume;
+    if (tail_pc >= code.len or code[tail_pc] != op.drop) return false;
+    tail_pc += 1;
+    if (tail_pc >= code.len) return false;
+    const goto_target = backwardGotoTarget(code, tail_pc + 1, code[tail_pc]) orelse return false;
+    if (goto_target != condition_pc) return false;
+
+    const receiver = bindingReadableBorrowed(frame, receiver_get) orelse return false;
+    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.array.PrototypeMethod.push))) return false;
+    const array_object = objectFromValue(receiver) orelse return false;
+    if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
+    if (array_object.properties.len != 0) return false;
+
+    const start_index = array_object.length;
+    if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, start_index, current_i, iteration_count)) return false;
+    const final_length_value = shared_vm.lengthIndexValue(array_object.length);
+    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, final_length_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
     try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
@@ -9054,7 +9517,13 @@ pub fn putVar(
     if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
     const value = try stack.pop();
     const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
-    if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
+    if (canUseFastGlobalVarWrite(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
+        if (shared_vm.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
+            value.free(ctx.runtime);
+            return err;
+        }) {
+            return .continue_loop;
+        }
         if (globalWritableDataWriteFastOwned(ctx, global, function, frame, atom_id, value) catch |err| {
             value.free(ctx.runtime);
             return err;
@@ -9961,6 +10430,7 @@ pub fn field(
             if (try tryFuseMathMinMaxPrimitiveCallFromField2(ctx, function, frame, stack, obj, atom_id)) return .done;
             if (try tryFuseStringFromCharCodeInt32CallFromField2(ctx, function, global, frame, stack, obj, atom_id, site_pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
             if (try tryFuseStringSliceConstLocalStoreFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
+            if (try tryFuseArrayPushCallFromField2(ctx, function, global, frame, stack, obj, atom_id, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
             if (dataPropertyValueForFastPath(function, site_pc, ctx.runtime, obj, atom_id)) |value| {
                 try stack.push(value);
                 return .done;
@@ -9998,7 +10468,7 @@ pub fn field(
             defer value.free(ctx.runtime);
             const obj = try stack.pop();
             defer obj.free(ctx.runtime);
-            if (setArrayLengthForPutFieldFastPath(obj, atom_id, value)) return .done;
+            if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
             if (try setObjectDataPropertyForPutFieldFastPath(ctx.runtime, function, site_pc, obj, atom_id, value)) return .done;
             const result = setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
                 try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack, frame);
@@ -10013,6 +10483,7 @@ pub fn field(
 }
 
 fn setArrayLengthForPutFieldFastPath(
+    rt: *core.JSRuntime,
     receiver: core.JSValue,
     atom_id: core.Atom,
     value: core.JSValue,
@@ -10024,7 +10495,15 @@ fn setArrayLengthForPutFieldFastPath(
     if (!object.is_array or object.exotic != null or object.proxyTarget() != null) return false;
     if (!object.length_writable) return false;
     const new_len: u32 = @intCast(length);
-    if (new_len < object.length) return false;
+    if (new_len < object.length) {
+        if (object.arrayElementStorageMode() != .dense) return false;
+        for (object.properties) |entry| {
+            if (entry.flags.deleted) continue;
+            const index = core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+            if (index >= new_len) return false;
+        }
+        object.truncateArrayElements(rt, new_len);
+    }
     object.length = new_len;
     return true;
 }
@@ -10796,6 +11275,15 @@ pub fn arrayElement(
                 try stack.pushOwned(value);
                 return .done;
             }
+            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                if (try tryFuseLocalAddWithValue(ctx, stack, function, global, frame, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) {
+                    value.free(ctx.runtime);
+                    return .done;
+                }
+                try stack.pushOwned(value);
+                return .done;
+            }
             const atom_id = toPropertyKeyAtom(ctx, output, global, key, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
@@ -10828,6 +11316,13 @@ pub fn arrayElement(
                 return .done;
             }
             if (fastStringIndexValue(ctx.runtime, obj, key)) |value| {
+                errdefer value.free(ctx.runtime);
+                const old_value = stack.values[stack.values.len - 1];
+                stack.values[stack.values.len - 1] = value;
+                old_value.free(ctx.runtime);
+                return .done;
+            }
+            if (fastInt32TypedArrayElementValue(obj, key)) |value| {
                 errdefer value.free(ctx.runtime);
                 const old_value = stack.values[stack.values.len - 1];
                 stack.values[stack.values.len - 1] = value;
@@ -10885,13 +11380,52 @@ pub fn arrayElement(
     return .done;
 }
 
+fn fastInt32TypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JSValue {
+    const object = objectFromValue(obj) orelse return null;
+    const key_int = key.asInt32() orelse return null;
+    if (key_int < 0) return null;
+    if (object.typedArrayKind() != 6 or object.typedArrayElementSize() != 4) return null;
+    const fixed_len = object.typedArrayFixedLength() orelse return null;
+    const buffer_value = object.typedArrayBuffer() orelse return null;
+    const buffer = objectFromValue(buffer_value) orelse return null;
+    if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return null;
+    if (buffer.arrayBufferDetached()) return core.JSValue.undefinedValue();
+
+    const bytes = buffer.byteStorage();
+    const byte_offset = object.typedArrayByteOffset();
+    if (byte_offset > bytes.len) return core.JSValue.undefinedValue();
+    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, 4)) catch return null;
+    if (byte_len > bytes.len - byte_offset) return core.JSValue.undefinedValue();
+    const index: u32 = @intCast(key_int);
+    if (index >= fixed_len) return core.JSValue.undefinedValue();
+    const offset = byte_offset + @as(usize, index) * 4;
+    return core.JSValue.int32(std.mem.readInt(i32, bytes[offset..][0..4], .little));
+}
+
 fn putInt32TypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {
+    _ = rt;
     const object = objectFromValue(obj) orelse return false;
-    if (!builtins.buffer.isTypedArrayObject(object)) return false;
     const key_int = key.asInt32() orelse return false;
     if (key_int < 0) return false;
     const value_int = value.asInt32() orelse return false;
-    return try builtins.buffer.typedArraySetInt32IndexFast(rt, object, @intCast(key_int), value_int);
+    if (object.typedArrayKind() != 6 or object.typedArrayElementSize() != 4) return false;
+    const fixed_len = object.typedArrayFixedLength() orelse return false;
+    const buffer_value = object.typedArrayBuffer() orelse return false;
+    const buffer = objectFromValue(buffer_value) orelse return false;
+    if (buffer.class_id != core.class.ids.array_buffer and buffer.class_id != core.class.ids.shared_array_buffer) return false;
+    if (buffer.arrayBufferImmutable()) return false;
+    if (buffer.arrayBufferDetached()) return true;
+
+    const bytes = buffer.byteStorage();
+    const byte_offset = object.typedArrayByteOffset();
+    if (byte_offset > bytes.len) return true;
+    const byte_len = std.math.mul(usize, @as(usize, fixed_len), @as(usize, 4)) catch return false;
+    if (byte_len > bytes.len - byte_offset) return true;
+    const index: u32 = @intCast(key_int);
+    if (index >= fixed_len) return true;
+    const offset = byte_offset + @as(usize, index) * 4;
+    std.mem.writeInt(i32, bytes[offset..][0..4], value_int, .little);
+    return true;
 }
 
 fn tryFuseRegExpTestConstStringFromField2(
@@ -10927,6 +11461,50 @@ fn tryFuseRegExpTestConstStringFromField2(
     return true;
 }
 
+fn tryFuseArrayPushCallFromField2(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    stack: *stack_mod.Stack,
+    receiver: core.JSValue,
+    method_atom: core.Atom,
+    sync_global_lexical_locals: bool,
+    comptime setSlotValue: anytype,
+    comptime syncTopLevelGlobalLexicalLocal: anytype,
+) !bool {
+    if (!value_ops.atomNameEql(ctx.runtime, method_atom, "push")) return false;
+    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.array.PrototypeMethod.push))) return false;
+
+    const object = objectFromValue(receiver) orelse return false;
+    if (object.proxyTarget() != null or object.exotic != null) return false;
+    if (object.length >= core.array.max_array_length) return false;
+
+    const code = function.code;
+    const call_arg = borrowedSimpleCallArg(frame, function, frame.pc) orelse return false;
+    const call_pc = call_arg.next_pc;
+    if (call_pc + 3 > code.len or code[call_pc] != op.call_method) return false;
+    if (readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
+
+    const index = object.length;
+    if (!try object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), call_arg.value)) return false;
+    const result = shared_vm.lengthIndexValue(index + 1);
+
+    const stacked_receiver = try stack.pop();
+    stacked_receiver.free(ctx.runtime);
+
+    const after_call_pc = call_pc + 3;
+    if (decodeOptionalLocalCompletionTail(function, frame, after_call_pc)) |completion_tail| {
+        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, result, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        frame.pc = completion_tail.tail_pc;
+        return true;
+    }
+
+    try stack.pushOwned(result);
+    frame.pc = after_call_pc;
+    return true;
+}
+
 fn atomStringValueForFastPath(rt: *core.JSRuntime, atom_id: core.Atom) !?core.JSValue {
     if (rt.atoms.kind(atom_id) != .string) return null;
     const value = try rt.atoms.toStringValue(rt, atom_id);
@@ -10935,6 +11513,26 @@ fn atomStringValueForFastPath(rt: *core.JSRuntime, atom_id: core.Atom) !?core.JS
         return null;
     }
     return value;
+}
+
+fn decodeStringLiteralRef(code: []const u8, pc: usize) ?StringLiteralRef {
+    if (pc >= code.len) return null;
+    return switch (code[pc]) {
+        op.push_atom_value => blk: {
+            if (pc + 5 > code.len) return null;
+            break :blk .{
+                .atom = readInt(u32, code[pc + 1 ..][0..4]),
+                .next_pc = pc + 5,
+            };
+        },
+        op.push_empty_string => .{ .next_pc = pc + 1 },
+        else => null,
+    };
+}
+
+fn stringLiteralRefValueForFastPath(rt: *core.JSRuntime, literal: StringLiteralRef) !?core.JSValue {
+    if (literal.atom) |atom_id| return atomStringValueForFastPath(rt, atom_id);
+    return (try rt.emptyString()).value().dup();
 }
 
 const RegExpLiteralLastIndexZeroLoop = struct {
@@ -11760,6 +12358,20 @@ fn canUseFastGlobalVarLookup(
     return true;
 }
 
+fn canUseFastGlobalVarWrite(
+    ctx: *core.JSContext,
+    function: *const bytecode.Bytecode,
+    atom_id: core.Atom,
+    frame: *const frame_mod.Frame,
+    eval_local_names: []const core.Atom,
+    eval_var_ref_names: []const core.Atom,
+    eval_with_object: core.JSValue,
+) bool {
+    if (!canFuseGlobalDataWrite(function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
+    if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return false;
+    return true;
+}
+
 fn canUseInstalledGlobalDataIc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -12409,8 +13021,17 @@ pub fn globalDefinition(
             const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
             frame.pc += 4;
             const value = try stack.pop();
-            defer value.free(ctx.runtime);
+            var value_owned = true;
+            defer if (value_owned) value.free(ctx.runtime);
             if (!function.flags.is_indirect_eval) {
+                const fast_global_lexical = shared_vm.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
+                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    return err;
+                };
+                if (fast_global_lexical) {
+                    value_owned = false;
+                    return .continue_loop;
+                }
                 const updated_global_lexical = setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
                     if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;

@@ -828,6 +828,108 @@ test "resolve_variables: scope_put_var → put_var" {
     try std.testing.expectEqual(y_atom, bc.atom_operands[0]);
 }
 
+test "resolve_variables: global scope_make_ref assignment lowers to put_var" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const global_atom = try rt.internAtom("g");
+    const local_atom = try rt.internAtom("i");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(global_atom);
+    defer rt.atoms.free(local_atom);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(local_atom, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 21;
+    input[0] = op.scope_make_ref;
+    std.mem.writeInt(u32, input[1..5], global_atom, .little);
+    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u16, input[9..11], 0, .little);
+    input[11] = op.scope_get_var;
+    std.mem.writeInt(u32, input[12..16], local_atom, .little);
+    std.mem.writeInt(u16, input[16..18], 0, .little);
+    input[18] = op.insert3;
+    input[19] = op.put_ref_value;
+    input[20] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(global_atom);
+    try bc.retainAtomOperand(local_atom);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(@as(usize, 8), bc.code.len);
+    try std.testing.expectEqual(op.get_loc0, bc.code[0]);
+    try std.testing.expectEqual(op.dup, bc.code[1]);
+    try std.testing.expectEqual(op.put_var, bc.code[2]);
+    try std.testing.expectEqual(global_atom, std.mem.readInt(u32, bc.code[3..7], .little));
+    try std.testing.expectEqual(op.return_undef, bc.code[7]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(global_atom, bc.atom_operands[0]);
+}
+
+test "resolve_variables: local scope_make_ref assignment keeps reference path" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const name = try rt.internAtom("test");
+    const local_target = try rt.internAtom("x");
+    const local_value = try rt.internAtom("i");
+    defer rt.atoms.free(name);
+    defer rt.atoms.free(local_target);
+    defer rt.atoms.free(local_value);
+
+    var bc = bytecode.function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    defer bc.deinit(rt);
+
+    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    defer fd.deinit(rt);
+    fd.use_short_opcodes = true;
+    _ = try fd.appendScope(-1);
+    _ = try fd.addScopeVar(local_target, .normal, 0, false, false);
+    _ = try fd.addScopeVar(local_value, .normal, 0, false, false);
+
+    const op = bytecode.opcode.op;
+    var input = [_]u8{0} ** 21;
+    input[0] = op.scope_make_ref;
+    std.mem.writeInt(u32, input[1..5], local_target, .little);
+    std.mem.writeInt(u32, input[5..9], 0, .little);
+    std.mem.writeInt(u16, input[9..11], 0, .little);
+    input[11] = op.scope_get_var;
+    std.mem.writeInt(u32, input[12..16], local_value, .little);
+    std.mem.writeInt(u16, input[16..18], 0, .little);
+    input[18] = op.insert3;
+    input[19] = op.put_ref_value;
+    input[20] = op.return_undef;
+
+    try bc.setCode(&input);
+    try bc.retainAtomOperand(local_target);
+    try bc.retainAtomOperand(local_value);
+
+    var ctx = pipeline.resolve_variables.Context.initWithFunctionDef(&bc, &fd);
+    try pipeline.resolve_variables.run(&ctx);
+
+    try std.testing.expectEqual(op.make_loc_ref, bc.code[0]);
+    try std.testing.expectEqual(local_target, std.mem.readInt(u32, bc.code[1..5], .little));
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[5..7], .little));
+    try std.testing.expectEqual(op.get_loc1, bc.code[7]);
+    try std.testing.expectEqual(op.insert3, bc.code[8]);
+    try std.testing.expectEqual(op.put_ref_value, bc.code[9]);
+    try std.testing.expectEqual(op.return_undef, bc.code[10]);
+    try std.testing.expectEqual(@as(usize, 1), bc.atom_operands.len);
+    try std.testing.expectEqual(local_target, bc.atom_operands[0]);
+}
+
 test "resolve_variables: drops enter_scope/leave_scope" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

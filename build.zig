@@ -365,6 +365,27 @@ pub fn build(b: *std.Build) void {
     const perf_self_update_step = b.step("perf-self-update-baseline", "Refresh the checked-in zjs self performance baseline");
     perf_self_update_step.dependOn(&run_perf_self_env_update.step);
 
+    const run_perf_hotpath = b.addSystemCommand(&.{
+        "bun",
+        "tools/compare/run_microbench.js",
+        "--suite",
+        "hotpath",
+        "--zjs-only",
+        "--iters",
+        "30",
+        "--warmup",
+        "5",
+        "--zjs",
+        b.getInstallPath(.bin, "zjs"),
+        "--output",
+        ".zig-cache/perf/current/hotpath-zjs-releasefast.json",
+        "--emit-scripts",
+        ".zig-cache/perf/current/hotpath-scripts",
+    });
+    run_perf_hotpath.step.dependOn(&install_zjs.step);
+    const perf_hotpath_step = b.step("perf-hotpath", "Record independent hotpath calibration benchmark report");
+    perf_hotpath_step.dependOn(&run_perf_hotpath.step);
+
     const run_architecture_deps = b.addSystemCommand(&.{
         "node",
         "tools/architecture/check_deps.js",

@@ -50,6 +50,18 @@ pub const ClosureType = function_bytecode.ClosureType;
 pub const VarKind = function_bytecode.VarKind;
 pub const VarDef = function_bytecode.VarDef;
 
+pub const DirectCallKind = enum(u8) {
+    prop_atom,
+};
+
+pub const DirectCallSite = struct {
+    kind: DirectCallKind = .prop_atom,
+    prepare_pc: u32,
+    call_pc: u32,
+    atom_id: atom.Atom,
+    argc: u16,
+};
+
 /// Mirrors `JSVarScope` (`quickjs.c:702`).
 pub const VarScope = struct {
     parent: i32, // index into scopes of the enclosing scope
@@ -161,6 +173,24 @@ fn freeGrowableAtomSlice(
     }
 }
 
+fn freeGrowableDirectCallSites(
+    atoms: *atom.AtomTable,
+    mem: *memory.MemoryAccount,
+    slice: *[]DirectCallSite,
+    capacity: *usize,
+) void {
+    const items = slice.*;
+    const old_capacity = capacity.*;
+    slice.* = &.{};
+    capacity.* = 0;
+    for (items) |site| atoms.free(site.atom_id);
+    if (old_capacity != 0) {
+        mem.free(DirectCallSite, items.ptr[0..old_capacity]);
+    } else if (items.len != 0) {
+        mem.free(DirectCallSite, items);
+    }
+}
+
 fn freeGrowableNamedSlice(
     comptime T: type,
     atoms: *atom.AtomTable,
@@ -257,6 +287,8 @@ pub const FunctionDef = struct {
     byte_code_capacity: usize = 0,
     atom_operands: []atom.Atom = &.{},
     atom_operands_capacity: usize = 0,
+    direct_call_sites: []DirectCallSite = &.{},
+    direct_call_sites_capacity: usize = 0,
     last_opcode_pos: i32 = -1,
 
     // Labels
@@ -500,6 +532,12 @@ pub const FunctionDef = struct {
         tail[0] = self.atoms.dup(atom_id);
     }
 
+    pub fn appendDirectCallSite(self: *FunctionDef, site: DirectCallSite) !void {
+        const tail = try growSliceBy(DirectCallSite, self.memory, &self.direct_call_sites, &self.direct_call_sites_capacity, 1);
+        tail[0] = site;
+        tail[0].atom_id = self.atoms.dup(site.atom_id);
+    }
+
     pub fn appendCpool(self: *FunctionDef, value: JSValue) !u32 {
         const tail = try growSliceBy(JSValue, self.memory, &self.cpool, &self.cpool_capacity, 1);
         tail[0] = dupOwnedValue(self.atoms, value);
@@ -551,6 +589,7 @@ pub const FunctionDef = struct {
 
         freeGrowableSlice(u8, self.memory, &self.byte_code, &self.byte_code_capacity);
         freeGrowableAtomSlice(self.atoms, self.memory, &self.atom_operands, &self.atom_operands_capacity);
+        freeGrowableDirectCallSites(self.atoms, self.memory, &self.direct_call_sites, &self.direct_call_sites_capacity);
 
         const old_label_slots = self.label_slots;
         self.label_slots = &.{};

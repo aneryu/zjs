@@ -12,6 +12,7 @@ const function_def_mod = @import("../function_def.zig");
 const opcode = @import("../opcode.zig");
 const resolve_variables = @import("resolve_variables.zig");
 const resolve_labels = @import("resolve_labels.zig");
+const prepared_calls = @import("prepared_calls.zig");
 const pc2line = @import("pc2line.zig");
 const stack_size = @import("stack_size.zig");
 const JSValue = @import("../../core/value.zig").JSValue;
@@ -53,6 +54,15 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     lowered.col_num = fd.col_num;
     try lowered.setCode(fd.byte_code);
     for (fd.atom_operands) |atom_id| try lowered.retainAtomOperand(atom_id);
+    for (fd.direct_call_sites) |site| {
+        try lowered.appendDirectCallSite(.{
+            .kind = .prop_atom,
+            .prepare_pc = site.prepare_pc,
+            .call_pc = site.call_pc,
+            .atom_id = site.atom_id,
+            .argc = site.argc,
+        });
+    }
     for (fd.source_loc_slots) |slot| try lowered.appendSourceLoc(slot.pc, slot.line_num, slot.col_num);
     try runPhases(&lowered, fd, fd);
 
@@ -99,6 +109,13 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
         fb.atom_operands = try fd.memory.alloc(atom.Atom, lowered.atom_operands.len);
         for (lowered.atom_operands, 0..) |atom_id, idx| {
             fb.atom_operands[idx] = fd.atoms.dup(atom_id);
+        }
+    }
+    if (lowered.call_sites.len > 0) {
+        fb.call_sites = try fd.memory.alloc(bytecode_function.CallSite, lowered.call_sites.len);
+        for (lowered.call_sites, 0..) |site, idx| {
+            fb.call_sites[idx] = site;
+            fb.call_sites[idx].atom_id = fd.atoms.dup(site.atom_id);
         }
     }
     try copyArgNamesToFunctionBytecode(fd, fb);
@@ -502,6 +519,8 @@ fn runPhases(
         try removeUncapturedCloseLoc(function, def);
     }
 
+    try prepared_calls.run(function);
+
     // Phase 3b: pc2line from remapped Bytecode source slots.
     try encodePc2Line(function);
 
@@ -563,6 +582,7 @@ fn removeUncapturedCloseLoc(
     pc_map[old_code.len] = out;
     try patchRelativeJumpsAfterPcMap(old_code, next, pc_map);
     function.remapSourceLocs(pc_map);
+    function.remapDirectCallSites(pc_map);
     function.installCode(next);
 }
 

@@ -815,6 +815,32 @@ test "strings choose QuickJS-style 8-bit or 16-bit storage" {
     try std.testing.expectEqual(@as(u16, 0xd800), lone_surrogate.codeUnitAt(0));
 }
 
+test "normal strings use compact allocation with bounded in-place append" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const fixed_allocations = rt.memory.allocation_count;
+    const fixed = try core.string.String.createLatin1(rt, "abc");
+    try std.testing.expectEqual(core.string.Layout.compact, fixed.layout);
+    try std.testing.expectEqual(@as(usize, 3), fixed.capacity);
+    try std.testing.expectEqual(fixed_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expect(!try fixed.appendLatin1InPlace(rt, "d"));
+    try std.testing.expectEqual(fixed_allocations + 1, rt.memory.allocation_count);
+    fixed.value().free(rt);
+    try std.testing.expectEqual(fixed_allocations, rt.memory.allocation_count);
+
+    const growable_allocations = rt.memory.allocation_count;
+    const growable = try core.string.String.createLatin1Concat(rt, "a", "b");
+    defer growable.value().free(rt);
+    try std.testing.expectEqual(core.string.Layout.compact, growable.layout);
+    try std.testing.expect(growable.capacity > growable.len());
+    try std.testing.expectEqual(growable_allocations + 1, rt.memory.allocation_count);
+
+    try std.testing.expect(try growable.appendLatin1InPlace(rt, "c"));
+    try std.testing.expectEqual(growable_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expect(growable.eqlBytes("abc"));
+}
+
 test "strings compare by code unit across storage widths" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

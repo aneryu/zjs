@@ -576,6 +576,7 @@ pub fn forOfNext(
         stack.values.len - @as(usize, depth) - 3
     else
         try findForOfIteratorIndex(ctx.runtime, stack);
+    if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
     const iterator_value = stack.values[iterator_index].dup();
     defer iterator_value.free(ctx.runtime);
     var value: core.JSValue = undefined;
@@ -602,6 +603,64 @@ pub fn forOfNext(
     }
     stack.pushOwnedAssumeCapacity(value);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done));
+}
+
+fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_index: usize) !bool {
+    if (iterator_index + 1 >= stack.values.len) return false;
+    const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
+    if (iterator.class_id != core.class.ids.array_iterator) return false;
+    const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
+    if (!next_function.isArrayIteratorNextFunction()) return false;
+
+    const kind = iterator.iteratorKindSlot().*;
+    if (kind != 1 and kind != 2) return false;
+
+    const target_value = (iterator.iteratorTargetSlot().*) orelse {
+        try stack.reserveAdditional(2);
+        const old_iterator = stack.values[iterator_index];
+        stack.values[iterator_index] = core.JSValue.undefinedValue();
+        old_iterator.free(ctx.runtime);
+        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
+        return true;
+    };
+    const target = objectFromValue(target_value) orelse return false;
+    if (!target.is_array or target.exotic != null or target.proxyTarget() != null) return false;
+
+    const index = iterator.iteratorIndexSlot().*;
+    const length: usize = @intCast(target.length);
+    if (index >= length) {
+        try stack.reserveAdditional(2);
+        iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot());
+        const old_iterator = stack.values[iterator_index];
+        stack.values[iterator_index] = core.JSValue.undefinedValue();
+        old_iterator.free(ctx.runtime);
+        stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
+        return true;
+    }
+    if (index > core.atom.max_int_atom) return false;
+    const element_index: u32 = @intCast(index);
+
+    const value = switch (kind) {
+        1 => core.JSValue.int32(@intCast(element_index)),
+        2 => blk: {
+            const atom_id = core.atom.atomFromUInt32(element_index);
+            if (target.findProperty(atom_id) != null) return false;
+            const elements = target.arrayElements();
+            if (index >= elements.len) return false;
+            const element = elements[index] orelse return false;
+            break :blk element.dup();
+        },
+        else => unreachable,
+    };
+    errdefer value.free(ctx.runtime);
+
+    try stack.reserveAdditional(2);
+    iterator.iteratorIndexSlot().* = index + 1;
+    stack.pushOwnedAssumeCapacity(value);
+    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
+    return true;
 }
 
 pub fn forOfNextVm(

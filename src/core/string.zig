@@ -31,9 +31,16 @@ pub const Data = union(enum) {
     }
 };
 
+pub const Layout = enum(u8) {
+    compact,
+    separate,
+    slice,
+};
+
 pub const String = struct {
     header: gc.Header,
     data: Data,
+    layout: Layout,
     capacity: usize,
     hash: u32,
     atom_id: ?u32 = null,
@@ -100,16 +107,10 @@ pub const String = struct {
         }
 
         if (!needs_wide) {
-            const bytes = try rt.memory.alloc(u8, units.len);
-            errdefer rt.memory.free(u8, bytes);
-            for (units, 0..) |unit, i| bytes[i] = @intCast(unit);
-            const self = try rt.memory.create(String);
-            self.* = .{
-                .header = .{ .kind = .string },
-                .data = .{ .latin1 = bytes },
-                .capacity = bytes.len,
-                .hash = hashLatin1(bytes, 0),
-            };
+            const self = try createUninitialized(rt, .latin1, units.len);
+            errdefer destroyUninitialized(rt, self);
+            for (units, 0..) |unit, i| self.data.latin1[i] = @intCast(unit);
+            self.hash = hashLatin1(self.data.latin1, 0);
             rt.memory.free(u16, units.ptr[0..capacity]);
             return self;
         }
@@ -118,6 +119,7 @@ pub const String = struct {
         self.* = .{
             .header = .{ .kind = .string },
             .data = .{ .utf16 = units },
+            .layout = .separate,
             .capacity = capacity,
             .hash = hashUtf16(units, 0),
         };
@@ -155,12 +157,23 @@ pub const String = struct {
     /// Used by the `+` operator string fast path so we skip the per-call
     /// `ArrayList(u8)` intermediate (and its `deinit`).
     pub fn createLatin1Concat(rt: *JSRuntime, a: []const u8, b: []const u8) !*String {
-        return createLatin1ConcatWithSeed(rt, a, b, hashLatin1(a, 0));
+        return createLatin1ConcatGrowableWithSeed(rt, a, b, hashLatin1(a, 0));
     }
 
     pub fn createLatin1ConcatWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
         const total = a.len + b.len;
         const self = try createUninitialized(rt, .latin1, total);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.latin1[0..a.len], a);
+        @memcpy(self.data.latin1[a.len..], b);
+        self.hash = hashLatin1(b, seed);
+        return self;
+    }
+
+    fn createLatin1ConcatGrowableWithSeed(rt: *JSRuntime, a: []const u8, b: []const u8, seed: u32) !*String {
+        const total = a.len + b.len;
+        const capacity = nextStringCapacity(0, total);
+        const self = try createInlineUninitialized(rt, .latin1, total, capacity);
         errdefer destroyUninitialized(rt, self);
         @memcpy(self.data.latin1[0..a.len], a);
         @memcpy(self.data.latin1[a.len..], b);
@@ -195,7 +208,7 @@ pub const String = struct {
     /// Concatenate two utf16 unit buffers into a single freshly allocated
     /// utf16 string. The runtime owns the result.
     pub fn createUtf16Concat(rt: *JSRuntime, a: []const u16, b: []const u16) !*String {
-        return createUtf16ConcatWithSeed(rt, a, b, hashUtf16(a, 0));
+        return createUtf16ConcatGrowableWithSeed(rt, a, b, hashUtf16(a, 0));
     }
 
     pub fn createUtf16ConcatWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
@@ -208,20 +221,22 @@ pub const String = struct {
         return self;
     }
 
+    fn createUtf16ConcatGrowableWithSeed(rt: *JSRuntime, a: []const u16, b: []const u16, seed: u32) !*String {
+        const total = a.len + b.len;
+        const capacity = nextStringCapacity(0, total);
+        const self = try createInlineUninitialized(rt, .utf16, total, capacity);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.utf16[0..a.len], a);
+        @memcpy(self.data.utf16[a.len..], b);
+        self.hash = hashUtf16(b, seed);
+        return self;
+    }
+
     pub fn createLatin1(rt: *JSRuntime, bytes: []const u8) !*String {
-        const self = try rt.memory.create(String);
-        errdefer rt.memory.destroy(String, self);
-
-        const owned = try rt.memory.alloc(u8, bytes.len);
-        errdefer rt.memory.free(u8, owned);
-        @memcpy(owned, bytes);
-
-        self.* = .{
-            .header = .{ .kind = .string },
-            .data = .{ .latin1 = owned },
-            .capacity = bytes.len,
-            .hash = hashLatin1(bytes, 0),
-        };
+        const self = try createUninitialized(rt, .latin1, bytes.len);
+        errdefer destroyUninitialized(rt, self);
+        @memcpy(self.data.latin1, bytes);
+        self.hash = hashLatin1(bytes, 0);
         return self;
     }
 
@@ -317,6 +332,7 @@ pub const String = struct {
         self.header = .{ .kind = .string };
         self.hash = 0;
         self.atom_id = null;
+        self.layout = .slice;
         self.capacity = 0;
         self.data = .{ .slice = .{ .parent = parent, .start = start, .len = slice_len } };
         gc.retain(&parent.header);
@@ -344,6 +360,7 @@ pub const String = struct {
             self.hash = hashLatin1(suffix, self.hash);
             return true;
         }
+        if (self.layout != .separate) return false;
 
         var next_capacity = if (self.capacity == 0) @as(usize, 16) else self.capacity;
         while (next_capacity < new_len) {
@@ -378,6 +395,7 @@ pub const String = struct {
             self.hash = hashUtf16(suffix, self.hash);
             return true;
         }
+        if (self.layout != .separate) return false;
 
         const next_capacity = nextStringCapacity(self.capacity, new_len);
         const expanded = try rt.memory.alloc(u16, next_capacity);
@@ -409,6 +427,7 @@ pub const String = struct {
             self.hash = hashLatin1(suffix, self.hash);
             return true;
         }
+        if (self.layout != .separate) return false;
 
         const next_capacity = nextStringCapacity(self.capacity, new_len);
         const expanded = try rt.memory.alloc(u16, next_capacity);
@@ -433,6 +452,7 @@ pub const String = struct {
         };
         const old_len = bytes.len;
         const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
+        if (self.layout != .separate) return false;
         const next_capacity = nextStringCapacity(self.capacity, new_len);
         const expanded = try rt.memory.alloc(u16, next_capacity);
         errdefer rt.memory.free(u16, expanded);
@@ -469,6 +489,7 @@ pub const String = struct {
         if (new_len <= self.capacity) {
             expanded = bytes.ptr[0..new_len];
         } else {
+            if (self.layout != .separate) return false;
             next_capacity = if (self.capacity == 0) @as(usize, 16) else self.capacity;
             while (next_capacity < new_len) {
                 const doubled = @mulWithOverflow(next_capacity, 2);
@@ -507,15 +528,29 @@ pub const String = struct {
     }
 
     fn createUninitialized(rt: *JSRuntime, comptime tag: std.meta.Tag(Data), unit_count: usize) !*String {
-        const self = try rt.memory.create(String);
-        errdefer rt.memory.destroy(String, self);
+        return createInlineUninitialized(rt, tag, unit_count, unit_count);
+    }
+
+    fn createInlineUninitialized(rt: *JSRuntime, comptime tag: std.meta.Tag(Data), unit_count: usize, capacity: usize) !*String {
+        std.debug.assert(capacity >= unit_count);
+        const inline_layout = inlineAllocationLayout(tag, capacity) orelse return error.OutOfMemory;
+        const bytes = try rt.memory.allocAlignedBytes(inline_layout.total_size, inline_layout.allocation_alignment);
+        const self: *String = @ptrCast(@alignCast(bytes.ptr));
         self.header = .{ .kind = .string };
         self.hash = 0;
         self.atom_id = null;
-        self.capacity = unit_count;
+        self.layout = .compact;
+        self.capacity = capacity;
         switch (tag) {
-            .latin1 => self.data = .{ .latin1 = try rt.memory.alloc(u8, unit_count) },
-            .utf16 => self.data = .{ .utf16 = try rt.memory.alloc(u16, unit_count) },
+            .latin1 => {
+                const payload = bytes[inline_layout.payload_offset..];
+                self.data = .{ .latin1 = payload.ptr[0..unit_count] };
+            },
+            .utf16 => {
+                const payload = bytes[inline_layout.payload_offset..];
+                const units: [*]u16 = @ptrCast(@alignCast(payload.ptr));
+                self.data = .{ .utf16 = units[0..unit_count] };
+            },
             .slice => unreachable,
         }
         return self;
@@ -523,13 +558,57 @@ pub const String = struct {
 
     fn destroyUninitialized(rt: *JSRuntime, self: *String) void {
         switch (self.data) {
-            .latin1 => |bytes| rt.memory.free(u8, bytes.ptr[0..self.capacity]),
-            .utf16 => |units| rt.memory.free(u16, units.ptr[0..self.capacity]),
+            .latin1 => |bytes| switch (self.layout) {
+                .compact => return destroyInline(rt, self, .latin1),
+                .separate => rt.memory.free(u8, bytes.ptr[0..self.capacity]),
+                .slice => unreachable,
+            },
+            .utf16 => |units| switch (self.layout) {
+                .compact => return destroyInline(rt, self, .utf16),
+                .separate => rt.memory.free(u16, units.ptr[0..self.capacity]),
+                .slice => unreachable,
+            },
             .slice => |s| JSValue.string(&s.parent.header).free(rt),
         }
         rt.memory.destroy(String, self);
     }
+
+    fn destroyInline(rt: *JSRuntime, self: *String, comptime tag: std.meta.Tag(Data)) void {
+        const inline_layout = inlineAllocationLayout(tag, self.capacity) orelse unreachable;
+        const bytes: [*]u8 = @ptrCast(self);
+        rt.memory.freeAlignedBytes(bytes[0..inline_layout.total_size], inline_layout.allocation_alignment);
+    }
 };
+
+const InlineAllocationLayout = struct {
+    payload_offset: usize,
+    total_size: usize,
+    allocation_alignment: std.mem.Alignment,
+};
+
+fn inlineAllocationLayout(comptime tag: std.meta.Tag(Data), capacity: usize) ?InlineAllocationLayout {
+    const unit_align = switch (tag) {
+        .latin1 => @alignOf(u8),
+        .utf16 => @alignOf(u16),
+        .slice => unreachable,
+    };
+    const unit_size = switch (tag) {
+        .latin1 => @sizeOf(u8),
+        .utf16 => @sizeOf(u16),
+        .slice => unreachable,
+    };
+    const payload_alignment = std.mem.Alignment.fromByteUnits(unit_align);
+    const string_alignment = std.mem.Alignment.of(String);
+    const allocation_alignment = if (payload_alignment.compare(.gt, string_alignment)) payload_alignment else string_alignment;
+    const payload_offset = std.mem.alignForward(usize, @sizeOf(String), payload_alignment.toByteUnits());
+    const payload_size = std.math.mul(usize, unit_size, capacity) catch return null;
+    const total_size = std.math.add(usize, payload_offset, payload_size) catch return null;
+    return .{
+        .payload_offset = payload_offset,
+        .total_size = total_size,
+        .allocation_alignment = allocation_alignment,
+    };
+}
 
 fn checkedAddLength(a: usize, b: usize) ?usize {
     const result = @addWithOverflow(a, b);

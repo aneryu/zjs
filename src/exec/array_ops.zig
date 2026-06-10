@@ -225,6 +225,23 @@ pub fn qjsArrayMethodFastCall(
     return null;
 }
 
+pub fn qjsArrayPreparedNativeCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    return switch (method_id) {
+        @intFromEnum(builtins.array.PrototypeMethod.push) => qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame),
+        @intFromEnum(builtins.array.PrototypeMethod.pop) => qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame),
+        else => null,
+    };
+}
+
 pub fn qjsArrayPrototypeNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2869,6 +2886,18 @@ pub fn qjsArrayPushCall(
         if (!std.mem.eql(u8, name, "push")) return null;
     }
 
+    return qjsArrayPushCallImpl(ctx, output, global, receiver, args, caller_function, caller_frame);
+}
+
+fn qjsArrayPushCallImpl(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
     if (receiver.isNull() or receiver.isUndefined()) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
     }
@@ -2920,10 +2949,22 @@ pub fn qjsArrayPopCall(
         if (!std.mem.eql(u8, name, "pop")) return null;
     }
 
+    return qjsArrayPopCallImpl(ctx, output, global, receiver, caller_function, caller_frame);
+}
+
+fn qjsArrayPopCallImpl(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
     const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     if (object.class_id == core.class.ids.string) return error.TypeError;
+    if (qjsFastDenseArrayPop(object)) |value| return value;
     const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
     const length = try toLengthIndex(ctx, output, global, length_value);
@@ -2945,6 +2986,36 @@ pub fn qjsArrayPopCall(
     const set_length = try setValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, lengthIndexValue(index), caller_function, caller_frame);
     set_length.free(ctx.runtime);
     try verifyArrayLikeLengthSet(ctx, output, global, receiver_object_value, index);
+    return value;
+}
+
+fn qjsFastDenseArrayPop(object: *core.Object) ?core.JSValue {
+    if (!object.is_array or !object.length_writable) return null;
+    if (object.proxyTarget() != null or object.exotic != null or object.arrayElementStorageMode() != .dense) return null;
+    if (object.length == 0) return null;
+
+    const index = object.length - 1;
+    const atom_id = core.atom.atomFromUInt32(index);
+    if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;
+
+    const element_index: usize = @intCast(index);
+    const elements = object.arrayElementsSlot();
+    if (element_index >= elements.*.len) {
+        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+        object.length = index;
+        return core.JSValue.undefinedValue();
+    }
+
+    const value = elements.*[element_index] orelse {
+        if (!arrayPrototypeChainHasNoIndexedProperties(object)) return null;
+        elements.* = elements.*.ptr[0..element_index];
+        object.length = index;
+        return core.JSValue.undefinedValue();
+    };
+
+    elements.*[element_index] = null;
+    elements.* = elements.*.ptr[0..element_index];
+    object.length = index;
     return value;
 }
 

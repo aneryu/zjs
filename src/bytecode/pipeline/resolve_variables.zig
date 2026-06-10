@@ -673,6 +673,16 @@ const JumpSite = struct {
     operand_pos: usize,
 };
 
+const GLOBAL_REF_TAIL_NONE: u8 = 0;
+const GLOBAL_REF_TAIL_PUT: u8 = 1;
+const GLOBAL_REF_TAIL_DUP_PUT: u8 = 2;
+
+const GlobalRefPutTail = struct {
+    pc: usize,
+    original_size: usize,
+    kind: u8,
+};
+
 /// Returns the byte offset within this opcode of the absolute u32
 /// label operand, or `null` if the format has no such operand. Only
 /// the `.label` format (u32 absolute target) is relevant for the
@@ -685,6 +695,107 @@ fn labelOperandOffset(op_id: u8) ?usize {
         .atom_label_u8, .atom_label_u16 => 5, // atom at bytes[1..5], target at bytes[5..9]
         else => null,
     };
+}
+
+fn globalRefPutTailReplacementSize(kind: u8) usize {
+    return switch (kind) {
+        GLOBAL_REF_TAIL_PUT => 5,
+        GLOBAL_REF_TAIL_DUP_PUT => 6,
+        else => 0,
+    };
+}
+
+fn decodeGlobalRefPutTail(code: []const u8, pc: usize) ?GlobalRefPutTail {
+    if (pc >= code.len) return null;
+    if (code[pc] == opcode.op.put_ref_value) {
+        return .{ .pc = pc, .original_size = 1, .kind = GLOBAL_REF_TAIL_PUT };
+    }
+    if (pc + 2 > code.len or code[pc + 1] != opcode.op.put_ref_value) return null;
+    return switch (code[pc]) {
+        opcode.op.insert3 => .{ .pc = pc, .original_size = 2, .kind = GLOBAL_REF_TAIL_DUP_PUT },
+        opcode.op.nop, opcode.op.perm4, opcode.op.rot3l => .{ .pc = pc, .original_size = 2, .kind = GLOBAL_REF_TAIL_PUT },
+        else => null,
+    };
+}
+
+fn inputInstrSizeForRefTailScan(code: []const u8, pc: usize) ?usize {
+    if (pc >= code.len) return null;
+    const op_id = code[pc];
+    const size: usize = if (op_id == opcode.op.eval)
+        5
+    else if (op_id == opcode.op.apply_eval)
+        2
+    else if (op_id == opcode.op.scope_make_ref)
+        11
+    else if (isScopeVarOp(op_id) or isScopeRefOp(op_id) or isScopePrivateFieldOp(op_id))
+        7
+    else if (op_id == opcode.op.enter_scope or op_id == opcode.op.leave_scope)
+        3
+    else
+        instrSize(op_id);
+    if (pc + size > code.len) return null;
+    return size;
+}
+
+fn stopsGlobalRefTailScan(op_id: u8) bool {
+    if (op_id == opcode.op.scope_make_ref or
+        op_id == opcode.op.scope_get_ref or
+        op_id == opcode.op.scope_delete_var or
+        op_id == opcode.op.eval or
+        op_id == opcode.op.apply_eval or
+        op_id == opcode.op.@"return" or
+        op_id == opcode.op.return_undef or
+        op_id == opcode.op.return_async or
+        op_id == opcode.op.throw or
+        op_id == opcode.op.goto or
+        op_id == opcode.op.goto8 or
+        op_id == opcode.op.goto16 or
+        op_id == opcode.op.if_false or
+        op_id == opcode.op.if_false8 or
+        op_id == opcode.op.if_true or
+        op_id == opcode.op.if_true8 or
+        op_id == opcode.op.@"catch" or
+        op_id == opcode.op.label or
+        op_id == opcode.op.gosub or
+        op_id == opcode.op.ret or
+        op_id == opcode.op.call or
+        op_id == opcode.op.call0 or
+        op_id == opcode.op.call1 or
+        op_id == opcode.op.call2 or
+        op_id == opcode.op.call3 or
+        op_id == opcode.op.call_method or
+        op_id == opcode.op.tail_call or
+        op_id == opcode.op.tail_call_method)
+    {
+        return true;
+    }
+    return false;
+}
+
+fn findGlobalRefPutTail(code: []const u8, make_ref_pc: usize) ?GlobalRefPutTail {
+    if (make_ref_pc + 11 > code.len or code[make_ref_pc] != opcode.op.scope_make_ref) return null;
+    const label_pc = std.mem.readInt(u32, code[make_ref_pc + 5 ..][0..4], .little);
+    if (label_pc > make_ref_pc and label_pc < code.len) {
+        if (decodeGlobalRefPutTail(code, @intCast(label_pc))) |tail| return tail;
+    }
+
+    var pc = make_ref_pc + 11;
+    var steps: usize = 0;
+    while (pc < code.len and steps < 16) : (steps += 1) {
+        if (decodeGlobalRefPutTail(code, pc)) |tail| return tail;
+        const op_id = code[pc];
+        if (stopsGlobalRefTailScan(op_id)) return null;
+        const size = inputInstrSizeForRefTailScan(code, pc) orelse return null;
+        pc += size;
+    }
+    return null;
+}
+
+fn scopeMakeRefResolvesToGlobal(ctx: *const JSContext, atom_id: u32, scope_level: i16) bool {
+    if (lookupTopLevelModuleLexicalClosureVar(ctx, atom_id, scope_level) != null) return false;
+    if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) return false;
+    if (lookupClosureVar(ctx, atom_id) != null) return false;
+    return true;
 }
 
 pub fn run(ctx: *JSContext) !void {
@@ -875,6 +986,12 @@ pub fn run(ctx: *JSContext) !void {
     var jump_count: usize = 0;
     var i: usize = 0;
     var scan_atom_idx: usize = 0;
+    var global_ref_tail_atoms: []atom.Atom = if (func.code.len == 0) &.{} else try ctx.memory.alloc(atom.Atom, func.code.len);
+    defer if (global_ref_tail_atoms.len != 0) ctx.memory.free(atom.Atom, global_ref_tail_atoms);
+    var global_ref_tail_kinds: []u8 = if (func.code.len == 0) &.{} else try ctx.memory.alloc(u8, func.code.len);
+    defer if (global_ref_tail_kinds.len != 0) ctx.memory.free(u8, global_ref_tail_kinds);
+    if (global_ref_tail_atoms.len != 0) @memset(global_ref_tail_atoms, atom.null_atom);
+    if (global_ref_tail_kinds.len != 0) @memset(global_ref_tail_kinds, GLOBAL_REF_TAIL_NONE);
     const var_initialized = if (ctx.function_def) |fd| blk: {
         const bytes = try ctx.memory.alloc(bool, fd.vars.len);
         @memset(bytes, false);
@@ -883,6 +1000,12 @@ pub fn run(ctx: *JSContext) !void {
     defer if (var_initialized.len != 0) ctx.memory.free(bool, var_initialized);
     while (i < func.code.len) {
         const op = func.code[i];
+        if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
+            output_size += globalRefPutTailReplacementSize(global_ref_tail_kinds[i]);
+            output_atom_count += 1;
+            i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+            continue;
+        }
         // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
         if (op == opcode.op.eval) {
             if (i + 5 > func.code.len) return error.InvalidBytecode;
@@ -974,8 +1097,7 @@ pub fn run(ctx: *JSContext) !void {
                             const init_safe = var_initialized[loc_idx] and !init_bypassed[loc_idx];
                             break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
                         }
-                    })
-                    {
+                    }) {
                         // Lexical: 3-byte TDZ-check variant.
                         output_size += 3;
                     } else {
@@ -1010,6 +1132,17 @@ pub fn run(ctx: *JSContext) !void {
             if (i + 11 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
             const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
+            if (scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+                if (findGlobalRefPutTail(func.code, i)) |tail| {
+                    if (tail.pc < global_ref_tail_kinds.len and global_ref_tail_kinds[tail.pc] == GLOBAL_REF_TAIL_NONE) {
+                        global_ref_tail_atoms[tail.pc] = atom_id;
+                        global_ref_tail_kinds[tail.pc] = tail.kind;
+                        scan_atom_idx += 1;
+                        i += 11;
+                        continue;
+                    }
+                }
+            }
             if (resolveLocalOrArg(ctx, atom_id, scope_level) != null) {
                 output_size += 7;
                 output_atom_count += 1;
@@ -1249,6 +1382,20 @@ pub fn run(ctx: *JSContext) !void {
         // the post-prologue body resolve correctly.
         pc_map[i] = out_idx;
         const op = func.code[i];
+        if (global_ref_tail_kinds.len != 0 and global_ref_tail_kinds[i] != GLOBAL_REF_TAIL_NONE) {
+            const atom_id = global_ref_tail_atoms[i];
+            if (global_ref_tail_kinds[i] == GLOBAL_REF_TAIL_DUP_PUT) {
+                output[out_idx] = opcode.op.dup;
+                out_idx += 1;
+            }
+            output[out_idx] = opcode.op.put_var;
+            std.mem.writeInt(u32, output[out_idx + 1 ..][0..4], atom_id, .little);
+            output_atoms[out_atom_idx] = func.atoms.dup(atom_id);
+            out_idx += 5;
+            out_atom_idx += 1;
+            i += (decodeGlobalRefPutTail(func.code, i) orelse return error.InvalidBytecode).original_size;
+            continue;
+        }
         // Handle OP_eval and OP_apply_eval scope_idx rewrite (mirrors quickjs.c:33690-33702)
         if (op == opcode.op.eval) {
             if (i + 5 > func.code.len) return error.InvalidBytecode;
@@ -1372,8 +1519,7 @@ pub fn run(ctx: *JSContext) !void {
                             const init_safe = var_initialized_pass2[loc_idx] and !init_bypassed[loc_idx];
                             break :blk !init_safe and (isConstLocal(ctx, loc_idx) or localTdzEmittedAtDecl(ctx, loc_idx));
                         }
-                    })
-                    {
+                    }) {
                         output[out_idx] = lowerScopeVarOpLexical(op);
                         std.mem.writeInt(u16, output[out_idx + 1 ..][0..2], loc_idx, .little);
                         out_idx += 3;
@@ -1425,6 +1571,18 @@ pub fn run(ctx: *JSContext) !void {
             if (i + 11 > func.code.len) return error.InvalidBytecode;
             const atom_id = std.mem.readInt(u32, func.code[i + 1 ..][0..4], .little);
             const scope_level = std.mem.readInt(i16, func.code[i + 9 ..][0..2], .little);
+            if (scopeMakeRefResolvesToGlobal(ctx, atom_id, scope_level)) {
+                if (findGlobalRefPutTail(func.code, i)) |tail| {
+                    if (tail.pc < global_ref_tail_kinds.len and
+                        global_ref_tail_kinds[tail.pc] != GLOBAL_REF_TAIL_NONE and
+                        global_ref_tail_atoms[tail.pc] == atom_id)
+                    {
+                        in_atom_idx += 1;
+                        i += 11;
+                        continue;
+                    }
+                }
+            }
             if (resolveLocalOrArg(ctx, atom_id, scope_level)) |binding| switch (binding) {
                 .arg => |arg_idx| {
                     output[out_idx] = opcode.op.make_arg_ref;
@@ -1614,6 +1772,7 @@ pub fn run(ctx: *JSContext) !void {
     // Replace the old code buffer. `installCode` frees any prior buffer,
     // including capacity allocated by the parser via geometric growth.
     func.remapSourceLocs(pc_map);
+    func.remapDirectCallSites(pc_map);
     if (code_to_install.ptr != output.ptr and output_owned) {
         ctx.memory.free(u8, output);
         output_owned = false;

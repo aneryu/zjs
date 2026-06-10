@@ -8922,6 +8922,24 @@ pub const Object = struct {
         }
     }
 
+    pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
+        if (self.exotic != null or index >= self.properties.len) return false;
+        var entry = &self.properties[index];
+        if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return false;
+        switch (entry.slot) {
+            .data => |*stored| {
+                if (!entry.flags.writable and !stored.isUninitialized()) return false;
+                if (entry.atom_id == atom.ids.Private_brand) return false;
+                try self.writeValueBarrierAt(rt, new_value, stored);
+                const old = stored.*;
+                stored.* = new_value;
+                old.free(rt);
+                return true;
+            },
+            .auto_init, .accessor, .deleted => return false,
+        }
+    }
+
     pub fn setOrDefineOwnDataPropertyForSimpleSet(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
         if (self.class_id == class.ids.module_ns) {
             if (self.moduleNamespaceBindingValue(atom_id)) |stored| {

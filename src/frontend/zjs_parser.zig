@@ -1979,6 +1979,26 @@ pub const ParseState = struct {
         else
             self.function.atom_operands.len;
     }
+
+    fn appendDirectCallSite(self: *ParseState, prepare_pc: usize, call_pc: usize, atom_id: Atom, argc: u16) Error!void {
+        if (self.emit_to_function_def) {
+            try self.cur_func().appendDirectCallSite(.{
+                .kind = .prop_atom,
+                .prepare_pc = @intCast(prepare_pc),
+                .call_pc = @intCast(call_pc),
+                .atom_id = atom_id,
+                .argc = argc,
+            });
+            return;
+        }
+        try self.function.appendDirectCallSite(.{
+            .kind = .prop_atom,
+            .prepare_pc = @intCast(prepare_pc),
+            .call_pc = @intCast(call_pc),
+            .atom_id = atom_id,
+            .argc = argc,
+        });
+    }
 };
 
 /// Check if `<ident> =>` is the arrow function head shape.
@@ -4541,6 +4561,7 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
             if (s.peekKind() == @as(tok.TokenKind, @intCast('('))) {
                 const callee_line = s.last_token_line_num;
                 const callee_col = s.last_token_col_num;
+                const prepare_pc = s.currentCodeLen();
                 if (was_super) {
                     const code = s.currentCode();
                     if (code.len == 0 or code[code.len - 1] != opcode.op.get_super) return Error.UnexpectedToken;
@@ -4556,7 +4577,11 @@ fn parseMemberChain(s: *ParseState, flags: ParseFlags, chain_buf: []usize, chain
                 const shape = try parseCallArgs(s, flags);
                 s.last_anonymous_function_expr = false;
                 switch (shape) {
-                    .direct => |argc| try s.emitOpU16At(opcode.op.call_method, argc, callee_line, callee_col),
+                    .direct => |argc| {
+                        const call_pc = s.currentCodeLen();
+                        try s.emitOpU16At(opcode.op.call_method, argc, callee_line, callee_col);
+                        if (!was_super and !private_name) try s.appendDirectCallSite(prepare_pc, call_pc, retained_name, argc);
+                    },
                     .applied => {
                         // Method call with spread. Stack: [obj, func, array].
                         // QuickJS emits `perm3 ; apply 0` (`quickjs.c:26672-26676`).

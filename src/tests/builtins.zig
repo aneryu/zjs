@@ -264,7 +264,7 @@ test "invariant int32 property and dense array range fast path preserves observa
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
-    var output_buffer: [160]u8 = undefined;
+    var output_buffer: [192]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
         \\let own = { a: 1, b: 2 };
@@ -419,6 +419,79 @@ test "Array.prototype.push fast path observes inherited indexed setter" {
     try std.testing.expectEqualStrings("3\n3\n3\nundefined\nfalse\n", stream.buffered());
 }
 
+test "Array.prototype.push field2 fast path preserves observable guards" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let fast = [];
+        \\for (let i = 0; i < 8; i++) fast.push(i);
+        \\print(fast.length, fast[0], fast[7]);
+        \\print(eval("let completion=[]; for (let i=0; i<4; i++) completion.push(i);"));
+        \\print(eval("let skipped=[]; for (let i=4; i<4; i++) skipped.push(i);"));
+        \\let saved = Array.prototype.push;
+        \\try {
+        \\  let calls = 0;
+        \\  Array.prototype.push = function(v) { calls++; return 123; };
+        \\  let custom = [];
+        \\  print(custom.push(9), custom.length, calls);
+        \\  let customLoop = [];
+        \\  for (let i = 0; i < 3; i++) customLoop.push(i);
+        \\  print(customLoop.length, calls);
+        \\} finally {
+        \\  Array.prototype.push = saved;
+        \\}
+        \\let own = [];
+        \\own.push = function(v) { return 77; };
+        \\print(own.push(1), own.length);
+        \\let locked = [];
+        \\Object.defineProperty(locked, "length", { writable: false });
+        \\try { locked.push(1); print("locked-ok"); } catch (e) { print(e instanceof TypeError, locked.length); }
+        \\let lockedLoop = [];
+        \\Object.defineProperty(lockedLoop, "length", { writable: false });
+        \\try { for (let i = 0; i < 2; i++) lockedLoop.push(i); print("locked-loop-ok"); } catch (e) { print(e instanceof TypeError, lockedLoop.length); }
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("8 0 7\n4\nundefined\n123 0 1\n0 4\n77 0\ntrue 0\ntrue 0\n", stream.buffered());
+}
+
+test "RegExp literal test range fast path preserves observable guards" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let c = 0;
+        \\for (let i = 0; i < 8; i++) if (/a+b/.test("aaab")) c++;
+        \\print(c);
+        \\let miss = 0;
+        \\for (let i = 0; i < 8; i++) if (/z+/.test("aaab")) miss++;
+        \\print(miss);
+        \\let saved = RegExp.prototype.test;
+        \\try {
+        \\  let calls = 0;
+        \\  RegExp.prototype.test = function(s) { calls++; return false; };
+        \\  let custom = 0;
+        \\  for (let i = 0; i < 3; i++) if (/a+b/.test("aaab")) custom++;
+        \\  print(custom, calls);
+        \\} finally {
+        \\  RegExp.prototype.test = saved;
+        \\}
+        \\let globalFlag = 0;
+        \\for (let i = 0; i < 3; i++) if (/a/g.test("a")) globalFlag++;
+        \\print(globalFlag);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("8\n0\n0 3\n3\n", stream.buffered());
+}
+
 test "sparse array literal fast paths preserve holes and length semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -437,11 +510,76 @@ test "sparse array literal fast paths preserve holes and length semantics" {
         \\print(c.length, c[0]);
         \\c.length = 2;
         \\print(c.length, c[0]);
+        \\let calls = 0;
+        \\function sideEffect() { calls++; return 3; }
+        \\let sum = 0;
+        \\for (let i = 0; i < 4; i++) { const d = [1, , sideEffect()]; sum += d.length; }
+        \\print(sum, calls);
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("3 true false true true\n2 false false\nshrink-err\n1 1\n2 1\n", stream.buffered());
+    try std.testing.expectEqualStrings("3 true false true true\n2 false false\nshrink-err\n1 1\n2 1\n12 4\n", stream.buffered());
+}
+
+test "sparse array literal length add range fast path collapses loop opcodes" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var profile = core.OpcodeProfile{};
+    js.runtime.setOpcodeProfile(&profile);
+    defer js.runtime.setOpcodeProfile(null);
+
+    var output_buffer: [32]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let s = 0;
+        \\for (let i = 0; i < 50000; i++) { const a = [1, , 3]; s += a.length; }
+        \\print(s);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("150000\n", stream.buffered());
+    try std.testing.expect(profile.totalOpcodeCount() <= 20);
+    try std.testing.expectEqual(@as(u64, 0), profile.count[op.array_from]);
+    try std.testing.expectEqual(@as(u64, 0), profile.count[op.define_field]);
+    try std.testing.expectEqual(@as(u64, 0), profile.count[op.get_length]);
+    try std.testing.expectEqual(@as(u64, 0), profile.count[op.add]);
+}
+
+test "array for-of fast path preserves iterator observability" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let s = 0;
+        \\for (let x of [1, 2, 3]) s += x;
+        \\print(s);
+        \\let a = [1, , 3];
+        \\Object.prototype[1] = 9;
+        \\let inherited = 0;
+        \\for (let x of a) inherited += x;
+        \\delete Object.prototype[1];
+        \\print(inherited);
+        \\let calls = 0;
+        \\const proto = Object.getPrototypeOf([][Symbol.iterator]());
+        \\const saved = proto.next;
+        \\proto.next = function() { calls++; return saved.call(this); };
+        \\let patched = 0;
+        \\for (let x of [4, 5]) patched += x;
+        \\proto.next = saved;
+        \\print(patched, calls);
+        \\let keys = "";
+        \\for (let k of [10, 20].keys()) keys += k;
+        \\print(keys);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("6\n13\n9 3\n01\n", stream.buffered());
 }
 
 test "dense array indexed append range preserves ordinary set guards" {
@@ -555,6 +693,36 @@ test "global var induction add range preserves completion" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("499500 1000\n6\nundefined\n", stream.buffered());
+}
+
+test "global write induction range preserves strict writable semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\"use strict";
+        \\var g = -1;
+        \\for (let i = 0; i < 1000; i++) g = i;
+        \\print(g);
+        \\var skipped = 7;
+        \\for (let j = 5; j < 5; j++) skipped = j;
+        \\print(skipped);
+        \\Object.defineProperty(globalThis, "roGlobalLoop", { value: 1, writable: false, configurable: true });
+        \\try {
+        \\  for (let k = 0; k < 3; k++) roGlobalLoop = k;
+        \\} catch (e) {
+        \\  print(e.name, roGlobalLoop);
+        \\}
+        \\delete globalThis.roGlobalLoop;
+        \\print(eval("var eg = -1; for (let i = 0; i < 4; i++) eg = i;"));
+        \\print(eval("var eg2 = -1; for (let j = 4; j < 4; j++) eg2 = j;"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("999\n7\nTypeError 1\n3\nundefined\n", stream.buffered());
 }
 
 test "short BigInt induction add range preserves completion" {
@@ -2785,7 +2953,7 @@ test "invalid opcode reports invalid bytecode without context exception" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    var function = try makeFunction(rt, &.{250});
+    var function = try makeFunction(rt, &.{255});
     defer function.deinit(rt);
     try std.testing.expectError(error.InvalidBytecode, runFunction(rt, ctx, &function));
     try std.testing.expect(!ctx.hasException());

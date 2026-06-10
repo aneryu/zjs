@@ -3687,6 +3687,33 @@ test "Engine eval executes simple variable assignment and print" {
     try std.testing.expectEqualStrings("12\n", stream.buffered());
 }
 
+test "Engine eval preserves global lexical write fast path semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let g = 0;
+        \\g = 1;
+        \\function setGlobal() { g = g + 2; }
+        \\setGlobal();
+        \\print(g);
+        \\const c = 1;
+        \\try { c = 2; } catch (e) { print(e.name, c); }
+        \\let shadow = "global";
+        \\function localShadow() { let shadow = "local"; shadow = "changed"; return shadow; }
+        \\print(localShadow(), shadow);
+        \\let withTarget = { g: 10 };
+        \\with (withTarget) { g = 11; }
+        \\print(g, withTarget.g);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3\nTypeError 1\nchanged global\n3 11\n", stream.buffered());
+}
+
 test "Engine eval assigns contextual await bindings in sloppy scripts" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -3870,6 +3897,8 @@ test "Engine eval preserves regexp UTF-16 test host output semantics" {
     const result = try js.evalWithOutput(
         \\let re = new RegExp("\u00e9+", "");
         \\print(re.test("\u00e9\u00e9"));
+        \\print(re.test("\u0100\u00e9"));
+        \\print(re.test("\u0100"));
         \\let oldTest = RegExp.prototype.test;
         \\RegExp.prototype.test = function(input) { return input.length + ":" + (this === re); };
         \\print(re.test("\u00e9\u00e9"));
@@ -3878,11 +3907,45 @@ test "Engine eval preserves regexp UTF-16 test host output semantics" {
         \\print(re.test("\u00e9\u00e9"));
         \\delete re.test;
         \\print(re.test("aa"));
+        \\let execOverride = /a+b/;
+        \\let seenExec = "";
+        \\execOverride.exec = function(input) { seenExec = input + ":" + (this === execOverride); return null; };
+        \\print(execOverride.test("aaab"));
+        \\print(seenExec);
+        \\let globalRe = /a+b/g;
+        \\print(globalRe.test("aaab"), globalRe.lastIndex);
+        \\print(globalRe.test("x"), globalRe.lastIndex);
+        \\let stickyRe = /a/y;
+        \\stickyRe.lastIndex = 1;
+        \\print(stickyRe.test("ba"), stickyRe.lastIndex);
     , &stream);
     defer result.free(js.runtime);
 
     try std.testing.expect(result.isUndefined());
-    try std.testing.expectEqualStrings("true\n2:true\n233\nfalse\n", stream.buffered());
+    try std.testing.expectEqualStrings("true\ntrue\nfalse\n2:true\n233\nfalse\nfalse\naaab:true\ntrue 4\nfalse 0\ntrue 2\n", stream.buffered());
+}
+
+test "Engine eval prepared RegExp call observes same-site property changes" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let re = /a+b/;
+        \\function hit(input) { return re.test(input); }
+        \\print(hit("aaab"));
+        \\RegExp.prototype.test = function(input) { return "patched:" + input + ":" + (this === re); };
+        \\print(hit("aaab"));
+        \\re.test = function(input) { return "own:" + input; };
+        \\print(hit("aaab"));
+        \\delete re.test;
+        \\print(hit("aaab"));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("true\npatched:aaab:true\nown:aaab\npatched:aaab:true\n", stream.buffered());
 }
 
 test "Engine eval preserves dense array join host output semantics" {
@@ -3939,6 +4002,40 @@ test "Engine eval preserves dense array pop host output semantics" {
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("2\n1\ncustom:1\nown:1\n9\n0\ngetter\n", stream.buffered());
+}
+
+test "Engine eval preserves ordinary array pop fast path semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [512]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let a = [1, 2, 3];
+        \\let x = a.pop();
+        \\print(x, a.length, a.join(","));
+        \\let extra = [1, 2];
+        \\print(extra.pop(0), extra.length, extra.join(","));
+        \\let b = [1];
+        \\b.length = 2;
+        \\print(b.pop(), b.length);
+        \\Object.prototype[1] = 7;
+        \\let c = [1];
+        \\c.length = 2;
+        \\print(c.pop(), c.length);
+        \\delete Object.prototype[1];
+        \\let d = [1, 2];
+        \\Object.defineProperty(d, "1", { value: 2, configurable: false });
+        \\try {
+        \\    print(d.pop());
+        \\} catch (e) {
+        \\    print(e.name, d.length, d[1]);
+        \\}
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("3 2 1,2\n2 1 1\nundefined 1\n7 1\nTypeError 2 2\n", stream.buffered());
 }
 
 test "Engine eval preserves simple closure call host output semantics" {
@@ -4057,6 +4154,31 @@ test "Engine eval preserves typed array constructor length host output semantics
 
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("4\ntrue\nprint:4\n99\n", stream.buffered());
+}
+
+test "Engine eval preserves Int32Array indexed read fast path semantics" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\let a = new Int32Array(2);
+        \\a[0] = 7;
+        \\a[1] = -3;
+        \\print(a[0], a[1], a[2]);
+        \\Object.prototype[0] = 9;
+        \\let b = new Int32Array(0);
+        \\print(b[0]);
+        \\delete Object.prototype[0];
+        \\let c = new Int32Array(1);
+        \\c.buffer.transfer();
+        \\print(c[0]);
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("7 -3 undefined\nundefined\nundefined\n", stream.buffered());
 }
 
 test "Engine eval executes simple template interpolation" {

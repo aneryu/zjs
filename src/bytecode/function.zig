@@ -111,6 +111,20 @@ pub const VarDef = function_bytecode.VarDef;
 pub const ClosureVar = function_bytecode.ClosureVar;
 pub const SimpleNumericKind = function_bytecode.SimpleNumericKind;
 pub const SimpleStringKind = function_bytecode.SimpleStringKind;
+pub const CallSiteKind = function_bytecode.CallSiteKind;
+pub const CallSite = function_bytecode.CallSite;
+
+pub const DirectCallKind = enum(u8) {
+    prop_atom,
+};
+
+pub const DirectCallSite = struct {
+    kind: DirectCallKind = .prop_atom,
+    prepare_pc: u32,
+    call_pc: u32,
+    atom_id: atom.Atom,
+    argc: u16,
+};
 
 const IcSite = ic.Site;
 
@@ -159,6 +173,10 @@ pub const Bytecode = struct {
     ic_slots: []ic.Slot = &.{},
     ic_site_ids: []usize = &.{},
     ic_sites: []IcSite = &.{},
+    direct_call_sites: []DirectCallSite = &.{},
+    direct_call_sites_capacity: usize = 0,
+    call_sites: []CallSite = &.{},
+    call_sites_capacity: usize = 0,
 
     pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) Bytecode {
         return .{
@@ -203,6 +221,8 @@ pub const Bytecode = struct {
         if (module_record) |*record| record.deinit();
         if (debug_table) |*table| table.deinit();
         self.deinitIcSlots(rt);
+        self.deinitDirectCallSites();
+        self.deinitCallSites();
         if (owns_pc2line_buf and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
     }
 
@@ -290,6 +310,22 @@ pub const Bytecode = struct {
         }
     }
 
+    pub fn remapDirectCallSites(self: *Bytecode, old_to_new_pc: []const usize) void {
+        if (self.direct_call_sites.len == 0) return;
+        for (self.direct_call_sites) |*site| {
+            if (site.prepare_pc < old_to_new_pc.len) {
+                site.prepare_pc = @intCast(old_to_new_pc[site.prepare_pc]);
+            } else {
+                site.prepare_pc = std.math.maxInt(u32);
+            }
+            if (site.call_pc < old_to_new_pc.len) {
+                site.call_pc = @intCast(old_to_new_pc[site.call_pc]);
+            } else {
+                site.call_pc = std.math.maxInt(u32);
+            }
+        }
+    }
+
     /// Truncate `code` back to `target_len` bytes, preserving capacity so
     /// re-emission after speculative rollback does not reallocate.
     pub fn truncateCode(self: *Bytecode, target_len: usize) void {
@@ -344,6 +380,38 @@ pub const Bytecode = struct {
             self.atoms.free(self.atom_operands[i]);
         }
         self.atom_operands = self.atom_operands.ptr[0..target_len];
+    }
+
+    pub fn appendDirectCallSite(self: *Bytecode, site: DirectCallSite) !void {
+        const tail = try growSliceBy(DirectCallSite, self.memory, &self.direct_call_sites, &self.direct_call_sites_capacity, 1);
+        tail[0] = site;
+        tail[0].atom_id = self.atoms.dup(site.atom_id);
+    }
+
+    pub fn appendCallSite(self: *Bytecode, site: CallSite) !u16 {
+        if (self.call_sites.len >= std.math.maxInt(u16)) return error.BytecodeOverflow;
+        const tail = try growSliceBy(CallSite, self.memory, &self.call_sites, &self.call_sites_capacity, 1);
+        tail[0] = site;
+        tail[0].atom_id = self.atoms.dup(site.atom_id);
+        return @intCast(self.call_sites.len - 1);
+    }
+
+    pub fn deinitDirectCallSites(self: *Bytecode) void {
+        const items = self.direct_call_sites;
+        const capacity = self.direct_call_sites_capacity;
+        self.direct_call_sites = &.{};
+        self.direct_call_sites_capacity = 0;
+        for (items) |site| self.atoms.free(site.atom_id);
+        if (capacity != 0) self.memory.free(DirectCallSite, items.ptr[0..capacity]);
+    }
+
+    pub fn deinitCallSites(self: *Bytecode) void {
+        const items = self.call_sites;
+        const capacity = self.call_sites_capacity;
+        self.call_sites = &.{};
+        self.call_sites_capacity = 0;
+        for (items) |site| self.atoms.free(site.atom_id);
+        if (capacity != 0) self.memory.free(CallSite, items.ptr[0..capacity]);
     }
 
     pub fn addScope(self: *Bytecode, parent: ?u32) !*scope.ScopeRecord {
@@ -407,6 +475,7 @@ pub fn asBytecodeView(fb: *const FunctionBytecode, rt: *runtime.JSRuntime) Bytec
         .ic_slots = fb.ic_slots,
         .ic_site_ids = fb.ic_site_ids,
         .ic_sites = fb.ic_sites,
+        .call_sites = fb.call_sites,
         .constants = .{ .memory = &rt.memory, .atoms = &rt.atoms, .values = fb.cpool },
     };
 }
@@ -455,6 +524,7 @@ fn opcodeHasOwnDataIc(op_id: u8) bool {
         op_id == opcode.op.put_var or
         op_id == opcode.op.get_field or
         op_id == opcode.op.get_field2 or
+        op_id == opcode.op.prepare_call_prop_atom or
         op_id == opcode.op.put_field or
         op_id == opcode.op.get_field_data_slot or
         op_id == opcode.op.get_global_data_slot or

@@ -21,6 +21,17 @@ pub const TailCallMethodResult = union(enum) {
 
 pub const TailCallResult = TailCallMethodResult;
 
+const PreparedPropertyTarget = union(enum) {
+    native: frame_mod.PreparedNativeCallTarget,
+    value: core.JSValue,
+};
+
+const PreparedNativeLookup = struct {
+    target: frame_mod.PreparedNativeCallTarget,
+    holder: *core.Object,
+    index: usize,
+};
+
 pub const CallDepthGuard = struct {
     ctx: *core.JSContext,
 
@@ -546,6 +557,140 @@ pub fn tailCall(
     return .{ .return_value = core.JSValue.undefinedValue() };
 }
 
+pub fn prepareCallPropAtom(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime getValueProperty: anytype,
+    comptime closeStackTopForOfIteratorForPendingError: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    if (frame.pc + 4 > function.code.len) return error.InvalidBytecode;
+    const site_id_u32 = readInt(u32, function.code[frame.pc..][0..4]);
+    frame.pc += 4;
+    if (site_id_u32 >= function.call_sites.len or site_id_u32 > std.math.maxInt(u16)) return error.InvalidBytecode;
+    const site_id: u16 = @intCast(site_id_u32);
+    const site = function.call_sites[site_id];
+    if (site.kind != .prop_atom) return error.InvalidBytecode;
+
+    const receiver = stack.peek() orelse return error.StackUnderflow;
+    defer receiver.free(ctx.runtime);
+    const target = preparePropertyCallTarget(ctx, output, global, receiver, site, function, frame, getValueProperty) catch |err| {
+        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack, frame);
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        return err;
+    };
+    switch (target) {
+        .native => |native| {
+            if (try tryCallPreparedNativeNoArg(ctx, output, global, stack, function, frame, catch_target, receiver, native, handleCatchableRuntimeError)) |step| {
+                return step;
+            }
+            try frame.pushPreparedNativeCall(&ctx.runtime.memory, site_id, stack.values.len, native);
+        },
+        .value => |value| {
+            errdefer value.free(ctx.runtime);
+            try frame.pushPreparedValueCall(&ctx.runtime.memory, site_id, stack.values.len, value);
+        },
+    }
+    return .done;
+}
+
+fn tryCallPreparedNativeNoArg(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    receiver: core.JSValue,
+    native: frame_mod.PreparedNativeCallTarget,
+    comptime handleCatchableRuntimeError: anytype,
+) !?Step {
+    if (frame.pc + 3 > function.code.len or function.code[frame.pc] != op.call_prepared) return null;
+    const argc = readInt(u16, function.code[frame.pc + 1 ..][0..2]);
+    if (argc != 0) return null;
+    frame.pc += 3;
+
+    const args: []const core.JSValue = &.{};
+    const result = callPreparedNativeTarget(ctx, output, global, receiver, native, args, function, frame) catch |err| {
+        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        discardPreparedCallInputs(ctx.runtime, stack, 0) catch {};
+        return err;
+    };
+    errdefer result.free(ctx.runtime);
+    try discardPreparedCallInputs(ctx.runtime, stack, 0);
+    if (dropUnusedCallResult(ctx, function, frame, result)) return .done;
+    try stack.pushOwned(result);
+    return .done;
+}
+
+pub fn callPrepared(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    comptime qjsArrayMethodFastCall: anytype,
+    comptime callValueOrBytecodeClassMode: anytype,
+    comptime isCurrentSuperConstructor: anytype,
+    comptime handleCatchableRuntimeError: anytype,
+) !Step {
+    if (frame.pc + 2 > function.code.len) return error.InvalidBytecode;
+    const argc = readInt(u16, function.code[frame.pc..][0..2]);
+    frame.pc += 2;
+    if (stack.values.len < @as(usize, argc) + 1) return error.StackUnderflow;
+    const args_start = stack.values.len - argc;
+    const receiver_index = args_start - 1;
+    const receiver = stack.values[receiver_index];
+    const args = stack.values[args_start..];
+    const target = frame.popPreparedCallTarget() orelse return error.InvalidBytecode;
+
+    var rooted_func = core.JSValue.undefinedValue();
+    var rooted_func_active = false;
+    defer if (rooted_func_active) rooted_func.free(ctx.runtime);
+
+    const result = switch (target) {
+        .native => |native| callPreparedNativeTarget(ctx, output, global, receiver, native, args, function, frame) catch |err| {
+            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
+            return err;
+        },
+        .value => |func| blk: {
+            rooted_func = func;
+            rooted_func_active = true;
+            const fast_result = fastNativeMethodCall(ctx, output, global, receiver, rooted_func, args, function, frame) catch |err| {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
+                return err;
+            };
+            if (fast_result) |value| break :blk value;
+            const maybe_array_result = qjsArrayMethodFastCall(ctx, output, global, receiver, rooted_func, args, function, frame) catch |err| {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
+                return err;
+            };
+            if (maybe_array_result) |value| break :blk value;
+            break :blk callValueOrBytecodeClassMode(ctx, output, global, receiver, rooted_func, args, function, frame, isCurrentSuperConstructor(ctx, frame, rooted_func)) catch |err| {
+                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
+                return err;
+            };
+        },
+    };
+    errdefer result.free(ctx.runtime);
+    try discardPreparedCallInputs(ctx.runtime, stack, argc);
+    if (dropUnusedCallResult(ctx, function, frame, result)) return .done;
+    try stack.pushOwned(result);
+    return .done;
+}
+
 pub fn callMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -602,6 +747,262 @@ pub fn callMethod(
     errdefer result.free(ctx.runtime);
     try stack.pushOwned(result);
     return .done;
+}
+
+fn preparePropertyCallTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    site: bytecode.function.CallSite,
+    function: *const bytecode.Bytecode,
+    frame: *frame_mod.Frame,
+    comptime getValueProperty: anytype,
+) !PreparedPropertyTarget {
+    if (cachedPreparedNativeCallTarget(function, site, receiver)) |native| {
+        return .{ .native = native };
+    }
+    if (autoInitNativeTargetForReceiver(ctx.runtime, global, receiver, site.atom_id)) |lookup| {
+        installPreparedNativeCallIc(function, site, ctx.runtime, receiver, lookup.holder, lookup.index);
+        return .{ .native = lookup.target };
+    }
+    const value = try getValueProperty(ctx, output, global, receiver, site.atom_id, function, frame);
+    return .{ .value = value };
+}
+
+fn autoInitNativeTargetForReceiver(
+    rt: *core.JSRuntime,
+    global: *core.Object,
+    receiver: core.JSValue,
+    atom_id: core.Atom,
+) ?PreparedNativeLookup {
+    if (objectFromValue(receiver)) |object| {
+        return autoInitNativeTargetInObjectChain(receiver, object, atom_id);
+    }
+    const prototype = primitivePrototypeForCall(rt, global, receiver) orelse return null;
+    return autoInitNativeTargetInObjectChain(receiver, prototype, atom_id);
+}
+
+fn autoInitNativeTargetInObjectChain(
+    receiver: core.JSValue,
+    start: *core.Object,
+    atom_id: core.Atom,
+) ?PreparedNativeLookup {
+    var cursor: ?*core.Object = start;
+    while (cursor) |object| {
+        if (object.proxyTarget() != null or object.exotic != null) return null;
+        if (object.findProperty(atom_id)) |index| {
+            const target = preparedNativeTargetFromAutoInitEntry(receiver, object, index, atom_id) orelse return null;
+            return .{ .target = target, .holder = object, .index = index };
+        }
+        cursor = object.getPrototype();
+    }
+    return null;
+}
+
+fn cachedPreparedNativeCallTarget(
+    function: *const bytecode.Bytecode,
+    site: bytecode.function.CallSite,
+    receiver: core.JSValue,
+) ?frame_mod.PreparedNativeCallTarget {
+    const object = objectFromValue(receiver) orelse return null;
+    if (object.proxyTarget() != null or object.exotic != null) return null;
+    const slot = function.icSlotForPc(site.prepare_pc) orelse return null;
+
+    switch (slot.lookupOwnDataResult(object, site.atom_id)) {
+        .hit => |index| {
+            if (preparedNativeTargetFromAutoInitEntry(receiver, object, index, site.atom_id)) |target| return target;
+        },
+        .miss, .invalidated => {},
+    }
+    switch (slot.lookupProtoDataResult(object, site.atom_id)) {
+        .hit => |hit| {
+            if (preparedNativeTargetFromAutoInitEntry(receiver, hit.holder, hit.slot_index, site.atom_id)) |target| return target;
+        },
+        .miss, .invalidated => {},
+    }
+    return null;
+}
+
+fn preparedNativeTargetFromAutoInitEntry(
+    receiver: core.JSValue,
+    holder: *core.Object,
+    index: usize,
+    atom_id: core.Atom,
+) ?frame_mod.PreparedNativeCallTarget {
+    if (holder.proxyTarget() != null or holder.exotic != null) return null;
+    if (index >= holder.properties.len) return null;
+    const entry = holder.properties[index];
+    if (entry.flags.deleted or entry.flags.accessor or entry.atom_id != atom_id) return null;
+    return switch (entry.slot) {
+        .auto_init => |info| {
+            const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return null;
+            if (!nativeBuiltinSupportedWithoutFunctionObject(receiver, native_ref, info)) return null;
+            return .{ .native_ref = native_ref, .auto_init = info };
+        },
+        .data, .accessor, .deleted => null,
+    };
+}
+
+fn installPreparedNativeCallIc(
+    function: *const bytecode.Bytecode,
+    site: bytecode.function.CallSite,
+    rt: *core.JSRuntime,
+    receiver: core.JSValue,
+    holder: *core.Object,
+    index: usize,
+) void {
+    const object = objectFromValue(receiver) orelse return;
+    if (object.proxyTarget() != null or object.exotic != null) return;
+    if (holder.proxyTarget() != null or holder.exotic != null) return;
+    const slot = function.icSlotForPc(site.prepare_pc) orelse return;
+    if (holder == object) {
+        _ = slot.installOwnData(&rt.shapes, object, site.atom_id, index);
+    } else {
+        _ = slot.installProtoData(&rt.shapes, object, holder, site.atom_id, index);
+    }
+}
+
+fn primitivePrototypeForCall(rt: *core.JSRuntime, global: *core.Object, receiver: core.JSValue) ?*core.Object {
+    if (receiver.isString()) return shared_vm.constructorPrototypeFromGlobal(rt, global, "String");
+    if (receiver.isNumber()) return shared_vm.constructorPrototypeFromGlobal(rt, global, "Number");
+    if (receiver.isBool()) return shared_vm.constructorPrototypeFromGlobal(rt, global, "Boolean");
+    if (receiver.isBigInt()) return shared_vm.constructorPrototypeFromGlobal(rt, global, "BigInt");
+    if (receiver.isSymbol()) return shared_vm.constructorPrototypeFromGlobal(rt, global, "Symbol");
+    return null;
+}
+
+fn nativeBuiltinSupportedWithoutFunctionObject(
+    receiver: core.JSValue,
+    native_ref: core.function.NativeBuiltinRef,
+    info: core.property.AutoInit,
+) bool {
+    return switch (native_ref.domain) {
+        .math => true,
+        .date => native_ref.id == @intFromEnum(builtins.date.StaticMethod.now),
+        .number => native_ref.id == @intFromEnum(builtins.number.StaticMethod.parse_int) or
+            native_ref.id == @intFromEnum(builtins.number.StaticMethod.parse_float),
+        .string => native_ref.id == @intFromEnum(builtins.string.StaticMethod.from_char_code) or
+            native_ref.id == @intFromEnum(builtins.string.PrototypeMethod.substring),
+        .regexp => native_ref.id == @intFromEnum(builtins.regexp.PrototypeMethod.test_) or
+            native_ref.id == @intFromEnum(builtins.regexp.PrototypeMethod.exec),
+        .json, .uri => true,
+        .collection => collectionNativeSupportedWithoutFunctionObject(native_ref.id, info),
+        .array => arrayNativeSupportedWithoutFunctionObject(receiver, native_ref.id),
+        else => false,
+    };
+}
+
+fn arrayNativeSupportedWithoutFunctionObject(receiver: core.JSValue, id: u32) bool {
+    _ = receiver;
+    return switch (id) {
+        @intFromEnum(builtins.array.PrototypeMethod.push),
+        @intFromEnum(builtins.array.PrototypeMethod.pop),
+        => true,
+        else => false,
+    };
+}
+
+fn collectionNativeSupportedWithoutFunctionObject(id: u32, info: core.property.AutoInit) bool {
+    if (info.collection_method_owner_class == core.class.invalid_class_id) return false;
+    return switch (id) {
+        @intFromEnum(builtins.collection.PrototypeMethod.set),
+        @intFromEnum(builtins.collection.PrototypeMethod.get),
+        @intFromEnum(builtins.collection.PrototypeMethod.has),
+        @intFromEnum(builtins.collection.PrototypeMethod.delete),
+        @intFromEnum(builtins.collection.PrototypeMethod.clear),
+        @intFromEnum(builtins.collection.PrototypeMethod.add),
+        @intFromEnum(builtins.collection.PrototypeMethod.keys),
+        @intFromEnum(builtins.collection.PrototypeMethod.values),
+        @intFromEnum(builtins.collection.PrototypeMethod.entries),
+        @intFromEnum(builtins.collection.PrototypeMethod.get_or_insert),
+        @intFromEnum(builtins.collection.PrototypeMethod.size_getter),
+        => true,
+        else => false,
+    };
+}
+
+fn callPreparedNativeTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    target: frame_mod.PreparedNativeCallTarget,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const native_ref = target.native_ref;
+    switch (native_ref.domain) {
+        .math => return shared_vm.qjsMathCall(ctx, output, global, native_ref.id, args),
+        .date => if (native_ref.id == @intFromEnum(builtins.date.StaticMethod.now)) {
+            return builtins.date.staticCall(ctx.runtime, native_ref.id, args);
+        },
+        .number => switch (native_ref.id) {
+            @intFromEnum(builtins.number.StaticMethod.parse_int) => return shared_vm.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame),
+            @intFromEnum(builtins.number.StaticMethod.parse_float) => return shared_vm.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame),
+            else => {},
+        },
+        .string => switch (native_ref.id) {
+            @intFromEnum(builtins.string.StaticMethod.from_char_code) => return shared_vm.qjsStringFromCharCode(ctx, output, global, args),
+            @intFromEnum(builtins.string.PrototypeMethod.substring) => return shared_vm.qjsStringPrototypeMethod(ctx, output, global, receiver, 1, args, caller_function, caller_frame),
+            else => {},
+        },
+        .regexp => switch (native_ref.id) {
+            @intFromEnum(builtins.regexp.PrototypeMethod.test_) => {
+                if (try shared_vm.qjsRegExpTestMethod(ctx, output, global, receiver, args, caller_function, caller_frame)) |value| return value;
+            },
+            @intFromEnum(builtins.regexp.PrototypeMethod.exec) => {
+                if (try shared_vm.qjsRegExpExecMethod(ctx, output, global, receiver, args, caller_function, caller_frame)) |value| return value;
+            },
+            else => {},
+        },
+        .json => return shared_vm.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        .uri => return shared_vm.qjsUriCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        .collection => if (try callPreparedCollectionNativeTarget(ctx, global, receiver, target, args, caller_function, caller_frame)) |value| return value,
+        .array => if (try collection_vm.qjsArrayPreparedNativeCall(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value,
+        else => {},
+    }
+    return error.TypeError;
+}
+
+fn callPreparedCollectionNativeTarget(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    receiver: core.JSValue,
+    target: frame_mod.PreparedNativeCallTarget,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    const info = target.auto_init orelse return null;
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (info.collection_method_owner_class != core.class.invalid_class_id and object.class_id != info.collection_method_owner_class) {
+        return error.TypeError;
+    }
+    if (preparedCallResultIsDropped(caller_function, caller_frame)) {
+        const handled = try builtins.collection.methodCallDroppedResult(ctx.runtime, object, target.native_ref.id, args);
+        if (handled) return core.JSValue.undefinedValue();
+    }
+    return try builtins.collection.methodCallObjectWithGlobal(ctx, global, object, target.native_ref.id, args, &.{});
+}
+
+fn preparedCallResultIsDropped(caller_function: ?*const bytecode.Bytecode, caller_frame: ?*frame_mod.Frame) bool {
+    const function = caller_function orelse return false;
+    const frame = caller_frame orelse return false;
+    return frame.pc < function.code.len and function.code[frame.pc] == op.drop;
+}
+
+fn objectFromValue(value: core.JSValue) ?*core.Object {
+    return property_ops.expectObject(value) catch null;
+}
+
+fn discardPreparedCallInputs(rt: *core.JSRuntime, stack: *stack_mod.Stack, argc: u16) !void {
+    var remaining: usize = @as(usize, argc) + 1;
+    while (remaining != 0) : (remaining -= 1) {
+        const value = try stack.pop();
+        value.free(rt);
+    }
 }
 
 fn dropUnusedCallResult(

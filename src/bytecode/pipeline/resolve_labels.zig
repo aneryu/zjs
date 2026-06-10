@@ -693,6 +693,7 @@ pub fn run(ctx: *JSContext) !void {
     // worst-case post-lowering layout; trim it to `out_idx` before
     // installing so capacity tracking stays accurate.
     func.remapSourceLocs(positions);
+    func.remapDirectCallSites(positions);
     if (out_idx < output.len) {
         const trimmed = try ctx.memory.alloc(u8, out_idx);
         @memcpy(trimmed, output[0..out_idx]);

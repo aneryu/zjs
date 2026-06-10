@@ -135,6 +135,34 @@ test "zjs CLI behavior" {
     }
 }
 
+test "prepared method calls capture callee before argument side effects" {
+    const allocator = std.testing.allocator;
+    const zjs_path = build_options.zjs_executable_path;
+    const source =
+        \\let log = "";
+        \\let old = function(x) { log += "old" + x; };
+        \\let obj = { f: old };
+        \\obj.f((obj.f = function() { log += "new"; }, log += "a"));
+        \\try { ({ f: 1 }).f(log += "b"); } catch (e) { log += "T"; }
+        \\console.log(log);
+        \\console.log(Date.now() > 0, Number.parseFloat("1.5"), "abcdef".substring(1, 3), /b/.test("abc"));
+    ;
+
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &[_][]const u8{ zjs_path, "-e", source },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const exit_code = switch (result.term) {
+        .exited => |code| code,
+        else => 255,
+    };
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    try std.testing.expectEqualStrings("aoldabT\ntrue 1.5 bc true\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
 test "CLI top-level range fast paths collapse completion-store loops" {
     const allocator = std.testing.allocator;
     const zjs_path = build_options.zjs_executable_path;
@@ -156,6 +184,12 @@ test "CLI top-level range fast paths collapse completion-store loops" {
             .name = "global_read_loop",
             .source = "var x = 1; let s = 0; for (let i = 0; i < 2000; i++) s += x; print(s);",
             .expected_stdout_prefix = "2000\n",
+            .max_opcodes = 120,
+        },
+        .{
+            .name = "global_write_loop",
+            .source = "\"use strict\"; var g = 0; for (let i = 0; i < 2000; i++) g = i; print(g);",
+            .expected_stdout_prefix = "1999\n",
             .max_opcodes = 120,
         },
         .{

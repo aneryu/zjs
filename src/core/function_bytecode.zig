@@ -77,6 +77,18 @@ pub const SimpleStringKind = enum(u8) {
     percent_hex_byte,
 };
 
+pub const CallSiteKind = enum(u8) {
+    prop_atom,
+};
+
+pub const CallSite = struct {
+    kind: CallSiteKind = .prop_atom,
+    atom_id: atom.Atom,
+    prepare_pc: u32,
+    call_pc: u32,
+    ic_slot_index: usize = std.math.maxInt(usize),
+};
+
 /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
 ///
 /// This is the final compiled bytecode structure produced by the
@@ -147,6 +159,7 @@ pub const FunctionBytecode = struct {
     ic_slots: []ic.Slot = &.{},
     ic_site_ids: []usize = &.{},
     ic_sites: []ic.Site = &.{},
+    call_sites: []CallSite = &.{},
 
     // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
     // tracks this differently via the runtime context.
@@ -228,6 +241,7 @@ pub const FunctionBytecode = struct {
         self.pc2line_len = 0;
         if (pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
 
+        freeOwnedCallSites(self.atoms, self.memory, &self.call_sites);
         if (self.source) |src| {
             self.source = null;
             self.memory.free(u8, @constCast(src));
@@ -261,6 +275,7 @@ pub const FunctionBytecode = struct {
         bytes = addSliceBytes(bytes, ic.Slot, self.ic_slots.len);
         bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
         bytes = addSliceBytes(bytes, ic.Site, self.ic_sites.len);
+        bytes = addSliceBytes(bytes, CallSite, self.call_sites.len);
         if (self.source) |source| bytes = addSaturating(bytes, source.len);
         return bytes;
     }
@@ -292,6 +307,13 @@ fn freeOwnedAtomSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: 
     slot.* = &.{};
     for (items) |atom_id| atoms.free(atom_id);
     if (items.len != 0) mem.free(atom.Atom, items);
+}
+
+fn freeOwnedCallSites(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]CallSite) void {
+    const items = slot.*;
+    slot.* = &.{};
+    for (items) |site| atoms.free(site.atom_id);
+    if (items.len != 0) mem.free(CallSite, items);
 }
 
 fn freeOwnedSlice(comptime T: type, mem: *memory.MemoryAccount, slot: *[]T) void {

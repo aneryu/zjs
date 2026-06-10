@@ -439,7 +439,9 @@ test "print calls emit global lookup generic call and receiver-preserving proper
     var get_var_count: usize = 0;
     var get_prop_count: usize = 0;
     var call_count: usize = 0;
-    var call_prop_count: usize = 0;
+    var prepared_call_count: usize = 0;
+    var call_prepared_count: usize = 0;
+    var legacy_call_prop_count: usize = 0;
     var mul_index: ?usize = null;
     var add_index: ?usize = null;
     var i: usize = 0;
@@ -450,13 +452,17 @@ test "print calls emit global lookup generic call and receiver-preserving proper
         if (op == engine.bytecode.opcode.op.get_var) get_var_count += 1;
         if (op == engine.bytecode.opcode.op.get_field) get_prop_count += 1;
         if (op == engine.bytecode.opcode.op.call) call_count += 1;
-        if (op == engine.bytecode.opcode.op.call_method) call_prop_count += 1;
+        if (op == engine.bytecode.opcode.op.prepare_call_prop_atom) prepared_call_count += 1;
+        if (op == engine.bytecode.opcode.op.call_prepared) call_prepared_count += 1;
+        if (op == engine.bytecode.opcode.op.call_method) legacy_call_prop_count += 1;
         i += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), get_var_count);
     try std.testing.expectEqual(@as(usize, 0), get_prop_count);
     try std.testing.expect(call_count + countOpcode(parsed.function.code, engine.bytecode.opcode.op.call1) >= 1);
-    try std.testing.expectEqual(@as(usize, 1), call_prop_count);
+    try std.testing.expectEqual(@as(usize, 1), prepared_call_count);
+    try std.testing.expectEqual(@as(usize, 1), call_prepared_count);
+    try std.testing.expectEqual(@as(usize, 0), legacy_call_prop_count);
     try std.testing.expect(mul_index != null);
     try std.testing.expect(add_index != null);
     try std.testing.expect(mul_index.? < add_index.?);
@@ -645,7 +651,7 @@ test "quick parser lowers supported Date helpers to receiver-preserving property
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countCalls(parsed.function.code) >= 4);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 2);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) >= 2);
 }
 
 test "quick parser lowers supported RegExp helpers to receiver-preserving property calls" {
@@ -661,7 +667,37 @@ test "quick parser lowers supported RegExp helpers to receiver-preserving proper
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 3);
+    const receiver_call_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) +
+        countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
+    try std.testing.expect(receiver_call_count >= 3);
+}
+
+test "prepared call lowering preserves RegExp literal fuse while preparing cached RegExp calls" {
+    const rt = try core.Runtime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    var cached = try frontend.parser.parse(
+        rt,
+        "const r = /a+b/; r.test(\"aaab\");",
+        .{ .mode = .script, .filename = "regexp-cached-prepared.js" },
+    );
+    defer cached.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, cached.parse_path);
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(cached.function.code, engine.bytecode.opcode.op.call_prepared));
+
+    var literal = try frontend.parser.parse(
+        rt,
+        "/a+b/.test(\"aaab\");",
+        .{ .mode = .script, .filename = "regexp-literal-fuse.js" },
+    );
+    defer literal.deinit();
+
+    try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, literal.parse_path);
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(literal.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_prepared));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(literal.function.code, engine.bytecode.opcode.op.call_method));
 }
 
 test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {
@@ -685,7 +721,7 @@ test "quick parser lowers supported Promise helpers to receiver-preserving prope
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 1);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 4);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) >= 4);
 }
 
 test "quick parser lowers supported collection helpers to receiver-preserving property calls" {
@@ -723,7 +759,7 @@ test "quick parser lowers supported collection helpers to receiver-preserving pr
 
     try std.testing.expectEqual(frontend.parser.ParsePath.quickjs_parser, parsed.parse_path);
     try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_constructor) >= 4);
-    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method) >= 16);
+    try std.testing.expect(countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) >= 16);
 }
 
 test "template interpolation emits string concatenation" {
@@ -749,8 +785,11 @@ test "simple arrays emit receiver-preserving property calls" {
 
     const new_array_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.array_from);
     const get_index_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_array_el);
-    const map_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field);
-    const call_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
+    const map_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field) +
+        countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field2) +
+        countOpcode(parsed.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom);
+    const call_prop_count = countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared) +
+        countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method);
     try std.testing.expectEqual(@as(usize, 1), new_array_count);
     try std.testing.expectEqual(@as(usize, 1), get_index_count);
     try std.testing.expect(map_count >= 1 or call_prop_count >= 1);
@@ -809,7 +848,9 @@ test "test262 frontmatter does not affect quick parser behavior" {
     try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_var));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.get_field));
     try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call));
-    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.prepare_call_prop_atom));
+    try std.testing.expectEqual(@as(usize, 1), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_prepared));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(parsed.function.code, engine.bytecode.opcode.op.call_method));
 }
 
 test "arrow early errors reject non-simple strict and invalid rest parameters" {

@@ -1007,24 +1007,50 @@ pub fn qjsRegExpToString(
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
-pub fn simpleAsciiLiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
-    const input = latin1StringSlice(string_value) orelse return null;
-    return simpleAsciiLiteralPlusLiteralMatchBytes(source, flags, input);
+const SimpleLatin1LiteralPlusLiteral = struct {
+    repeat: u8,
+    tail: ?u8,
+};
+
+fn isPlainLatin1RegExpLiteral(unit: u8) bool {
+    return unit >= 0x80 or isPlainAsciiRegExpLiteral(unit);
 }
 
-pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
+fn parseSimpleLatin1LiteralPlusLiteral(source: []const u8, flags: []const u8) ?SimpleLatin1LiteralPlusLiteral {
     if (flags.len != 0 or source.len < 2 or source[1] != '+') return null;
     const repeat = source[0];
-    if (!isPlainAsciiRegExpLiteral(repeat)) return null;
+    if (!isPlainLatin1RegExpLiteral(repeat)) return null;
 
     if (source.len == 2) {
-        return std.mem.indexOfScalar(u8, input, repeat) != null;
+        return .{ .repeat = repeat, .tail = null };
     }
 
     if (source.len != 3) return null;
     const tail = source[2];
-    if (!isPlainAsciiRegExpLiteral(tail)) return null;
+    if (!isPlainLatin1RegExpLiteral(tail)) return null;
+    return .{ .repeat = repeat, .tail = tail };
+}
 
+pub fn simpleLatin1LiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
+    const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
+    const header = string_value.refHeader() orelse return null;
+    if (!string_value.isString()) return null;
+    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    return switch (string_object.resolveData()) {
+        .latin1 => |bytes| simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, bytes),
+        .utf16 => |units| simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern, units),
+    };
+}
+
+pub fn simpleLatin1LiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
+    const pattern = parseSimpleLatin1LiteralPlusLiteral(source, flags) orelse return null;
+    return simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern, input);
+}
+
+fn simpleLatin1LiteralPlusLiteralMatchBytesPattern(pattern: SimpleLatin1LiteralPlusLiteral, input: []const u8) bool {
+    const repeat = pattern.repeat;
+    if (pattern.tail == null) return std.mem.indexOfScalar(u8, input, repeat) != null;
+    const tail = pattern.tail.?;
     var i: usize = 0;
     while (i < input.len) : (i += 1) {
         if (input[i] != repeat) continue;
@@ -1033,6 +1059,28 @@ pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []cons
         if (j < input.len and input[j] == tail) return true;
     }
     return false;
+}
+
+fn simpleLatin1LiteralPlusLiteralMatchUtf16Pattern(pattern: SimpleLatin1LiteralPlusLiteral, input: []const u16) bool {
+    const repeat: u16 = pattern.repeat;
+    if (pattern.tail == null) return std.mem.indexOfScalar(u16, input, repeat) != null;
+    const tail: u16 = pattern.tail.?;
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        if (input[i] != repeat) continue;
+        var j = i + 1;
+        while (j < input.len and input[j] == repeat) : (j += 1) {}
+        if (j < input.len and input[j] == tail) return true;
+    }
+    return false;
+}
+
+pub fn simpleAsciiLiteralPlusLiteralMatch(source: []const u8, flags: []const u8, string_value: core.JSValue) ?bool {
+    return simpleLatin1LiteralPlusLiteralMatch(source, flags, string_value);
+}
+
+pub fn simpleAsciiLiteralPlusLiteralMatchBytes(source: []const u8, flags: []const u8, input: []const u8) ?bool {
+    return simpleLatin1LiteralPlusLiteralMatchBytes(source, flags, input);
 }
 
 pub fn simpleAsciiLiteralClassPlusLiteralMatchBytes(pattern: SimpleAsciiLiteralClassPlusLiteral, input: []const u8) bool {

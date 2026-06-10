@@ -208,6 +208,8 @@ pub const replacementCaptureUnits = string_ops.replacementCaptureUnits;
 pub const simpleAsciiLiteralClassPlusLiteralMatchBytes = string_ops.simpleAsciiLiteralClassPlusLiteralMatchBytes;
 pub const simpleAsciiLiteralPlusLiteralMatch = string_ops.simpleAsciiLiteralPlusLiteralMatch;
 pub const simpleAsciiLiteralPlusLiteralMatchBytes = string_ops.simpleAsciiLiteralPlusLiteralMatchBytes;
+pub const simpleLatin1LiteralPlusLiteralMatch = string_ops.simpleLatin1LiteralPlusLiteralMatch;
+pub const simpleLatin1LiteralPlusLiteralMatchBytes = string_ops.simpleLatin1LiteralPlusLiteralMatchBytes;
 pub const simpleCaptureSequenceAtomMatches = string_ops.simpleCaptureSequenceAtomMatches;
 pub const simpleCaptureSequenceMatchLatin1 = string_ops.simpleCaptureSequenceMatchLatin1;
 pub const simpleCaptureSequenceMatchPattern = string_ops.simpleCaptureSequenceMatchPattern;
@@ -2290,6 +2292,7 @@ pub fn handleCatchableRuntimeError(
     const restored = (try popCatchMarker(ctx.runtime, stack)) orelse null;
     stack.pushOwnedAssumeCapacity(catch_value);
     catch_value_owned = false;
+    frame.dropPreparedCallsForCatchDepth(ctx.runtime, stack.values.len);
     frame.pc = target;
     catch_target.* = restored;
     return true;
@@ -3891,7 +3894,7 @@ pub fn qjsRegExpTestFastNoResult(
         if (is_global or is_sticky) return null;
 
         if (!regexpSourceUsesZigPropertyFallback(borrowed.source, flags)) {
-            if (simpleAsciiLiteralPlusLiteralMatch(borrowed.source, flags, string_value)) |matched| {
+            if (simpleLatin1LiteralPlusLiteralMatch(borrowed.source, flags, string_value)) |matched| {
                 return matched;
             }
             if (nativeFunctionMatcherUnicodeClassAsciiResult(borrowed.source, flags, string_value, 0)) |matched| {
@@ -10103,6 +10106,12 @@ pub fn setGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: co
         else => return err,
     };
     return true;
+}
+
+pub fn setGlobalLexicalValueForFastPathOwned(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool {
+    const env = existingGlobalLexicalEnv(ctx) orelse return false;
+    const index = env.findProperty(atom_id) orelse return false;
+    return env.setOwnDataPropertyAtForLexicalSyncOwned(ctx.runtime, index, atom_id, value);
 }
 
 pub fn initializeGlobalLexicalValue(rt: *core.JSRuntime, env: *core.Object, atom_id: core.Atom, value: core.JSValue) bool {

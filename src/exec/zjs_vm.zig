@@ -517,6 +517,14 @@ pub fn runWithArgsState(
                 .continue_loop => continue,
             },
             op.import => try eval_module_vm.dynamicImport(ctx, output, global, stack, function, &frame, toStringForAnnexB, getValueProperty, promisePrototypeFromGlobal, createNamedError, rejectedPromiseForRuntimeError),
+            op.prepare_call_prop_atom => switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, &frame, &catch_target, getValueProperty, closeStackTopForOfIteratorForPendingErrorWithFrame, handleCatchableRuntimeError)) {
+                .done => {},
+                .continue_loop => continue,
+            },
+            op.call_prepared => switch (try call_vm.callPrepared(ctx, output, global, stack, function, &frame, &catch_target, qjsArrayMethodFastCall, callValueOrBytecodeClassMode, isCurrentSuperConstructor, handleCatchableRuntimeError)) {
+                .done => {},
+                .continue_loop => continue,
+            },
             op.call_method => switch (try call_vm.callMethod(ctx, output, global, stack, function, &frame, &catch_target, qjsArrayMethodFastCall, callValueOrBytecodeClassMode, isCurrentSuperConstructor, handleCatchableRuntimeError)) {
                 .done => {},
                 .continue_loop => continue,
