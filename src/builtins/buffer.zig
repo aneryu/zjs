@@ -609,7 +609,7 @@ pub fn sharedArrayBufferGrowLength(rt: *core.JSRuntime, buffer_value: core.JSVal
 pub fn dataViewGet(rt: *core.JSRuntime, view_value: core.JSValue, kind: u32, args: []const core.JSValue) !core.JSValue {
     const view = try expectDataViewObject(view_value);
     const index = if (args.len >= 1) try toIndexUsize(rt, args[0]) else @as(usize, 0);
-    const little_endian = args.len >= 2 and isTruthy(args[1]);
+    const little_endian = args.len >= 2 and core.value_semantics.toBoolean(args[1]);
     const width = dataViewKindWidth(kind);
     try checkDataViewAttached(rt, view);
     try checkDataViewBounds(rt, view, index, width);
@@ -645,7 +645,7 @@ pub fn dataViewSet(rt: *core.JSRuntime, view_value: core.JSValue, kind: u32, arg
     const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const index = try toIndexUsize(rt, index_arg);
     const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const little_endian = args.len >= 3 and isTruthy(args[2]);
+    const little_endian = args.len >= 3 and core.value_semantics.toBoolean(args[2]);
     const width = dataViewKindWidth(kind);
 
     var bytes: [8]u8 = undefined;
@@ -1360,17 +1360,4 @@ fn appendArrayString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *c
         defer value.free(rt);
         if (!value.isUndefined() and !value.isNull()) try appendValueString(rt, buffer, value);
     }
-}
-
-fn isTruthy(value: core.JSValue) bool {
-    if (value.isUndefined() or value.isNull()) return false;
-    if (value.asBool()) |bool_value| return bool_value;
-    if (value.asInt32()) |int_value| return int_value != 0;
-    if (value.asFloat64()) |float_value| return float_value != 0 and !std.math.isNan(float_value);
-    if (value.isString()) {
-        const header = value.refHeader() orelse return false;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
-        return string_value.len() != 0;
-    }
-    return true;
 }

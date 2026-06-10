@@ -598,23 +598,7 @@ pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt
 }
 
 pub fn isTruthy(value: core.JSValue) bool {
-    if (isHTMLDDA(value)) return false;
-    if (value.isUndefined() or value.isNull()) return false;
-    if (value.asBool()) |bool_value| return bool_value;
-    if (value.asInt32()) |int_value| return int_value != 0;
-    if (value.asFloat64()) |float_value| return float_value != 0 and !std.math.isNan(float_value);
-    if (value.asShortBigInt()) |bigint_value| return bigint_value != 0;
-    if (value.isBigInt()) {
-        var zero_scratch: [2]bignum.Limb = undefined;
-        const parts = bigIntParts(value, &zero_scratch) orelse return true;
-        return !(parts.limbs.len == 0 or (parts.limbs.len == 1 and parts.limbs[0] == 0));
-    }
-    if (value.isString()) {
-        const header = value.refHeader() orelse return false;
-        const string_value: *core.string.String = @fieldParentPtr("header", header);
-        return string_value.len() != 0;
-    }
-    return true;
+    return core.value_semantics.toBoolean(value);
 }
 
 pub fn isFunctionObject(value: core.JSValue) bool {
@@ -1209,10 +1193,7 @@ fn bigIntParts(value: core.JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
 }
 
 pub fn isHTMLDDA(value: core.JSValue) bool {
-    if (!value.isObject()) return false;
-    const header = value.refHeader() orelse return false;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    return object.is_html_dda;
+    return core.value_semantics.isHTMLDDA(value);
 }
 
 fn sameAbstractEqualityType(a: core.JSValue, b: core.JSValue) bool {

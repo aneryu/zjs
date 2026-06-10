@@ -1580,6 +1580,19 @@ test "promise buffers reflect proxy iterator and atomics helpers" {
     defer get_u16.free(js.runtime);
     try std.testing.expectEqual(@as(?i32, 0x1234), get_u16.asInt32());
 
+    const set_u16_big_endian_args = [_]core.Value{ core.Value.int32(0), core.Value.int32(0x1234), core.Value.shortBigInt(0) };
+    const set_u16_big_endian = try builtins.buffer.dataViewSet(js.runtime, data_view, 4, set_u16_big_endian_args[0..]);
+    defer set_u16_big_endian.free(js.runtime);
+    const get_u16_big_endian_args = [_]core.Value{ core.Value.int32(0), core.Value.shortBigInt(0) };
+    const get_u16_big_endian = try builtins.buffer.dataViewGet(js.runtime, data_view, 4, get_u16_big_endian_args[0..]);
+    defer get_u16_big_endian.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 0x1234), get_u16_big_endian.asInt32());
+
+    const get_u16_little_endian_args = [_]core.Value{ core.Value.int32(0), core.Value.shortBigInt(1) };
+    const get_u16_little_endian = try builtins.buffer.dataViewGet(js.runtime, data_view, 4, get_u16_little_endian_args[0..]);
+    defer get_u16_little_endian.free(js.runtime);
+    try std.testing.expectEqual(@as(?i32, 0x3412), get_u16_little_endian.asInt32());
+
     const full_view_args = [_]core.Value{array_buffer};
     const full_view = try builtins.buffer.dataViewConstruct(js.runtime, full_view_args[0..], null);
     defer full_view.free(js.runtime);

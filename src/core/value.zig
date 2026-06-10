@@ -286,6 +286,12 @@ fn numberValue(value: JSValue) ?f64 {
     return null;
 }
 
+pub fn isZeroBigInt(value: JSValue) ?bool {
+    var scratch: [2]bignum.Limb = undefined;
+    const parts = bigIntParts(value, &scratch) orelse return null;
+    return parts.limbs.len == 0 or (parts.limbs.len == 1 and parts.limbs[0] == 0);
+}
+
 fn isNegativeZero(value: f64) bool {
     return value == 0 and std.math.isNegativeInf(1.0 / value);
 }

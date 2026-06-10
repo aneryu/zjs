@@ -1,6 +1,7 @@
 pub const subsystem_name = "core_runtime";
 
 pub const value = @import("value.zig");
+pub const value_semantics = @import("value_semantics.zig");
 pub const value_format = @import("value_format.zig");
 pub const list = @import("list.zig");
 pub const gc = @import("gc.zig");
