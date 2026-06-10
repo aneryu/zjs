@@ -1,6 +1,7 @@
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 
 const AppendStringError = error{
@@ -224,8 +225,7 @@ pub fn parseIntLatin1Bytes(source: []const u8, initial_radix: i32) f64 {
     var value: f64 = 0;
     var consumed = false;
     for (text) |ch| {
-        const digit: i32 =
-            if (ch >= '0' and ch <= '9') ch - '0' else if (ch >= 'a' and ch <= 'z') ch - 'a' + 10 else if (ch >= 'A' and ch <= 'Z') ch - 'A' + 10 else break;
+        const digit: i32 = @intCast(unicode.asciiRadixDigitValueByte(ch) orelse break);
         if (digit >= radix) break;
         consumed = true;
         value = value * @as(f64, @floatFromInt(radix)) + @as(f64, @floatFromInt(digit));
@@ -251,10 +251,10 @@ pub fn parseFloatLatin1Bytes(source: []const u8) f64 {
     }
 
     var digits: usize = 0;
-    while (index < text.len and isAsciiDigit(text[index])) : (index += 1) digits += 1;
+    while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) digits += 1;
     if (index < text.len and text[index] == '.') {
         index += 1;
-        while (index < text.len and isAsciiDigit(text[index])) : (index += 1) digits += 1;
+        while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) digits += 1;
     }
     if (digits == 0) return std.math.nan(f64);
 
@@ -263,7 +263,7 @@ pub fn parseFloatLatin1Bytes(source: []const u8) f64 {
         index += 1;
         if (index < text.len and (text[index] == '+' or text[index] == '-')) index += 1;
         const exponent_digits_start = index;
-        while (index < text.len and isAsciiDigit(text[index])) : (index += 1) {}
+        while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) {}
         if (index == exponent_digits_start) index = exponent_start;
     }
 
@@ -281,7 +281,7 @@ fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
 
     var value: f64 = 0;
     var digits: usize = 0;
-    while (index < text.len and isAsciiDigit(text[index])) : (index += 1) {
+    while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) {
         if (digits == 15) return null;
         value = value * 10 + @as(f64, @floatFromInt(text[index] - '0'));
         digits += 1;
@@ -290,7 +290,7 @@ fn parseSimpleDecimalFloat(text: []const u8) ?f64 {
     if (index < text.len and text[index] == '.') {
         index += 1;
         var scale: f64 = 1;
-        while (index < text.len and isAsciiDigit(text[index])) : (index += 1) {
+        while (index < text.len and unicode.isAsciiDigitCodePoint(text[index])) : (index += 1) {
             if (digits == 15) return null;
             value = value * 10 + @as(f64, @floatFromInt(text[index] - '0'));
             scale *= 10;
@@ -457,10 +457,6 @@ fn trimLeadingJsWhitespace(source: []const u8) []const u8 {
         index += width;
     }
     return source[index..];
-}
-
-fn isAsciiDigit(byte: u8) bool {
-    return byte >= '0' and byte <= '9';
 }
 
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {

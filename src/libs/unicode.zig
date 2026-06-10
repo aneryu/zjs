@@ -123,11 +123,19 @@ pub fn isAsciiIdentifierPartByte(byte: u8) bool {
     return isAsciiIdentifierStartByte(byte) or isAsciiDigitCodePoint(byte);
 }
 
-pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
+pub fn asciiRadixDigitValueByte(byte: u8) ?u8 {
     if (byte >= '0' and byte <= '9') return byte - '0';
     if (byte >= 'a' and byte <= 'f') return byte - 'a' + 10;
     if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    if (byte >= 'g' and byte <= 'z') return byte - 'a' + 10;
+    if (byte >= 'G' and byte <= 'Z') return byte - 'A' + 10;
     return null;
+}
+
+pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
+    const value = asciiRadixDigitValueByte(byte) orelse return null;
+    if (value >= 16) return null;
+    return value;
 }
 
 pub fn asciiHexDigitValueUnit(unit: u16) ?u8 {
@@ -1469,6 +1477,17 @@ test "unicode ascii hex helpers cover digit values" {
 
     try std.testing.expectEqual(@as(u8, 15), asciiHexDigitValueUnit('F'));
     try std.testing.expectEqual(@as(?u8, null), asciiHexDigitValueUnit(0x100));
+}
+
+test "unicode ascii radix digit helper covers base-36 digit values" {
+    try std.testing.expectEqual(@as(u8, 0), asciiRadixDigitValueByte('0'));
+    try std.testing.expectEqual(@as(u8, 9), asciiRadixDigitValueByte('9'));
+    try std.testing.expectEqual(@as(u8, 10), asciiRadixDigitValueByte('a'));
+    try std.testing.expectEqual(@as(u8, 35), asciiRadixDigitValueByte('z'));
+    try std.testing.expectEqual(@as(u8, 10), asciiRadixDigitValueByte('A'));
+    try std.testing.expectEqual(@as(u8, 35), asciiRadixDigitValueByte('Z'));
+    try std.testing.expectEqual(@as(?u8, null), asciiRadixDigitValueByte('_'));
+    try std.testing.expectEqual(@as(?u8, null), asciiRadixDigitValueByte(0x80));
 }
 
 fn rangesContain(ranges: []const CodePointRange, code_point: u21) bool {
