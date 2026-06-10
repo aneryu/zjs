@@ -6700,7 +6700,7 @@ pub fn qjsMapGetOrInsertComputed(
     else
         args[0].dup();
     defer key.free(ctx.runtime);
-    if (receiver.class_id == core.class.ids.weakmap and !canBeHeldWeakly(ctx.runtime, key)) {
+    if (receiver.class_id == core.class.ids.weakmap and !builtins.symbol.canBeHeldWeakly(ctx.runtime, key)) {
         return @as(?core.JSValue, try shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
     }
 
@@ -6724,14 +6724,6 @@ pub fn qjsMapGetOrInsertComputed(
     const set_result = try builtins.collection.methodCall(ctx.runtime, receiver_value, 1, &.{ key, computed });
     set_result.free(ctx.runtime);
     return computed;
-}
-
-pub fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.isObject()) return true;
-    if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
-    }
-    return false;
 }
 
 pub fn collectionMethodOwnerClass(function_object: *core.Object) ?core.ClassId {
@@ -6760,13 +6752,13 @@ fn throwCollectionMethodTypeError(
 ) !core.JSValue {
     if (receiver.class_id == core.class.ids.weakmap and
         (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
-        args.len >= 1 and !canBeHeldWeakly(ctx.runtime, args[0]))
+        args.len >= 1 and !builtins.symbol.canBeHeldWeakly(ctx.runtime, args[0]))
     {
         return shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
     }
     if (receiver.class_id == core.class.ids.weakset and
         method == .add and
-        args.len >= 1 and !canBeHeldWeakly(ctx.runtime, args[0]))
+        args.len >= 1 and !builtins.symbol.canBeHeldWeakly(ctx.runtime, args[0]))
     {
         return shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
     }

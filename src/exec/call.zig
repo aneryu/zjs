@@ -3329,7 +3329,7 @@ fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals: []
             try construct_args.init(rt, args[1]);
             defer construct_args.deinit();
             const target_value = if (construct_args.values.len >= 1) construct_args.values[0] else return error.TypeError;
-            if (!canBeHeldWeakly(rt, target_value)) return error.TypeError;
+            if (!builtins.symbol.canBeHeldWeakly(rt, target_value)) return error.TypeError;
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
             return construct_mod.weakRefWithPrototype(rt, target_value, prototype);
         }
@@ -5084,9 +5084,9 @@ fn finalizationRegistryRegister(rt: *core.JSRuntime, receiver: *core.Object, arg
     const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    if (!canBeHeldWeakly(rt, target)) return error.TypeError;
+    if (!builtins.symbol.canBeHeldWeakly(rt, target)) return error.TypeError;
     if (builtins.object.sameValue(target, held_value)) return error.TypeError;
-    if (!unregister_token.isUndefined() and !canBeHeldWeakly(rt, unregister_token)) return error.TypeError;
+    if (!unregister_token.isUndefined() and !builtins.symbol.canBeHeldWeakly(rt, unregister_token)) return error.TypeError;
     if (builtins.object.sameValue(target, receiver.value())) return core.JSValue.undefinedValue();
     try finalizationRegistryAppendCell(rt, receiver, target, held_value, unregister_token);
     return core.JSValue.undefinedValue();
@@ -5094,7 +5094,7 @@ fn finalizationRegistryRegister(rt: *core.JSRuntime, receiver: *core.Object, arg
 
 fn finalizationRegistryUnregister(rt: *core.JSRuntime, receiver: *core.Object, args: []const core.JSValue) !core.JSValue {
     const token = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!canBeHeldWeakly(rt, token)) return error.TypeError;
+    if (!builtins.symbol.canBeHeldWeakly(rt, token)) return error.TypeError;
     return core.JSValue.boolean(receiver.unregisterFinalizationRegistryCells(rt, token));
 }
 
@@ -5106,14 +5106,6 @@ fn finalizationRegistryAppendCell(
     unregister_token: core.JSValue,
 ) !void {
     try receiver.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
-}
-
-fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.isObject()) return true;
-    if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
-    }
-    return false;
 }
 
 fn objectHasOwnProperty(

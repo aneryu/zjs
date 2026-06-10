@@ -480,7 +480,7 @@ fn constructOrdinaryInstance(rt: *core.JSRuntime, prototype: ?*core.Object) !cor
 }
 
 fn constructWeakRef(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    if (args.len < 1 or !canBeHeldWeakly(rt, args[0])) return error.TypeError;
+    if (args.len < 1 or !builtins.symbol.canBeHeldWeakly(rt, args[0])) return error.TypeError;
     return weakRefWithPrototype(rt, args[0], prototype);
 }
 
@@ -533,14 +533,6 @@ test "constructWeakRef roots direct symbol target while creating weak ref" {
 
     weak_ref_value.free(rt);
     weak_ref_alive = false;
-}
-
-fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.isObject()) return true;
-    if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
-    }
-    return false;
 }
 
 fn defineData(
