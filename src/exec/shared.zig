@@ -6235,9 +6235,9 @@ pub fn parseSimpleUnicodeLiteralSource(source: []const u8) ?SimpleUnicodeLiteral
                             pattern.len += 1;
                         } else {
                             if (pattern.len + 2 > pattern.units.len) return null;
-                            const cp = value - 0x10000;
-                            pattern.units[pattern.len] = @intCast(0xd800 + (cp >> 10));
-                            pattern.units[pattern.len + 1] = @intCast(0xdc00 + (cp & 0x3ff));
+                            const pair = unicode_lib.surrogatePairFromCodePoint(@intCast(value));
+                            pattern.units[pattern.len] = pair.high;
+                            pattern.units[pattern.len + 1] = pair.low;
                             pattern.len += 2;
                         }
                         index = scan + 1;
@@ -6267,9 +6267,9 @@ pub fn parseSimpleUnicodeLiteralSource(source: []const u8) ?SimpleUnicodeLiteral
             pattern.len += 1;
         } else {
             if (pattern.len + 2 > pattern.units.len) return null;
-            const adjusted = cp - 0x10000;
-            pattern.units[pattern.len] = @intCast(0xd800 + (adjusted >> 10));
-            pattern.units[pattern.len + 1] = @intCast(0xdc00 + (adjusted & 0x3ff));
+            const pair = unicode_lib.surrogatePairFromCodePoint(@intCast(cp));
+            pattern.units[pattern.len] = pair.high;
+            pattern.units[pattern.len + 1] = pair.low;
             pattern.len += 2;
         }
         index += width;

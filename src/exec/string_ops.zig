@@ -845,9 +845,9 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
                 units[unit_count] = @intCast(code_point);
                 unit_count += 1;
             } else {
-                const adjusted = code_point - 0x10000;
-                units[unit_count] = @intCast(0xd800 + (adjusted >> 10));
-                units[unit_count + 1] = @intCast(0xdc00 + (adjusted & 0x3ff));
+                const pair = unicode_lib.surrogatePairFromCodePoint(@intCast(code_point));
+                units[unit_count] = pair.high;
+                units[unit_count + 1] = pair.low;
                 unit_count += 2;
             }
         }
@@ -901,9 +901,9 @@ pub fn appendCodePointUnits(units: *std.ArrayList(u16), code_point: u32) void {
     if (code_point <= 0xffff) {
         units.appendAssumeCapacity(@intCast(code_point));
     } else {
-        const adjusted = code_point - 0x10000;
-        units.appendAssumeCapacity(@intCast(0xd800 + (adjusted >> 10)));
-        units.appendAssumeCapacity(@intCast(0xdc00 + (adjusted & 0x3ff)));
+        const pair = unicode_lib.surrogatePairFromCodePoint(@intCast(code_point));
+        units.appendAssumeCapacity(pair.high);
+        units.appendAssumeCapacity(pair.low);
     }
 }
 
