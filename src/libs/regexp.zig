@@ -2158,9 +2158,9 @@ const Compiler = struct {
     }
 
     fn emitNonUnicodeSurrogatePairAtom(self: *Compiler, cp: u21, is_backward_dir: bool) !void {
-        const value = cp - 0x10000;
-        const high: u21 = 0xd800 + (value >> 10);
-        const low: u21 = 0xdc00 + (value & 0x3ff);
+        const pair = unicode.surrogatePairFromCodePoint(cp);
+        const high: u21 = pair.high;
+        const low: u21 = pair.low;
         if (is_backward_dir) {
             try self.emitCharacterAtom(low, true);
             try self.emitCharacterAtom(high, true);
@@ -2171,9 +2171,9 @@ const Compiler = struct {
     }
 
     fn emitNonUnicodeSurrogatePairTerms(self: *Compiler, cp: u21, is_backward_dir: bool) !usize {
-        const value = cp - 0x10000;
-        const high: u21 = 0xd800 + (value >> 10);
-        const low: u21 = 0xdc00 + (value & 0x3ff);
+        const pair = unicode.surrogatePairFromCodePoint(cp);
+        const high: u21 = pair.high;
+        const low: u21 = pair.low;
         if (is_backward_dir) {
             const low_start = self.code.items.len;
             try self.emitCharacterAtom(low, true);
@@ -2340,11 +2340,9 @@ const RangeSet = struct {
     }
 
     fn addNonUnicodeSurrogatePair(self: *RangeSet, cp: u21) !void {
-        const value = cp - 0x10000;
-        const high: u21 = 0xd800 + (value >> 10);
-        const low: u21 = 0xdc00 + (value & 0x3ff);
-        try self.addInclusive(high, high);
-        try self.addInclusive(low, low);
+        const pair = unicode.surrogatePairFromCodePoint(cp);
+        try self.addInclusive(pair.high, pair.high);
+        try self.addInclusive(pair.low, pair.low);
     }
 
     fn addHalfOpen(self: *RangeSet, lo: u21, hi: u21) !void {

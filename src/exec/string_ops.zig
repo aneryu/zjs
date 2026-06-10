@@ -740,13 +740,7 @@ pub fn qjsStringFromCodePoint(
             return error.RangeError;
         }
         const code_point: u32 = @intFromFloat(number);
-        if (code_point <= 0xffff) {
-            try units.append(ctx.runtime.memory.allocator, @intCast(code_point));
-        } else {
-            const adjusted = code_point - 0x10000;
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
-        }
+        try appendUtf16CodePoint(ctx.runtime, &units, code_point);
     }
     return (try core.string.String.createUtf16(ctx.runtime, units.items)).value();
 }
@@ -826,13 +820,7 @@ pub fn qjsStringFromCodePointArray(
             return error.RangeError;
         }
         const code_point: u32 = @intFromFloat(number);
-        if (code_point <= 0xffff) {
-            try units.append(ctx.runtime.memory.allocator, @intCast(code_point));
-        } else {
-            const adjusted = code_point - 0x10000;
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-            try units.append(ctx.runtime.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
-        }
+        try appendUtf16CodePoint(ctx.runtime, &units, code_point);
     }
     return (try core.string.String.createUtf16(ctx.runtime, units.items)).value();
 }
@@ -2516,13 +2504,7 @@ pub fn appendUtf32FromStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u32),
 }
 
 pub fn appendUtf16CodePoint(rt: *core.JSRuntime, out: *std.ArrayList(u16), code_point: u32) !void {
-    if (code_point <= 0xffff) {
-        try out.append(rt.memory.allocator, @intCast(code_point));
-        return;
-    }
-    const cp = code_point - 0x10000;
-    try out.append(rt.memory.allocator, @intCast(0xd800 + (cp >> 10)));
-    try out.append(rt.memory.allocator, @intCast(0xdc00 + (cp & 0x3ff)));
+    return unicode_lib.appendUtf16CodePoint(rt.memory.allocator, out, @intCast(code_point));
 }
 
 pub fn qjsStringNumericArgsMethod(
@@ -3674,12 +3656,8 @@ pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
     return unicode_lib.codePointFromSurrogatePair(high, low);
 }
 
-pub fn surrogatePairFromCodePoint(code_point: u21) struct { high: u16, low: u16 } {
-    const value = code_point - 0x10000;
-    return .{
-        .high = @intCast(0xd800 + (value >> 10)),
-        .low = @intCast(0xdc00 + (value & 0x3ff)),
-    };
+pub fn surrogatePairFromCodePoint(code_point: u21) unicode_lib.SurrogatePair {
+    return unicode_lib.surrogatePairFromCodePoint(code_point);
 }
 
 pub fn findUnicodeFoldClassMatch(value: core.JSValue, unit: u16, start: usize) ?usize {

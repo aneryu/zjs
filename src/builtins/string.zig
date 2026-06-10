@@ -341,13 +341,7 @@ pub fn fromCodePoint(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSVa
             return error.RangeError;
         }
         const code_point: u32 = @intFromFloat(number);
-        if (code_point <= 0xffff) {
-            try units.append(rt.memory.allocator, @intCast(code_point));
-        } else {
-            const adjusted = code_point - 0x10000;
-            try units.append(rt.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-            try units.append(rt.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
-        }
+        try unicode.appendUtf16CodePoint(rt.memory.allocator, &units, @intCast(code_point));
     }
     const string = try core.string.String.createUtf16(rt, units.items);
     return string.value();
@@ -1049,14 +1043,7 @@ fn codePointBeforeStringIndex(string_value: core.string.String, end: usize) ?Cod
 }
 
 fn appendUtf16CodePoint(rt: *core.JSRuntime, units: *std.ArrayList(u16), cp: u21) !void {
-    if (cp <= 0xffff) {
-        try units.append(rt.memory.allocator, @intCast(cp));
-        return;
-    }
-
-    const adjusted = @as(u32, cp) - 0x10000;
-    try units.append(rt.memory.allocator, @intCast(0xd800 + (adjusted >> 10)));
-    try units.append(rt.memory.allocator, @intCast(0xdc00 + (adjusted & 0x3ff)));
+    return unicode.appendUtf16CodePoint(rt.memory.allocator, units, cp);
 }
 
 fn isFinalSigma(string_value: core.string.String, sigma_start: usize, after_sigma: usize) bool {

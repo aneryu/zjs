@@ -164,10 +164,8 @@ fn decodeSingleFourByteEscapeUnitsFromAscii(bytes: []const u8) !?FourByteEscapeU
         @as(u21, h67 & 0x3f);
     if (codepoint < 0x10000 or codepoint > 0x10ffff) return error.URIError;
 
-    const adjusted = codepoint - 0x10000;
-    const high: u16 = @intCast(0xd800 + (adjusted >> 10));
-    const low: u16 = @intCast(0xdc00 + (adjusted & 0x3ff));
-    return .{ .high = high, .low = low };
+    const pair = unicode.surrogatePairFromCodePoint(codepoint);
+    return .{ .high = pair.high, .low = pair.low };
 }
 
 fn fastHexPair(high: u8, low: u8) ?u8 {

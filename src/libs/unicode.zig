@@ -44,6 +44,11 @@ pub const CodePointRange = struct {
     hi: u21,
 };
 
+pub const SurrogatePair = struct {
+    high: u16,
+    low: u16,
+};
+
 const UnicodeError = std.mem.Allocator.Error || error{InvalidProperty};
 
 pub fn isIdentifierStart(c: u21) bool {
@@ -189,6 +194,24 @@ pub fn isSurrogateCodePoint(cp: u21) bool {
 
 pub fn codePointFromSurrogatePair(high: u16, low: u16) u21 {
     return 0x10000 + ((@as(u21, high) - high_surrogate_min) << 10) + (@as(u21, low) - low_surrogate_min);
+}
+
+pub fn surrogatePairFromCodePoint(code_point: u21) SurrogatePair {
+    const value = code_point - 0x10000;
+    return .{
+        .high = @intCast(high_surrogate_min + (value >> 10)),
+        .low = @intCast(low_surrogate_min + (value & 0x3ff)),
+    };
+}
+
+pub fn appendUtf16CodePoint(allocator: std.mem.Allocator, units: *std.ArrayList(u16), code_point: u21) std.mem.Allocator.Error!void {
+    if (code_point <= std.math.maxInt(u16)) {
+        try units.append(allocator, @intCast(code_point));
+        return;
+    }
+    const pair = surrogatePairFromCodePoint(code_point);
+    try units.append(allocator, pair.high);
+    try units.append(allocator, pair.low);
 }
 
 pub fn appendUtf8CodePoint(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), cp: u32) std.mem.Allocator.Error!void {
@@ -1463,6 +1486,20 @@ test "unicode surrogate range helpers cover boundaries" {
     try std.testing.expectEqual(@as(u21, 0x10000), codePointFromSurrogatePair(0xd800, 0xdc00));
     try std.testing.expectEqual(@as(u21, 0x1f600), codePointFromSurrogatePair(0xd83d, 0xde00));
     try std.testing.expectEqual(@as(u21, 0x10ffff), codePointFromSurrogatePair(0xdbff, 0xdfff));
+
+    try std.testing.expectEqual(SurrogatePair{ .high = 0xd800, .low = 0xdc00 }, surrogatePairFromCodePoint(0x10000));
+    try std.testing.expectEqual(SurrogatePair{ .high = 0xd83d, .low = 0xde00 }, surrogatePairFromCodePoint(0x1f600));
+    try std.testing.expectEqual(SurrogatePair{ .high = 0xdbff, .low = 0xdfff }, surrogatePairFromCodePoint(0x10ffff));
+}
+
+test "unicode UTF-16 append helper emits BMP units and surrogate pairs" {
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendUtf16CodePoint(std.testing.allocator, &out, 'A');
+    try appendUtf16CodePoint(std.testing.allocator, &out, 0xd800);
+    try appendUtf16CodePoint(std.testing.allocator, &out, 0x1f600);
+    try std.testing.expectEqualSlices(u16, &.{ 'A', 0xd800, 0xd83d, 0xde00 }, out.items);
 }
 
 test "unicode UTF-8 append helper preserves existing surrogate-half encoding" {
