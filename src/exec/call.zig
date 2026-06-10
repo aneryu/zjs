@@ -555,7 +555,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
 }
 
 pub fn forEachArrayPrint(rt: *core.JSRuntime, output: ?*std.Io.Writer, array_value: core.JSValue) !core.JSValue {
-    const array = try expectArray(array_value);
+    const array = try builtins.array.expectArray(array_value);
     if (output) |writer| {
         var index: u32 = 0;
         while (index < array.length) : (index += 1) {
@@ -5466,14 +5466,6 @@ fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSValue
     const proxy = thisObject(proxy_value) orelse return core.JSValue.undefinedValue();
     proxy.clearOptionalValueSlot(rt, proxy.proxyHandlerSlot());
     return core.JSValue.undefinedValue();
-}
-
-fn expectArray(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (!object.is_array) return error.TypeError;
-    return object;
 }
 
 fn hostOutputValues(rt: *core.JSRuntime, output: ?*std.Io.Writer, values: []const core.JSValue) HostError!core.JSValue {

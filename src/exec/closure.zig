@@ -1,5 +1,6 @@
 const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode/root.zig");
+const array_builtin = @import("../builtins/array.zig");
 const collection_builtin = @import("../builtins/collection.zig");
 const object_builtin = @import("../builtins/object.zig");
 const globals_mod = @import("globals.zig");
@@ -604,7 +605,7 @@ test "appendPairToGlobalArray roots direct function bytecode entries while creat
     {
         const stored_pair_value = results.getProperty(core.atom.atomFromUInt32(0));
         defer stored_pair_value.free(rt);
-        const stored_pair = try expectArray(stored_pair_value);
+        const stored_pair = try array_builtin.expectArray(stored_pair_value);
         try expectArrayIndexSame(rt, stored_pair, 0, pair_key.value);
         try expectArrayIndexSame(rt, stored_pair, 1, pair_value.value);
     }
@@ -854,7 +855,7 @@ fn appendWeakMapAdderRecord(rt: *core.JSRuntime, globals: []globals_mod.Slot, ke
 fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actual: core.JSValue) !void {
     const expects_value = try globals_mod.getByName(rt, globals, "expects");
     defer expects_value.free(rt);
-    const expects = try expectArray(expects_value);
+    const expects = try array_builtin.expectArray(expects_value);
     if (expects.length == 0) return error.JSException;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
@@ -1008,7 +1009,7 @@ fn appendToGlobalArray(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: [
         array_value = try getGlobalObjectProperty(rt, globals, name);
     }
     defer array_value.free(rt);
-    const array = try expectArray(array_value);
+    const array = try array_builtin.expectArray(array_value);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(rooted_value, true, true, true));
 }
 
@@ -1046,14 +1047,6 @@ fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, name: []const 
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(rooted_value, true, true, true));
-}
-
-fn expectArray(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.isObject()) return error.TypeError;
-    const object: *core.Object = @fieldParentPtr("header", header);
-    if (!object.is_array) return error.TypeError;
-    return object;
 }
 
 fn expectObject(value: core.JSValue) !*core.Object {
