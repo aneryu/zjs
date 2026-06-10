@@ -153,7 +153,7 @@ pub const Lexer = struct {
         if (isAsciiIdentStart(c) or c >= 0x80 or self.startsUnicodeEscape()) {
             return self.lexIdentifier();
         }
-        if (std.ascii.isDigit(c)) return self.lexNumber(false);
+        if (isDecimalDigit(c)) return self.lexNumber(false);
         if (c == '#') return self.lexPrivateName();
         if (c == '"' or c == '\'') return self.lexString(c);
         if (c == '`') return self.lexTemplate(.head_or_no_subst);
@@ -583,7 +583,7 @@ pub const Lexer = struct {
             self.bump();
             return self.emit(t.TOK_ELLIPSIS, .{ .none = {} });
         }
-        if (std.ascii.isDigit(self.peekAt(1))) {
+        if (isDecimalDigit(self.peekAt(1))) {
             return self.lexNumber(true);
         }
         self.bump();
@@ -742,7 +742,7 @@ pub const Lexer = struct {
                 try out.append(self.allocator, 0x0B);
             },
             '0' => {
-                if (self.pos + 1 < self.source.len and std.ascii.isDigit(self.peekAt(1))) {
+                if (self.pos + 1 < self.source.len and isDecimalDigit(self.peekAt(1))) {
                     if (self.is_strict_mode or in_template) return error.LegacyOctalInStrictMode;
                     try appendUtf8(out, self.allocator, try self.consumeLegacyOctalEscape());
                     return true;
@@ -1278,7 +1278,7 @@ pub const Lexer = struct {
                 }
                 return self.emit(t.TOK_DOUBLE_QUESTION_MARK, .{ .none = {} });
             }
-            if (self.peek() == '.' and !std.ascii.isDigit(self.peekAt(1))) {
+            if (self.peek() == '.' and !isDecimalDigit(self.peekAt(1))) {
                 self.bump();
                 return self.emit(t.TOK_QUESTION_MARK_DOT, .{ .none = {} });
             }
@@ -1354,12 +1354,28 @@ fn appendUtf8(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !v
     try out.appendSlice(allocator, buf[0..len]);
 }
 
-fn consumeHexDigits(self: *Lexer) bool {
+fn isHexDigit(c: u8) bool {
+    return unicode.isAsciiHexDigitByte(c);
+}
+
+fn isOctalDigit(c: u8) bool {
+    return c >= '0' and c <= '7';
+}
+
+fn isBinaryDigit(c: u8) bool {
+    return c == '0' or c == '1';
+}
+
+fn isDecimalDigit(c: u8) bool {
+    return unicode.isAsciiDigitCodePoint(c);
+}
+
+fn consumeDigitRun(self: *Lexer, comptime isDigit: fn (u8) bool) bool {
     var any = false;
     var prev_sep = false;
     while (self.pos < self.source.len) {
         const c = self.peek();
-        if (unicode.isAsciiHexDigitByte(c)) {
+        if (isDigit(c)) {
             any = true;
             prev_sep = false;
             self.bump();
@@ -1370,60 +1386,22 @@ fn consumeHexDigits(self: *Lexer) bool {
         } else break;
     }
     return any and !prev_sep;
+}
+
+fn consumeHexDigits(self: *Lexer) bool {
+    return consumeDigitRun(self, isHexDigit);
 }
 
 fn consumeOctalDigits(self: *Lexer) bool {
-    var any = false;
-    var prev_sep = false;
-    while (self.pos < self.source.len) {
-        const c = self.peek();
-        if (c >= '0' and c <= '7') {
-            any = true;
-            prev_sep = false;
-            self.bump();
-        } else if (c == '_') {
-            if (!any or prev_sep) return false;
-            prev_sep = true;
-            self.bump();
-        } else break;
-    }
-    return any and !prev_sep;
+    return consumeDigitRun(self, isOctalDigit);
 }
 
 fn consumeBinaryDigits(self: *Lexer) bool {
-    var any = false;
-    var prev_sep = false;
-    while (self.pos < self.source.len) {
-        const c = self.peek();
-        if (c == '0' or c == '1') {
-            any = true;
-            prev_sep = false;
-            self.bump();
-        } else if (c == '_') {
-            if (!any or prev_sep) return false;
-            prev_sep = true;
-            self.bump();
-        } else break;
-    }
-    return any and !prev_sep;
+    return consumeDigitRun(self, isBinaryDigit);
 }
 
 fn consumeDecDigits(self: *Lexer) bool {
-    var any = false;
-    var prev_sep = false;
-    while (self.pos < self.source.len) {
-        const c = self.peek();
-        if (std.ascii.isDigit(c)) {
-            any = true;
-            prev_sep = false;
-            self.bump();
-        } else if (c == '_') {
-            if (!any or prev_sep) return false;
-            prev_sep = true;
-            self.bump();
-        } else break;
-    }
-    return any and !prev_sep;
+    return consumeDigitRun(self, isDecimalDigit);
 }
 
 fn consumeDecDigitsRequired(self: *Lexer) Error!void {
@@ -1433,7 +1411,7 @@ fn consumeDecDigitsRequired(self: *Lexer) Error!void {
 fn consumeOptionalFractionDigits(self: *Lexer) Error!void {
     if (self.pos >= self.source.len) return;
     const c = self.peek();
-    if (std.ascii.isDigit(c) or c == '_') {
+    if (isDecimalDigit(c) or c == '_') {
         if (!consumeDecDigits(self)) return error.InvalidNumber;
     }
 }
@@ -1643,7 +1621,7 @@ fn tsTokenize(allocator: std.mem.Allocator, src: []const u8, tokens: *std.ArrayL
             i += 1;
             while (i < src.len and tsIsIdentContinue(src[i])) i += 1;
             break :blk TSToken{ .kind = .identifier, .start = start, .end = i };
-        } else if (std.ascii.isDigit(c)) blk: {
+        } else if (isDecimalDigit(c)) blk: {
             i = tsSkipNumber(src, i);
             break :blk TSToken{ .kind = .number, .start = start, .end = i };
         } else if (c == '\'' or c == '"') blk: {
