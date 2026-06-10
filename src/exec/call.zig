@@ -2592,7 +2592,7 @@ fn callNativeBuiltin(
                     else => err,
                 };
             }
-            if (regexpMethodId(name)) |method| {
+            if (builtins.regexp.legacyPrototypeMethodId(name)) |method| {
                 const native_method = regexpNativePrototypeMethodId(function_object) orelse break :regexp_dispatch;
                 if (native_method != method) break :regexp_dispatch;
                 const arg: ?core.JSValue = if (method == 1 or args.len == 0) null else args[0];
@@ -5549,13 +5549,6 @@ fn regexpAccessorName(name: []const u8) ?[]const u8 {
         std.mem.eql(u8, accessor, "sticky") or
         std.mem.eql(u8, accessor, "hasIndices") or
         std.mem.eql(u8, accessor, "unicodeSets")) return accessor;
-    return null;
-}
-
-fn regexpMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "toString")) return 1;
-    if (std.mem.eql(u8, name, "test")) return 2;
-    if (std.mem.eql(u8, name, "exec")) return 3;
     return null;
 }
 

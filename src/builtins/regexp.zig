@@ -78,6 +78,17 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
+pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
+    const id = prototypeMethodId(name) orelse return null;
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.to_string),
+        @intFromEnum(PrototypeMethod.test_),
+        @intFromEnum(PrototypeMethod.exec),
+        => decodePrototypeMethodId(id),
+        else => null,
+    };
+}
+
 pub fn decodePrototypeMethodId(id: u32) ?u32 {
     return switch (id) {
         @intFromEnum(PrototypeMethod.to_string) => 1,
