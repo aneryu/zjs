@@ -2586,7 +2586,7 @@ fn callNativeBuiltin(
         }
         regexp_dispatch: {
             if (receiver.class_id != core.class.ids.regexp) break :regexp_dispatch;
-            if (regexpAccessorName(name)) |accessor_name| {
+            if (builtins.regexp.accessorNameFromGetterName(name)) |accessor_name| {
                 return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
                     error.TypeError => error.TypeError,
                     else => err,
@@ -5511,22 +5511,6 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (!object.is_proxy or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
-}
-
-fn regexpAccessorName(name: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, name, "get ")) return null;
-    const accessor = name["get ".len..];
-    if (std.mem.eql(u8, accessor, "source") or
-        std.mem.eql(u8, accessor, "flags") or
-        std.mem.eql(u8, accessor, "global") or
-        std.mem.eql(u8, accessor, "ignoreCase") or
-        std.mem.eql(u8, accessor, "multiline") or
-        std.mem.eql(u8, accessor, "dotAll") or
-        std.mem.eql(u8, accessor, "unicode") or
-        std.mem.eql(u8, accessor, "sticky") or
-        std.mem.eql(u8, accessor, "hasIndices") or
-        std.mem.eql(u8, accessor, "unicodeSets")) return accessor;
-    return null;
 }
 
 fn regexpNativePrototypeMethodId(function_object: *core.Object) ?u32 {

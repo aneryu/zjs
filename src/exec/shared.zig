@@ -2859,7 +2859,7 @@ pub fn callValueOrBytecodeClassMode(
                 }
             }
         }
-        if (regexpAccessorName(name)) |accessor_name| {
+        if (builtins.regexp.accessorNameFromGetterName(name)) |accessor_name| {
             if (try qjsRegExpAccessor(ctx, output, global, this_value, func, accessor_name, caller_function, caller_frame)) |value| return value;
             return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
@@ -7191,22 +7191,6 @@ pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?co
         => if (object.objectData()) |stored| return stored.dup() else return null,
         else => return null,
     }
-}
-
-pub fn regexpAccessorName(name: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, name, "get ")) return null;
-    const accessor = name["get ".len..];
-    if (std.mem.eql(u8, accessor, "source") or
-        std.mem.eql(u8, accessor, "flags") or
-        std.mem.eql(u8, accessor, "global") or
-        std.mem.eql(u8, accessor, "ignoreCase") or
-        std.mem.eql(u8, accessor, "multiline") or
-        std.mem.eql(u8, accessor, "dotAll") or
-        std.mem.eql(u8, accessor, "unicode") or
-        std.mem.eql(u8, accessor, "sticky") or
-        std.mem.eql(u8, accessor, "hasIndices") or
-        std.mem.eql(u8, accessor, "unicodeSets")) return accessor;
-    return null;
 }
 
 pub fn qjsFunctionHasInstanceCall(

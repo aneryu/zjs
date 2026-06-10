@@ -134,6 +134,13 @@ pub fn accessorNameFromId(id: u32) ?[]const u8 {
     };
 }
 
+pub fn accessorNameFromGetterName(name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, name, "get ")) return null;
+    const accessor_name = name["get ".len..];
+    const id = accessorMethodId(accessor_name) orelse return null;
+    return accessorNameFromId(id);
+}
+
 pub fn legacyAccessorMethodFromId(id: u32) ?LegacyAccessorMethod {
     return switch (id) {
         @intFromEnum(LegacyAccessorMethod.get_input) => .get_input,

@@ -1068,7 +1068,6 @@ const primitiveWrapperStoredValue = shared_vm.primitiveWrapperStoredValue;
 const standardStringMethodId = shared_vm.standardStringMethodId;
 const genericTrimStringMethodId = shared_vm.genericTrimStringMethodId;
 const isStringMethodReceiver = shared_vm.isStringMethodReceiver;
-const regexpAccessorName = shared_vm.regexpAccessorName;
 const annexBStringMethodId = shared_vm.annexBStringMethodId;
 const qjsDateSetYear = date_vm.qjsDateSetYear;
 const qjsDateSetTime = date_vm.qjsDateSetTime;
