@@ -2533,7 +2533,7 @@ fn callNativeBuiltin(
         if (receiver.class_id == core.class.ids.map or receiver.class_id == core.class.ids.set or
             receiver.class_id == core.class.ids.weakmap or receiver.class_id == core.class.ids.weakset)
         {
-            if (collectionMethodId(name)) |method| {
+            if (builtins.collection.legacyPrototypeMethodId(name)) |method| {
                 const owner_class = function_object.collectionMethodOwnerClass();
                 if (owner_class != core.class.invalid_class_id) {
                     if (receiver.class_id != owner_class) return error.TypeError;
@@ -5511,29 +5511,6 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (!object.is_proxy or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
-}
-
-fn collectionMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "set")) return 1;
-    if (std.mem.eql(u8, name, "get")) return 2;
-    if (std.mem.eql(u8, name, "has")) return 3;
-    if (std.mem.eql(u8, name, "delete")) return 4;
-    if (std.mem.eql(u8, name, "clear")) return 5;
-    if (std.mem.eql(u8, name, "add")) return 6;
-    if (std.mem.eql(u8, name, "keys")) return 7;
-    if (std.mem.eql(u8, name, "values")) return 8;
-    if (std.mem.eql(u8, name, "entries")) return 9;
-    if (std.mem.eql(u8, name, "forEach")) return 10;
-    if (std.mem.eql(u8, name, "getOrInsert")) return 11;
-    if (std.mem.eql(u8, name, "getOrInsertComputed")) return 12;
-    if (std.mem.eql(u8, name, "difference")) return 15;
-    if (std.mem.eql(u8, name, "intersection")) return 16;
-    if (std.mem.eql(u8, name, "isDisjointFrom")) return 17;
-    if (std.mem.eql(u8, name, "isSubsetOf")) return 18;
-    if (std.mem.eql(u8, name, "isSupersetOf")) return 19;
-    if (std.mem.eql(u8, name, "symmetricDifference")) return 20;
-    if (std.mem.eql(u8, name, "union")) return 21;
-    return null;
 }
 
 fn regexpAccessorName(name: []const u8) ?[]const u8 {

@@ -1123,7 +1123,7 @@ fn callClosureWithThis(
     if (object.class_id == core.class.ids.c_function) {
         const name = try nativeFunctionName(rt, object);
         defer rt.memory.allocator.free(name);
-        if (collectionMethodId(name)) |method| {
+        if (builtins.collection.legacyClosureMethodId(name)) |method| {
             return builtins.collection.methodCallWithCallbackHost(rt, this_value, method, args, collection_adapter.host(globals)) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 else => err,
@@ -1161,23 +1161,6 @@ fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, p
         return error.TypeError;
     }
     return name_value;
-}
-
-fn collectionMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "set")) return 1;
-    if (std.mem.eql(u8, name, "get")) return 2;
-    if (std.mem.eql(u8, name, "has")) return 3;
-    if (std.mem.eql(u8, name, "delete")) return 4;
-    if (std.mem.eql(u8, name, "clear")) return 5;
-    if (std.mem.eql(u8, name, "add")) return 6;
-    if (std.mem.eql(u8, name, "keys")) return 7;
-    if (std.mem.eql(u8, name, "values")) return 8;
-    if (std.mem.eql(u8, name, "entries")) return 9;
-    if (std.mem.eql(u8, name, "forEach")) return 10;
-    if (std.mem.eql(u8, name, "getOrInsert")) return 11;
-    if (std.mem.eql(u8, name, "getOrInsertComputed")) return 12;
-    if (std.mem.eql(u8, name, "next")) return 13;
-    return null;
 }
 
 fn isNativeCollectionAdder(rt: *core.JSRuntime, value: core.JSValue, expected: []const u8) bool {

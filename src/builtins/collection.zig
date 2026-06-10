@@ -188,6 +188,50 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     return null;
 }
 
+pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
+    const id = prototypeMethodId(name) orelse return null;
+    if (legacyBasePrototypeMethodId(id)) |method_id| return method_id;
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.difference),
+        @intFromEnum(PrototypeMethod.intersection),
+        @intFromEnum(PrototypeMethod.is_disjoint_from),
+        @intFromEnum(PrototypeMethod.is_subset_of),
+        @intFromEnum(PrototypeMethod.is_superset_of),
+        @intFromEnum(PrototypeMethod.symmetric_difference),
+        @intFromEnum(PrototypeMethod.union_),
+        => id,
+        else => null,
+    };
+}
+
+pub fn legacyClosureMethodId(name: []const u8) ?u32 {
+    const id = prototypeMethodId(name) orelse return null;
+    if (legacyBasePrototypeMethodId(id)) |method_id| return method_id;
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.iterator_next) => id,
+        else => null,
+    };
+}
+
+fn legacyBasePrototypeMethodId(id: u32) ?u32 {
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.set),
+        @intFromEnum(PrototypeMethod.get),
+        @intFromEnum(PrototypeMethod.has),
+        @intFromEnum(PrototypeMethod.delete),
+        @intFromEnum(PrototypeMethod.clear),
+        @intFromEnum(PrototypeMethod.add),
+        @intFromEnum(PrototypeMethod.keys),
+        @intFromEnum(PrototypeMethod.values),
+        @intFromEnum(PrototypeMethod.entries),
+        @intFromEnum(PrototypeMethod.for_each),
+        @intFromEnum(PrototypeMethod.get_or_insert),
+        @intFromEnum(PrototypeMethod.get_or_insert_computed),
+        => id,
+        else => null,
+    };
+}
+
 pub fn sameValueZero(a: core.JSValue, b: core.JSValue) bool {
     if (numberValue(a)) |lhs| {
         if (numberValue(b)) |rhs| {
