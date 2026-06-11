@@ -53,8 +53,20 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     defer lowered.deinit(rt);
     lowered.line_num = fd.line_num;
     lowered.col_num = fd.col_num;
-    try lowered.setCode(fd.byte_code);
-    for (fd.atom_operands) |atom_id| try lowered.retainAtomOperand(atom_id);
+    // Move the parser-built buffers instead of copying them. QuickJS runs
+    // its passes directly on `fd->byte_code` and performs a single copy
+    // into the packed JSFunctionBytecode (quickjs.c:36188/36226); moving
+    // ownership of the growable code and atom-operand buffers into the
+    // lowered carrier gives the same copy count. The FunctionDef keeps
+    // only the variable/scope metadata the passes consult.
+    lowered.code = fd.byte_code;
+    lowered.code_capacity = fd.byte_code_capacity;
+    fd.byte_code = &.{};
+    fd.byte_code_capacity = 0;
+    lowered.atom_operands = fd.atom_operands;
+    lowered.atom_operands_capacity = fd.atom_operands_capacity;
+    fd.atom_operands = &.{};
+    fd.atom_operands_capacity = 0;
     for (fd.direct_call_sites) |site| {
         try lowered.appendDirectCallSite(.{
             .kind = .prop_atom,
@@ -692,15 +704,7 @@ fn writeRelativeDiff(bytes: []u8, width: usize, diff: i64) !void {
     }
 }
 
-fn localIsCapturedByChild(fd: *const function_def_mod.FunctionDef, loc_idx: u16) bool {
-    if (loc_idx < fd.vars.len and fd.vars[loc_idx].is_captured) return true;
-    for (fd.child_list) |child| {
-        for (child.closure_var) |cv| {
-            if ((cv.closure_type == .local or cv.closure_type == .ref) and cv.var_idx == loc_idx) return true;
-        }
-    }
-    return false;
-}
+const localIsCapturedByChild = resolve_variables.localIsCaptured;
 
 fn encodePc2Line(function: *bytecode_function.Bytecode) !void {
     if (function.source_loc_slots.len == 0) {

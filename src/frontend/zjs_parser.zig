@@ -362,6 +362,9 @@ pub const ParseState = struct {
     /// for golden-byte tests that assert the lowered shape and want
     /// to bypass the pipeline.
     emit_phase1_temp: bool = true,
+    /// One-shot: the next `parseBlock` is a function/arrow body and must
+    /// not emit `enter_scope` (see `emitEnterScope`).
+    suppress_block_enter_scope: bool = false,
 
     /// Parity/tooling mode for top-level program dumps. QuickJS-ng dumps
     /// top-level lexical bindings in the eval/module wrapper as var-ref
@@ -1518,6 +1521,24 @@ pub const ParseState = struct {
 
     fn emitCloseLoc(self: *ParseState, idx: u16) Error!void {
         try self.emitOpU16NoSource(opcode.op.close_loc, idx);
+    }
+
+    /// Mirror the `OP_enter_scope` emission of QuickJS `push_scope`
+    /// (`quickjs.c:23486`). `resolve_variables` lowers this temp opcode
+    /// to a per-scope binding refresh (TDZ re-arm + captured-slot
+    /// detach, see `enterScopeRefreshSize`) so block-scoped bindings
+    /// are fresh on every scope entry — the per-iteration semantics of
+    /// lexicals declared inside loop bodies.
+    ///
+    /// Function/arrow body blocks set `suppress_block_enter_scope`:
+    /// they are entered exactly once per frame (slots start fresh) and
+    /// the hoisted statement-function inits injected ahead of the body
+    /// may already have captured body-scope slots, which an entry-time
+    /// detach would disconnect.
+    fn emitEnterScope(self: *ParseState) Error!void {
+        if (!self.emit_phase1_temp) return;
+        if (self.scope_level < 0) return;
+        try self.emitOpU16NoSource(opcode.op.enter_scope, @intCast(self.scope_level));
     }
 
     fn emitOpAtom(self: *ParseState, op_id: u8, atom_id: Atom) Error!void {
@@ -7130,9 +7151,12 @@ pub fn parseProgramStatements(s: *ParseState, decl_mask: DeclMask) Error!void {
 /// `resolve_variables` walks this chain.
 pub fn parseBlock(s: *ParseState) Error!void {
     const direct_using_kind = blockDirectUsingDeclarationKind(s);
+    const is_function_body = s.suppress_block_enter_scope;
+    s.suppress_block_enter_scope = false;
     try s.expectToken('{');
     try s.pushScope();
     errdefer s.popScope();
+    if (!is_function_body) try s.emitEnterScope();
     // Check for directive prologue (simplified)
     try parseDirectives(s);
 
@@ -8066,6 +8090,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             try validateSwitchCaseBlockDeclarations(s);
             try s.pushScope();
             errdefer s.popScope();
+            try s.emitEnterScope();
             const saved_switch_case_block_scope = s.in_switch_case_block_scope;
             s.in_switch_case_block_scope = true;
             defer s.in_switch_case_block_scope = saved_switch_case_block_scope;
@@ -8207,6 +8232,7 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 try s.advance();
                 try patchForwardJump(s, catch_off);
                 try s.pushScope();
+                try s.emitEnterScope();
                 var catch_bound_atom: ?Atom = null;
                 if (s.peekKind() == '{') {
                     try s.emitOp(opcode.op.drop);
@@ -11215,6 +11241,7 @@ fn parseFunctionParamsAndBody(s: *ParseState, func_kind: ParseFunctionKind, sour
     defer {
         if (!capture_child) s.return_depth -= 1;
     }
+    s.suppress_block_enter_scope = true;
     try parseBlock(s);
     if (s.is_strict) s.cur_func().is_strict_mode = true;
     if (s.cur_func().is_strict_mode) {
@@ -11628,6 +11655,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
         defer {
             if (!capture_child) s.return_depth -= 1;
         }
+        s.suppress_block_enter_scope = true;
         try parseBlock(s);
         if (capture_child) {
             const code = s.currentCode();

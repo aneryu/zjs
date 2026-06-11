@@ -424,6 +424,79 @@ fn writeLoweredPrivateField(ctx: *const JSContext, output: []u8, out_idx: *usize
     out_idx.* += 1;
 }
 
+/// True if the local slot `loc_idx` is captured by a closure — either the
+/// parser marked it (`ensureClosureChain` sets `VarDef.is_captured`, the
+/// `capture_var` equivalent of quickjs.c:33022) or a child FunctionDef
+/// references the slot through its closure_var table (retrofit capture
+/// paths that do not set the flag).
+pub fn localIsCaptured(fd: *const function_def_mod.FunctionDef, loc_idx: u16) bool {
+    if (loc_idx < fd.vars.len and fd.vars[loc_idx].is_captured) return true;
+    for (fd.child_list) |child| {
+        for (child.closure_var) |cv| {
+            if ((cv.closure_type == .local or cv.closure_type == .ref) and cv.var_idx == loc_idx) return true;
+        }
+    }
+    return false;
+}
+
+/// Lexical vars with `.normal` kind get their TDZ bit re-armed on scope
+/// entry. Block function declarations are excluded: their inline
+/// `fclosure` init does not always clear the TDZ bit, so re-arming them
+/// would fault later reads (QuickJS re-instantiates them in
+/// `enter_scope` instead, quickjs.c:34488).
+fn varNeedsTdzRearm(vd: function_def_mod.VarDef) bool {
+    return vd.is_lexical and vd.var_kind == .normal;
+}
+
+/// Byte size of the `enter_scope <scope>` lowering. Mirrors the QuickJS
+/// `OP_enter_scope` case (quickjs.c:34476): one `set_loc_uninitialized`
+/// per lexical var of the scope. In addition zjs emits one `close_loc`
+/// per captured var: QuickJS detaches captured stack slots at
+/// `OP_leave_scope` (quickjs.c:34510) and at break/continue jump sites
+/// (`close_scopes`, quickjs.c:27948); zjs's boxed-cell model instead
+/// detaches at scope *entry*, which dominates every re-entry path
+/// (normal back-edge, `continue`, jumps out of inner blocks) with a
+/// single emission site. This is observationally equivalent because
+/// local slots are never reused and a detached cell is only reachable
+/// through the closures that captured it.
+fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) usize {
+    const fd = ctx.function_def orelse return 0;
+    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return 0;
+    var total: usize = 0;
+    var idx = fd.scopes[@intCast(scope)].first;
+    while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
+        const vd = fd.vars[@intCast(idx)];
+        if (vd.scope_level != scope) break;
+        if (localIsCaptured(fd, @intCast(idx))) total += 3;
+        if (varNeedsTdzRearm(vd)) total += 3;
+        idx = vd.scope_next;
+    }
+    return total;
+}
+
+/// Emit the `enter_scope` lowering described in `enterScopeRefreshSize`.
+fn writeEnterScopeRefresh(ctx: *const JSContext, output: []u8, out_idx: *usize, scope: i32) void {
+    const fd = ctx.function_def orelse return;
+    if (scope < 0 or @as(usize, @intCast(scope)) >= fd.scopes.len) return;
+    var idx = fd.scopes[@intCast(scope)].first;
+    while (idx >= 0 and @as(usize, @intCast(idx)) < fd.vars.len) {
+        const vd = fd.vars[@intCast(idx)];
+        if (vd.scope_level != scope) break;
+        const loc_idx: u16 = @intCast(idx);
+        if (localIsCaptured(fd, loc_idx)) {
+            output[out_idx.*] = opcode.op.close_loc;
+            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
+            out_idx.* += 3;
+        }
+        if (varNeedsTdzRearm(vd)) {
+            output[out_idx.*] = opcode.op.set_loc_uninitialized;
+            std.mem.writeInt(u16, output[out_idx.* + 1 ..][0..2], loc_idx, .little);
+            out_idx.* += 3;
+        }
+        idx = vd.scope_next;
+    }
+}
+
 fn isAncestorLocalOrArg(ctx: *const JSContext, atom_id: u32) bool {
     const fd = ctx.function_def orelse return false;
     var maybe_parent = fd.parent;
@@ -1225,6 +1298,11 @@ pub fn run(ctx: *JSContext) !void {
             scan_atom_idx += 1;
             i += 7;
         } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
+            if (i + 3 > func.code.len) return error.InvalidBytecode;
+            if (op == opcode.op.enter_scope) {
+                const scope = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                output_size += enterScopeRefreshSize(ctx, scope);
+            }
             i += 3;
         } else {
             const size = instrSize(op);
@@ -1712,6 +1790,10 @@ pub fn run(ctx: *JSContext) !void {
             i += 7;
         } else if (op == opcode.op.enter_scope or op == opcode.op.leave_scope) {
             if (i + 3 > func.code.len) return error.InvalidBytecode;
+            if (op == opcode.op.enter_scope) {
+                const scope = std.mem.readInt(u16, func.code[i + 1 ..][0..2], .little);
+                writeEnterScopeRefresh(ctx, output, &out_idx, scope);
+            }
             i += 3;
         } else {
             const size = instrSize(op);

@@ -98,6 +98,22 @@ pipeline 入口在 `src/bytecode/pipeline/`：
 overflow、stack mismatch 和无效 opcode 等错误。它不是完整 JIT-style GC
 stack-map 系统。
 
+### 3.1 编译管线与 QuickJS 的对应关系
+
+p3-pipeline / p4-fb-compact 的对照结论（语义已由 test262 门禁 0 失败 +
+行为探针验证；下表记录结构差异及其成本评估，消除「未知偏差」）：
+
+| QuickJS pass / 机制 | zjs 等价机制 | 差异点 | 实质成本 |
+| --- | --- | --- | --- |
+| `js_create_function` scope 重链（quickjs.c:36120-36144：重算 `scope_next`/`scopes[].first`，空 scope 继承父链） | `FunctionDef.addScopeVar` 在解析时增量维护 `scope_next`/`scopes[].first`；`resolveScopeVar`（resolve_variables.zig）显式沿 `scopes[].parent` 上溯 | zjs 链接关系自构造起即正确且只含本 scope 变量，无需收尾重链 pass；QuickJS 的「空 scope 继承父链」由查找方上溯替代 | 无。按构造等价 |
+| `add_eval_variables`（quickjs.c:33694：编译期把调用方全部绑定闭包化，`capture_var` 标记所有 locals） | 运行时 eval overlay：`eval_ops.zig` 把 caller frame 的 `eval_local_names`/slots/`var_ref_names`/refs 传入嵌套执行，`getVar`/`putVar` 按名查 overlay | 编译期闭包转换 vs 运行时按名叠加视图；zjs 无需预捕获 caller 全部 locals（overlay 直读 frame 槽位） | eval 路径按名扫描慢于索引访问，但 direct eval 是冷路径；语义等价 |
+| `add_module_variables`（quickjs.c:36073：模块 global vars 入 closure，`export_entries[i].var_idx` 编译末期定索引） | 解析期 `ensureTopLevelModuleDeclClosureVar`（zjs_parser.zig）为顶层模块绑定建 `module_decl` closure_var；实例化期 `buildModuleVarRefs`（exec/module.zig）按 `var_ref_names` 名字解析到模块 cell（import → 他模块 cell = live binding） | export → 索引的绑定从编译末期推迟到模块实例化期，按名而非按 `var_idx` | 实例化期 O(绑定数) 名字解析，一次性；稳态访问同为 `get_var_ref` 索引访问。live binding 探针通过 |
+| `capture_var`（quickjs.c:33022：置 `is_captured` + 分配 `var_ref_idx`，`b->var_ref_count` = 被捕获自有局部数；运行时 `sf->var_refs[]` 存开放 JSVarRef） | `ensureClosureChain`（zjs_parser.zig）置 `VarDef.is_captured`；无 `var_ref_idx`——cell 由 `ensureLocalVarRefCell`（slot_ops.zig）就地装箱在局部槽内 | QuickJS 是「旁路 var_ref 表 + 栈槽开放引用」模型；zjs 是「槽内 boxed cell」模型，捕获状态即槽位内容，无需帧侧 var_refs 表寻自有局部 | 无正确性差异。字段语义差异：zjs `var_ref_count` = closure_var 数（父引用数，供 frame.var_refs 定容），不是 QuickJS 的被捕获自有局部数 |
+| `OP_enter_scope` 降级（quickjs.c:34476：对 scope 内 lexical 发 `set_loc_uninitialized`，函数声明发 `fclosure` 重实例化） | `resolve_variables` 的 `enterScopeRefreshSize`/`writeEnterScopeRefresh`：对 scope 内被捕获槽发 `close_loc`（detach cell），对 `.normal` lexical 发 `set_loc_uninitialized`（TDZ 重 arm） | zjs 把 close 也放在 scope **入口**（QuickJS 在 `leave_scope` 出口 + break/continue 跳转点 `close_scopes`，quickjs.c:27948）。入口位置支配一切重入路径（正常回边/continue/内层 break），单点发射即可；因局部槽不复用、cell 仅经闭包可达，观察等价 | 无。函数/箭头体块（每帧仅进入一次，且提升函数初始化先于体码捕获槽位）显式抑制发射（`suppress_block_enter_scope`） |
+| `OP_leave_scope` 降级（quickjs.c:34510：对 `is_captured` 变量发 `close_loc`） | 解析器在 for 头作用域回边处 `emitCloseCurrentScopeLexicals`；块作用域由上行 enter_scope 入口刷新覆盖；`removeUncapturedCloseLoc`（finalize.zig）以 `localIsCaptured`（resolve_variables.zig，共享谓词）剔除未捕获槽的 close_loc | 出口 close 改为入口 close + for 头回边 close 的组合 | 无（语义探针覆盖 per-iteration 捕获、TDZ 重入、capture-before-decl、catch/switch/嵌套循环） |
+| 编译期载体：`JSFunctionDef`（含 `byte_code` DynBuf）→ pass 原地改写 → 一次 memcpy 进单块 `JSFunctionBytecode`（quickjs.c:36219-36294） | `FunctionDef`（变量/scope 元数据 + `byte_code`）→ finalize **move**（非拷贝）code/atom_operands 进 `Bytecode` lowered 载体 → pass 改写 → 一次拷贝进单块 `core.FunctionBytecode.block` | zjs 多一个 `Bytecode` 结构，但 move 后拷贝次数与 QuickJS 相同（仅终态打包一次）；`Bytecode` 同时是 VM 执行视图类型（`asBytecodeView` 借用切片），贯穿全部 exec 签名 | 收敛为「VM 直接执行 FunctionBytecode」= exec 层签名级重写，收益仅省一个借用视图构造（无堆分配），不实施，记录为既定设计 |
+| 顶层脚本执行载体 | 顶层经 `runWithFunctionDefRuntime` 直接执行解析器产出的 `Bytecode`（不物化 `FunctionBytecode`）；嵌套函数经 `createFunctionBytecode` 物化 | QuickJS 顶层同样物化 `JSFunctionBytecode` | 顶层少一次打包；module/debug 元数据留在 `Bytecode` 上（`module_record`/`debug_table`），属同一既定设计 |
+
 ## 4. VM Execution
 
 当前 VM dispatcher 是 `src/exec/zjs_vm.zig`。Phase 1 执行模型改进已落地：

@@ -28,7 +28,7 @@ todos:
     status: completed
   - id: p3-pipeline
     content: "Phase 3: 补 add_module_variables/add_eval_variables/scope 重链 pass，补全 is_captured/var_ref_count 链路"
-    status: pending
+    status: completed
   - id: p3-regexp-rope
     content: "Phase 3: 修复 UnicodeSets 排除项与 duplicate named groups；实现 String rope"
     status: completed
@@ -37,7 +37,7 @@ todos:
     status: completed
   - id: p4-fb-compact
     content: "Phase 4: FunctionBytecode 单块布局消解 D2；编译期 Bytecode/FunctionDef 双轨收敛"
-    status: pending
+    status: completed
   - id: p4-gc-weakref
     content: "Phase 4: WeakRef 注册表替换 O(n) 扫描；移除 Z-GE 分代脚手架；Object 头瘦身与属性元数据去重"
     status: completed
