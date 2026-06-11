@@ -489,12 +489,12 @@ const SimpleJsonParser = struct {
         const start = self.index;
         if (self.consumeByte('-') and self.peek() == null) return error.UnsupportedSimpleJson;
         if (self.consumeByte('0')) {
-            if (self.peek()) |byte| if (byte >= '0' and byte <= '9') return error.UnsupportedSimpleJson;
+            if (self.peek()) |byte| if (unicode.isAsciiDigitByte(byte)) return error.UnsupportedSimpleJson;
         } else {
             const first = self.peek() orelse return error.UnsupportedSimpleJson;
-            if (first < '1' or first > '9') return error.UnsupportedSimpleJson;
+            if (!unicode.isAsciiDigitByte(first) or first == '0') return error.UnsupportedSimpleJson;
             while (self.peek()) |byte| {
-                if (byte < '0' or byte > '9') break;
+                if (!unicode.isAsciiDigitByte(byte)) break;
                 self.index += 1;
             }
         }
@@ -541,6 +541,22 @@ const SimpleJsonParser = struct {
 fn parseSimpleJsonValue(rt: *core.JSRuntime, global: ?*core.Object, bytes: []const u8) !?core.JSValue {
     var parser = SimpleJsonParser{ .rt = rt, .global = global, .bytes = bytes };
     return try parser.parse();
+}
+
+test "simple JSON parser uses shared ASCII digit classification for integers" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const int_value = (try parseSimpleJsonValue(rt, null, "12345")).?;
+    defer int_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 12345), int_value.asInt32());
+
+    const zero_value = (try parseSimpleJsonValue(rt, null, "0")).?;
+    defer zero_value.free(rt);
+    try std.testing.expectEqual(@as(?i32, 0), zero_value.asInt32());
+
+    try std.testing.expect((try parseSimpleJsonValue(rt, null, "01")) == null);
+    try std.testing.expect((try parseSimpleJsonValue(rt, null, "1.5")) == null);
 }
 
 fn valueFromStdJson(rt: *core.JSRuntime, global: ?*core.Object, value: std.json.Value) !core.JSValue {
