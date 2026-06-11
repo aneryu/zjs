@@ -2139,9 +2139,8 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     const unit = string_object.codeUnitAt(0);
     if (unit > 0x7f) return null;
     const byte: u8 = @intCast(unit);
-    if (byte >= 'A' and byte <= 'Z') return true;
-    if (byte >= 'a' and byte <= 'z') return true;
-    if (is_id_continue and byte >= '0' and byte <= '9') return true;
+    if (unicode_lib.isAsciiAlphaByte(byte)) return true;
+    if (is_id_continue and unicode_lib.isAsciiDigitByte(byte)) return true;
     if (is_id_continue and byte == '_') return true;
     return false;
 }
