@@ -1025,46 +1025,6 @@ pub const directEvalVisibleBindingExists = eval_ops.directEvalVisibleBindingExis
 pub const directEvalVisibleLocalNameCount = eval_ops.directEvalVisibleLocalNameCount;
 pub const directEvalShouldExposeImplicitArguments = eval_ops.directEvalShouldExposeImplicitArguments;
 
-test "appendFunctionEvalLocal roots new refs while write barrier records slice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const owner_value = try builtins.function.nativeFunction(rt, "owner", 0);
-    defer owner_value.free(rt);
-    const owner = objectFromValue(owner_value) orelse return error.TypeError;
-    owner.header.setGeneration(.old);
-    const child = try core.Object.create(rt, core.class.ids.object, null);
-    defer child.value().free(rt);
-    child.header.setGeneration(.young);
-    const child_value = child.value();
-
-    const name = try rt.internAtom("rootedEvalLocal");
-    defer rt.atoms.free(name);
-
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
-    var probe = ActiveRootValueProbe{
-        .rt = rt,
-        .target = child_value,
-    };
-    rt.memory.trigger_gc_fn = ActiveRootValueProbe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
-    defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-        rt.gc.clearRememberedSet();
-    }
-
-    try appendFunctionEvalLocal(ctx, owner, name, child_value);
-
-    try std.testing.expect(!probe.trace_failed);
-    try std.testing.expect(probe.match_count >= 1);
-    try std.testing.expectEqual(@as(usize, 1), owner.functionEvalLocalRefsSlot().*.len);
-    try std.testing.expect(owner.functionEvalLocalRefsSlot().*[0].same(child_value));
-}
-
 pub const InlineCallRequest = struct {
     target: inline_calls.InlineTarget,
     /// Index of the callable on the caller operand stack; args follow it.
@@ -10049,7 +10009,6 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
     }
     const next_value = value.dup();
     errdefer next_value.free(ctx.runtime);
-    try ctx.runtime.writeBarrierValueAt(&object.header, next_value, &refs.*[index]);
     const old_value = refs.*[index];
     refs.*[index] = next_value;
     old_value.free(ctx.runtime);

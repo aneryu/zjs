@@ -527,7 +527,6 @@ pub fn createBytecodeFunctionObject(
                     rooted_refs = refs[0..initialized];
                 }
             }
-            try object.writeValueSliceBarrier(ctx.runtime, refs);
             eval_bindings_transferred = true;
             object.functionEvalLocalNamesSlot().* = names;
             object.functionEvalLocalRefsSlot().* = refs;
@@ -3992,7 +3991,6 @@ pub fn createGeneratorObject(
             initialized += 1;
             rooted_refs = refs[0..initialized];
         }
-        try object.writeValueSliceBarrier(ctx.runtime, refs);
         locals_transferred = true;
         object.functionEvalLocalNamesSlot().* = names;
         object.functionEvalLocalRefsSlot().* = refs;
@@ -4016,60 +4014,6 @@ pub fn createGeneratorObject(
     defer slice.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "slice", slice);
     return object.value();
-}
-
-test "createGeneratorObject roots copied captures while installing generator slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-
-    const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
-    const fb = &fb_slice[0];
-    fb.* = bytecode.FunctionBytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    try rt.gc.add(&fb.header);
-    var func_value = core.JSValue.functionBytecode(&fb.header);
-    var func_alive = true;
-    defer if (func_alive) func_value.free(rt);
-
-    const child = try core.Object.create(rt, core.class.ids.object, null);
-    var child_alive = true;
-    defer if (child_alive) child.value().free(rt);
-    child.header.setGeneration(.young);
-    const var_refs = [_]core.JSValue{child.value()};
-
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
-    var probe = ActiveRootValueProbe{
-        .rt = rt,
-        .target = child.value(),
-    };
-    rt.memory.trigger_gc_fn = ActiveRootValueProbe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
-    defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-        rt.gc.clearRememberedSet();
-    }
-
-    const generator_value = try createGeneratorObject(ctx, func_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), &.{}, &var_refs, null, global, &.{}, &.{}, false);
-    var generator_alive = true;
-    defer if (generator_alive) generator_value.free(rt);
-
-    try std.testing.expect(!probe.trace_failed);
-    try std.testing.expect(probe.max_match_count >= 2);
-    const generator = objectFromValue(generator_value) orelse return error.TypeError;
-    try std.testing.expectEqual(@as(usize, 1), generator.functionCapturesSlot().*.len);
-    try std.testing.expect(generator.functionCapturesSlot().*[0].same(child.value()));
-
-    generator_value.free(rt);
-    generator_alive = false;
-    child.value().free(rt);
-    child_alive = false;
-    func_value.free(rt);
-    func_alive = false;
 }
 
 pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, function_value: core.JSValue, is_async: bool) !?*core.Object {
@@ -4233,23 +4177,8 @@ pub fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: 
     for (args, 0..) |arg, index| {
         const refs = object.argumentsVarRefsSlot();
         if (mapped and index < refs.*.len and index < frame.args.len) {
-            var rooted_cell = try ensureVarRefCell(ctx, &frame.args[index]);
-            var cell_owned = true;
-            errdefer if (cell_owned) rooted_cell.free(ctx.runtime);
-            {
-                var root_values = [_]core.runtime.ValueRootValue{
-                    .{ .value = &rooted_cell },
-                };
-                const root_frame = core.runtime.ValueRootFrame{
-                    .previous = ctx.runtime.active_value_roots,
-                    .values = &root_values,
-                };
-                ctx.runtime.active_value_roots = &root_frame;
-                defer ctx.runtime.active_value_roots = root_frame.previous;
-                try ctx.runtime.writeBarrierValueAt(&object.header, rooted_cell, &refs.*[index]);
-            }
+            const rooted_cell = try ensureVarRefCell(ctx, &frame.args[index]);
             refs.*[index] = rooted_cell;
-            cell_owned = false;
             rooted_argument_refs = refs.*[0 .. index + 1];
         }
         const arg_value = slotValueDup(arg);

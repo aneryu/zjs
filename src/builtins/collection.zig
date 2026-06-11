@@ -545,7 +545,6 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
     defer canonical_key.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| {
         const entry = &object.collectionEntriesSlot().*[index];
-        try rt.writeBarrierValueAt(&object.header, value, &entry.value);
         const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
@@ -570,7 +569,6 @@ pub fn setWeakMapEntryByIdentity(rt: *core.JSRuntime, object: *core.Object, key_
 fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (findWeakEntry(object, key_identity)) |index| {
         const entry = &object.weakCollectionEntriesSlot().*[index];
-        try rt.writeBarrierValueAt(&object.header, value, &entry.value);
         const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
@@ -1097,7 +1095,6 @@ fn mapGetOrInsertComputed(
         errdefer value.free(rt);
         if (findWeakEntry(object, key_identity)) |index| {
             const entry = &object.weakCollectionEntriesSlot().*[index];
-            try rt.writeBarrierValueAt(&object.header, value, &entry.value);
             const next_value = value.dup();
             const old_value = entry.value;
             entry.value = next_value;
@@ -1123,7 +1120,6 @@ fn mapGetOrInsertComputed(
     errdefer value.free(rt);
     if (findStrongEntry(object, canonical_key)) |index| {
         const entry = &object.collectionEntriesSlot().*[index];
-        try rt.writeBarrierValueAt(&object.header, value, &entry.value);
         const next_value = value.dup();
         const old_value = entry.value;
         entry.value = next_value;
@@ -2237,7 +2233,6 @@ fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.object
     const refreshed_entries = object.weakCollectionEntriesSlot();
     refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
     errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    try rt.writeBarrierValueAt(&object.header, stored.value, &refreshed_entries.*[index].value);
     refreshed_entries.*[index] = stored;
     linkWeakEntry(object, index);
 }

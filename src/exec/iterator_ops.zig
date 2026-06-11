@@ -2999,8 +2999,6 @@ fn qjsIteratorHelperSetInnerFromIterator(
     errdefer next_inner_next.free(ctx.runtime);
     const iterator_slot = helper.iteratorDataSlot();
     const inner_next_slot = helper.iteratorInnerNextSlot();
-    try ctx.runtime.writeBarrierValueAt(&helper.header, next_inner_iterator, iterator_slot);
-    try ctx.runtime.writeBarrierValueAt(&helper.header, next_inner_next, inner_next_slot);
     const old_inner_iterator = iterator_slot.*;
     const old_inner_next = inner_next_slot.*;
     iterator_slot.* = next_inner_iterator;

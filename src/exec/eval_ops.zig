@@ -132,19 +132,8 @@ pub fn shouldSkipDirectEvalScopeCaptureName(
 pub fn appendFunctionEvalLocal(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
     for (object.functionEvalLocalNamesSlot().*, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= object.functionEvalLocalRefsSlot().*.len) continue;
-        var next = value.dup();
-        errdefer next.free(ctx.runtime);
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &next },
-        };
-        const root_frame = core.runtime.ValueRootFrame{
-            .previous = ctx.runtime.active_value_roots,
-            .values = &root_values,
-        };
-        ctx.runtime.active_value_roots = &root_frame;
-        defer ctx.runtime.active_value_roots = root_frame.previous;
+        const next = value.dup();
         const ref_slot = &object.functionEvalLocalRefsSlot().*[idx];
-        try ctx.runtime.writeBarrierValueAt(&object.header, next, ref_slot);
         const old_value = ref_slot.*;
         ref_slot.* = next;
         old_value.free(ctx.runtime);
@@ -178,7 +167,6 @@ pub fn appendFunctionEvalLocal(ctx: *core.JSContext, object: *core.Object, atom_
 
     const old_names = object.functionEvalLocalNamesSlot().*;
     const old_refs = object.functionEvalLocalRefsSlot().*;
-    try object.writeValueSliceBarrier(ctx.runtime, refs);
     name_owned = false;
     value_owned = false;
     object.functionEvalLocalNamesSlot().* = names;

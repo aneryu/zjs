@@ -1565,7 +1565,6 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
 
     const heap_bytes = fb.heapByteSize();
     try std.testing.expect(heap_bytes >= large_threshold);
-    try std.testing.expectEqual(core.gc.Generation.large, fb.header.generation());
     try std.testing.expectEqual(@as(u16, @intCast(@min(heap_bytes, std.math.maxInt(u16)))), fb.header.size_class);
 
     const stats = rt.gcStats();

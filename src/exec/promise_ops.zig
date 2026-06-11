@@ -441,8 +441,6 @@ pub fn qjsAsyncDisposableStackStoreCapability(stack: *core.Object, rt: *core.JSR
 
     const resolve_slot = stack.disposableStackAsyncResolveSlot();
     const reject_slot = stack.disposableStackAsyncRejectSlot();
-    try rt.writeBarrierValueAt(&stack.header, resolve, resolve_slot);
-    try rt.writeBarrierValueAt(&stack.header, reject, reject_slot);
 
     stack.clearDisposableStackAsyncCapability(rt);
     resolve_slot.* = resolve;
@@ -862,7 +860,6 @@ pub fn qjsAppendPromiseReaction(rt: *core.JSRuntime, promise: *core.Object, reac
         next[current.len] = core.JSValue.undefinedValue();
         rooted_next = next[0..current.len];
     };
-    try promise.writeValueSliceBarrier(rt, next);
     reaction_owned = false;
     promise.promiseReactionsSlot().* = next;
     if (current.len != 0) rt.memory.free(core.JSValue, current);
@@ -1212,14 +1209,12 @@ pub fn qjsPromiseSettleValue(
     var next_result_owned = true;
     errdefer if (next_result_owned) next_result.free(ctx.runtime);
     const result_slot = promise.promiseResultSlot();
-    try ctx.runtime.writeBarrierValueAt(&promise.header, next_result, result_slot);
 
     var next_reaction_arg: ?core.JSValue = null;
     errdefer if (next_reaction_arg) |reaction_arg| reaction_arg.free(ctx.runtime);
     const reaction_arg_slot = promise.promiseReactionArgSlot();
     if (needs_callback_job) {
         next_reaction_arg = value.dup();
-        try ctx.runtime.writeBarrierValueAt(&promise.header, next_reaction_arg.?, reaction_arg_slot);
         try enqueuePendingPromiseJob(ctx, promise.value());
     }
 
@@ -2626,7 +2621,6 @@ pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, r
     try ctx.ensurePendingPromiseJobCapacity(ctx.pending_promise_jobs.len + 1);
 
     const result_slot = promise_object.promiseResultSlot();
-    try ctx.runtime.writeBarrierValueAt(&promise_object.header, result_value, result_slot);
 
     var reaction_arg_value: ?core.JSValue = null;
     errdefer if (reaction_arg_value) |value| value.free(ctx.runtime);
@@ -2634,7 +2628,6 @@ pub fn atomicsSettleAsyncWaiter(waiter: *AtomicsWaiter, promise: core.JSValue, r
     const needs_reaction_arg = promise_object.promiseReactionCallback() != null and promise_object.promiseReactionArg() == null;
     if (needs_reaction_arg) {
         reaction_arg_value = result_value.dup();
-        try ctx.runtime.writeBarrierValueAt(&promise_object.header, reaction_arg_value.?, reaction_arg_slot);
     }
 
     try enqueuePendingPromiseJob(ctx, promise);

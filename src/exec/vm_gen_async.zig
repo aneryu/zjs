@@ -29,6 +29,7 @@ const AwaitSuspendMode = enum {
 };
 
 pub fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.Stack, generator: *core.Object, additional: usize) !void {
+    _ = rt;
     const values = generator.generatorStack();
     const capacity = generator.generatorStackCapacity();
     if (values.len > stack.limit) return error.StackOverflow;
@@ -48,7 +49,6 @@ pub fn reserveGeneratorStackAdditional(rt: *core.JSRuntime, stack: *stack_mod.St
     const next = try stack.memory.alloc(core.JSValue, next_capacity);
     errdefer stack.memory.free(core.JSValue, next);
     @memcpy(next[0..values.len], values);
-    try generator.writeValueSliceBarrier(rt, next[0..values.len]);
     generator.generatorStackSlot().* = next[0..values.len];
     generator.generatorStackCapacitySlot().* = next_capacity;
     if (capacity != 0) {
@@ -70,10 +70,6 @@ pub fn saveGeneratorExecutionState(
     // borrowed VM stack-arena windows.
     std.debug.assert(!stack.arena_window);
     generator.generatorPcSlot().* = pc;
-    try generator.writeValueSliceBarrier(ctx.runtime, stack.values);
-    try generator.writeValueSliceBarrier(ctx.runtime, frame.locals);
-    try generator.writeValueSliceBarrier(ctx.runtime, frame.args);
-    try generator.writeValueSliceBarrier(ctx.runtime, frame.var_refs);
     const old_stack = generator.generatorStack();
     const old_stack_capacity = generator.generatorStackCapacity();
     const old_frame_locals = generator.generatorFrameLocals();

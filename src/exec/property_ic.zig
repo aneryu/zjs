@@ -513,7 +513,6 @@ fn setOwnDataPropertyAt(rt: *core.JSRuntime, object: *core.Object, index: usize,
     }
     const next_value = core.object.dupPropertyDataValue(&rt.atoms, atom_id, value);
     errdefer core.object.destroyPropertySlot(rt, slot.entry.atom_id, .{ .data = next_value });
-    try rt.writeBarrierValueAt(&object.header, next_value, slot.value);
     const old_value = slot.value.*;
     slot.value.* = next_value;
     core.object.destroyPropertySlot(rt, slot.entry.atom_id, .{ .data = old_value });

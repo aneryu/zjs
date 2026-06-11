@@ -615,8 +615,6 @@ pub fn qjsRegExpCompile(
     errdefer if (next_flags_owned) next_flags.free(ctx.runtime);
     const source_slot = regexp_object.regexpSourceSlot();
     const flags_slot = regexp_object.regexpFlagsSlot();
-    try ctx.runtime.writeBarrierValueAt(&regexp_object.header, next_source, source_slot);
-    try ctx.runtime.writeBarrierValueAt(&regexp_object.header, next_flags, flags_slot);
 
     const old_source = source_slot.*;
     const old_flags = flags_slot.*;

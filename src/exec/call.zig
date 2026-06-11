@@ -4809,7 +4809,6 @@ fn createBoundFunction(
             initialized += 1;
             rooted_owned_bound_args = owned_bound_args[0..initialized];
         }
-        try object.writeValueSliceBarrier(rt, rooted_owned_bound_args);
         bound_args_owned = false;
         object.boundArgsSlot().* = owned_bound_args;
         rooted_owned_bound_args = &.{};

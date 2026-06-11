@@ -201,7 +201,7 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     }
     cacheSimpleNumericBytecode(fb);
 
-    try rt.gc.addWithGeneration(&fb.header, .old, fb.heapByteSize());
+    try rt.gc.addWithSize(&fb.header, fb.heapByteSize());
     registered = true;
 
     committed = true;

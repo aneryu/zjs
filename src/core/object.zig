@@ -1292,7 +1292,6 @@ pub const Object = struct {
         shape_owned = false;
         initialized = true;
         try rt.registerObject(self);
-        try rt.writeBarrierObjectSlot(&self.header, &self.prototype);
         initialized = false;
         return self;
     }
@@ -1424,7 +1423,6 @@ pub const Object = struct {
         const payload = try self.ensureRealmPayload(rt);
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
-        try rt.writeBarrierObjectAt(&self.header, prototype, @ptrCast(&payload.cached_function_proto));
         const old_prototype = payload.cached_function_proto;
         payload.cached_function_proto = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -1444,7 +1442,6 @@ pub const Object = struct {
         const payload = try self.ensureRealmPayload(rt);
         if (prototype) |stored| gc.retain(&stored.header);
         errdefer if (prototype) |stored| stored.value().free(rt);
-        try rt.writeBarrierObjectAt(&self.header, prototype, @ptrCast(&payload.cached_promise_proto));
         const old_prototype = payload.cached_promise_proto;
         payload.cached_promise_proto = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -2097,8 +2094,6 @@ pub const Object = struct {
         const refreshed_entries = self.collectionEntriesSlot();
         refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
         errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-        try self.writeValueBarrierAt(rt, entry.key, &refreshed_entries.*[index].key);
-        try self.writeValueBarrierAt(rt, entry.value, &refreshed_entries.*[index].value);
         refreshed_entries.*[index] = entry;
         return index;
     }
@@ -2268,8 +2263,6 @@ pub const Object = struct {
         const refreshed_entries = self.finalizationRegistryCellsSlot();
         refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
         errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-        try self.writeValueBarrierAt(rt, rooted_held_value, &refreshed_entries.*[index].held_value);
-        try self.writeValueBarrierAt(rt, rooted_unregister_token, &refreshed_entries.*[index].unregister_token);
         refreshed_entries.*[index] = .{
             .target_identity = weakIdentityFromValue(rooted_target),
             .held_value = rooted_held_value.dup(),
@@ -2347,8 +2340,6 @@ pub const Object = struct {
         const index = payload.resources.len;
         payload.resources = payload.resources.ptr[0 .. index + 1];
         errdefer payload.resources = payload.resources[0..index];
-        try self.writeValueBarrierAt(rt, resource_value, &payload.resources[index].value);
-        try self.writeValueBarrierAt(rt, method, &payload.resources[index].method);
         payload.resources[index] = .{
             .value = resource_value.dup(),
             .method = method.dup(),
@@ -2407,11 +2398,8 @@ pub const Object = struct {
             std.debug.assert(target.class_payload_kind == .disposable_stack);
             unreachable;
         };
+        _ = rt;
         std.debug.assert(target_payload.resources.len == 0 and target_payload.resource_capacity == 0);
-        for (source_payload.resources) |*resource| {
-            try target.writeValueBarrierAt(rt, resource.value, &resource.value);
-            try target.writeValueBarrierAt(rt, resource.method, &resource.method);
-        }
         target_payload.resources = source_payload.resources;
         target_payload.resource_capacity = source_payload.resource_capacity;
         source_payload.resources = &.{};
@@ -2437,15 +2425,14 @@ pub const Object = struct {
     pub fn setVarRefValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
         errdefer next_value.free(rt);
         const value_slot = self.varRefValueSlot();
-        try self.writeValueBarrierAt(rt, next_value, value_slot);
         const old_value = value_slot.*;
         value_slot.* = next_value;
         if (old_value) |stored| stored.free(rt);
     }
 
     pub fn setOptionalValueSlot(self: *Object, rt: *JSRuntime, slot: *?JSValue, next_value: ?JSValue) !void {
+        _ = self;
         errdefer if (next_value) |stored_value| stored_value.free(rt);
-        if (next_value) |stored_value| try self.writeValueBarrierAt(rt, stored_value, slot);
         const old_value = slot.*;
         slot.* = next_value;
         if (old_value) |stored| stored.free(rt);
@@ -2465,16 +2452,12 @@ pub const Object = struct {
         return old_value;
     }
 
-    pub fn writeValueSliceBarrier(self: *Object, rt: *JSRuntime, values: []const JSValue) !void {
-        try rt.writeBarrierValueSlice(&self.header, values);
-    }
-
     pub fn setValueSlice(self: *Object, rt: *JSRuntime, slot: *[]JSValue, next_values: []JSValue) !void {
+        _ = self;
         errdefer {
             var owned_next = next_values;
             destroyValueSlice(rt, &owned_next);
         }
-        try self.writeValueSliceBarrier(rt, next_values);
         destroyValueSlice(rt, slot);
         slot.* = next_values;
     }
@@ -2487,12 +2470,12 @@ pub const Object = struct {
         next_values: []JSValue,
         next_capacity: usize,
     ) !void {
+        _ = self;
         errdefer {
             var owned_next = next_values;
             var owned_capacity = next_capacity;
             destroyValueSliceWithCapacity(rt, &owned_next, &owned_capacity);
         }
-        try self.writeValueSliceBarrier(rt, next_values);
         destroyValueSliceWithCapacity(rt, slot, capacity);
         slot.* = next_values;
         capacity.* = next_capacity;
@@ -4071,7 +4054,6 @@ pub const Object = struct {
         if (slot.* == home_object) return;
         if (home_object) |next| gc.retain(&next.header);
         errdefer if (home_object) |next| next.value().free(rt);
-        try rt.writeBarrierObjectAt(&self.header, home_object, @ptrCast(slot));
         const old_home_object = slot.*;
         slot.* = home_object;
         if (old_home_object) |old| old.value().free(rt);
@@ -4130,8 +4112,6 @@ pub const Object = struct {
         errdefer next_file.free(rt);
         const next_function = function_name.dup();
         errdefer next_function.free(rt);
-        try self.writeValueBarrierAt(rt, next_file, &payload.callsite_file);
-        try self.writeValueBarrierAt(rt, next_function, &payload.callsite_function);
         const old_file = payload.callsite_file;
         const old_function = payload.callsite_function;
         payload.callsite_file = next_file;
@@ -4172,7 +4152,6 @@ pub const Object = struct {
         const payload = try self.ensureOrdinaryPayload(rt);
         const next_value = stack_value.dup();
         errdefer next_value.free(rt);
-        try self.writeValueBarrierAt(rt, next_value, &payload.error_stack);
         const old_value = payload.error_stack;
         const old_sites = payload.error_stack_sites;
         payload.error_stack = next_value;
@@ -4191,7 +4170,6 @@ pub const Object = struct {
         const payload = try self.ensureOrdinaryPayload(rt);
         const next_value = sites_value.dup();
         errdefer next_value.free(rt);
-        try self.writeValueBarrierAt(rt, next_value, &payload.error_stack_sites);
         const old_stack = payload.error_stack;
         const old_sites = payload.error_stack_sites;
         payload.error_stack = null;
@@ -4317,8 +4295,6 @@ pub const Object = struct {
         }
         const resolve_slot = try self.promiseCapabilityResolveSlot(rt);
         const reject_slot = try self.promiseCapabilityRejectSlot(rt);
-        if (next_resolve) |stored| try self.writeValueBarrierAt(rt, stored, resolve_slot);
-        if (next_reject) |stored| try self.writeValueBarrierAt(rt, stored, reject_slot);
         const old_resolve = resolve_slot.*;
         const old_reject = reject_slot.*;
         resolve_slot.* = next_resolve;
@@ -7005,7 +6981,6 @@ pub const Object = struct {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
-        try rt.writeBarrierObjectAt(&self.header, prototype, @ptrCast(&self.prototype));
         const old_prototype = self.prototype;
         self.prototype = prototype;
         if (old_prototype) |old| old.value().free(rt);
@@ -7204,10 +7179,7 @@ pub const Object = struct {
                     return JSValue.undefinedValue();
                 }
                 const cached_value = cached.dup();
-                self.installMaterializedAutoInit(index, info.rt, cached_value) catch {
-                    cached_value.free(info.rt);
-                    return JSValue.undefinedValue();
-                };
+                self.installMaterializedAutoInit(index, cached_value);
                 return cached_value.dup();
             }
         }
@@ -7225,31 +7197,22 @@ pub const Object = struct {
     }
 
     fn finishMaterializedAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: JSValue) JSValue {
-        self.installMaterializedAutoInit(index, info.rt, materialized) catch {
-            materialized.free(info.rt);
-            return JSValue.undefinedValue();
-        };
+        _ = info;
+        self.installMaterializedAutoInit(index, materialized);
         return materialized.dup();
     }
 
     fn finishMaterializedAccessorAutoInit(self: *Object, index: usize, info: property.AutoInit, materialized: property.Accessor) JSValue {
-        self.installMaterializedAccessorAutoInit(index, info.rt, materialized) catch {
-            materialized.getter.free(info.rt);
-            materialized.setter.free(info.rt);
-            return JSValue.undefinedValue();
-        };
+        _ = info;
+        self.installMaterializedAccessorAutoInit(index, materialized);
         return materialized.getter.dup();
     }
 
-    fn installMaterializedAutoInit(self: *Object, index: usize, rt: *JSRuntime, materialized: JSValue) !void {
-        const slot_addr: *const anyopaque = @ptrCast(&self.properties[index].slot);
-        try self.writePropertySlotBarrier(rt, slot_addr, .{ .data = materialized });
+    fn installMaterializedAutoInit(self: *Object, index: usize, materialized: JSValue) void {
         self.properties[index].slot = .{ .data = materialized };
     }
 
-    fn installMaterializedAccessorAutoInit(self: *Object, index: usize, rt: *JSRuntime, materialized: property.Accessor) !void {
-        const slot_addr: *const anyopaque = @ptrCast(&self.properties[index].slot);
-        try self.writePropertySlotBarrier(rt, slot_addr, .{ .accessor = materialized });
+    fn installMaterializedAccessorAutoInit(self: *Object, index: usize, materialized: property.Accessor) void {
         self.properties[index].flags.accessor = true;
         self.properties[index].slot = .{ .accessor = materialized };
     }
@@ -7872,7 +7835,6 @@ pub const Object = struct {
             try self.ensureUniqueShapeForMutation(rt);
             const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.flags = property.Flags.data(true, true, true);
             entry.slot = .{ .data = next_value };
@@ -8462,7 +8424,6 @@ pub const Object = struct {
 
         const element_slot = &self.arrayElementsSlot().*[@intCast(index)];
         const old_value = element_slot.*;
-        try self.writeValueBarrierAt(rt, new_value, element_slot);
         element_slot.* = new_value.dup();
         if (old_value) |old| old.free(rt);
         return true;
@@ -8483,7 +8444,6 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0 .. @as(usize, @intCast(index)) + 1];
         if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
         const element_slot = &elements.*[@intCast(index)];
-        try self.writeValueBarrierAt(rt, new_value, element_slot);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
         self.length = index + 1;
@@ -8500,7 +8460,6 @@ pub const Object = struct {
 
         const elements = try rt.memory.alloc(?JSValue, 1);
         errdefer rt.memory.free(?JSValue, elements);
-        try self.writeValueBarrierAt(rt, new_value, &elements[0]);
         elements[0] = new_value.dup();
         self.arrayElementsSlot().* = elements[0..1];
         self.arrayElementsCapacitySlot().* = 1;
@@ -8518,7 +8477,6 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0 .. @as(usize, @intCast(index)) + 1];
         if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
         const element_slot = &elements.*[@intCast(index)];
-        try self.writeValueBarrierAt(rt, new_value, element_slot);
         element_slot.* = new_value.dup();
         self.markIndexedProperties(rt);
         self.length = index + 1;
@@ -8536,7 +8494,6 @@ pub const Object = struct {
         elements.* = elements.*.ptr[0..values.len];
         for (values, 0..) |item, index| {
             const element_slot = &elements.*[index];
-            try self.writeValueBarrierAt(rt, item, element_slot);
             element_slot.* = item.dup();
         }
         if (values.len != 0) self.markIndexedProperties(rt);
@@ -8705,7 +8662,6 @@ pub const Object = struct {
             const element_slot = &elements.*[element_index];
             const old = element_slot.*;
             const new_value = JSValue.int32(@intCast(value_index));
-            try self.writeValueBarrierAt(rt, new_value, element_slot);
             element_slot.* = new_value;
             if (old) |stored| stored.free(rt);
         }
@@ -8738,7 +8694,6 @@ pub const Object = struct {
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const element_slot = &elements.*[element_index];
-        try self.writeValueBarrierAt(rt, next_value, element_slot);
         const old = element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8788,7 +8743,6 @@ pub const Object = struct {
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const element_slot = &elements.*[element_index];
-        try self.writeValueBarrierAt(rt, next_value, element_slot);
         const old = element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -8813,7 +8767,6 @@ pub const Object = struct {
             const last_index = self.regexpLastIndexSlot();
             const next_value = new_value.dup();
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, last_index);
             const old_value = last_index.*.?;
             last_index.* = next_value;
             old_value.free(rt);
@@ -8830,7 +8783,6 @@ pub const Object = struct {
             if (!entry.flags.writable) return error.ReadOnly;
             const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
             destroyPropertySlot(rt, entry.atom_id, old_slot);
@@ -8880,7 +8832,6 @@ pub const Object = struct {
             }
             const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
             destroyPropertySlot(rt, entry.atom_id, old_slot);
@@ -8900,7 +8851,6 @@ pub const Object = struct {
                 if (entry.atom_id == atom.ids.Private_brand) {
                     const next = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
                     errdefer next.free(rt);
-                    try self.writeValueBarrierAt(rt, next, stored);
                     const old = stored.*;
                     stored.* = next;
                     destroyPropertySlot(rt, entry.atom_id, .{ .data = old });
@@ -8912,7 +8862,6 @@ pub const Object = struct {
                 }
                 const next = new_value.dup();
                 errdefer next.free(rt);
-                try self.writeValueBarrierAt(rt, next, stored);
                 const old = stored.*;
                 stored.* = next;
                 old.free(rt);
@@ -8930,7 +8879,6 @@ pub const Object = struct {
             .data => |*stored| {
                 if (!entry.flags.writable and !stored.isUninitialized()) return false;
                 if (entry.atom_id == atom.ids.Private_brand) return false;
-                try self.writeValueBarrierAt(rt, new_value, stored);
                 const old = stored.*;
                 stored.* = new_value;
                 old.free(rt);
@@ -8964,7 +8912,6 @@ pub const Object = struct {
             }
             const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, &entry.slot);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
             destroyPropertySlot(rt, entry.atom_id, old_slot);
@@ -9254,7 +9201,6 @@ pub const Object = struct {
         if (desc.value_present) {
             const next_value = desc.value.dup();
             errdefer next_value.free(rt);
-            try self.writeValueBarrierAt(rt, next_value, last_index);
             const old_value = last_index.*.?;
             last_index.* = next_value;
             old_value.free(rt);
@@ -9296,7 +9242,6 @@ pub const Object = struct {
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const element_slot = &elements.*[element_index];
-        try self.writeValueBarrierAt(rt, next_value, element_slot);
         const old = element_slot.*;
         element_slot.* = next_value;
         self.markIndexedProperties(rt);
@@ -9342,25 +9287,6 @@ pub const Object = struct {
         try self.appendPreparedPropertyEntry(rt, entry);
     }
 
-    fn writeValueBarrierAt(self: *Object, rt: *JSRuntime, stored_value: JSValue, slot_addr: *const anyopaque) !void {
-        try rt.writeBarrierValueAt(&self.header, stored_value, slot_addr);
-    }
-
-    fn writePropertySlotBarrier(self: *Object, rt: *JSRuntime, slot_addr: *const anyopaque, slot: property.Slot) !void {
-        switch (slot) {
-            .data => |stored_value| try self.writeValueBarrierAt(rt, stored_value, slot_addr),
-            .accessor => |accessor| {
-                try self.writeValueBarrierAt(rt, accessor.getter, slot_addr);
-                try self.writeValueBarrierAt(rt, accessor.setter, slot_addr);
-            },
-            .auto_init, .deleted => {},
-        }
-    }
-
-    fn writePropertyEntryBarrier(self: *Object, rt: *JSRuntime, entry: *const property.Entry) !void {
-        try self.writePropertySlotBarrier(rt, @ptrCast(&entry.slot), entry.slot);
-    }
-
     fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, entry: property.Entry) !void {
         var entry_owned = true;
         errdefer if (entry_owned) destroyPropertyEntry(rt, entry);
@@ -9399,7 +9325,6 @@ pub const Object = struct {
             }
         };
 
-        try self.writePropertyEntryBarrier(rt, &self.properties[old_len]);
         const entry_atom = self.properties[old_len].atom_id;
         if (array.arrayIndexFromAtom(&rt.atoms, entry_atom) != null) {
             self.markIndexedProperties(rt);
@@ -9456,7 +9381,6 @@ pub const Object = struct {
         const next = try entryFromDescriptor(&rt.atoms, atom_id, mergeDescriptor(self.properties[index], desc));
         var next_owned = true;
         errdefer if (next_owned) destroyPropertyEntry(rt, next);
-        try self.writePropertySlotBarrier(rt, @ptrCast(&self.properties[index].slot), next.slot);
         try self.ensureUniqueShapeForMutation(rt);
         const old = self.properties[index];
         self.properties[index] = next;
@@ -9530,7 +9454,6 @@ pub const Object = struct {
         const next_value = new_value.dup();
         errdefer next_value.free(rt);
         const value_slot = &refs.*[slot_index];
-        try self.writeValueBarrierAt(rt, next_value, value_slot);
         const old_value = value_slot.*;
         value_slot.* = next_value;
         old_value.free(rt);

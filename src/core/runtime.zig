@@ -918,46 +918,10 @@ pub const JSRuntime = struct {
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
-        try self.gc.addWithGeneration(&object.header, self.initialObjectGeneration(object), object.allocationSize(self));
+        try self.gc.addWithSize(&object.header, object.allocationSize(self));
         if (self.gc.hasPendingMajorRequest() or self.memory.allocated_bytes > self.malloc_gc_threshold) {
             _ = self.pollGC(self.active_value_roots, .normal) catch {};
         }
-    }
-
-    fn initialObjectGeneration(self: JSRuntime, object: *const Object) gc.Generation {
-        if (!self.gc.policy.enable_nursery) return .old;
-        return switch (object.class_id) {
-            class.ids.object,
-            class.ids.array,
-            class.ids.error_,
-            class.ids.number,
-            class.ids.string,
-            class.ids.boolean,
-            class.ids.symbol,
-            class.ids.arguments,
-            class.ids.mapped_arguments,
-            class.ids.date,
-            class.ids.big_int,
-            class.ids.for_in_iterator,
-            class.ids.iterator,
-            class.ids.iterator_concat,
-            class.ids.iterator_helper,
-            class.ids.iterator_wrap,
-            class.ids.map_iterator,
-            class.ids.set_iterator,
-            class.ids.array_iterator,
-            class.ids.string_iterator,
-            class.ids.regexp_string_iterator,
-            class.ids.async_from_sync_iterator,
-            class.ids.promise,
-            class.ids.promise_resolve_function,
-            class.ids.promise_reject_function,
-            class.ids.dom_exception,
-            class.ids.call_site,
-            class.ids.raw_json,
-            => .young,
-            else => .old,
-        };
     }
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
@@ -1526,7 +1490,6 @@ pub const JSRuntime = struct {
     ) gc.CollectionError!gc.CollectionResult {
         if (self.gc_running) return .{};
         if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
         if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
         defer if (builtin.mode == .Debug) {
             self.gc.verifyIntrusiveList() catch unreachable;
@@ -1545,7 +1508,7 @@ pub const JSRuntime = struct {
             };
             self.gc.recordFailure(mapped);
             self.gc.abortMajorCycle();
-            self.gc.requestGC(.major, .collection_failed, .soon);
+            self.gc.requestGC(.collection_failed, .soon);
             return mapped;
         };
         self.gc.setMajorPhase(.sweep);
@@ -1560,215 +1523,6 @@ pub const JSRuntime = struct {
         self.gc.recordSuccess(result);
         self.gc.finishMajorCycle(result);
         self.resetGCThreshold();
-        return result;
-    }
-
-    fn tryCollectMinorNonMoving(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-    ) gc.CollectionError!gc.CollectionResult {
-        if (self.gc_running) return .{};
-        if (builtin.mode == .Debug) self.gc.verifyIntrusiveList() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyNurseryCoverage() catch unreachable;
-        if (builtin.mode == .Debug) self.verifyRememberedSetCoverage() catch unreachable;
-        if (builtin.mode == .Debug) self.gc.verifyHeapAccounting() catch unreachable;
-        defer if (builtin.mode == .Debug) {
-            self.gc.verifyIntrusiveList() catch unreachable;
-            self.gc.verifyHeapAccounting() catch unreachable;
-        };
-        self.gc_running = true;
-        defer self.gc_running = false;
-
-        const MinorPromotionVisitor = struct {
-            rt: *JSRuntime,
-            object_worklist: std.ArrayList(*Object) = .empty,
-            bytecode_worklist: std.ArrayList(*FunctionBytecode) = .empty,
-            promoted_young_objects: usize = 0,
-            promoted_young_bytes: usize = 0,
-            err: ?gc.CollectionError = null,
-
-            fn deinit(self_visitor: *@This()) void {
-                self_visitor.object_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
-                self_visitor.bytecode_worklist.deinit(self_visitor.rt.memory.persistent_allocator);
-            }
-
-            fn rootVisitValue(context: *anyopaque, slot: *JSValue) RootTraceError!void {
-                const self_visitor: *@This() = @ptrCast(@alignCast(context));
-                try self_visitor.visitValue(slot);
-            }
-
-            fn rootVisitObject(context: *anyopaque, slot: *?*Object) RootTraceError!void {
-                const self_visitor: *@This() = @ptrCast(@alignCast(context));
-                try self_visitor.visitObject(slot);
-            }
-
-            fn visitObject(self_visitor: *@This(), slot: *?*Object) !void {
-                self_visitor.rt.rewriteForwardedObjectSlot(slot);
-                const obj = slot.* orelse return;
-                try self_visitor.evacuateHeader(&obj.header);
-            }
-
-            fn visitValue(self_visitor: *@This(), slot: *JSValue) !void {
-                self_visitor.rt.rewriteForwardedValueSlot(slot);
-                if (slot.refHeader()) |header| {
-                    try self_visitor.evacuateHeader(header);
-                }
-                if (slot.objectHeader()) |header| {
-                    try self_visitor.evacuateHeader(header);
-                }
-            }
-
-            fn evacuateHeader(self_visitor: *@This(), header: *gc.Header) !void {
-                if (header.generation() != .young) return;
-
-                if (self_visitor.rt.gc.forwardedHeader(header)) |forwarded| {
-                    if (forwarded != header) {
-                        self_visitor.rt.gc.promoteHeapAllocationToOld(header);
-                        header.setGeneration(.old);
-                        return;
-                    }
-                } else {
-                    try self_visitor.rt.gc.recordForwarding(header, header);
-                }
-
-                try self_visitor.promoteInPlace(header);
-            }
-
-            fn promoteInPlace(self_visitor: *@This(), header: *gc.Header) !void {
-                std.debug.assert(header.generation() == .young);
-                self_visitor.rt.gc.markNurserySurvivor(header);
-                switch (header.kind) {
-                    .object => {
-                        const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                        try self_visitor.object_worklist.append(self_visitor.rt.memory.persistent_allocator, obj);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
-                    },
-                    .function_bytecode => {
-                        const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", header));
-                        try self_visitor.bytecode_worklist.append(self_visitor.rt.memory.persistent_allocator, fb);
-                        self_visitor.rt.gc.recordMarkStackDepth(self_visitor.object_worklist.items.len + self_visitor.bytecode_worklist.items.len);
-                    },
-                    .string, .big_int => {},
-                }
-
-                self_visitor.rt.gc.promoteHeapAllocationToOld(header);
-                header.setGeneration(.old);
-                self_visitor.promoted_young_objects +|= 1;
-                self_visitor.promoted_young_bytes +|= promotedSize(header);
-            }
-
-            fn promotedSize(header: *const gc.Header) usize {
-                return switch (header.kind) {
-                    .object => @sizeOf(Object),
-                    .function_bytecode => @sizeOf(FunctionBytecode),
-                    .string, .big_int => 0,
-                };
-            }
-
-            fn drain(self_visitor: *@This()) !void {
-                var object_index: usize = 0;
-                var bytecode_index: usize = 0;
-                while (object_index < self_visitor.object_worklist.items.len or bytecode_index < self_visitor.bytecode_worklist.items.len) {
-                    while (object_index < self_visitor.object_worklist.items.len) : (object_index += 1) {
-                        const obj = self_visitor.object_worklist.items[object_index];
-                        try obj.traceChildEdgesFallible(self_visitor.rt, self_visitor);
-                    }
-                    while (bytecode_index < self_visitor.bytecode_worklist.items.len) : (bytecode_index += 1) {
-                        const fb = self_visitor.bytecode_worklist.items[bytecode_index];
-                        try self_visitor.traceFunctionBytecode(fb);
-                    }
-                }
-            }
-
-            fn traceFunctionBytecode(self_visitor: *@This(), fb: *FunctionBytecode) !void {
-                if (fb.class_fields_init) |*stored| try self_visitor.visitValue(stored);
-                for (fb.cpool) |*stored| try self_visitor.visitValue(stored);
-            }
-        };
-
-        const Helper = struct {
-            fn mapRootTraceError(err: RootTraceError) gc.CollectionError {
-                return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.PayloadMarkFailed => error.PayloadMarkFailed,
-                };
-            }
-        };
-
-        const start_ns = profile.nowNanos();
-        _ = self.gc.clearMinorRequest();
-        errdefer self.gc.clearForwarding();
-
-        var visitor = MinorPromotionVisitor{ .rt = self };
-        defer visitor.deinit();
-
-        var root_visitor = RootVisitor{
-            .context = &visitor,
-            .visit_value = MinorPromotionVisitor.rootVisitValue,
-            .visit_object = MinorPromotionVisitor.rootVisitObject,
-        };
-        self.traceRoots(roots orelse self.active_value_roots, &root_visitor) catch |err| {
-            const mapped = Helper.mapRootTraceError(err);
-            self.gc.recordFailure(mapped);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return mapped;
-        };
-
-        for (self.gc.remembered_set) |owner| {
-            switch (owner.kind) {
-                .object => {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", owner));
-                    obj.traceChildEdgesFallible(self, &visitor) catch |err| {
-                        self.gc.recordFailure(err);
-                        self.gc.requestGC(.minor, .collection_failed, .soon);
-                        return err;
-                    };
-                },
-                .function_bytecode => {
-                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
-                    visitor.traceFunctionBytecode(fb) catch |err| {
-                        self.gc.recordFailure(err);
-                        self.gc.requestGC(.minor, .collection_failed, .soon);
-                        return err;
-                    };
-                },
-                .string, .big_int => {},
-            }
-        }
-
-        visitor.drain() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return err;
-        };
-
-        var nursery_index: usize = 0;
-        while (self.gc.nurseryEntryHeader(nursery_index)) |header| : (nursery_index += 1) {
-            visitor.evacuateHeader(header) catch |err| {
-                self.gc.recordFailure(err);
-                self.gc.requestGC(.minor, .collection_failed, .soon);
-                return err;
-            };
-        }
-        visitor.drain() catch |err| {
-            self.gc.recordFailure(err);
-            self.gc.requestGC(.minor, .collection_failed, .soon);
-            return err;
-        };
-
-        const result = gc.CollectionResult{
-            .promoted_young_objects = visitor.promoted_young_objects,
-            .promoted_young_bytes = visitor.promoted_young_bytes,
-            .duration_ns = blk: {
-                const end_ns = profile.nowNanos();
-                break :blk if (end_ns > start_ns) end_ns - start_ns else 0;
-            },
-        };
-        self.gc.finishMinorCollection(result);
-        if (builtin.mode == .Debug) {
-            self.gc.verifyMinorPostcondition() catch unreachable;
-            self.gc.verifyHeapAccounting() catch unreachable;
-        }
         return result;
     }
 
@@ -1790,33 +1544,19 @@ pub const JSRuntime = struct {
             .callback_boundary, .safepoint => {},
         }
         const over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
-        const run_minor = self.gc.shouldRunMinorAt(scheduler_point);
         const run_major = self.gc.shouldRunMajorAt(scheduler_point, over_threshold);
-        if (!run_minor and !run_major) return .{};
-
-        var result: gc.CollectionResult = .{};
-        if (run_minor) {
-            result = try self.tryCollectMinorNonMoving(roots orelse self.active_value_roots);
-        }
+        if (!run_major) return .{};
 
         const major_request = self.gc.pendingMajorRequest();
-        if (run_major) {
-            if (major_request != null) _ = self.gc.clearMajorRequest();
-            const reason = if (major_request) |request|
-                request.reason orelse gc.RequestReason.manual
-            else if (over_threshold)
-                gc.RequestReason.allocation_threshold
-            else
-                gc.RequestReason.manual;
-            self.gc.beginMajorCycle(reason, profile.nowNanos());
-            const major_result = try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
-            result.freed_objects +|= major_result.freed_objects;
-            result.freed_bytecodes +|= major_result.freed_bytecodes;
-            result.promoted_young_objects +|= major_result.promoted_young_objects;
-            result.promoted_young_bytes +|= major_result.promoted_young_bytes;
-            result.duration_ns +|= major_result.duration_ns;
-        }
-        return result;
+        if (major_request != null) _ = self.gc.clearMajorRequest();
+        const reason = if (major_request) |request|
+            request.reason orelse gc.RequestReason.manual
+        else if (over_threshold)
+            gc.RequestReason.allocation_threshold
+        else
+            gc.RequestReason.manual;
+        self.gc.beginMajorCycle(reason, profile.nowNanos());
+        return try self.tryRunObjectCycleRemovalWithValueRoots(roots orelse self.active_value_roots);
     }
 
     pub fn gcSafepoint(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
@@ -1838,7 +1578,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn forceGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
-        self.gc.requestGC(.major, .manual, .urgent);
+        self.gc.requestGC(.manual, .urgent);
         return self.pollGC(roots, .urgent);
     }
 
@@ -1846,14 +1586,9 @@ pub const JSRuntime = struct {
         return self.forceGC(roots);
     }
 
-    pub fn forceMinorGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
-        self.gc.requestGC(.minor, .manual, .urgent);
-        return self.pollGC(roots, .normal);
-    }
-
     pub fn requestGCForTest(self: *JSRuntime) void {
         if (!builtin.is_test) @compileError("test-only helper");
-        self.gc.requestGC(.major, .manual, .soon);
+        self.gc.requestGC(.manual, .soon);
     }
 
     pub fn gcPendingForTest(self: JSRuntime) bool {
@@ -1864,11 +1599,6 @@ pub const JSRuntime = struct {
     pub fn gcLastRequestReasonForTest(self: JSRuntime) ?gc.RequestReason {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.gc.stats.last_request_reason;
-    }
-
-    pub fn gcPendingKindForTest(self: JSRuntime) ?gc.RequestKind {
-        if (!builtin.is_test) @compileError("test-only helper");
-        return self.gc.pendingRequestKind();
     }
 
     pub fn setGCThreshold(self: *JSRuntime, threshold: usize) void {
@@ -1932,7 +1662,7 @@ pub const JSRuntime = struct {
     pub fn reportExternalAlloc(self: *JSRuntime, bytes: usize) !gc.ExternalMemoryToken {
         const token = try self.gc.reportExternalAlloc(bytes);
         if (self.gc.externalMemoryRequestReason()) |reason| {
-            self.gc.requestGC(.major, reason, self.gc.externalMemoryRequestUrgency());
+            self.gc.requestGC(reason, self.gc.externalMemoryRequestUrgency());
         }
         self.requestGCForProcessMemoryPressure();
         return token;
@@ -1981,7 +1711,7 @@ pub const JSRuntime = struct {
         const cgroup_limit_bytes = cgroupLimitBytes();
         if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {
             if (request.urgency == .urgent) self.gc.decommitEmptyPagesNow();
-            self.gc.requestGC(.major, request.reason, request.urgency);
+            self.gc.requestGC(request.reason, request.urgency);
         }
     }
 
@@ -2039,125 +1769,6 @@ pub const JSRuntime = struct {
         return std.fmt.parseInt(usize, token, 10) catch null;
     }
 
-    pub fn rewriteForwardedValueSlot(self: *JSRuntime, slot: *JSValue) void {
-        const header = slot.refHeader() orelse slot.objectHeader() orelse return;
-        const forwarded = self.gc.forwardedHeader(header) orelse return;
-        slot.payload = @intFromPtr(forwarded);
-    }
-
-    pub fn rewriteForwardedObjectSlot(self: *JSRuntime, slot: *?*Object) void {
-        const obj = slot.* orelse return;
-        const forwarded = self.gc.forwardedHeader(&obj.header) orelse return;
-        std.debug.assert(forwarded.kind == .object);
-        slot.* = @alignCast(@fieldParentPtr("header", forwarded));
-    }
-
-    pub fn writeBarrierValue(self: *JSRuntime, owner: *gc.GCObjectHeader, value: JSValue) !void {
-        const child = value.refHeader() orelse value.objectHeader() orelse return;
-        try self.gc.writeBarrier(owner, child, null);
-    }
-
-    pub fn writeBarrierValueAt(self: *JSRuntime, owner: *gc.GCObjectHeader, value: JSValue, slot_addr: *const anyopaque) !void {
-        const child = value.refHeader() orelse value.objectHeader() orelse return;
-        try self.gc.writeBarrier(owner, child, slot_addr);
-    }
-
-    pub fn writeBarrierObjectAt(self: *JSRuntime, owner: *gc.GCObjectHeader, object: ?*Object, slot_addr: *const anyopaque) !void {
-        const child = object orelse return;
-        try self.gc.writeBarrier(owner, &child.header, slot_addr);
-    }
-
-    pub fn writeBarrierObjectSlot(self: *JSRuntime, owner: *gc.GCObjectHeader, slot: *const ?*Object) !void {
-        try self.writeBarrierObjectAt(owner, slot.*, @ptrCast(slot));
-    }
-
-    pub fn writeBarrierValueSlot(self: *JSRuntime, owner: *gc.GCObjectHeader, slot: *const JSValue) !void {
-        try self.writeBarrierValueAt(owner, slot.*, slot);
-    }
-
-    pub fn writeBarrierValueSlice(self: *JSRuntime, owner: *gc.GCObjectHeader, values: []const JSValue) !void {
-        for (values, 0..) |value, index| {
-            try self.writeBarrierValueAt(owner, value, &values[index]);
-        }
-    }
-
-    pub fn writeBarrierOptionalValueSlot(self: *JSRuntime, owner: *gc.GCObjectHeader, slot: *const ?JSValue) !void {
-        if (slot.*) |stored| try self.writeBarrierValueAt(owner, stored, slot);
-    }
-
-    pub fn verifyRememberedSetCoverage(self: *JSRuntime) gc.InvariantError!void {
-        const RememberedVerifier = struct {
-            rt: *JSRuntime,
-            owner: *gc.GCObjectHeader,
-            err: ?gc.InvariantError = null,
-
-            pub fn visitValue(verifier: *@This(), slot: *JSValue) gc.InvariantError!void {
-                if (slot.refHeader()) |header| try verifier.verifyValueChild(header, slot);
-                if (slot.objectHeader()) |header| try verifier.verifyValueChild(header, slot);
-            }
-
-            pub fn visitObject(verifier: *@This(), slot: *?*Object) gc.InvariantError!void {
-                const object = slot.* orelse return;
-                try verifier.verifyObjectChild(&object.header, slot);
-            }
-
-            pub fn visitWeakCollectionEntry(verifier: *@This(), entry: *object_mod.WeakCollectionEntry) gc.InvariantError!void {
-                try verifier.visitValue(&entry.value);
-            }
-
-            pub fn visitFinalizationCell(verifier: *@This(), entry: *object_mod.FinalizationRegistryCell) gc.InvariantError!void {
-                if (!entry.keepsHeldValuesAlive()) return;
-                try verifier.visitValue(&entry.held_value);
-                try verifier.visitValue(&entry.unregister_token);
-            }
-
-            fn verifyChild(verifier: *@This(), child: *gc.GCObjectHeader) gc.InvariantError!void {
-                _ = verifier.rt;
-                if (child.generation() != .young) return;
-                if (!verifier.owner.remembered()) return error.MissingRememberedEdge;
-            }
-
-            fn verifyValueChild(verifier: *@This(), child: *gc.GCObjectHeader, slot: *const JSValue) gc.InvariantError!void {
-                try verifier.verifyChild(child);
-                if (child.generation() != .young) return;
-                if (!verifier.rt.gc.hasDirtyCard(verifier.owner, slot)) return error.MissingDirtyCard;
-            }
-
-            fn verifyObjectChild(verifier: *@This(), child: *gc.GCObjectHeader, slot: *const ?*Object) gc.InvariantError!void {
-                try verifier.verifyChild(child);
-                if (child.generation() != .young) return;
-                if (!verifier.rt.gc.hasDirtyCard(verifier.owner, @ptrCast(slot))) return error.MissingDirtyCard;
-            }
-        };
-
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const owner = gc.headerFromGcNode(node);
-            if (owner.generation() != .old) {
-                current = node.next;
-                continue;
-            }
-
-            var verifier = RememberedVerifier{
-                .rt = self,
-                .owner = owner,
-            };
-            switch (owner.kind) {
-                .object => {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", owner));
-                    try obj.traceChildEdgesFallible(self, &verifier);
-                },
-                .function_bytecode => {
-                    const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", owner));
-                    if (fb.class_fields_init) |*stored| try verifier.visitValue(stored);
-                    for (fb.cpool) |*stored| try verifier.visitValue(stored);
-                },
-                .string, .big_int => {},
-            }
-            current = node.next;
-        }
-    }
-
     fn maybeRunObjectCycleRemoval(self: *JSRuntime) void {
         if (self.gc_running) return;
         if (self.memory.allocated_bytes <= self.malloc_gc_threshold) return;
@@ -2169,7 +1780,7 @@ pub const JSRuntime = struct {
         if (self.gc_running) return;
         const total = std.math.add(usize, self.memory.allocated_bytes, size) catch std.math.maxInt(usize);
         if (total > self.malloc_gc_threshold) {
-            self.gc.requestGC(.major, .allocation_threshold, .soon);
+            self.gc.requestGC(.allocation_threshold, .soon);
         }
     }
 

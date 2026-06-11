@@ -777,7 +777,6 @@ fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int:
     for (map_object.collectionEntriesSlot().*) |*entry| {
         if (!entry.active) continue;
         if (entry.key.asInt32() == key_int) {
-            try rt.writeBarrierValueAt(&map_object.header, value, &entry.value);
             const next_value = value.dup();
             const old_value = entry.value;
             entry.value = next_value;
