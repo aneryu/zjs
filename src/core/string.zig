@@ -184,8 +184,42 @@ pub const String = struct {
     pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
         const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
         const self = try createUtf8(rt, name);
-        self.atom_id = rt.atoms.dup(atom_id);
+        // Only string-kind atoms may seed the bidirectional cache: a
+        // symbol's description string must not convert back into the
+        // symbol atom when later used as a property key.
+        if (rt.atoms.kind(atom_id) == .string) {
+            self.atom_id = rt.atoms.dup(atom_id);
+        }
         return self;
+    }
+
+    /// Interns this string's content as a property-key atom and returns an
+    /// owned atom reference (caller releases it via `rt.atoms.free`).
+    ///
+    /// The atom name uses the same UTF-8/WTF-8 encoding the lexer and the
+    /// JSON parser produce, so keys built from runtime strings unify with
+    /// keys interned from source text. The id is cached on `atom_id` (the
+    /// cache holds its own atom reference, released on destroy), making
+    /// repeated conversions of the same string a ref-count bump; the
+    /// reverse direction (`AtomTable.toStringValue`) seeds the same cache.
+    /// Rope-backed strings are flattened by the content read.
+    pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
+        if (self.atom_id) |cached| return rt.atoms.dup(cached);
+        var utf8 = std.ArrayList(u8).empty;
+        defer utf8.deinit(rt.memory.allocator);
+        const atom_id = switch (self.resolveData()) {
+            .latin1 => |bytes| blk: {
+                if (isAsciiBytes(bytes)) break :blk try rt.atoms.internString(bytes);
+                for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, &utf8, byte);
+                break :blk try rt.atoms.internString(utf8.items);
+            },
+            .utf16 => |units| blk: {
+                try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, &utf8, units);
+                break :blk try rt.atoms.internString(utf8.items);
+            },
+        };
+        self.atom_id = rt.atoms.dup(atom_id);
+        return atom_id;
     }
 
     /// Concatenate two latin1 string buffers into a single freshly allocated

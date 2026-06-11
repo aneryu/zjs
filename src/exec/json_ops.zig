@@ -1000,10 +1000,9 @@ fn qjsJsonStringifyPropertyListAtom(
         string_value = core.JSValue.undefinedValue();
         owned_string.free(ctx.runtime);
     }
-    var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
-    try value_ops.appendRawString(ctx.runtime, &bytes, string_value);
-    return try ctx.runtime.internAtom(bytes.items);
+    const header = string_value.refHeader().?;
+    const string_object: *core.string.String = @fieldParentPtr("header", header);
+    return try string_object.internAtom(ctx.runtime);
 }
 
 fn qjsJsonIsStringOrNumberObject(value: core.JSValue) bool {

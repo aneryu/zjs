@@ -765,7 +765,9 @@ const predefined_private_map = blk: {
 pub const DynamicAtom = struct {
     id: Atom,
     bytes: []u8,
-    hash: u32,
+    /// Link in the table's free-slot list, only meaningful while the entry
+    /// is dead (`ref_count == 0`). `no_free_slot` terminates the list.
+    next_free: EntryIndex = no_free_slot,
     kind: AtomKind,
     ref_count: usize,
     gc_managed_symbol: bool = false,
@@ -779,6 +781,9 @@ pub const DynamicAtom = struct {
 /// Index in `AtomTable.entries`, used as the secondary lookup key for the
 /// hash maps below.
 const EntryIndex = u32;
+
+/// Sentinel terminating the free-slot list.
+const no_free_slot: EntryIndex = std.math.maxInt(EntryIndex);
 
 /// Hash-map context for live string-kind entries. The key is the bytes
 /// slice; the value is an entry index. Equality dereferences into
@@ -811,6 +816,12 @@ pub const AtomTable = struct {
     /// Registered symbols indexed by bytes. Ordinary unique symbols and
     /// private names intentionally do not enter this map.
     symbol_index: InternMap = .{},
+    /// Head of the dead-slot free list threaded through
+    /// `DynamicAtom.next_free`. Slots (and therefore ids) are recycled
+    /// only after their ref count reached zero, so no live holder can be
+    /// retargeted. Predefined atom ids live below `first_dynamic_atom`
+    /// and never enter `entries`, so they are never recycled.
+    free_slot_head: EntryIndex = no_free_slot,
     pub fn init(account: *memory.MemoryAccount) AtomTable {
         return .{ .memory = account };
     }
@@ -907,7 +918,9 @@ pub const AtomTable = struct {
 
     pub fn free(self: *AtomTable, atom: Atom) void {
         if (isConst(atom) or isTaggedInt(atom)) return;
-        const entry = self.findDynamic(atom) orelse return;
+        const idx = dynamicEntryIndex(atom) orelse return;
+        if (idx >= self.entries.len) return;
+        const entry = &self.entries[idx];
         std.debug.assert(entry.ref_count > 0);
         entry.ref_count -= 1;
         if (entry.ref_count == 0) {
@@ -923,8 +936,10 @@ pub const AtomTable = struct {
             const bytes = entry.bytes;
             entry.bytes = &.{};
             if (bytes.len != 0) self.memory.free(u8, bytes);
-            // Slot stays in `entries`. The id is gone for good (no recycle):
-            // see `internDynamic` for the rationale.
+            // Recycle the slot: nobody holds the id anymore, so the next
+            // intern may rebind it. See `internDynamic` for the pop side.
+            entry.next_free = self.free_slot_head;
+            self.free_slot_head = @intCast(idx);
         }
     }
 
@@ -1003,19 +1018,38 @@ pub const AtomTable = struct {
         errdefer if (owned.len != 0) self.memory.free(u8, owned);
         if (bytes.len != 0) @memcpy(owned, bytes);
 
-        // Always assign a fresh id; never recycle a dead slot. Reusing a
-        // dead slot would keep its old `Atom` id but rebind it to new
-        // bytes/kind, silently retargeting any callers that still hold the
-        // id. The original linear-scan AtomTable did recycle dead slots,
-        // but the rest of the engine assumes ids are stable across the
-        // table's lifetime, so we keep the simpler "monotonic id" scheme.
+        // Reuse a dead slot when one is available. A slot only enters the
+        // free list once its ref count reached zero, so rebinding its id
+        // cannot retarget a live holder; the recycled id behaves exactly
+        // like a fresh one. Without recycling the table (and the id
+        // space) grows monotonically under intern/free churn.
+        if (self.free_slot_head != no_free_slot) {
+            const idx = self.free_slot_head;
+            const entry = &self.entries[idx];
+            std.debug.assert(!entry.isLive());
+            std.debug.assert(entry.id == @as(Atom, @intCast(idx)) + first_dynamic_atom);
+            self.free_slot_head = entry.next_free;
+            entry.bytes = owned;
+            entry.kind = atom_kind;
+            entry.ref_count = 1;
+            entry.gc_managed_symbol = atom_kind == .symbol and gc_managed_symbol;
+            entry.registry_managed_symbol = false;
+            errdefer {
+                entry.bytes = &.{};
+                entry.ref_count = 0;
+                entry.next_free = self.free_slot_head;
+                self.free_slot_head = idx;
+            }
+            if (index_entry) try self.indexEntry(idx);
+            return entry.id;
+        }
+
         const id = self.next_id;
         self.next_id += 1;
         errdefer self.next_id = id;
         const idx = try self.appendEntry(.{
             .id = id,
             .bytes = owned,
-            .hash = string.hashBytes(bytes),
             .kind = atom_kind,
             .ref_count = 1,
             .gc_managed_symbol = atom_kind == .symbol and gc_managed_symbol,

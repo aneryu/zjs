@@ -771,10 +771,9 @@ fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.At
     defer rt.active_value_roots = root_frame.previous;
 
     if (rooted_value.isString()) {
-        var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
-        try appendRawString(rt, &bytes, rooted_value);
-        return try rt.internAtom(bytes.items);
+        const header = rooted_value.refHeader().?;
+        const string_object: *core.string.String = @fieldParentPtr("header", header);
+        return try string_object.internAtom(rt);
     }
     if (rooted_value.asInt32()) |int_value| {
         var buf: [64]u8 = undefined;
