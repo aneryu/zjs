@@ -527,7 +527,7 @@ pub fn defineField(
             if (target.class_id == core.class.ids.object and
                 target.exotic == null and
                 target.proxyTarget() == null and
-                !target.is_array and
+                !target.flags.is_array and
                 target.properties.len == 0)
             {
                 try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
@@ -551,7 +551,7 @@ pub fn defineField(
 
     const target = try property_ops.expectObject(obj);
     const effective_atom = remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
-    if (target.is_array and effective_atom == core.atom.ids.length) {
+    if (target.flags.is_array and effective_atom == core.atom.ids.length) {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
             target.truncateArrayElements(ctx.runtime, new_len);
@@ -559,7 +559,7 @@ pub fn defineField(
             return .done;
         }
     }
-    if (target.is_array) {
+    if (target.flags.is_array) {
         if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, effective_atom)) |index| {
             if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return .done;
         }
@@ -571,7 +571,7 @@ pub fn defineField(
     if (target.class_id == core.class.ids.object and
         target.exotic == null and
         target.proxyTarget() == null and
-        !target.is_array and
+        !target.flags.is_array and
         target.properties.len == 0)
     {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, effective_atom, core.Descriptor.data(rooted_value, true, true, true));
@@ -664,7 +664,7 @@ pub fn appendSpreadValues(
     var out_index = index.asInt32() orelse 0;
     const source = property_ops.expectObject(iterable) catch null;
     if (source) |source_object| {
-        if (source_object.is_array) {
+        if (source_object.flags.is_array) {
             var source_index: u32 = 0;
             while (source_index < source_object.length) : (source_index += 1) {
                 const item = source_object.getProperty(core.atom.atomFromUInt32(source_index));
@@ -854,7 +854,7 @@ fn tryFuseArrayLengthLessThanFalseBranch(
     if (frame.pc + 3 > function.code.len) return false;
     if (function.code[frame.pc] != op.lt or function.code[frame.pc + 1] != op.if_false8) return false;
     const array_object = shared_vm.objectFromValue(value) orelse return false;
-    if (!array_object.is_array or array_object.proxyTarget() != null) return false;
+    if (!array_object.flags.is_array or array_object.proxyTarget() != null) return false;
     const lhs = stack.peekBorrowed() orelse return false;
     const lhs_int = lhs.asInt32() orelse return false;
 

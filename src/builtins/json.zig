@@ -242,7 +242,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             primitive = try primitiveValue(rt, object_value) orelse core.JSValue.undefinedValue();
             defer primitive.free(rt);
             try appendJsonValue(rt, buffer, primitive, array_slot, stack, options, depth);
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendJsonArray(rt, buffer, object_value, stack, options, depth);
         } else {
             try appendJsonObject(rt, buffer, object_value, stack, options, depth);
@@ -706,7 +706,7 @@ fn isArrayObject(value: core.JSValue) bool {
     const header = value.refHeader() orelse return false;
     if (!value.isObject()) return false;
     const object: *core.Object = @fieldParentPtr("header", header);
-    return object.is_array;
+    return object.flags.is_array;
 }
 
 fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.Atom {
@@ -724,7 +724,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
     const header = rooted_replacer.refHeader() orelse return &.{};
     if (!rooted_replacer.isObject()) return &.{};
     const object: *core.Object = @fieldParentPtr("header", header);
-    if (!object.is_array) return &.{};
+    if (!object.flags.is_array) return &.{};
 
     var list = std.ArrayList(core.Atom).empty;
     errdefer {

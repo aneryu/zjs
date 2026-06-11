@@ -27,5 +27,5 @@ pub fn isHTMLDDA(value: JSValue) bool {
     if (!value.isObject()) return false;
     const header = value.refHeader() orelse return false;
     const object_value: *object.Object = @fieldParentPtr("header", header);
-    return object_value.is_html_dda;
+    return object_value.flags.is_html_dda;
 }

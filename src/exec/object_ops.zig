@@ -2937,7 +2937,7 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    groups.null_prototype = true;
+    groups.flags.null_prototype = true;
     for (found.captures[0..found.capture_count]) |capture| {
         const name = capture.name orelse continue;
         var decoded_name = std.ArrayList(u8).empty;
@@ -2978,7 +2978,7 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    groups.null_prototype = true;
+    groups.flags.null_prototype = true;
     for (found.captures[0..found.capture_count]) |capture| {
         const name = capture.name orelse continue;
         var decoded_name = std.ArrayList(u8).empty;
@@ -3022,7 +3022,7 @@ pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Objec
     const groups = try core.Object.create(rt, core.class.ids.object, null);
     var groups_raw_owned = true;
     errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, &groups.header);
-    groups.null_prototype = true;
+    groups.flags.null_prototype = true;
     for (found.captures[0..found.capture_count]) |capture| {
         const name = capture.name orelse continue;
         var decoded_name = std.ArrayList(u8).empty;
@@ -3251,7 +3251,7 @@ pub fn constructCollectionWithPrototypeFromVm(
 
     const source = property_ops.expectObject(args[0]) catch null;
     if (source) |source_object| {
-        if (source_object.is_array) {
+        if (source_object.flags.is_array) {
             try addCollectionEntriesFromArray(ctx, output, global, collection_value, kind, source_object, adder);
             return collection_value;
         }
@@ -3404,7 +3404,7 @@ pub fn qjsObjectGetPrototypeOfStep(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?*core.Object {
-    if (!object.is_proxy) {
+    if (!object.flags.is_proxy) {
         if (isThrowTypeErrorIntrinsicObject(object)) {
             if (object.getPrototype()) |prototype| return prototype;
             return functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global);
@@ -3438,7 +3438,7 @@ pub fn qjsObjectGetPrototypeOfValue(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (!object.is_proxy) {
+    if (!object.flags.is_proxy) {
         if (isThrowTypeErrorIntrinsicObject(object)) {
             if (object.getPrototype()) |prototype| return prototype.value().dup();
             if (functionPrototypeFromGlobal(ctx.runtime, objectRealmGlobal(object) orelse global)) |prototype| return prototype.value().dup();
@@ -4344,7 +4344,7 @@ pub fn getValueProperty(
             if (atom_id == atom_byte_offset) return core.JSValue.int32(@intCast(try builtins.buffer.typedArrayByteOffset(object)));
         }
         if (object.exotic == null) {
-            if (object.is_array) {
+            if (object.flags.is_array) {
                 if (atom_id == core.atom.ids.length) return value_ops.length(rt, value);
                 if (core.atom.isTaggedInt(atom_id)) {
                     const index = core.atom.atomToUInt32(atom_id);
@@ -4395,15 +4395,15 @@ pub fn getValueProperty(
         if (!direct.isUndefined()) return direct;
         direct.free(rt);
         if (rt.atoms.kind(atom_id) == .private) return error.TypeError;
-        if (object.is_array and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
+        if (object.flags.is_array and atom_id == core.atom.ids.length) return value_ops.length(rt, value);
         if (object.class_id == core.class.ids.string) {
             if (object.objectData()) |string_data| {
                 if (try getStringIndexValue(rt, string_data, atom_id)) |indexed| return indexed;
             }
         }
-        if (object.is_array) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
+        if (object.flags.is_array) return getPrototypeMethodWithFallback(rt, global, "Array", atom_id, "Object");
         if (object.class_id == core.class.ids.object) {
-            if (object.null_prototype) return core.JSValue.undefinedValue();
+            if (object.flags.null_prototype) return core.JSValue.undefinedValue();
             return getPrototypeMethod(rt, global, "Object", atom_id);
         }
         if (object.class_id == core.class.ids.string) return getPrototypeMethod(rt, global, "String", atom_id);
@@ -4757,14 +4757,14 @@ pub fn setValueProperty(
         if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.TypeError);
         return core.JSValue.undefinedValue();
     }
-    if (object.is_with_environment and is_strict and !object.hasProperty(atom_id)) return error.ReferenceError;
+    if (object.flags.is_with_environment and is_strict and !object.hasProperty(atom_id)) return error.ReferenceError;
     if (try setMappedArgumentsValue(ctx, object, atom_id, value)) return core.JSValue.undefinedValue();
     if (builtins.buffer.isTypedArrayObject(object)) {
         if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value)) {
             return core.JSValue.undefinedValue();
         }
     }
-    if (object.is_array and atom_id == core.atom.ids.length) {
+    if (object.flags.is_array and atom_id == core.atom.ids.length) {
         const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
         defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
         object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
@@ -4789,7 +4789,7 @@ pub fn setValueProperty(
         };
         return core.JSValue.undefinedValue();
     }
-    if (object.is_array) {
+    if (object.flags.is_array) {
         if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id)) |index| {
             if (try object.appendDenseArrayIndex(ctx.runtime, index, atom_id, value)) return core.JSValue.undefinedValue();
         }
@@ -4979,7 +4979,7 @@ pub fn qjsObjectCreateCall(
         objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "object prototype may only be an Object or null"));
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    object.null_prototype = args[0].isNull();
+    object.flags.null_prototype = args[0].isNull();
     if (args.len >= 2 and !args[1].isUndefined()) {
         try qjsDefinePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
     }
@@ -5327,7 +5327,7 @@ pub fn qjsObjectGroupByCall(
     if (!isCallableValue(args[1])) return error.TypeError;
     const out = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    out.null_prototype = true;
+    out.flags.null_prototype = true;
     const out_value = out.value();
 
     const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
@@ -5978,7 +5978,7 @@ pub fn qjsDescriptorFromObject(
         var value = data_value orelse core.JSValue.undefinedValue();
         data_value = null;
         errdefer value.free(ctx.runtime);
-        if (has_value and target.is_array and atom_id == core.atom.ids.length and !value.isNumber()) {
+        if (has_value and target.flags.is_array and atom_id == core.atom.ids.length and !value.isNumber()) {
             const coerced = try arrayLengthDefineValue(ctx, output, global, value);
             value.free(ctx.runtime);
             value = coerced;
@@ -7095,7 +7095,7 @@ pub fn proxySetTrapForErrorStackSetter(
 }
 
 pub fn isRevokedProxy(object: *core.Object) bool {
-    return object.is_proxy and object.proxyHandler() == null;
+    return object.flags.is_proxy and object.proxyHandler() == null;
 }
 
 pub fn proxyCreateDataPropertyOrThrow(
@@ -7615,7 +7615,7 @@ pub fn proxyDefineValueForReflectSet(
 
 pub fn proxyTargetIsCallableObject(object: *core.Object) bool {
     if (isFunctionLikeClass(object.class_id)) return true;
-    if (!object.is_proxy) return false;
+    if (!object.flags.is_proxy) return false;
     const target = object.proxyTarget() orelse return false;
     return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
 }

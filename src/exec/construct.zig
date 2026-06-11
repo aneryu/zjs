@@ -103,7 +103,7 @@ pub fn constructValue(rt: *core.JSRuntime, callee: core.JSValue, args: []const c
             _ = try expectObject(rooted_args[1]);
             const proxy = try core.Object.create(rt, core.class.ids.object, null);
             errdefer core.Object.destroyFromHeader(rt, &proxy.header);
-            proxy.is_proxy = true;
+            proxy.flags.is_proxy = true;
             try proxy.ensureProxyPayload(rt);
             try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
             try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
@@ -201,7 +201,7 @@ pub fn constructTypedArrayValue(rt: *core.JSRuntime, prototype: ?*core.Object, e
     const buffer = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.int32(0);
     if (buffer.isObject()) {
         const source = try expectObject(buffer);
-        if (source.is_array) return constructTypedArrayArrayInput(rt, prototype, element, source, global);
+        if (source.flags.is_array) return constructTypedArrayArrayInput(rt, prototype, element, source, global);
         if (builtins.buffer.isTypedArrayObject(source)) return constructTypedArrayTypedArrayInput(rt, prototype, element, source, global);
         if (source.class_id != core.class.ids.array_buffer and source.class_id != core.class.ids.shared_array_buffer) return constructTypedArrayArrayLikeInput(rt, prototype, element, source, global);
         return builtins.buffer.typedArrayConstructWithOptions(rt, element.size, element.kind, buffer, rooted_args, prototype);
@@ -423,7 +423,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
 
     if (rooted_args.len < 1 or !rooted_args[0].isObject()) return error.TypeError;
     const errors_source = try expectObject(rooted_args[0]);
-    if (!errors_source.is_array) return error.TypeError;
+    if (!errors_source.flags.is_array) return error.TypeError;
     if (rooted_args.len >= 2 and !rooted_args[1].isUndefined()) {
         const message = try value_ops.toStringValue(rt, rooted_args[1]);
         defer message.free(rt);
@@ -857,7 +857,7 @@ fn constructCollectionValue(
     if (!isCallableObject(adder)) return error.TypeError;
 
     const source = try expectObject(args[0]);
-    if (!source.is_array) {
+    if (!source.flags.is_array) {
         try constructCollectionFromIterator(rt, collection_value, kind, args[0], adder, adder_name, globals);
         return collection_value;
     }
@@ -867,7 +867,7 @@ fn constructCollectionValue(
         defer entry_value.free(rt);
         if (kind == 1 or kind == 3) {
             const entry = try expectObject(entry_value);
-            if (!entry.is_array) return error.TypeError;
+            if (!entry.flags.is_array) return error.TypeError;
             const key = entry.getProperty(core.atom.atomFromUInt32(0));
             defer key.free(rt);
             const value = entry.getProperty(core.atom.atomFromUInt32(1));

@@ -363,7 +363,7 @@ pub fn toObject(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     var object_value = try toObjectForWith(ctx.runtime, value);
     errdefer object_value.free(ctx.runtime);
     const object = try property_ops.expectObject(object_value);
-    object.is_with_environment = true;
+    object.flags.is_with_environment = true;
     try stack.pushOwned(object_value);
 }
 

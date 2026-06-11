@@ -150,7 +150,7 @@ fn simpleForInEnumerableStringKeyCount(rt: *core.JSRuntime, source: *core.Object
 }
 
 pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) bool {
-    if (source.class_id != core.class.ids.object or source.is_proxy or source.exotic != null or source.is_array) return false;
+    if (source.class_id != core.class.ids.object or source.flags.is_proxy or source.exotic != null or source.flags.is_array) return false;
     if (builtins.buffer.isTypedArrayObject(source)) return false;
     if (source.arrayElements().len != 0) return false;
     for (source.properties) |entry| {
@@ -162,7 +162,7 @@ pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) 
 
     var proto = source.getPrototype();
     while (proto) |object| : (proto = object.getPrototype()) {
-        if (object.is_proxy or object.exotic != null) return false;
+        if (object.flags.is_proxy or object.exotic != null) return false;
         if (builtins.buffer.isTypedArrayObject(object)) return false;
         if (object.arrayElements().len != 0) return false;
         for (object.properties) |entry| {

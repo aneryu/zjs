@@ -176,7 +176,7 @@ test "host global bootstrap installs and tears down builtin plus host domains" {
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.is_global = true;
+    global.flags.is_global = true;
     defer global.value().free(rt);
 
     try exec.call.installHostGlobals(rt, global);
@@ -1508,7 +1508,7 @@ fn expectArrayLength(object_value: core.Value, expected: u32) !void {
     try std.testing.expect(object_value.isObject());
     const header = object_value.refHeader().?;
     const object: *core.Object = @fieldParentPtr("header", header);
-    try std.testing.expect(object.is_array);
+    try std.testing.expect(object.flags.is_array);
     try std.testing.expectEqual(expected, object.length);
 }
 

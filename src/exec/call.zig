@@ -545,7 +545,7 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
             try writer.writeAll("[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try writer.writeAll("[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try printArray(rt, writer, object_value);
         } else {
             try writer.writeAll("[object Object]");
@@ -2482,7 +2482,7 @@ fn callNativeBuiltin(
         if (shared_vm.isCallSiteObject(ctx.runtime, receiver)) {
             if (try shared_vm.qjsCallSiteMethod(ctx.runtime, receiver, name)) |value| return value;
         }
-        if (receiver.is_array and isArrayMethodName(name)) {
+        if (receiver.flags.is_array and isArrayMethodName(name)) {
             return callArrayMethod(ctx.runtime, output, globals, this_value, name, args);
         }
         if (std.mem.eql(u8, name, "stringify")) {
@@ -2610,7 +2610,7 @@ fn callNativeBuiltin(
         if (std.mem.eql(u8, name, "hasOwnProperty")) return objectHasOwnProperty(ctx, output, global, receiver, args);
         if (std.mem.eql(u8, name, "propertyIsEnumerable")) return objectPropertyIsEnumerable(ctx, output, global, receiver, args);
         if (std.mem.eql(u8, name, "toString")) {
-            if (isFunctionClass(receiver.class_id) or receiver.class_id == core.class.ids.bytecode_function or receiver.is_proxy) {
+            if (isFunctionClass(receiver.class_id) or receiver.class_id == core.class.ids.bytecode_function or receiver.flags.is_proxy) {
                 return functionToStringValue(ctx.runtime, this_value);
             }
             if (receiver.class_id == core.class.ids.error_) return errorToString(ctx.runtime, this_value);
@@ -3196,7 +3196,7 @@ pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
     );
     var realm_global_owned = true;
     errdefer if (realm_global_owned) realm_global.value().free(rt);
-    realm_global.is_global = true;
+    realm_global.flags.is_global = true;
     try builtins.registry.installStandardGlobals(rt, realm_global);
     try defineGlobalThisProperty(rt, realm_global);
     try tagRealmEval(rt, realm_global);
@@ -3417,7 +3417,7 @@ const ReflectConstructArguments = struct {
 
 fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]core.JSValue {
     const object = try expectObjectArg(value);
-    if (!object.is_array) return error.TypeError;
+    if (!object.flags.is_array) return error.TypeError;
     const out = try rt.memory.alloc(core.JSValue, object.length);
     errdefer rt.memory.free(core.JSValue, out);
     var rooted_out: []core.JSValue = out[0..0];
@@ -3662,7 +3662,7 @@ fn callObjectStatic(
             try expectObjectArg(args[0]);
         const object = try core.Object.create(rt, core.class.ids.object, proto);
         errdefer core.Object.destroyFromHeader(rt, &object.header);
-        object.null_prototype = args[0].isNull();
+        object.flags.null_prototype = args[0].isNull();
         if (args.len >= 2 and !args[1].isUndefined()) {
             try definePropertiesFromObject(rt, object, args[1]);
         }
@@ -4143,7 +4143,7 @@ fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core
     const proxy = try core.Object.create(rt, core.class.ids.object, null);
     var proxy_raw_owned = true;
     errdefer if (proxy_raw_owned) core.Object.destroyFromHeader(rt, &proxy.header);
-    proxy.is_proxy = true;
+    proxy.flags.is_proxy = true;
     try proxy.ensureProxyPayload(rt);
     try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
     try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
@@ -4440,7 +4440,7 @@ fn arrayFrom(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
         }
         return out_root;
     }
-    if (!source.is_array) return error.TypeError;
+    if (!source.flags.is_array) return error.TypeError;
     return source.value().dup();
 }
 
@@ -4449,7 +4449,7 @@ fn typedArrayStaticFrom(rt: *core.JSRuntime, this_value: core.JSValue, args: []c
     if (ctor.typedArrayElementSize() == 0 or ctor.typedArrayKind() == 0) return null;
     const source_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const source = thisObject(source_value) orelse return try typedArrayConstructFromValues(rt, ctor, &.{});
-    const length: u32 = if (source.is_array) source.length else blk: {
+    const length: u32 = if (source.flags.is_array) source.length else blk: {
         const length_value = source.getProperty(core.atom.ids.length);
         defer length_value.free(rt);
         const length_i32 = length_value.asInt32() orelse 0;
@@ -5187,7 +5187,7 @@ fn symbolPrimitiveValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSV
 }
 
 fn defaultObjectTag(object: *core.Object) []const u8 {
-    if (object.is_array) return "[object Array]";
+    if (object.flags.is_array) return "[object Array]";
     return switch (object.class_id) {
         core.class.ids.c_function,
         core.class.ids.bytecode_function,
@@ -5233,7 +5233,7 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
     }
 
     const object = thisObject(value) orelse return error.TypeError;
-    if (object.is_proxy) {
+    if (object.flags.is_proxy) {
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         if (!isFunctionToStringCallable(target)) return error.TypeError;
@@ -5431,7 +5431,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     if (value.isFunctionBytecode()) return true;
     const object = thisObject(value) orelse return false;
     if (object.class_id == core.class.ids.bytecode_function or isFunctionClass(object.class_id)) return true;
-    if (!object.is_proxy or object.proxyHandler() == null) return false;
+    if (!object.flags.is_proxy or object.proxyHandler() == null) return false;
     const target = object.proxyTarget() orelse return false;
     return isFunctionToStringCallable(target);
 }
@@ -7768,7 +7768,7 @@ test "host global bootstrap installs and tears down builtin plus host domains" {
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.is_global = true;
+    global.flags.is_global = true;
     defer global.value().free(rt);
 
     try installHostGlobals(rt, global);

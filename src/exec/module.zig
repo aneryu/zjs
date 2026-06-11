@@ -521,7 +521,7 @@ fn initializeModuleNamespaceObject(ctx: *core.JSContext, record: *core.module.Mo
     const payload = object.moduleNamespacePayload() orelse return error.InvalidBytecode;
     payload.names = try ownedAtomSliceFromList(ctx, &payload_names);
     try object.setModuleNamespaceCells(ctx.runtime, try ownedValueSliceFromList(ctx, &payload_cells));
-    object.extensible = false;
+    object.flags.extensible = false;
 }
 
 fn defineModuleNamespaceToStringTag(ctx: *core.JSContext, object: *core.Object) !void {

@@ -3227,7 +3227,7 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     }
     const object = objectFromValue(value) orelse return error.TypeError;
     if (object.proxyTarget() != null) return error.TypeError;
-    if (object.is_array) {
+    if (object.flags.is_array) {
         if (object.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
             return core.JSValue.int32(@intCast(object.length));
         }
@@ -3295,7 +3295,7 @@ pub fn globalDefinition(
                     } else if (!has_own_global_property) {
                         const configurable = (flags & (1 << 5)) != 0;
                         const define_desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
-                        if (global.exotic == null and !global.is_array and global.isExtensible()) {
+                        if (global.exotic == null and !global.flags.is_array and global.isExtensible()) {
                             try global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, define_desc);
                         } else if (!global.hasOwnProperty(atom_id)) {
                             global.defineOwnProperty(ctx.runtime, atom_id, define_desc) catch |err| switch (err) {
@@ -3327,7 +3327,7 @@ pub fn globalDefinition(
             } else if (!global.hasOwnProperty(atom_id)) {
                 const configurable = (flags & (1 << 5)) != 0;
                 const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
-                const define_result = if (global.exotic == null and !global.is_array and global.isExtensible())
+                const define_result = if (global.exotic == null and !global.flags.is_array and global.isExtensible())
                     global.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, desc)
                 else
                     global.defineOwnProperty(ctx.runtime, atom_id, desc);

@@ -3010,7 +3010,7 @@ pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *z
         const func_val = try createExternalHostFunction(rt, ctx, "IsHTMLDDA", 0, wrapExternal(hostCallIsHtmlDda));
         defer func_val.free(rt);
         const is_html_dda_obj = test262InternalObjectFromValue(func_val).?;
-        is_html_dda_obj.is_html_dda = true;
+        is_html_dda_obj.flags.is_html_dda = true;
 
         try ctx.defineDataProperty(ns_target, "IsHTMLDDA", func_val, .{ .enumerable = false });
     }

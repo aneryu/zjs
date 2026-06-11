@@ -1777,7 +1777,7 @@ pub fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const f
 pub fn denseArrayModFieldInt32Increments(rt: *core.JSRuntime, array_value: core.JSValue, field_atom: core.Atom, modulus: usize) ?DenseArrayModFieldIncrements {
     const array_object = objectFromValue(array_value) orelse return null;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return null;
-    if (!array_object.is_array or array_object.arrayElementStorageMode() != .dense) return null;
+    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return null;
     if (modulus > @as(usize, @intCast(array_object.length))) return null;
     const elements = array_object.arrayElements();
     if (modulus > elements.len) return null;
@@ -1881,7 +1881,7 @@ pub fn fastCollectionPrototypeMethodIsDefault(value: core.JSValue, atom_id: core
 
 pub fn fastArrayPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom, expected_id: u32) bool {
     const object = objectFromValue(value) orelse return false;
-    if (!object.is_array or object.hasOwnProperty(atom_id)) return false;
+    if (!object.flags.is_array or object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .array, expected_id);
 }
@@ -1902,7 +1902,7 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     if (index_i32 < 0) return null;
     const object = objectFromValue(value) orelse return null;
     if (object.proxyTarget() != null or object.exotic != null) return null;
-    if (!object.is_array or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
     const index: u32 = @intCast(index_i32);
     const atom_id = core.atom.atomFromUInt32(index);
     if (object.properties.len != 0 and object.findProperty(atom_id) != null) return null;

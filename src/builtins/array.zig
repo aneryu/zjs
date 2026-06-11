@@ -174,12 +174,12 @@ pub fn isArrayIndex(bytes: []const u8) bool {
 
 pub fn isArrayValue(value: core.JSValue) !bool {
     const object = objectFromValue(value) orelse return false;
-    if (object.is_proxy) {
+    if (object.flags.is_proxy) {
         if (object.proxyHandler() == null) return error.TypeError;
         const target = object.proxyTarget() orelse return error.TypeError;
         return isArrayValue(target);
     }
-    return object.is_array;
+    return object.flags.is_array;
 }
 
 pub fn lengthAfterSet(index: u32, current: u32) u32 {
@@ -995,7 +995,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
     if (value.isObject()) {
         const header = value.refHeader() orelse unreachable;
         const object: *core.Object = @fieldParentPtr("header", header);
-        if (object.is_array) {
+        if (object.flags.is_array) {
             var index: u32 = 0;
             while (index < object.length) : (index += 1) {
                 const item = object.getProperty(core.atom.atomFromUInt32(index));
@@ -1027,18 +1027,18 @@ fn objectFromValue(value: core.JSValue) ?*core.Object {
 
 pub fn expectArray(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
-    if (!object.is_array) return error.TypeError;
+    if (!object.flags.is_array) return error.TypeError;
     return object;
 }
 
 fn expectArrayIteratorTarget(value: core.JSValue) !*core.Object {
     const object = try expectObject(value);
-    if (object.is_array or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
+    if (object.flags.is_array or object.class_id == core.class.ids.arguments or object.class_id == core.class.ids.mapped_arguments or buffer_builtin.isTypedArrayObject(object)) return object;
     return error.TypeError;
 }
 
 fn arrayIteratorTargetLength(rt: *core.JSRuntime, object: *core.Object) u32 {
-    if (object.is_array) return object.length;
+    if (object.flags.is_array) return object.length;
     if (buffer_builtin.isTypedArrayObject(object)) return buffer_builtin.typedArrayLength(rt, object) catch 0;
     const length = object.getProperty(core.atom.ids.length);
     defer length.free(rt);
@@ -1121,7 +1121,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");

@@ -518,7 +518,7 @@ pub fn groupByWithCallbackHost(
     }
 
     const source = try expectObject(args[0]);
-    if (!source.is_array) return error.TypeError;
+    if (!source.flags.is_array) return error.TypeError;
     var index: u32 = 0;
     while (index < source.length) : (index += 1) {
         const item = source.getProperty(core.atom.atomFromUInt32(index));
@@ -1038,7 +1038,7 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     }
     defer expects_value.free(rt);
     const expects = try expectObject(expects_value);
-    if (!expects.is_array or expects.length == 0) return error.TypeError;
+    if (!expects.flags.is_array or expects.length == 0) return error.TypeError;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
     if (!@import("object.zig").sameValue(actual, expected)) return error.JSException;
@@ -1545,7 +1545,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
     const iterable_value = try host.callWithThis(rt, keys_value, object.value(), &.{});
     defer iterable_value.free(rt);
     const iterable = try expectObject(iterable_value);
-    if (iterable.is_array) {
+    if (iterable.flags.is_array) {
         var values: []core.JSValue = &.{};
         errdefer freeValueList(rt, values);
         var index: u32 = 0;
@@ -1651,7 +1651,7 @@ fn appendGlobalString(rt: *core.JSRuntime, globals: []globals_mod.Slot, array_na
     }
     defer array_value.free(rt);
     const array = try expectObject(array_value);
-    if (!array.is_array) return error.TypeError;
+    if (!array.flags.is_array) return error.TypeError;
     const value = try makeString(rt, bytes);
     defer value.free(rt);
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
@@ -1872,7 +1872,7 @@ fn addGroupedItem(
 }
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
-    if (!array.is_array) return error.TypeError;
+    if (!array.flags.is_array) return error.TypeError;
     try array.defineOwnProperty(rt, core.atom.atomFromUInt32(array.length), core.Descriptor.data(value, true, true, true));
 }
 

@@ -1773,7 +1773,7 @@ pub fn qjsPromiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *c
     const result = try core.Object.create(rt, core.class.ids.object, null);
     result_value = result.value();
     errdefer result_value.free(rt);
-    result.null_prototype = true;
+    result.flags.null_prototype = true;
 
     var index: u32 = 0;
     while (index < keys.length) : (index += 1) {

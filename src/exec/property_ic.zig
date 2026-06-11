@@ -262,7 +262,7 @@ fn setObjectDataPropertyForSimplePutField(rt: *core.JSRuntime, receiver: core.JS
     const object = objectFromValue(receiver) orelse return false;
     if (object.proxyTarget() != null or object.exotic != null) return false;
     if (builtins.buffer.isTypedArrayObject(object)) return false;
-    if (object.is_array) {
+    if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     }
     if (object.class_id == core.class.ids.regexp and atom_id == core.atom.ids.lastIndex and object.regexpLastIndex() != null) return false;
@@ -390,9 +390,9 @@ fn cacheableOwnDataReceiver(rt: *core.JSRuntime, value: core.JSValue, atom_id: c
 
 fn cacheableNamedDataObject(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (object.proxyTarget() != null or object.exotic != null) return false;
-    if (object.is_array) {
+    if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
-    } else if (object.class_id != core.class.ids.object and !object.is_global and object.class_id < core.class.ids.init_count) return false;
+    } else if (object.class_id != core.class.ids.object and !object.flags.is_global and object.class_id < core.class.ids.init_count) return false;
     return true;
 }
 
@@ -461,14 +461,14 @@ pub fn setPlainObjectInt32DataPropertyForFastPath(rt: *core.JSRuntime, object: *
 
 fn plainObjectDataPropertyFastPathReceiver(object: *core.Object) bool {
     if (object.proxyTarget() != null or object.exotic != null) return false;
-    return object.class_id == core.class.ids.object and !object.is_array and !object.is_global;
+    return object.class_id == core.class.ids.object and !object.flags.is_array and !object.flags.is_global;
 }
 
 pub fn ownDataPropertyValueMaterializedForFastPath(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     if (rt.atoms.kind(atom_id) == .private) return null;
     const object = objectFromValue(value) orelse return null;
     if (object.proxyTarget() != null or object.exotic != null) return null;
-    if (object.class_id != core.class.ids.object and !object.is_global) return null;
+    if (object.class_id != core.class.ids.object and !object.flags.is_global) return null;
 
     switch (fastOwnOrdinaryDataPropertyBorrowedValue(object, atom_id)) {
         .value => |stored| return stored,
@@ -537,13 +537,13 @@ fn ordinaryDataPropertyLookup(rt: *core.JSRuntime, value: core.JSValue, atom_id:
     var cursor = objectFromValue(value) orelse return .slow;
     while (true) {
         if (cursor.proxyTarget() != null or cursor.exotic != null) return .slow;
-        if (cursor.is_array) {
+        if (cursor.flags.is_array) {
             if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return .slow;
-        } else if (cursor.class_id != core.class.ids.object and !cursor.is_global) return .slow;
+        } else if (cursor.class_id != core.class.ids.object and !cursor.flags.is_global) return .slow;
         switch (fastOwnOrdinaryDataPropertyBorrowedValue(cursor, atom_id)) {
             .value => |property_value| return .{ .value = property_value },
             .missing => cursor = cursor.getPrototype() orelse {
-                if (cursor.is_array) return .slow;
+                if (cursor.flags.is_array) return .slow;
                 return .undefined;
             },
             .slow => return .slow,

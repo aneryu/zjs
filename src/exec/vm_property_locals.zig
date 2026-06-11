@@ -2902,7 +2902,7 @@ fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
     const array_value = bindingReadableBorrowed(frame, bound_array_get) orelse return false;
     const array_object = objectFromValue(array_value) orelse return false;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.is_array or array_object.arrayElementStorageMode() != .dense) return false;
+    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
     if (array_object.length > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
     const limit: i32 = @intCast(array_object.length);
     if (current_i >= limit) {
@@ -3139,7 +3139,7 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     const receiver_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
     const receiver = bindingReadableBorrowed(frame, receiver_get) orelse return false;
     if (objectFromValue(receiver)) |array_object| {
-        if (!array_object.is_array) return false;
+        if (!array_object.flags.is_array) return false;
     } else return false;
     if (receiver_get.next_pc + 7 > code.len or code[receiver_get.next_pc] != op.get_field2) return false;
     const method_atom = readInt(u32, code[receiver_get.next_pc + 1 ..][0..4]);
@@ -3579,7 +3579,7 @@ fn tryFuseCheckedLocalDenseArrayConstInt32Add(
     if (varRefCellFromValue(array_slot) != null) return false;
     const array_object = objectFromValue(array_slot) orelse return false;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.is_array or array_object.arrayElementStorageMode() != .dense) return false;
+    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
     if (index >= @as(usize, @intCast(array_object.length))) return false;
     const elements = array_object.arrayElements();
     if (index >= elements.len) return false;
@@ -3629,7 +3629,7 @@ fn tryFuseCheckedLocalDenseArrayIndexedInt32Add(
     if (array_slot.isUninitialized()) return false;
     const array_object = objectFromValue(array_slot) orelse return false;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.is_array or array_object.arrayElementStorageMode() != .dense) return false;
+    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
 
     const index_value = slotValueBorrowed(frame.locals[index_idx]);
     const index_i32 = index_value.asInt32() orelse return false;
@@ -4678,7 +4678,7 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32Add(
     if (varRefCellFromValue(array_slot) != null) return false;
     const array_object = objectFromValue(array_slot) orelse return false;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.is_array or array_object.arrayElementStorageMode() != .dense) return false;
+    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
 
     const index_value = frame.locals[index_idx].asInt32() orelse return false;
     if (index_value < 0) return false;
@@ -5010,7 +5010,7 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
     if (pc + 2 > code.len or code[pc + 1] != op.get_array_el) return null;
     const object = objectFromValue(receiver) orelse return null;
     if (object.proxyTarget() != null or object.exotic != null) return null;
-    if (!object.is_array or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
     if (index >= @as(usize, @intCast(object.length))) return null;
     const elements = object.arrayElements();
     if (index >= elements.len) return null;
@@ -5021,7 +5021,7 @@ fn invariantInt32LoadValue(rt: *core.JSRuntime, receiver: core.JSValue, code: []
 fn denseArrayInt32RangeDelta(object: *core.Object, start: usize, limit: usize) ?IntRangeDeltaBounds {
     if (start > limit) return null;
     if (object.proxyTarget() != null or object.exotic != null) return null;
-    if (!object.is_array or object.arrayElementStorageMode() != .dense) return null;
+    if (!object.flags.is_array or object.arrayElementStorageMode() != .dense) return null;
     if (limit > @as(usize, @intCast(object.length))) return null;
     const elements = object.arrayElements();
     if (limit > elements.len) return null;

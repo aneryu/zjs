@@ -576,7 +576,7 @@ pub fn deletePropertyVm(
             };
         } else if (object == global and functionHasFrameBinding(ctx.runtime, function, frame, atom_id))
             false
-        else if (object.is_array and atom_id == core.atom.ids.length)
+        else if (object.flags.is_array and atom_id == core.atom.ids.length)
             false
         else if (try typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
             typed_deleted

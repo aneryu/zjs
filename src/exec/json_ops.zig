@@ -455,7 +455,7 @@ fn qjsJsonSourceCountForValue(rt: *core.JSRuntime, value: core.JSValue) !usize {
 
     const object = shared_vm.objectFromValue(rooted_value) orelse return 1;
     var count: usize = 0;
-    if (object.is_array) {
+    if (object.flags.is_array) {
         var index: usize = 0;
         while (index < object.length) : (index += 1) {
             const key = try shared_vm.propertyAtomFromLengthIndex(rt, index);
@@ -798,7 +798,7 @@ fn qjsJsonAppendSimpleValue(
     };
     if (shared_vm.isCallableValue(value)) return .fallback;
     if (!qjsJsonSimplePrototypeChainHasNoToJSON(object)) return .fallback;
-    if (object.is_array) return try qjsJsonAppendSimpleArray(rt, global, buffer, object, stack);
+    if (object.flags.is_array) return try qjsJsonAppendSimpleArray(rt, global, buffer, object, stack);
     return try qjsJsonAppendSimpleObject(rt, global, buffer, object, stack);
 }
 
@@ -806,7 +806,7 @@ fn qjsJsonSimplePrototypeChainHasNoToJSON(object: *core.Object) bool {
     const to_json_key = core.atom.ids.toJSON;
     var cursor: ?*core.Object = object;
     while (cursor) |current| {
-        if (current.exotic != null or current.is_proxy) return false;
+        if (current.exotic != null or current.flags.is_proxy) return false;
         if (current.hasOwnProperty(to_json_key)) return false;
         cursor = current.getPrototype();
     }
@@ -863,7 +863,7 @@ fn qjsJsonAppendSimpleObject(
     stack: *std.ArrayList(*core.Object),
 ) SimpleJsonStringifyError!SimpleJsonResult {
     const start = buffer.items.len;
-    if (object.exotic != null or object.is_proxy or object.class_id != core.class.ids.object) return .fallback;
+    if (object.exotic != null or object.flags.is_proxy or object.class_id != core.class.ids.object) return .fallback;
     if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
 
     try stack.append(rt.memory.allocator, object);

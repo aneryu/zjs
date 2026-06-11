@@ -625,7 +625,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
         return true;
     };
     const target = objectFromValue(target_value) orelse return false;
-    if (!target.is_array or target.exotic != null or target.proxyTarget() != null) return false;
+    if (!target.flags.is_array or target.exotic != null or target.proxyTarget() != null) return false;
 
     const index = iterator.iteratorIndexSlot().*;
     const length: usize = @intCast(target.length);
@@ -956,7 +956,7 @@ pub fn arrayIteratorNext(
         if (try builtins.buffer.typedArrayDetached(target)) return error.TypeError;
         if (try builtins.buffer.typedArrayOutOfBounds(target)) return error.TypeError;
         break :blk builtins.buffer.typedArrayLength(ctx.runtime, target) catch return error.TypeError;
-    } else if (target.is_array) target.length else blk: {
+    } else if (target.flags.is_array) target.length else blk: {
         const length_value = try getValueProperty(ctx, output, global, target_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
         break :blk @min(try toLengthIndex(ctx, output, global, length_value), std.math.maxInt(u32));
@@ -2688,7 +2688,7 @@ fn qjsIteratorZipHelperNext(
         try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobalFn(ctx.runtime, global))
     else blk: {
         const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        object.null_prototype = true;
+        object.flags.null_prototype = true;
         break :blk object;
     };
     const results_value = results.value();

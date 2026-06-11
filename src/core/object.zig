@@ -1052,26 +1052,15 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKi
     }
 }
 
-pub const Object = struct {
-    header: gc.GCObjectHeader,
-    gc: gc.GcNode = .{},
-    class_id: class.ClassId,
-    class_payload: class.Payload = .none,
-    class_payload_kind: class.PayloadKind = .none,
-    shape_ref: *shape.Shape,
-    prototype: ?*Object = null,
+pub const ObjectFlags = packed struct(u16) {
     null_prototype: bool = false,
     extensible: bool = true,
     immutable_prototype: bool = false,
     is_array: bool = false,
     is_proxy: bool = false,
     is_global: bool = false,
-    global_lexicals: ?*Object = null,
-    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
-    cached_iterator_next: ?JSValue = null,
     is_html_dda: bool = false,
     may_have_indexed_properties: bool = false,
-    length: u32 = 0,
     length_writable: bool = true,
     is_with_environment: bool = false,
     is_prototype: bool = false,
@@ -1080,6 +1069,22 @@ pub const Object = struct {
     /// identity registry, so destruction can skip the registry lookup for the
     /// common case of objects that were never weakly referenced.
     has_weak_id: bool = false,
+    _padding: u3 = 0,
+};
+
+pub const Object = struct {
+    header: gc.GCObjectHeader,
+    gc: gc.GcNode = .{},
+    class_id: class.ClassId,
+    class_payload: class.Payload = .none,
+    class_payload_kind: class.PayloadKind = .none,
+    shape_ref: *shape.Shape,
+    prototype: ?*Object = null,
+    flags: ObjectFlags = .{},
+    global_lexicals: ?*Object = null,
+    shared_lazy_native_functions: ?*[runtime_mod.shared_lazy_native_function_slots]?JSValue = null,
+    cached_iterator_next: ?JSValue = null,
+    length: u32 = 0,
     properties: []property.Entry = &.{},
 
     property_capacity: usize = 0,
@@ -1274,8 +1279,8 @@ pub const Object = struct {
         }
         if (prototype) |proto| {
             gc.retain(&proto.header);
-            proto.is_prototype = true;
-            if (proto.may_have_indexed_properties) {
+            proto.flags.is_prototype = true;
+            if (proto.flags.may_have_indexed_properties) {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
@@ -1284,7 +1289,7 @@ pub const Object = struct {
             .class_id = class_id,
             .class_payload = class_payload,
             .class_payload_kind = class_payload_kind,
-            .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot,
+            .flags = .{ .reserved_class_payload_finalizer_slot = reserved_class_payload_finalizer_slot },
             .shape_ref = shape_ref,
             .prototype = prototype,
             .properties = property_storage[0..0],
@@ -1341,13 +1346,13 @@ pub const Object = struct {
 
     pub fn createArray(rt: *JSRuntime, prototype: ?*Object) !*Object {
         const self = try create(rt, class.ids.array, prototype);
-        self.is_array = true;
+        self.flags.is_array = true;
         return self;
     }
 
     pub fn createArrayWithOwnPropertyCapacity(rt: *JSRuntime, prototype: ?*Object, capacity: usize) !*Object {
         const self = try createWithOwnPropertyCapacity(rt, class.ids.array, prototype, capacity);
-        self.is_array = true;
+        self.flags.is_array = true;
         return self;
     }
 
@@ -1588,11 +1593,11 @@ pub const Object = struct {
     }
 
     fn enqueueClassPayloadFinalizer(self: *Object, rt: *JSRuntime) void {
-        if (!self.reserved_class_payload_finalizer_slot) return;
+        if (!self.flags.reserved_class_payload_finalizer_slot) return;
         const payload = self.class_payload;
         const payload_kind = self.class_payload_kind;
         const object_identity = @intFromPtr(&self.header) & ~@as(usize, 1);
-        self.reserved_class_payload_finalizer_slot = false;
+        self.flags.reserved_class_payload_finalizer_slot = false;
         const enqueued = rt.enqueueReservedDeferredClassPayloadFinalizer(self.class_id, payload, payload_kind, object_identity);
         if (!enqueued) return;
         self.class_payload = .none;
@@ -1608,7 +1613,7 @@ pub const Object = struct {
         const destroyed_identity = @intFromPtr(&destroyed.header) & ~@as(usize, 1);
         const weak_identity = rt.takeWeakObjectIdentity(destroyed);
         if (rt.borrowedWeakCleanupActive()) {
-            if (destroyed.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
+            if (destroyed.flags.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
             if (rt.isCurrentDeferredWeakValueFreeIdentity(destroyed_identity)) return;
             rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
                 clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
@@ -1623,7 +1628,7 @@ pub const Object = struct {
 
         rt.beginBorrowedWeakCleanup();
         defer rt.endBorrowedWeakCleanup();
-        if (destroyed.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
+        if (destroyed.flags.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
         rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
             clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
         };
@@ -2952,7 +2957,7 @@ pub const Object = struct {
 
     pub fn proxyTargetSlot(self: *Object) *?JSValue {
         if (self.proxyPayload()) |payload| return &payload.target;
-        std.debug.assert(self.is_proxy);
+        std.debug.assert(self.flags.is_proxy);
         unreachable;
     }
 
@@ -2963,7 +2968,7 @@ pub const Object = struct {
 
     pub fn proxyHandlerSlot(self: *Object) *?JSValue {
         if (self.proxyPayload()) |payload| return &payload.handler;
-        std.debug.assert(self.is_proxy);
+        std.debug.assert(self.flags.is_proxy);
         unreachable;
     }
 
@@ -3036,7 +3041,7 @@ pub const Object = struct {
 
     pub fn arrayStorageModeSlot(self: *Object) *ArrayStorageMode {
         if (self.arrayPayload()) |payload| return &payload.storage_mode;
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         unreachable;
     }
 
@@ -3047,7 +3052,7 @@ pub const Object = struct {
 
     pub fn arrayElementsSlot(self: *Object) *[]?JSValue {
         if (self.arrayPayload()) |payload| return &payload.elements;
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         unreachable;
     }
 
@@ -3058,7 +3063,7 @@ pub const Object = struct {
 
     pub fn arrayElementsCapacitySlot(self: *Object) *usize {
         if (self.arrayPayload()) |payload| return &payload.elements_capacity;
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         unreachable;
     }
 
@@ -4211,7 +4216,7 @@ pub const Object = struct {
 
     fn capturedStackSiteCount(sites_value: JSValue) usize {
         const sites = objectFromValue(sites_value) orelse return 0;
-        return if (sites.is_array) @intCast(sites.length) else 0;
+        return if (sites.flags.is_array) @intCast(sites.length) else 0;
     }
 
     pub fn promiseReactionOnFulfilledSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -6990,7 +6995,7 @@ pub const Object = struct {
             if (candidate == self) return error.PrototypeCycle;
             cursor = candidate.prototype;
         }
-        if (!self.extensible and self.prototype != prototype) return error.NotExtensible;
+        if (!self.flags.extensible and self.prototype != prototype) return error.NotExtensible;
         const proto_id = if (prototype) |proto| @intFromPtr(proto) else null;
         const next_shape = if (self.shapeNeedsMutationCopy())
             try rt.shapes.cloneWithPrototype(self.shape_ref, proto_id)
@@ -7000,8 +7005,8 @@ pub const Object = struct {
         if (prototype) |proto| gc.retain(&proto.header);
         errdefer if (prototype) |proto| proto.value().free(rt);
         if (prototype) |proto| {
-            proto.is_prototype = true;
-            if (proto.may_have_indexed_properties) {
+            proto.flags.is_prototype = true;
+            if (proto.flags.may_have_indexed_properties) {
                 rt.any_prototype_may_have_indexed_properties = true;
             }
         }
@@ -7018,19 +7023,19 @@ pub const Object = struct {
     }
 
     pub fn preventExtensions(self: *Object) void {
-        self.extensible = false;
+        self.flags.extensible = false;
     }
 
     pub fn isExtensible(self: *const Object) bool {
-        return self.extensible;
+        return self.flags.extensible;
     }
 
     pub fn markImmutablePrototype(self: *Object) void {
-        self.immutable_prototype = true;
+        self.flags.immutable_prototype = true;
     }
 
     pub fn hasImmutablePrototype(self: *const Object) bool {
-        return self.immutable_prototype;
+        return self.flags.immutable_prototype;
     }
 
     pub fn getOwnProperty(self: *const Object, atom_id: atom.Atom) ?descriptor.Descriptor {
@@ -7042,8 +7047,8 @@ pub const Object = struct {
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| {
             return descriptor.Descriptor.data(stored, true, true, false);
         }
-        if (self.is_array and atom_id == atom.ids.length) {
-            return descriptor.Descriptor.data(arrayLengthValue(self.length), self.length_writable, false, false);
+        if (self.flags.is_array and atom_id == atom.ids.length) {
+            return descriptor.Descriptor.data(arrayLengthValue(self.length), self.flags.length_writable, false, false);
         }
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex) {
             if (self.regexpLastIndex()) |stored| return descriptor.Descriptor.data(stored.dup(), self.regexpLastIndexWritable(), false, false);
@@ -7099,16 +7104,16 @@ pub const Object = struct {
     }
 
     pub fn hasProperty(self: *const Object, atom_id: atom.Atom) bool {
-        profile.recordPropLookup(self.is_global);
+        profile.recordPropLookup(self.flags.is_global);
         if (self.hasOwnProperty(atom_id)) return true;
         if (self.prototype) |proto| return proto.hasProperty(atom_id);
         return false;
     }
 
     pub fn getProperty(self: *const Object, atom_id: atom.Atom) JSValue {
-        profile.recordPropLookup(self.is_global);
+        profile.recordPropLookup(self.flags.is_global);
         if (self.moduleNamespaceBindingValue(atom_id)) |stored| return stored;
-        if (self.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.length);
+        if (self.flags.is_array and atom_id == atom.ids.length) return arrayLengthValue(self.length);
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
             return switch (entry.slot) {
@@ -7735,7 +7740,7 @@ pub const Object = struct {
     }
 
     pub fn getDenseArrayElementValue(self: *const Object, index: u32) ?JSValue {
-        if (!self.is_array or self.arrayElementStorageMode() != .dense) return null;
+        if (!self.flags.is_array or self.arrayElementStorageMode() != .dense) return null;
         const atom_id = atom.atomFromUInt32(index);
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return null;
         const element_index: usize = @intCast(index);
@@ -7757,7 +7762,7 @@ pub const Object = struct {
         const destroy_actual_desc = try self.prepareMappedArgumentsDescriptorForDefine(rt, atom_id, &actual_desc);
         defer if (destroy_actual_desc) actual_desc.destroy(rt);
 
-        if (self.is_array and atom_id == atom.ids.length) {
+        if (self.flags.is_array and atom_id == atom.ids.length) {
             try self.defineArrayLength(rt, actual_desc);
             return;
         }
@@ -7767,9 +7772,9 @@ pub const Object = struct {
             return;
         }
 
-        if (self.is_array) {
+        if (self.flags.is_array) {
             if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
-                if (index >= self.length and !self.length_writable) return error.ReadOnly;
+                if (index >= self.length and !self.flags.length_writable) return error.ReadOnly;
                 try self.defineOrdinaryOwnProperty(rt, atom_id, actual_desc);
                 if (index >= self.length) self.length = index + 1;
                 self.updateArrayStorageMode(index);
@@ -7800,10 +7805,10 @@ pub const Object = struct {
     /// reintroduce the O(n) scan we are trying to avoid).
     pub fn defineOwnPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.addProperty(rt, atom_id, desc);
     }
 
@@ -7814,18 +7819,18 @@ pub const Object = struct {
     /// match-array `index`, `input`, and `groups`.
     pub fn defineOwnNonIndexPropertyAssumingNew(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!(self.is_array and atom_id == atom.ids.length));
+        std.debug.assert(!(self.flags.is_array and atom_id == atom.ids.length));
         std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
         std.debug.assert(self.class_id != class.ids.regexp or atom_id != atom.ids.lastIndex or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.addProperty(rt, atom_id, desc);
     }
 
     pub fn defineRegExpMatchMetadataPropertiesAssumingNew(self: *Object, rt: *JSRuntime, match_index: i32, input_value: JSValue, groups_value: JSValue) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
 
         const index_atom = atom.predefinedId("index", .string).?;
         const input_atom = atom.predefinedId("input", .string).?;
@@ -7850,9 +7855,9 @@ pub const Object = struct {
 
     pub fn defineJsonParseDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id == class.ids.object);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
 
         if (self.findProperty(atom_id)) |index| {
             var entry = &self.properties[index];
@@ -7873,10 +7878,10 @@ pub const Object = struct {
 
     pub fn reserveOwnPropertyCapacityAssumingPlain(self: *Object, rt: *JSRuntime, needed: usize) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         if (needed <= self.property_capacity and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
         // Bulk install paths build fresh ordinary objects. Once capacity is
         // reserved, keep their shapes unique and append in place instead of
@@ -7951,10 +7956,10 @@ pub const Object = struct {
         shared_native_cache_slot: u8,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
@@ -7991,11 +7996,11 @@ pub const Object = struct {
         shared_native_cache_slot: u8,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!(self.is_array and atom_id == atom.ids.length));
+        std.debug.assert(!(self.flags.is_array and atom_id == atom.ids.length));
         std.debug.assert(array.arrayIndexFromAtom(&rt.atoms, atom_id) == null);
         std.debug.assert(self.class_id != class.ids.regexp or atom_id != atom.ids.lastIndex or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
@@ -8027,10 +8032,10 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(flags.accessor);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
@@ -8066,10 +8071,10 @@ pub const Object = struct {
         std.debug.assert(setter_length > 0);
         std.debug.assert(setter_native_builtin_id >= 0);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
@@ -8133,8 +8138,8 @@ pub const Object = struct {
         realm_global: *Object,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         try self.appendPreparedPropertyEntry(rt, .{
@@ -8161,8 +8166,8 @@ pub const Object = struct {
         std.debug.assert(host_function_kind != 0);
         std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, .{
             .atom_id = rt.atoms.dup(atom_id),
             .flags = flags,
@@ -8185,8 +8190,8 @@ pub const Object = struct {
         realm_global: *Object,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         try self.appendPreparedPropertyEntry(rt, .{
@@ -8216,8 +8221,8 @@ pub const Object = struct {
             kind == .reflect_namespace or
             kind == .atomics_namespace);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
-        std.debug.assert(self.extensible);
+        std.debug.assert(!self.flags.is_array);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         try self.appendPreparedPropertyEntry(rt, .{
@@ -8240,7 +8245,7 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, .{
             .atom_id = rt.atoms.dup(atom_id),
             .flags = flags,
@@ -8261,10 +8266,10 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, .{
             .atom_id = rt.atoms.dup(atom_id),
             .flags = flags,
@@ -8286,10 +8291,10 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, .{
             .atom_id = rt.atoms.dup(atom_id),
             .flags = flags,
@@ -8310,10 +8315,10 @@ pub const Object = struct {
         flags: property.Flags,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         try self.appendPreparedPropertyEntry(rt, .{
             .atom_id = rt.atoms.dup(atom_id),
             .flags = flags,
@@ -8334,10 +8339,10 @@ pub const Object = struct {
         realm_global: *Object,
     ) !void {
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         std.debug.assert(!flags.accessor);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
@@ -8412,10 +8417,10 @@ pub const Object = struct {
         std.debug.assert(host_function_kind != 0);
         std.debug.assert(external_host_function_id == 0 or host_function_kind == host_function.ids.external_host);
         std.debug.assert(self.exotic == null);
-        std.debug.assert(!self.is_array);
+        std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.extensible);
         const inserted_holder = if (host_function_realm_global != null)
             try registerBorrowedHolderForPendingMutation(rt, self)
         else
@@ -8437,7 +8442,7 @@ pub const Object = struct {
     }
 
     pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.is_array or !self.length_writable) return false;
+        if (!self.flags.is_array or !self.flags.length_writable) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         const elements = self.arrayElements();
@@ -8454,9 +8459,9 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (!self.is_array or index != self.length or !self.length_writable) return false;
+        if (!self.flags.is_array or index != self.length or !self.flags.length_writable) return false;
         if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (!self.extensible) return false;
+        if (!self.flags.extensible) return false;
         if (self.properties.len != 0 and self.findProperty(atom_id) != null) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt) and proto.hasProperty(atom_id)) return false;
@@ -8475,10 +8480,10 @@ pub const Object = struct {
     }
 
     pub fn initDenseArrayIndexZeroAssumingEmpty(self: *Object, rt: *JSRuntime, new_value: JSValue) !void {
-        std.debug.assert(self.is_array);
+        std.debug.assert(self.flags.is_array);
         std.debug.assert(self.length == 0);
-        std.debug.assert(self.length_writable);
-        std.debug.assert(self.extensible);
+        std.debug.assert(self.flags.length_writable);
+        std.debug.assert(self.flags.extensible);
         std.debug.assert(self.arrayElements().len == 0);
         std.debug.assert(self.arrayElementsCapacity() == 0);
 
@@ -8492,8 +8497,8 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayLiteralIndex(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.is_array or index != self.length or !self.length_writable) return false;
-        if (!self.extensible) return false;
+        if (!self.flags.is_array or index != self.length or !self.flags.length_writable) return false;
+        if (!self.flags.extensible) return false;
 
         try self.ensureArrayElementCapacity(rt, index + 1);
         const elements = self.arrayElementsSlot();
@@ -8508,7 +8513,7 @@ pub const Object = struct {
     }
 
     pub fn initDenseArrayLiteralValuesAssumingEmpty(self: *Object, rt: *JSRuntime, values: []const JSValue) !bool {
-        if (!self.is_array or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.length != 0 or self.properties.len != 0) return false;
         if (self.arrayElementStorageMode() != .dense) return false;
         if (values.len > array.max_array_length) return false;
@@ -8526,8 +8531,8 @@ pub const Object = struct {
     }
 
     pub fn appendDenseArrayInt32Range(self: *Object, rt: *JSRuntime, start: u32, limit: u32) !bool {
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start != self.length or start >= limit or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start != self.length or start >= limit or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8574,8 +8579,8 @@ pub const Object = struct {
 
     pub fn appendDenseArrayInt32ValueRange(self: *Object, rt: *JSRuntime, start_index: u32, start_value: i32, count: u32) !bool {
         if (count == 0) return true;
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.length or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.length or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8618,8 +8623,8 @@ pub const Object = struct {
     pub fn appendDenseArrayInt32MulAndMaskRange(self: *Object, rt: *JSRuntime, start_index: u32, limit: u32, multiplier: i32, mask: i32) !bool {
         if (start_index >= limit) return true;
         if (multiplier < 0 or mask < 0) return false;
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
-        if (start_index != self.length or !self.length_writable or !self.extensible) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (start_index != self.length or !self.flags.length_writable or !self.flags.extensible) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
         }
@@ -8662,7 +8667,7 @@ pub const Object = struct {
         if (start >= limit) return true;
         if (limit > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
         if (mask > atom.max_int_atom) return false;
-        if (!self.is_array or !self.length_writable) return false;
+        if (!self.flags.is_array or !self.flags.length_writable) return false;
         if (self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         if (self.prototype) |proto| {
             if (!arrayAppendPrototypeChainHasNoIndexedProperties(proto, rt)) return false;
@@ -8693,25 +8698,25 @@ pub const Object = struct {
     }
 
     pub fn reserveDenseArrayElements(self: *Object, rt: *JSRuntime, needed: u32) !void {
-        if (!self.is_array) return;
+        if (!self.flags.is_array) return;
         try self.ensureArrayElementCapacity(rt, needed);
     }
 
     pub fn defineDenseArrayDataProperty(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
+        if (!self.flags.is_array or self.exotic != null or self.arrayElementStorageMode() != .dense) return false;
         const atom_id = atom.atomFromUInt32(index);
         if (self.findProperty(atom_id) != null) return false;
 
         const element_index: usize = @intCast(index);
         const elements = self.arrayElementsSlot();
         if (element_index >= elements.*.len) {
-            if (!self.extensible) return false;
-            if (index >= self.length and !self.length_writable) return false;
+            if (!self.flags.extensible) return false;
+            if (index >= self.length and !self.flags.length_writable) return false;
             try self.ensureArrayElementCapacity(rt, index + 1);
             const old_len = elements.*.len;
             elements.* = elements.*.ptr[0 .. element_index + 1];
             if (elements.*.len > old_len) @memset(elements.*[old_len..], null);
-        } else if (elements.*[element_index] == null and !self.extensible) {
+        } else if (elements.*[element_index] == null and !self.flags.extensible) {
             return false;
         }
 
@@ -8727,8 +8732,8 @@ pub const Object = struct {
     }
 
     pub fn markIndexedProperties(self: *Object, rt: *JSRuntime) void {
-        self.may_have_indexed_properties = true;
-        if (self.is_prototype) {
+        self.flags.may_have_indexed_properties = true;
+        if (self.flags.is_prototype) {
             rt.any_prototype_may_have_indexed_properties = true;
         }
     }
@@ -8737,23 +8742,23 @@ pub const Object = struct {
         if (!rt.any_prototype_may_have_indexed_properties) return true;
         var cursor: ?*Object = proto;
         while (cursor) |object| {
-            if (object.may_have_indexed_properties) return false;
+            if (object.flags.may_have_indexed_properties) return false;
             cursor = object.getPrototype();
         }
         return true;
     }
 
     pub fn canDefineDenseArrayDataPropertiesUnchecked(self: Object) bool {
-        return self.is_array and
+        return self.flags.is_array and
             self.exotic == null and
             self.arrayElementStorageMode() == .dense and
-            self.extensible and
+            self.flags.extensible and
             self.properties.len == 0;
     }
 
     pub fn defineDenseArrayDataPropertyUnchecked(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !void {
         std.debug.assert(self.canDefineDenseArrayDataPropertiesUnchecked());
-        std.debug.assert(index < self.length or self.length_writable);
+        std.debug.assert(index < self.length or self.flags.length_writable);
 
         const element_index: usize = @intCast(index);
         const elements = self.arrayElementsSlot();
@@ -8781,8 +8786,8 @@ pub const Object = struct {
                 return error.ReadOnly;
             }
         }
-        if (self.is_array and atom_id == atom.ids.length) {
-            if (!self.length_writable) return error.ReadOnly;
+        if (self.flags.is_array and atom_id == atom.ids.length) {
+            if (!self.flags.length_writable) return error.ReadOnly;
             try self.defineArrayLength(rt, descriptor.Descriptor.data(new_value, true, false, false));
             return;
         }
@@ -8951,11 +8956,11 @@ pub const Object = struct {
     }
 
     fn defineNewOwnDataPropertyForSimpleSetKnownNoOwn(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or self.proxyTarget() != null or self.is_global or self.is_with_environment) return false;
-        if (!self.extensible) return false;
+        if (self.exotic != null or self.proxyTarget() != null or self.flags.is_global or self.flags.is_with_environment) return false;
+        if (!self.flags.extensible) return false;
         if (self.class_id == class.ids.module_ns or self.class_id == class.ids.regexp or self.class_id == class.ids.mapped_arguments) return false;
         if (isTypedArrayObjectForSetFastPath(self)) return false;
-        if (self.is_array and atom_id == atom.ids.length) return false;
+        if (self.flags.is_array and atom_id == atom.ids.length) return false;
         if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
 
         var prototype = self.prototype;
@@ -8993,7 +8998,7 @@ pub const Object = struct {
         if (self.exotic) |methods| {
             if (methods.delete_property) |hook| return hook(self, atom_id);
         }
-        if (self.is_array and atom_id == atom.ids.length) return false;
+        if (self.flags.is_array and atom_id == atom.ids.length) return false;
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return false;
 
         if (self.findProperty(atom_id)) |index| {
@@ -9085,7 +9090,7 @@ pub const Object = struct {
             }
         }
 
-        if (self.is_array) try appendAtom(rt, &keys, atom.ids.length);
+        if (self.flags.is_array) try appendAtom(rt, &keys, atom.ids.length);
         if (self.class_id == class.ids.regexp and self.regexpLastIndex() != null) try appendAtom(rt, &keys, atom.ids.lastIndex);
 
         for (self.properties) |entry| {
@@ -9111,7 +9116,7 @@ pub const Object = struct {
     }
 
     pub fn seal(self: *Object, rt: *JSRuntime) !void {
-        self.extensible = false;
+        self.flags.extensible = false;
         try self.ensureUniqueShapeForMutation(rt);
         for (self.properties, 0..) |*entry, index| {
             if (entry.flags.deleted or !entry.flags.configurable) continue;
@@ -9127,7 +9132,7 @@ pub const Object = struct {
             entry.flags.writable = false;
             rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
         }
-        if (self.is_array) self.length_writable = false;
+        if (self.flags.is_array) self.flags.length_writable = false;
     }
 
     fn defineOrdinaryOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
@@ -9156,7 +9161,7 @@ pub const Object = struct {
             }
         }
 
-        if (!self.extensible) return error.NotExtensible;
+        if (!self.flags.extensible) return error.NotExtensible;
         try self.addProperty(rt, atom_id, desc);
     }
 
@@ -9170,8 +9175,8 @@ pub const Object = struct {
         if (desc.enumerable orelse false) return error.IncompatibleDescriptor;
         if (!desc.value_present) {
             if (desc.writable) |writable| {
-                if (self.length_writable or !writable) {
-                    self.length_writable = writable;
+                if (self.flags.length_writable or !writable) {
+                    self.flags.length_writable = writable;
                 } else {
                     return error.IncompatibleDescriptor;
                 }
@@ -9179,10 +9184,10 @@ pub const Object = struct {
             return;
         }
         const target_len = new_len.?;
-        if (!self.length_writable) {
+        if (!self.flags.length_writable) {
             if (target_len != self.length or (desc.writable orelse false)) return error.IncompatibleDescriptor;
         }
-        if (target_len > self.length and !self.length_writable) return error.ReadOnly;
+        if (target_len > self.length and !self.flags.length_writable) return error.ReadOnly;
         if (target_len < self.length) {
             var i = self.properties.len;
             while (i > 0) {
@@ -9195,7 +9200,7 @@ pub const Object = struct {
                     self.truncateArrayElements(rt, adjusted_len);
                     self.length = adjusted_len;
                     self.recomputeArrayStorageMode(rt);
-                    if (desc.writable == false) self.length_writable = false;
+                    if (desc.writable == false) self.flags.length_writable = false;
                     return error.IncompatibleDescriptor;
                 }
             }
@@ -9203,7 +9208,7 @@ pub const Object = struct {
         self.truncateArrayElements(rt, target_len);
         self.length = target_len;
         self.recomputeArrayStorageMode(rt);
-        if (desc.writable) |writable| self.length_writable = writable;
+        if (desc.writable) |writable| self.flags.length_writable = writable;
     }
 
     fn defineRegExpLastIndex(self: *Object, rt: *JSRuntime, desc: descriptor.Descriptor) !void {
@@ -9245,7 +9250,7 @@ pub const Object = struct {
     }
 
     fn denseArrayElement(self: *const Object, atom_id: atom.Atom) ?JSValue {
-        if (!self.is_array) return null;
+        if (!self.flags.is_array) return null;
         if (!atom.isTaggedInt(atom_id)) return null;
         const index: usize = @intCast(atom.atomToUInt32(atom_id));
         if (index >= self.arrayElements().len) return null;
@@ -9259,7 +9264,7 @@ pub const Object = struct {
     }
 
     fn setDenseArrayElement(self: *Object, rt: *JSRuntime, index: u32, new_value: JSValue) !bool {
-        if (!self.is_array) return false;
+        if (!self.flags.is_array) return false;
         const element_index: usize = @intCast(index);
         const elements = self.arrayElementsSlot();
         if (element_index >= elements.*.len or elements.*[element_index] == null) return false;
@@ -9292,12 +9297,12 @@ pub const Object = struct {
     }
 
     fn updateArrayStorageMode(self: *Object, index: u32) void {
-        if (!self.is_array) return;
+        if (!self.flags.is_array) return;
         if (index > self.properties.len * 2 + 8) self.arrayStorageModeSlot().* = .sparse;
     }
 
     fn recomputeArrayStorageMode(self: *Object, rt: *JSRuntime) void {
-        if (!self.is_array) return;
+        if (!self.flags.is_array) return;
         self.arrayStorageModeSlot().* = .dense;
         for (self.properties) |entry| {
             if (entry.flags.deleted) continue;
@@ -9330,7 +9335,7 @@ pub const Object = struct {
             grew_properties = true;
         }
 
-        const old_may_have_indexed_properties = self.may_have_indexed_properties;
+        const old_may_have_indexed_properties = self.flags.may_have_indexed_properties;
         self.properties = self.properties.ptr[0 .. old_len + 1];
         self.properties[old_len] = entry;
         entry_owned = false;
@@ -9340,7 +9345,7 @@ pub const Object = struct {
             destroyPropertyEntry(rt, self.properties[old_len]);
             self.properties[old_len] = .{};
             self.properties = self.properties.ptr[0..old_len];
-            self.may_have_indexed_properties = old_may_have_indexed_properties;
+            self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
             if (grew_properties) {
                 const new_properties = self.properties.ptr[0..self.property_capacity];
                 self.properties = old_properties[0..old_len];

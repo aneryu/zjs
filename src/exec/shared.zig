@@ -8591,7 +8591,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
         }
-        if (function_object.is_html_dda) return false;
+        if (function_object.flags.is_html_dda) return false;
         if (builtins.date.isConstructorRecord(function_object)) return true;
         if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
@@ -8741,7 +8741,7 @@ pub fn qjsReflectSetCall(
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(atom_id);
     if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
-    if (!object.is_array or atom_id != core.atom.ids.length) {
+    if (!object.flags.is_array or atom_id != core.atom.ids.length) {
         const receiver_value = if (args.len >= 4) args[3] else args[0];
         if (object.proxyTarget() != null) {
             const ok = try proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
@@ -9319,7 +9319,7 @@ pub fn inOp(
     const object = property_ops.expectObject(rhs) catch return error.TypeError;
     const key = try toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(key);
-    const has_builtin_object_proto = value_ops.atomNameEql(ctx.runtime, key, "toString") and (object.class_id == core.class.ids.object or object.is_array);
+    const has_builtin_object_proto = value_ops.atomNameEql(ctx.runtime, key, "toString") and (object.class_id == core.class.ids.object or object.flags.is_array);
     const found = if (object.proxyTarget() != null)
         try hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
     else
@@ -9356,7 +9356,7 @@ pub fn instanceofOp(
     }
     const object = try property_ops.expectObject(lhs);
     if (try constructorNameEqlLocal(ctx.runtime, ctor, "Array")) {
-        try stack.pushOwned(core.JSValue.boolean(object.is_array));
+        try stack.pushOwned(core.JSValue.boolean(object.flags.is_array));
         return;
     }
     const proto_value = try getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);

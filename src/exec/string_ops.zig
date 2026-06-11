@@ -694,7 +694,7 @@ pub fn formatCapturedErrorStackStringValue(ctx: *core.JSContext, sites_value: co
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
 
-    const current_length: usize = if (sites.is_array) @intCast(sites.length) else 0;
+    const current_length: usize = if (sites.flags.is_array) @intCast(sites.length) else 0;
     const length = @min(current_length, site_count);
     var index: usize = 0;
     var emitted: usize = 0;
@@ -805,7 +805,7 @@ pub fn qjsStringFromCodePointArray(
     array_value: core.JSValue,
 ) !core.JSValue {
     const array = try property_ops.expectObject(array_value);
-    if (!array.is_array) return error.TypeError;
+    if (!array.flags.is_array) return error.TypeError;
     if (try qjsStringFromCodePointDenseArray(ctx.runtime, array)) |value| return value;
     var units = std.ArrayList(u16).empty;
     defer units.deinit(ctx.runtime.memory.allocator);
@@ -3121,7 +3121,7 @@ pub fn qjsStringSplitBuiltinArray(
     const result = try builtins.string.methodCall(ctx.runtime, string_value, builtins.string.legacy_split_method_id, args);
     errdefer result.free(ctx.runtime);
     if (objectFromValue(result)) |object| {
-        if (object.is_array and object.getPrototype() == null) {
+        if (object.flags.is_array and object.getPrototype() == null) {
             if (arrayPrototypeFromGlobal(ctx.runtime, global)) |prototype| {
                 try object.setPrototype(ctx.runtime, prototype);
             }
@@ -4020,7 +4020,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
     legacy_capture_values: *[9]?core.JSValue,
     last_capture_value: *?core.JSValue,
 ) !void {
-    std.debug.assert(out.is_array);
+    std.debug.assert(out.flags.is_array);
     std.debug.assert(out.length == 0);
     std.debug.assert(out.arrayElements().len == 0);
     std.debug.assert(out.arrayElementsCapacity() == 0);
@@ -4059,7 +4059,7 @@ pub fn initRegExpMatchArrayDenseElementsFromValue(
 
     out.arrayElementsSlot().* = elements[0..element_count];
     out.arrayElementsCapacitySlot().* = element_count;
-    out.may_have_indexed_properties = true;
+    out.flags.may_have_indexed_properties = true;
     out.length = @intCast(element_count);
 }
 
@@ -4515,7 +4515,7 @@ pub fn qjsArraySearchCall(
     }
     const length = if (is_typed_array)
         try arrayMethodTypedArrayLength(ctx.runtime, object, is_typed_method)
-    else if (object.is_array)
+    else if (object.flags.is_array)
         @as(usize, @intCast(object.length))
     else blk: {
         const length_value = try getValueProperty(ctx, output, global, receiver_object_value, core.atom.ids.length, null, null);
@@ -5027,7 +5027,7 @@ pub fn qjsObjectTagString(rt: *core.JSRuntime, tag: []const u8) !core.JSValue {
 }
 
 pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
-    if (object.is_proxy) {
+    if (object.flags.is_proxy) {
         if (object.proxyHandler() == null) return error.TypeError;
         if (object.proxyTarget()) |target_value| {
             if (objectFromValue(target_value)) |target| {
@@ -5037,7 +5037,7 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
         }
         return "Object";
     }
-    if (object.is_array) return "Array";
+    if (object.flags.is_array) return "Array";
     return switch (object.class_id) {
         core.class.ids.arguments, core.class.ids.mapped_arguments => "Arguments",
         core.class.ids.error_ => "Error",
@@ -5060,8 +5060,8 @@ pub fn defaultObjectToStringTag(object: *core.Object) ![]const u8 {
 }
 
 pub fn objectIsArrayForToString(object: *core.Object) !bool {
-    if (object.is_array) return true;
-    if (!object.is_proxy) return false;
+    if (object.flags.is_array) return true;
+    if (!object.flags.is_proxy) return false;
     if (object.proxyHandler() == null) return error.TypeError;
     const target_value = object.proxyTarget() orelse return false;
     const target = objectFromValue(target_value) orelse return false;

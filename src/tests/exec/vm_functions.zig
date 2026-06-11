@@ -38,7 +38,7 @@ test "F2+F3 qjs dispatcher: array literal via qjs_vm" {
     const result = try parseAndRun(rt, ctx, "[]");
     defer result.free(rt);
     const object: *core.Object = @fieldParentPtr("header", result.refHeader().?);
-    try std.testing.expect(object.is_array);
+    try std.testing.expect(object.flags.is_array);
     try std.testing.expectEqual(@as(u32, 0), object.length);
 }
 
@@ -51,7 +51,7 @@ test "F2+F3 qjs dispatcher: array literal with elements via qjs_vm" {
     const result = try parseAndRun(rt, ctx, "[1, 2, 3]");
     defer result.free(rt);
     const object: *core.Object = @fieldParentPtr("header", result.refHeader().?);
-    try std.testing.expect(object.is_array);
+    try std.testing.expect(object.flags.is_array);
     try std.testing.expectEqual(@as(u32, 3), object.length);
 }
 

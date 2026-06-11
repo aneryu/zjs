@@ -1287,7 +1287,7 @@ pub const JSRuntime = struct {
     /// monotonically increasing weak id on first registration.
     pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.has_weak_id) {
+        if (object.flags.has_weak_id) {
             const weak_id = self.weak_object_ids.get(address) orelse unreachable;
             return weak_id << 1;
         }
@@ -1298,13 +1298,13 @@ pub const JSRuntime = struct {
             return err;
         };
         self.next_weak_id += 1;
-        object.has_weak_id = true;
+        object.flags.has_weak_id = true;
         return weak_id << 1;
     }
 
     /// Returns the encoded weak identity for `object` without registering one.
     pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
-        if (!object.has_weak_id) return null;
+        if (!object.flags.has_weak_id) return null;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         return weak_id << 1;
@@ -1313,8 +1313,8 @@ pub const JSRuntime = struct {
     /// Removes `object` from the weak identity registry, returning its encoded
     /// weak identity (if any) so destruction can propagate it to weak slots.
     pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
-        if (!object.has_weak_id) return null;
-        object.has_weak_id = false;
+        if (!object.flags.has_weak_id) return null;
+        object.flags.has_weak_id = false;
         const address = @intFromPtr(&object.header) & ~@as(usize, 1);
         const weak_id = self.weak_object_ids.get(address) orelse return null;
         _ = self.weak_object_ids.remove(address);
@@ -2292,7 +2292,7 @@ pub const JSRuntime = struct {
                 if (objectFromLastRefValue(item.value)) |object| {
                     const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
                     if (self.borrowed_weak_cleanup_active) {
-                        if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+                        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
                         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
                         var enqueued_current_identity = true;
                         self.enqueueBorrowedWeakCleanupIdentity(identity) catch {
@@ -2434,7 +2434,7 @@ pub const JSRuntime = struct {
     pub fn enqueueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) !void {
         const object = objectFromLastRefValue(value) orelse return;
         const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
         try self.enqueueBorrowedWeakCleanupIdentity(identity);
         if (self.peekWeakObjectIdentity(object)) |weak_identity| {
@@ -2446,7 +2446,7 @@ pub const JSRuntime = struct {
         if (!self.borrowed_weak_cleanup_active) return null;
         const object = objectFromLastRefValue(value) orelse return null;
         const identity = @intFromPtr(&object.header) & ~@as(usize, 1);
-        if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
+        if (object.flags.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
         self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
         if (self.peekWeakObjectIdentity(object)) |weak_identity| {

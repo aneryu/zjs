@@ -732,8 +732,8 @@ fn setArrayLengthForPutFieldFastPath(
     const length = value.asInt32() orelse return false;
     if (length < 0) return false;
     const object = objectFromValue(receiver) orelse return false;
-    if (!object.is_array or object.exotic != null or object.proxyTarget() != null) return false;
-    if (!object.length_writable) return false;
+    if (!object.flags.is_array or object.exotic != null or object.proxyTarget() != null) return false;
+    if (!object.flags.length_writable) return false;
     const new_len: u32 = @intCast(length);
     if (new_len < object.length) {
         if (object.arrayElementStorageMode() != .dense) return false;

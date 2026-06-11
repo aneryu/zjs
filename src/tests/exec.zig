@@ -2073,7 +2073,7 @@ test "array static native builtin records ignore dispatch names" {
     const direct_from_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, array_value, fake_from, &direct_is_array_args);
     defer direct_from_result.free(rt);
     const direct_from_array: *core.Object = @fieldParentPtr("header", direct_from_result.refHeader().?);
-    try std.testing.expect(direct_from_array.is_array);
+    try std.testing.expect(direct_from_array.flags.is_array);
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.length);
 
     const fake_is_array_key = try rt.internAtom("fakeArrayIsArray");
@@ -2708,7 +2708,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
     defer exec_result.free(rt);
     const exec_array: *core.Object = @fieldParentPtr("header", exec_result.refHeader().?);
-    try std.testing.expect(exec_array.is_array);
+    try std.testing.expect(exec_array.flags.is_array);
     const first_match = exec_array.getProperty(core.atom.atomFromUInt32(0));
     defer first_match.free(rt);
     try std.testing.expect(first_match.isString());
@@ -2856,7 +2856,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
     defer split_result.free(rt);
     const split_array: *core.Object = @fieldParentPtr("header", split_result.refHeader().?);
-    try std.testing.expect(split_array.is_array);
+    try std.testing.expect(split_array.flags.is_array);
     try std.testing.expectEqual(@as(u32, 2), split_array.length);
 
     const fake_search_key = try rt.internAtom("fakeRegExpSearch");

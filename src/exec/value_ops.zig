@@ -220,7 +220,7 @@ pub fn length(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isObject()) {
         const header = value.refHeader() orelse return error.TypeError;
         const object_value: *core.Object = @fieldParentPtr("header", header);
-        if (object_value.is_array) {
+        if (object_value.flags.is_array) {
             if (object_value.length <= @as(u32, @intCast(std.math.maxInt(i32)))) {
                 return core.JSValue.int32(@intCast(object_value.length));
             }
@@ -679,7 +679,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
             try buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
         } else if (object_value.class_id == core.class.ids.promise) {
             try buffer.appendSlice(rt.memory.allocator, "[object Promise]");
-        } else if (object_value.is_array) {
+        } else if (object_value.flags.is_array) {
             try appendArrayString(rt, buffer, object_value);
         } else {
             try buffer.appendSlice(rt.memory.allocator, "[object Object]");

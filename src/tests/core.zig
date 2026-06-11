@@ -1505,7 +1505,7 @@ test "array iterator target clear defers value finalizer reentry" {
     const iterator = try core.Object.create(rt, core.class.ids.array_iterator, null);
     defer iterator.value().free(rt);
     const target = try core.Object.create(rt, reentrant_id, null);
-    target.is_array = true;
+    target.flags.is_array = true;
     iterator.iteratorTargetSlot().* = target.value().dup();
     target.value().free(rt);
 
@@ -1985,7 +1985,7 @@ test "proxy state uses payload storage" {
 
     const proxy = try core.Object.create(rt, core.class.ids.object, null);
     defer proxy.value().free(rt);
-    proxy.is_proxy = true;
+    proxy.flags.is_proxy = true;
     try proxy.ensureProxyPayload(rt);
 
     try std.testing.expect(proxy.class_payload == .external);
@@ -2399,7 +2399,7 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    global.is_global = true;
+    global.flags.is_global = true;
     const object = try core.Object.create(rt, core.class.ids.object, null);
     defer object.value().free(rt);
 
@@ -4042,7 +4042,7 @@ test "destroyed realm global clears borrowed realm pointers and auto init metada
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.is_global = true;
+    global.flags.is_global = true;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const lazy_key = try rt.internAtom("lazy");
     defer rt.atoms.free(lazy_key);
@@ -4082,7 +4082,7 @@ test "cleared realm pointer unregisters empty borrowed holder" {
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    global.is_global = true;
+    global.flags.is_global = true;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
 
@@ -4100,7 +4100,7 @@ test "replaced realm auto-init unregisters empty borrowed holder" {
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    global.is_global = true;
+    global.flags.is_global = true;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const key = try rt.internAtom("lazy_replace_realm");
@@ -4140,7 +4140,7 @@ test "deleted realm auto-init unregisters empty borrowed holder" {
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    global.is_global = true;
+    global.flags.is_global = true;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const key = try rt.internAtom("lazy_delete_realm");
@@ -4159,7 +4159,7 @@ test "ordinary replacement of realm auto-init unregisters empty borrowed holder"
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
-    global.is_global = true;
+    global.flags.is_global = true;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const define_key = try rt.internAtom("lazy_define_realm");
@@ -4201,7 +4201,7 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.is_global = true;
+    global.flags.is_global = true;
 
     const navigator_holder = try core.Object.create(rt, core.class.ids.object, null);
     defer navigator_holder.value().free(rt);
@@ -4256,7 +4256,7 @@ test "materialized auto-init function realm pointer registers borrowed holder" {
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.is_global = true;
+    global.flags.is_global = true;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     defer holder.value().free(rt);
     const host_key = try rt.internAtom("gc");

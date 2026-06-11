@@ -101,7 +101,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         call_mod.contextGlobalOwnPropertyCapacity(),
     );
     errdefer global_object.value().free(ctx.runtime);
-    global_object.is_global = true;
+    global_object.flags.is_global = true;
     try call_mod.installHostGlobals(ctx.runtime, global_object);
     const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     thrower.free(ctx.runtime);
@@ -1837,7 +1837,7 @@ test "engine eval host globals and throw intrinsic tear down cleanly" {
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
-    global.is_global = true;
+    global.flags.is_global = true;
     defer global.value().free(rt);
 
     try exec.call.installHostGlobals(rt, global);
