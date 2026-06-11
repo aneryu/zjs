@@ -22,7 +22,7 @@ todos:
     status: completed
   - id: p2-split-shared
     content: "Phase 2: 拆分 shared.zig(15K) 与 vm_property.zig(13K)，合并 call.zig 重叠逻辑与 popCatchMarker 双实现"
-    status: in_progress
+    status: completed
   - id: p2-ic-opcodes
     content: "Phase 2: 接通预留 opcode 246-248（get_field_data_slot 等）的 emit+dispatch；删除 legacy bytecode/scope.zig 死路径"
     status: completed
