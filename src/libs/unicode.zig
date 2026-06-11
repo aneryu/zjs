@@ -175,6 +175,12 @@ pub fn asciiHexDigitValueByte(byte: u8) ?u8 {
     return value;
 }
 
+pub fn asciiUpperHexDigitValueByte(byte: u8) ?u8 {
+    if (byte >= '0' and byte <= '9') return byte - '0';
+    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
+    return null;
+}
+
 pub fn isAsciiHexDigitByte(byte: u8) bool {
     return asciiHexDigitValueByte(byte) != null;
 }
@@ -1663,6 +1669,13 @@ test "unicode ascii hex helpers cover digit values" {
 
     try std.testing.expect(isAsciiHexDigitUnit('a'));
     try std.testing.expect(!isAsciiHexDigitUnit(0x100));
+
+    try std.testing.expectEqual(@as(u8, 0), asciiUpperHexDigitValueByte('0'));
+    try std.testing.expectEqual(@as(u8, 9), asciiUpperHexDigitValueByte('9'));
+    try std.testing.expectEqual(@as(u8, 10), asciiUpperHexDigitValueByte('A'));
+    try std.testing.expectEqual(@as(u8, 15), asciiUpperHexDigitValueByte('F'));
+    try std.testing.expectEqual(@as(?u8, null), asciiUpperHexDigitValueByte('a'));
+    try std.testing.expectEqual(@as(?u8, null), asciiUpperHexDigitValueByte('g'));
 }
 
 test "unicode ascii radix digit helper covers base-36 digit values" {

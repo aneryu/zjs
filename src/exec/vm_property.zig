@@ -3,6 +3,7 @@ const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
+const unicode_lib = @import("../libs/unicode.zig");
 const frame_mod = @import("frame.zig");
 const arith_vm = @import("vm_arith.zig");
 const property_ic = @import("property_ic.zig");
@@ -8911,9 +8912,7 @@ fn percentHexByte(high: u8, low: u8) ?u8 {
 }
 
 fn percentHexNibble(byte: u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
-    return null;
+    return unicode_lib.asciiUpperHexDigitValueByte(byte);
 }
 
 fn tryFuseGlobalStringPercentHexAddStore(

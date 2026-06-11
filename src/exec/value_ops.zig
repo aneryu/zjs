@@ -1033,9 +1033,7 @@ fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JS
 }
 
 fn upperHexValue(byte: u8) ?u8 {
-    if (byte >= '0' and byte <= '9') return byte - '0';
-    if (byte >= 'A' and byte <= 'F') return byte - 'A' + 10;
-    return null;
+    return unicode_lib.asciiUpperHexDigitValueByte(byte);
 }
 
 fn stringObject(value: core.JSValue) ?*core.string.String {
