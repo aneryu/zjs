@@ -184,12 +184,8 @@ pub fn endSharedTest() void {
         const baseline = shared_engine_baseline_property_count;
         if (global.properties.len > baseline) {
             for (global.properties[baseline..]) |*entry| {
-                if (entry.flags.deleted) continue;
                 entry.slot.destroy(eng.runtime);
-                if (entry.atom_id != core.atom.null_atom) eng.runtime.atoms.free(entry.atom_id);
-                entry.atom_id = core.atom.null_atom;
                 entry.slot = .deleted;
-                entry.flags.deleted = true;
             }
             global.properties = global.properties.ptr[0..baseline];
         }

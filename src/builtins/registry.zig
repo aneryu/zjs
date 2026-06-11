@@ -1198,8 +1198,8 @@ fn bindNativeRecordByName(
 
 fn bindAutoInitNativeRecordByAtom(object: *core.Object, atom_id: core.Atom, native_id: i32) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| {
                 info.native_builtin_id = native_id;
@@ -1213,8 +1213,8 @@ fn bindAutoInitNativeRecordByAtom(object: *core.Object, atom_id: core.Atom, nati
 
 fn tagAutoInitArrayBuiltinByAtom(object: *core.Object, atom_id: core.Atom, marker: core.property.ArrayBuiltinMarker) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| return setAutoInitArrayBuiltinMarker(info, marker),
             .data => |value| {
@@ -1235,8 +1235,8 @@ fn setAutoInitArrayBuiltinMarker(info: *core.property.AutoInit, marker: core.pro
 
 fn tagAutoInitTypedArrayBuiltinByAtom(object: *core.Object, atom_id: core.Atom, marker: core.property.TypedArrayBuiltinMarker) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| return setAutoInitTypedArrayBuiltinMarker(info, marker),
             .data => |value| {
@@ -1257,8 +1257,8 @@ fn setAutoInitTypedArrayBuiltinMarker(info: *core.property.AutoInit, marker: cor
 
 fn tagAutoInitArrayIteratorKindByAtom(object: *core.Object, atom_id: core.Atom, kind: u8) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| return setAutoInitArrayIteratorKind(info, kind),
             .data => |value| {
@@ -1279,8 +1279,8 @@ fn setAutoInitArrayIteratorKind(info: *core.property.AutoInit, kind: u8) bool {
 
 fn tagAutoInitIteratorIdentityByAtom(object: *core.Object, atom_id: core.Atom) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| {
                 info.iterator_identity = true;
@@ -1298,8 +1298,8 @@ fn tagAutoInitIteratorIdentityByAtom(object: *core.Object, atom_id: core.Atom) b
 
 fn tagAutoInitCollectionOwnerByAtom(object: *core.Object, atom_id: core.Atom, owner_class: core.ClassId) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| return setAutoInitCollectionOwner(info, owner_class),
             .data => |value| {
@@ -1320,8 +1320,8 @@ fn setAutoInitCollectionOwner(info: *core.property.AutoInit, owner_class: core.C
 
 fn tagAutoInitDisposableStackMethodByAtom(object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| return setAutoInitDisposableStackMethod(info, method_id),
             .data => |value| {
@@ -1342,8 +1342,8 @@ fn setAutoInitDisposableStackMethod(info: *core.property.AutoInit, method_id: u8
 
 fn tagAutoInitAsyncDisposableStackMethodByAtom(object: *core.Object, atom_id: core.Atom, method_id: u8) bool {
     if (object.exotic != null) return false;
-    for (object.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
+    if (object.findProperty(atom_id)) |property_index| {
+        const entry = &object.properties[property_index];
         switch (entry.slot) {
             .auto_init => |*info| return setAutoInitAsyncDisposableStackMethod(info, method_id),
             .data => |value| {
@@ -2830,8 +2830,8 @@ fn wireNativeFunctionPropertyPrototypesWithProto(rt: *core.JSRuntime, target: *c
     // `Object.materializeAutoInit` instead, using the cached
     // realm-global Function.prototype slot populated while installing
     // the Function constructor.
-    for (target.properties) |entry| {
-        if (entry.flags.deleted) continue;
+    for (target.properties, 0..) |entry, property_index| {
+        if (target.propFlagsAt(property_index).deleted) continue;
         switch (entry.slot) {
             .data => |value| try wireNativeFunctionPrototype(rt, value, function_proto),
             .accessor => |accessor| {

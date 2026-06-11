@@ -1,4 +1,3 @@
-const atom = @import("atom.zig");
 const class = @import("class.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("runtime.zig").JSRuntime;
@@ -149,8 +148,12 @@ pub const Slot = union(enum) {
     }
 };
 
+/// Per-object property storage. Holds only the value side of a
+/// property (QuickJS `JSProperty` model); the key atom and the
+/// writable/enumerable/configurable/accessor/deleted flags live in the
+/// owning object's shape (`shape.Property`), indexed 1:1 with this
+/// array. Use `Object.propAtomAt` / `Object.propFlagsAt` to read the
+/// metadata for an entry.
 pub const Entry = struct {
-    atom_id: atom.Atom = atom.null_atom,
-    flags: Flags = .{},
     slot: Slot = .deleted,
 };

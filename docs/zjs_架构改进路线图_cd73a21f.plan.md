@@ -43,7 +43,7 @@ todos:
     status: in_progress
   - id: p5-nanbox
     content: "Phase 5: JSValue 访问器封装 pass + comptime 可切换 NaN-boxing，双模式跑门禁后按收益翻转默认"
-    status: in_progress
+    status: completed
 isProject: false
 ---
 

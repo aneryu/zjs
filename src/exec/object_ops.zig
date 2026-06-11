@@ -1015,10 +1015,11 @@ pub fn qjsRegExpPrototypeMethodIsDefault(object: *core.Object, atom_id: core.Ato
     if (object.hasOwnProperty(atom_id)) return false;
     const proto = object.getPrototype() orelse return false;
     if (proto.exotic != null) return false;
-    for (proto.properties) |entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-        if (entry.flags.accessor) return false;
-        return switch (entry.slot) {
+    for (proto.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
+        if (prop_flags.accessor) return false;
+        return switch (proto.properties[property_index].slot) {
             .data => |method| qjsRegExpNativeBuiltinMatches(method, expected_id),
             .auto_init => |info| qjsRegExpAutoInitBuiltinMatches(info, expected_id),
             .accessor, .deleted => false,
@@ -3768,8 +3769,8 @@ pub fn appendPrivateBoundNamesFromObject(
     atoms: *std.ArrayList(core.Atom),
     object: *core.Object,
 ) !void {
-    for (object.properties) |entry| {
-        try appendPrivateBoundName(rt, atoms, entry.atom_id);
+    for (object.shapeProps()) |prop| {
+        try appendPrivateBoundName(rt, atoms, prop.atom_id);
     }
 }
 
@@ -4535,10 +4536,9 @@ pub fn getPrimitiveProperty(
 
 pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) ?core.JSValue {
     if (object.exotic != null) return null;
-    for (object.properties) |entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-        if (entry.flags.accessor) return null;
-        return switch (entry.slot) {
+    if (object.findProperty(atom_id)) |index| {
+        if (object.propFlagsAt(index).accessor) return null;
+        return switch (object.properties[index].slot) {
             .data => |stored| stored.dup(),
             .auto_init => object.getProperty(atom_id),
             .accessor, .deleted => null,

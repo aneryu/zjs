@@ -639,8 +639,8 @@ test "constructor results do not install proto keepalive reserved property" {
 
     const object: *core.Object = @fieldParentPtr("header", result.refHeader().?);
     try std.testing.expect(object.getPrototype() != null);
-    for (object.properties) |entry| {
-        try std.testing.expect(entry.atom_id != core.atom.ids.zjs_proto_keepalive);
+    for (object.shapeProps()) |prop| {
+        try std.testing.expect(prop.atom_id != core.atom.ids.zjs_proto_keepalive);
     }
 }
 

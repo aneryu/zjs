@@ -863,12 +863,13 @@ pub fn qjsStringFromCodePointDenseArray(rt: *core.JSRuntime, array: *core.Object
     @memset(code_points, null);
 
     var seen: usize = 0;
-    for (array.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        const index = core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+    for (array.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted) continue;
+        const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
         if (index >= array.length) continue;
-        if (entry.flags.accessor) return null;
-        const value = switch (entry.slot) {
+        if (prop_flags.accessor) return null;
+        const value = switch (array.properties[property_index].slot) {
             .data => |stored| stored,
             // Array elements never carry `auto_init` placeholders --
             // those only appear for builtin method tables installed via

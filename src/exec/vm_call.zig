@@ -869,10 +869,11 @@ fn preparedNativeTargetFromAutoInitEntry(
     atom_id: core.Atom,
 ) ?frame_mod.PreparedNativeCallTarget {
     if (holder.proxyTarget() != null or holder.exotic != null) return null;
-    if (index >= holder.properties.len) return null;
-    const entry = holder.properties[index];
-    if (entry.flags.deleted or entry.flags.accessor or entry.atom_id != atom_id) return null;
-    return switch (entry.slot) {
+    if (index >= holder.shapeProps().len) return null;
+    const prop = holder.shapeProps()[index];
+    const prop_flags = core.property.Flags.fromBits(prop.flags);
+    if (prop_flags.deleted or prop_flags.accessor or prop.atom_id != atom_id) return null;
+    return switch (holder.properties[index].slot) {
         .auto_init => |info| {
             const native_ref = core.function.decodeNativeBuiltinId(info.native_builtin_id) orelse return null;
             if (!nativeBuiltinSupportedWithoutFunctionObject(receiver, native_ref, info)) return null;

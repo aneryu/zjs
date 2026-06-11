@@ -1525,9 +1525,13 @@ pub const Object = struct {
         if (!self.finalizeInlineClassPayload(rt)) self.enqueueClassPayloadFinalizer(rt);
         const old_properties = self.properties;
         const old_property_capacity = self.property_capacity;
+        const old_shape_props = self.shape_ref.props[0..@min(self.shape_ref.prop_count, old_properties.len)];
         self.properties = &.{};
         self.property_capacity = 0;
-        for (old_properties) |entry| destroyPropertyEntry(rt, entry);
+        for (old_properties, 0..) |entry, index| {
+            const entry_atom = if (index < old_shape_props.len) old_shape_props[index].atom_id else atom.null_atom;
+            destroyPropertySlot(rt, entry_atom, entry.slot);
+        }
         if (old_property_capacity != 0) rt.memory.free(property.Entry, old_properties.ptr[0..old_property_capacity]);
         self.destroyOrdinaryPayload(rt);
         self.destroyArrayPayload(rt);
@@ -5831,8 +5835,14 @@ pub const Object = struct {
                 try Helper.traceOptValue(visitor, maybe_cached);
             }
         }
+        // Property key atoms (including symbol keys) live in the shape;
+        // visit them from there. Visitors only read symbol atoms (set
+        // insertion / no-op), so revisiting a shared shape from several
+        // objects is safe.
+        for (self.shape_ref.props[0..self.shape_ref.prop_count]) |*prop| {
+            try Helper.callVisitSymbol(visitor, &prop.atom_id);
+        }
         for (self.properties) |*entry| {
-            try Helper.callVisitSymbol(visitor, &entry.atom_id);
             switch (entry.slot) {
                 .data => |*stored| try Helper.callVisitValue(visitor, stored),
                 .accessor => |*stored_accessor| {
@@ -7031,9 +7041,10 @@ pub const Object = struct {
         }
         if (self.findProperty(atom_id)) |index| {
             const entry = self.properties[index];
-            if (entry.flags.deleted) return null;
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.deleted) return null;
             // Auto-init placeholders need to be materialized before
-            // the descriptor is built (`fromEntry` cannot synthesize
+            // the descriptor is built (`fromSlot` cannot synthesize
             // a value from `(name, length, rt)` on its own). This
             // mirrors `getProperty`'s first-access promotion -- after
             // materialization the slot is `.data` or `.accessor` and
@@ -7041,32 +7052,32 @@ pub const Object = struct {
             if (entry.slot == .auto_init) {
                 // `materializeAutoInit` returns a fresh ref for
                 // `getProperty` semantics. On success the slot is promoted
-                // and `fromEntry` dups the stored value(s). On OOM the
+                // and `fromSlot` dups the stored value(s). On OOM the
                 // placeholder stays `.auto_init`, so expose a conservative
                 // fallback descriptor directly instead of passing the
-                // placeholder to `fromEntry`.
+                // placeholder to `fromSlot`.
                 const transient = materializeAutoInit(@constCast(self), index, entry.slot.auto_init);
                 const after_materialize = self.properties[index];
                 if (after_materialize.slot == .auto_init) {
-                    if (entry.flags.accessor) {
+                    if (entry_flags.accessor) {
                         return descriptor.Descriptor.accessor(
                             transient,
                             JSValue.undefinedValue(),
-                            entry.flags.enumerable,
-                            entry.flags.configurable,
+                            entry_flags.enumerable,
+                            entry_flags.configurable,
                         );
                     }
                     return descriptor.Descriptor.data(
                         transient,
-                        entry.flags.writable,
-                        entry.flags.enumerable,
-                        entry.flags.configurable,
+                        entry_flags.writable,
+                        entry_flags.enumerable,
+                        entry_flags.configurable,
                     );
                 }
                 transient.free(entry.slot.auto_init.rt);
-                return descriptor.Descriptor.fromEntry(after_materialize);
+                return descriptor.Descriptor.fromSlot(self.propFlagsAt(index), after_materialize.slot);
             }
-            return descriptor.Descriptor.fromEntry(entry);
+            return descriptor.Descriptor.fromSlot(entry_flags, entry.slot);
         }
         if (self.denseArrayElement(atom_id)) |stored| {
             return descriptor.Descriptor.data(stored.dup(), true, true, true);
@@ -7218,7 +7229,10 @@ pub const Object = struct {
     }
 
     fn installMaterializedAccessorAutoInit(self: *Object, index: usize, materialized: property.Accessor) void {
-        self.properties[index].flags.accessor = true;
+        // Accessor auto-init placeholders are installed with
+        // `flags.accessor` already set (asserted by the define paths),
+        // so the shape-side flags need no update here.
+        std.debug.assert(self.propFlagsAt(index).accessor);
         self.properties[index].slot = .{ .accessor = materialized };
     }
 
@@ -7682,9 +7696,8 @@ pub const Object = struct {
     pub fn getOwnDataObjectBorrowed(self: *const Object, atom_id: atom.Atom) ?*Object {
         if (self.exotic != null) return null;
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
-            if (entry.flags.deleted or entry.flags.accessor) return null;
-            return switch (entry.slot) {
+            if (self.propFlagsAt(index).accessor) return null;
+            return switch (self.properties[index].slot) {
                 .data => |stored| objectFromValue(stored),
                 .auto_init, .accessor, .deleted => null,
             };
@@ -7695,9 +7708,8 @@ pub const Object = struct {
     pub fn getOwnDataPropertyLookup(self: *const Object, atom_id: atom.Atom) ?DataPropertyLookup {
         if (self.exotic != null) return null;
         if (self.findProperty(atom_id)) |index| {
-            const entry = self.properties[index];
-            if (entry.flags.deleted or entry.flags.accessor) return null;
-            return switch (entry.slot) {
+            if (self.propFlagsAt(index).accessor) return null;
+            return switch (self.properties[index].slot) {
                 .data => |stored| .{ .index = index, .value = stored.dup() },
                 .auto_init, .accessor, .deleted => null,
             };
@@ -7706,10 +7718,11 @@ pub const Object = struct {
     }
 
     pub fn getOwnDataPropertyValueAt(self: *const Object, index: usize, atom_id: atom.Atom) ?JSValue {
-        if (self.exotic != null or index >= self.properties.len) return null;
-        const entry = self.properties[index];
-        if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return null;
-        return switch (entry.slot) {
+        if (self.exotic != null or index >= self.shapeProps().len) return null;
+        const prop = self.shape_ref.props[index];
+        const prop_flags = property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return null;
+        return switch (self.properties[index].slot) {
             .data => |stored| stored.dup(),
             .auto_init, .accessor, .deleted => null,
         };
@@ -7812,21 +7825,9 @@ pub const Object = struct {
         const input_atom = atom.predefinedId("input", .string).?;
         const groups_atom = atom.predefinedId("groups", .string).?;
         const enumerable_flags = property.Flags.data(true, true, true);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(index_atom),
-            .flags = enumerable_flags,
-            .slot = .{ .data = JSValue.int32(match_index) },
-        });
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(input_atom),
-            .flags = enumerable_flags,
-            .slot = .{ .data = input_value.dup() },
-        });
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(groups_atom),
-            .flags = enumerable_flags,
-            .slot = .{ .data = groups_value.dup() },
-        });
+        try self.appendPreparedPropertyEntry(rt, index_atom, enumerable_flags, .{ .data = JSValue.int32(match_index) });
+        try self.appendPreparedPropertyEntry(rt, input_atom, enumerable_flags, .{ .data = input_value.dup() });
+        try self.appendPreparedPropertyEntry(rt, groups_atom, enumerable_flags, .{ .data = groups_value.dup() });
     }
 
     pub fn defineJsonParseDataProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) !void {
@@ -7836,15 +7837,14 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
 
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
             try self.ensureUniqueShapeForMutation(rt);
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            const entry = &self.properties[index];
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
-            entry.flags = property.Flags.data(true, true, true);
             entry.slot = .{ .data = next_value };
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, property.Flags.data(true, true, true).bits());
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -7946,18 +7946,14 @@ pub const Object = struct {
         // (name, length, rt) triple stored in the slot's `auto_init`
         // payload. The atom is still retained the same way `addProperty`
         // would, via `rt.shapes.addProperty` -> `atoms.dup`.
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = length,
-                .rt = rt,
-                .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-                .native_builtin_id = native_builtin_id,
-                .shared_native_cache_slot = shared_native_cache_slot,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = length,
+            .rt = rt,
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = native_builtin_id,
+            .shared_native_cache_slot = shared_native_cache_slot,
+        } });
     }
 
     pub fn defineAutoInitNonIndexPropertyWithRealmNativeAndCache(
@@ -7982,18 +7978,14 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = length,
-                .rt = rt,
-                .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-                .native_builtin_id = native_builtin_id,
-                .shared_native_cache_slot = shared_native_cache_slot,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = length,
+            .rt = rt,
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = native_builtin_id,
+            .shared_native_cache_slot = shared_native_cache_slot,
+        } });
     }
 
     pub fn defineNativeAccessorAutoInitPropertyWithRealmAndNative(
@@ -8017,18 +8009,14 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = getter_name,
-                .length = getter_length,
-                .rt = rt,
-                .kind = .native_accessor,
-                .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-                .native_builtin_id = getter_native_builtin_id,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = getter_name,
+            .length = getter_length,
+            .rt = rt,
+            .kind = .native_accessor,
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = getter_native_builtin_id,
+        } });
     }
 
     pub fn defineNativeAccessorAutoInitPairPropertyWithRealmAndNative(
@@ -8056,20 +8044,16 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = getter_name,
-                .length = getter_length,
-                .rt = rt,
-                .kind = .native_accessor,
-                .host_function_kind = setter_length,
-                .external_host_function_id = @intCast(setter_native_builtin_id),
-                .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
-                .native_builtin_id = getter_native_builtin_id,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = getter_name,
+            .length = getter_length,
+            .rt = rt,
+            .kind = .native_accessor,
+            .host_function_kind = setter_length,
+            .external_host_function_id = @intCast(setter_native_builtin_id),
+            .host_function_realm_global = if (realm_global) |realm| @intFromPtr(realm) else 0,
+            .native_builtin_id = getter_native_builtin_id,
+        } });
     }
 
     pub fn replaceAutoInitPropertyWithRealmNativeAndCache(
@@ -8088,11 +8072,13 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        for (self.properties) |*entry| {
-            if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-            if (entry.slot != .auto_init) return error.TypeError;
-            entry.flags = flags;
-            entry.slot = .{ .auto_init = .{
+        if (self.findProperty(atom_id)) |index| {
+            if (self.properties[index].slot != .auto_init) return error.TypeError;
+            if (self.propFlagsAt(index).bits() != flags.bits()) {
+                try self.ensureUniqueShapeForMutation(rt);
+                rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
+            }
+            self.properties[index].slot = .{ .auto_init = .{
                 .name = name,
                 .length = length,
                 .rt = rt,
@@ -8118,17 +8104,13 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "navigator",
-                .length = 0,
-                .rt = rt,
-                .kind = .navigator,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "navigator",
+            .length = 0,
+            .rt = rt,
+            .kind = .navigator,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineConsoleAutoInitProperty(
@@ -8144,18 +8126,14 @@ pub const Object = struct {
         std.debug.assert(self.exotic == null);
         std.debug.assert(!self.flags.is_array);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "console",
-                .length = 0,
-                .rt = rt,
-                .kind = .console,
-                .host_function_kind = host_function_kind,
-                .external_host_function_id = external_host_function_id,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "console",
+            .length = 0,
+            .rt = rt,
+            .kind = .console,
+            .host_function_kind = host_function_kind,
+            .external_host_function_id = external_host_function_id,
+        } });
     }
 
     pub fn definePerformanceAutoInitProperty(
@@ -8170,17 +8148,13 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "performance",
-                .length = 0,
-                .rt = rt,
-                .kind = .performance,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "performance",
+            .length = 0,
+            .rt = rt,
+            .kind = .performance,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineBuiltinNamespaceAutoInitProperty(
@@ -8201,17 +8175,13 @@ pub const Object = struct {
         std.debug.assert(self.flags.extensible);
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = 0,
-                .rt = rt,
-                .kind = kind,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = 0,
+            .rt = rt,
+            .kind = kind,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineArrayUnscopablesAutoInitProperty(
@@ -8222,16 +8192,12 @@ pub const Object = struct {
     ) !void {
         std.debug.assert(self.exotic == null);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "[Symbol.unscopables]",
-                .length = 0,
-                .rt = rt,
-                .kind = .array_unscopables,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "[Symbol.unscopables]",
+            .length = 0,
+            .rt = rt,
+            .kind = .array_unscopables,
+        } });
     }
 
     pub fn defineNumberConstantAutoInitProperty(
@@ -8246,16 +8212,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = 0,
-                .rt = rt,
-                .kind = .number_constant,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = 0,
+            .rt = rt,
+            .kind = .number_constant,
+        } });
     }
 
     pub fn defineInt32ConstantAutoInitProperty(
@@ -8271,16 +8233,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = constant_value,
-                .rt = rt,
-                .kind = .int32_constant,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = constant_value,
+            .rt = rt,
+            .kind = .int32_constant,
+        } });
     }
 
     pub fn defineStringConstantAutoInitProperty(
@@ -8295,16 +8253,12 @@ pub const Object = struct {
         std.debug.assert(self.class_id != class.ids.regexp or self.regexpLastIndex() == null);
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = bytes,
-                .length = 0,
-                .rt = rt,
-                .kind = .string_constant,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = bytes,
+            .length = 0,
+            .rt = rt,
+            .kind = .string_constant,
+        } });
     }
 
     pub fn defineEmptyArrayAutoInitProperty(
@@ -8323,12 +8277,10 @@ pub const Object = struct {
         const inserted_holder = try registerBorrowedHolderForPendingMutation(rt, self);
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (!entry.flags.configurable) return error.IncompatibleDescriptor;
+            if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
             try self.ensureUniqueShapeForMutation(rt);
-            entry = &self.properties[index];
+            const entry = &self.properties[index];
             const old_slot = entry.slot;
-            entry.flags = flags;
             entry.slot = .{ .auto_init = .{
                 .name = "empty array",
                 .length = 0,
@@ -8336,22 +8288,18 @@ pub const Object = struct {
                 .kind = .empty_array,
                 .host_function_realm_global = @intFromPtr(realm_global),
             } };
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, flags.bits());
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = "empty array",
-                .length = 0,
-                .rt = rt,
-                .kind = .empty_array,
-                .host_function_realm_global = @intFromPtr(realm_global),
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = "empty array",
+            .length = 0,
+            .rt = rt,
+            .kind = .empty_array,
+            .host_function_realm_global = @intFromPtr(realm_global),
+        } });
     }
 
     pub fn defineHostAutoInitProperty(
@@ -8402,19 +8350,15 @@ pub const Object = struct {
         else
             false;
         errdefer rollbackBorrowedHolderRegistration(rt, self, inserted_holder);
-        try self.appendPreparedPropertyEntry(rt, .{
-            .atom_id = rt.atoms.dup(atom_id),
-            .flags = flags,
-            .slot = .{ .auto_init = .{
-                .name = name,
-                .length = length,
-                .rt = rt,
-                .host_function_kind = host_function_kind,
-                .external_host_function_id = external_host_function_id,
-                .host_function_prototype = host_function_prototype,
-                .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
-            } },
-        });
+        try self.appendPreparedPropertyEntry(rt, atom_id, flags, .{ .auto_init = .{
+            .name = name,
+            .length = length,
+            .rt = rt,
+            .host_function_kind = host_function_kind,
+            .external_host_function_id = external_host_function_id,
+            .host_function_prototype = host_function_prototype,
+            .host_function_realm_global = if (host_function_realm_global) |realm| @intFromPtr(realm) else 0,
+        } });
     }
 
     pub fn writeDenseArrayIndex(self: *Object, rt: *JSRuntime, index: u32, atom_id: atom.Atom, new_value: JSValue) !bool {
@@ -8778,19 +8722,20 @@ pub const Object = struct {
             return;
         }
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (entry.flags.accessor) {
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.accessor) {
                 try self.materializeAutoInitEntryForMutation(index);
-                entry = &self.properties[index];
+                const entry = &self.properties[index];
                 if (entry.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
                 return;
             }
-            if (!entry.flags.writable) return error.ReadOnly;
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            if (!entry_flags.writable) return error.ReadOnly;
+            const entry = &self.properties[index];
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return;
         }
@@ -8800,12 +8745,13 @@ pub const Object = struct {
         var prototype = self.prototype;
         while (prototype) |proto| {
             if (proto.findProperty(atom_id)) |index| {
-                if (proto.properties[index].flags.accessor) {
+                const inherited_flags = proto.propFlagsAt(index);
+                if (inherited_flags.accessor) {
                     try proto.materializeAutoInitEntryForMutation(index);
                 }
                 const inherited = proto.properties[index];
-                if (inherited.flags.accessor and inherited.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
-                if (!inherited.flags.accessor and !inherited.flags.writable) return error.ReadOnly;
+                if (inherited_flags.accessor and inherited.slot.accessor.setter.isUndefined()) return error.AccessorWithoutSetter;
+                if (!inherited_flags.accessor and !inherited_flags.writable) return error.ReadOnly;
             }
             prototype = proto.prototype;
         }
@@ -8821,10 +8767,11 @@ pub const Object = struct {
             }
         }
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (entry.flags.accessor) return false;
-            if (!entry.flags.writable) return false;
-            if (entry.atom_id != atom.ids.Private_brand) {
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.accessor) return false;
+            if (!entry_flags.writable) return false;
+            const entry = &self.properties[index];
+            if (atom_id != atom.ids.Private_brand) {
                 switch (entry.slot) {
                     .data => |*stored| {
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
@@ -8835,11 +8782,11 @@ pub const Object = struct {
                     .auto_init, .accessor, .deleted => {},
                 }
             }
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8847,18 +8794,20 @@ pub const Object = struct {
     }
 
     pub inline fn setOwnDataPropertyAtForLexicalSync(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or index >= self.properties.len) return false;
-        var entry = &self.properties[index];
-        if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return false;
+        if (self.exotic != null or index >= self.shapeProps().len) return false;
+        const prop = self.shape_ref.props[index];
+        const prop_flags = property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        const entry = &self.properties[index];
         switch (entry.slot) {
             .data => |*stored| {
-                if (!entry.flags.writable and !stored.isUninitialized()) return false;
-                if (entry.atom_id == atom.ids.Private_brand) {
-                    const next = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+                if (!prop_flags.writable and !stored.isUninitialized()) return false;
+                if (atom_id == atom.ids.Private_brand) {
+                    const next = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
                     errdefer next.free(rt);
                     const old = stored.*;
                     stored.* = next;
-                    destroyPropertySlot(rt, entry.atom_id, .{ .data = old });
+                    destroyPropertySlot(rt, atom_id, .{ .data = old });
                     return true;
                 }
                 if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
@@ -8877,13 +8826,15 @@ pub const Object = struct {
     }
 
     pub inline fn setOwnDataPropertyAtForLexicalSyncOwned(self: *Object, rt: *JSRuntime, index: usize, atom_id: atom.Atom, new_value: JSValue) !bool {
-        if (self.exotic != null or index >= self.properties.len) return false;
-        var entry = &self.properties[index];
-        if (entry.atom_id != atom_id or entry.flags.deleted or entry.flags.accessor) return false;
+        if (self.exotic != null or index >= self.shapeProps().len) return false;
+        const prop = self.shape_ref.props[index];
+        const prop_flags = property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != atom_id or prop_flags.deleted or prop_flags.accessor) return false;
+        const entry = &self.properties[index];
         switch (entry.slot) {
             .data => |*stored| {
-                if (!entry.flags.writable and !stored.isUninitialized()) return false;
-                if (entry.atom_id == atom.ids.Private_brand) return false;
+                if (!prop_flags.writable and !stored.isUninitialized()) return false;
+                if (atom_id == atom.ids.Private_brand) return false;
                 const old = stored.*;
                 stored.* = new_value;
                 old.free(rt);
@@ -8901,10 +8852,11 @@ pub const Object = struct {
             }
         }
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (entry.flags.accessor) return false;
-            if (!entry.flags.writable) return false;
-            if (entry.atom_id != atom.ids.Private_brand) {
+            const entry_flags = self.propFlagsAt(index);
+            if (entry_flags.accessor) return false;
+            if (!entry_flags.writable) return false;
+            const entry = &self.properties[index];
+            if (atom_id != atom.ids.Private_brand) {
                 switch (entry.slot) {
                     .data => |*stored| {
                         if (!stored.requiresRefCount() and !new_value.requiresRefCount()) {
@@ -8915,11 +8867,11 @@ pub const Object = struct {
                     .auto_init, .accessor, .deleted => {},
                 }
             }
-            const next_value = dupPropertyDataValue(&rt.atoms, entry.atom_id, new_value);
+            const next_value = dupPropertyDataValue(&rt.atoms, atom_id, new_value);
             errdefer next_value.free(rt);
             const old_slot = entry.slot;
             entry.slot = .{ .data = next_value };
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -8978,21 +8930,22 @@ pub const Object = struct {
         if (self.class_id == class.ids.regexp and atom_id == atom.ids.lastIndex and self.regexpLastIndex() != null) return false;
 
         if (self.findProperty(atom_id)) |index| {
-            var entry = &self.properties[index];
-            if (!entry.flags.configurable) return false;
+            if (!self.propFlagsAt(index).configurable) return false;
             self.ensureUniqueShapeForMutation(rt) catch return false;
+            const entry = &self.properties[index];
             const old_slot = entry.slot;
             entry.slot = .deleted;
-            entry.flags.deleted = true;
-            entry.flags.accessor = false;
-            entry.flags.writable = false;
-            rt.shapes.markPropertyDeleted(self.shape_ref, index, entry.flags.bits());
+            var entry_flags = self.propFlagsAt(index);
+            entry_flags.deleted = true;
+            entry_flags.accessor = false;
+            entry_flags.writable = false;
+            rt.shapes.markPropertyDeleted(self.shape_ref, index, entry_flags.bits());
             if (self.class_id == class.ids.mapped_arguments) {
                 if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |mapped_index| {
                     if (mapped_index < self.argumentsVarRefs().len) self.deleteMappedArgumentsBinding(rt, mapped_index);
                 }
             }
-            destroyPropertySlot(rt, entry.atom_id, old_slot);
+            destroyPropertySlot(rt, atom_id, old_slot);
             self.pruneBorrowedReferenceHolderIfEmpty(rt);
             return true;
         }
@@ -9046,13 +8999,13 @@ pub const Object = struct {
                     .atom_id = atom.atomFromUInt32(dense_index),
                 });
             }
-            for (self.properties) |entry| {
-                if (entry.flags.deleted) continue;
-                const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+            for (self.shapeProps()) |prop| {
+                if (property.Flags.fromBits(prop.flags).deleted) continue;
+                const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
                 if (self.hasDenseArrayElement(index)) continue;
                 try index_keys.append(rt.memory.allocator, .{
                     .index = index,
-                    .atom_id = entry.atom_id,
+                    .atom_id = prop.atom_id,
                 });
             }
             std.mem.sort(IndexKey, index_keys.items, {}, indexKeyLessThan);
@@ -9069,18 +9022,18 @@ pub const Object = struct {
         if (self.flags.is_array) try appendAtom(rt, &keys, atom.ids.length);
         if (self.class_id == class.ids.regexp and self.regexpLastIndex() != null) try appendAtom(rt, &keys, atom.ids.lastIndex);
 
-        for (self.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            if (array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) != null) continue;
-            const atom_kind = rt.atoms.kind(entry.atom_id);
+        for (self.shapeProps()) |prop| {
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            if (array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) continue;
+            const atom_kind = rt.atoms.kind(prop.atom_id);
             if (atom_kind == .symbol or atom_kind == .private) continue;
-            try appendAtom(rt, &keys, entry.atom_id);
+            try appendAtom(rt, &keys, prop.atom_id);
         }
 
-        for (self.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            if (rt.atoms.kind(entry.atom_id) != .symbol) continue;
-            try appendAtom(rt, &keys, entry.atom_id);
+        for (self.shapeProps()) |prop| {
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            if (rt.atoms.kind(prop.atom_id) != .symbol) continue;
+            try appendAtom(rt, &keys, prop.atom_id);
         }
 
         return keys;
@@ -9094,19 +9047,21 @@ pub const Object = struct {
     pub fn seal(self: *Object, rt: *JSRuntime) !void {
         self.flags.extensible = false;
         try self.ensureUniqueShapeForMutation(rt);
-        for (self.properties, 0..) |*entry, index| {
-            if (entry.flags.deleted or !entry.flags.configurable) continue;
-            entry.flags.configurable = false;
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
+        for (0..self.properties.len) |index| {
+            var entry_flags = self.propFlagsAt(index);
+            if (entry_flags.deleted or !entry_flags.configurable) continue;
+            entry_flags.configurable = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry_flags.bits());
         }
     }
 
     pub fn freeze(self: *Object, rt: *JSRuntime) !void {
         try self.seal(rt);
-        for (self.properties, 0..) |*entry, index| {
-            if (entry.flags.deleted or entry.flags.accessor or !entry.flags.writable) continue;
-            entry.flags.writable = false;
-            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry.flags.bits());
+        for (0..self.properties.len) |index| {
+            var entry_flags = self.propFlagsAt(index);
+            if (entry_flags.deleted or entry_flags.accessor or !entry_flags.writable) continue;
+            entry_flags.writable = false;
+            rt.shapes.updatePropertyFlags(self.shape_ref, index, entry_flags.bits());
         }
         if (self.flags.is_array) self.flags.length_writable = false;
     }
@@ -9114,7 +9069,7 @@ pub const Object = struct {
     fn defineOrdinaryOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
         if (self.findProperty(atom_id)) |index| {
             try self.materializeAutoInitEntryForMutation(index);
-            if (!isCompatible(self.properties[index], desc)) return error.IncompatibleDescriptor;
+            if (!isCompatible(self.propFlagsAt(index), self.properties[index].slot, desc)) return error.IncompatibleDescriptor;
             try self.replaceProperty(rt, index, desc);
             return;
         }
@@ -9123,13 +9078,10 @@ pub const Object = struct {
             const element_index: usize = @intCast(array_index);
             if (element_index < self.arrayElements().len) {
                 if (self.arrayElements()[element_index]) |stored| {
-                    const current = property.Entry{
-                        .atom_id = atom_id,
-                        .flags = property.Flags.data(true, true, true),
-                        .slot = .{ .data = stored },
-                    };
-                    if (!isCompatible(current, desc)) return error.IncompatibleDescriptor;
-                    try self.addProperty(rt, atom_id, mergeDescriptor(current, desc));
+                    const current_flags = property.Flags.data(true, true, true);
+                    const current_slot = property.Slot{ .data = stored };
+                    if (!isCompatible(current_flags, current_slot, desc)) return error.IncompatibleDescriptor;
+                    try self.addProperty(rt, atom_id, mergeDescriptor(current_flags, current_slot, desc));
                     self.arrayElements()[element_index] = null;
                     stored.free(rt);
                     return;
@@ -9168,10 +9120,10 @@ pub const Object = struct {
             var i = self.properties.len;
             while (i > 0) {
                 i -= 1;
-                const entry = self.properties[i];
-                if (entry.flags.deleted) continue;
-                const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
-                if (index >= target_len and !self.deleteProperty(rt, entry.atom_id)) {
+                if (self.propFlagsAt(i).deleted) continue;
+                const prop_atom = self.propAtomAt(i);
+                const index = array.arrayIndexFromAtom(&rt.atoms, prop_atom) orelse continue;
+                if (index >= target_len and !self.deleteProperty(rt, prop_atom)) {
                     const adjusted_len = index + 1;
                     self.truncateArrayElements(rt, adjusted_len);
                     self.length = adjusted_len;
@@ -9280,21 +9232,21 @@ pub const Object = struct {
     fn recomputeArrayStorageMode(self: *Object, rt: *JSRuntime) void {
         if (!self.flags.is_array) return;
         self.arrayStorageModeSlot().* = .dense;
-        for (self.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+        for (self.shapeProps()) |prop| {
+            if (property.Flags.fromBits(prop.flags).deleted) continue;
+            const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
             self.updateArrayStorageMode(index);
         }
     }
 
     fn addProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
-        const entry = try entryFromDescriptor(&rt.atoms, atom_id, desc);
-        try self.appendPreparedPropertyEntry(rt, entry);
+        const slot = slotFromDescriptor(&rt.atoms, atom_id, desc);
+        try self.appendPreparedPropertyEntry(rt, atom_id, flagsFromDescriptor(desc), slot);
     }
 
-    fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, entry: property.Entry) !void {
-        var entry_owned = true;
-        errdefer if (entry_owned) destroyPropertyEntry(rt, entry);
+    fn appendPreparedPropertyEntry(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
+        var slot_owned = true;
+        errdefer if (slot_owned) destroyPropertySlot(rt, atom_id, slot);
 
         const old_len = self.properties.len;
         const old_capacity = self.property_capacity;
@@ -9313,12 +9265,12 @@ pub const Object = struct {
 
         const old_may_have_indexed_properties = self.flags.may_have_indexed_properties;
         self.properties = self.properties.ptr[0 .. old_len + 1];
-        self.properties[old_len] = entry;
-        entry_owned = false;
+        self.properties[old_len] = .{ .slot = slot };
+        slot_owned = false;
 
         var inserted = true;
         errdefer if (inserted) {
-            destroyPropertyEntry(rt, self.properties[old_len]);
+            destroyPropertySlot(rt, atom_id, self.properties[old_len].slot);
             self.properties[old_len] = .{};
             self.properties = self.properties.ptr[0..old_len];
             self.flags.may_have_indexed_properties = old_may_have_indexed_properties;
@@ -9330,11 +9282,10 @@ pub const Object = struct {
             }
         };
 
-        const entry_atom = self.properties[old_len].atom_id;
-        if (array.arrayIndexFromAtom(&rt.atoms, entry_atom) != null) {
+        if (array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) {
             self.markIndexedProperties(rt);
         }
-        try self.adoptShapeForNewProperty(rt, entry_atom, self.properties[old_len].flags.bits());
+        try self.adoptShapeForNewProperty(rt, atom_id, entry_flags.bits());
         if (grew_properties and old_capacity != 0) rt.memory.free(property.Entry, old_properties);
         inserted = false;
     }
@@ -9382,20 +9333,42 @@ pub const Object = struct {
     }
 
     fn replaceProperty(self: *Object, rt: *JSRuntime, index: usize, desc: descriptor.Descriptor) !void {
-        const atom_id = self.properties[index].atom_id;
-        const next = try entryFromDescriptor(&rt.atoms, atom_id, mergeDescriptor(self.properties[index], desc));
+        const atom_id = self.propAtomAt(index);
+        const merged = mergeDescriptor(self.propFlagsAt(index), self.properties[index].slot, desc);
+        const next_flags = flagsFromDescriptor(merged);
+        const next_slot = slotFromDescriptor(&rt.atoms, atom_id, merged);
         var next_owned = true;
-        errdefer if (next_owned) destroyPropertyEntry(rt, next);
+        errdefer if (next_owned) destroyPropertySlot(rt, atom_id, next_slot);
         try self.ensureUniqueShapeForMutation(rt);
-        const old = self.properties[index];
-        self.properties[index] = next;
+        const old_slot = self.properties[index].slot;
+        self.properties[index] = .{ .slot = next_slot };
         next_owned = false;
-        rt.shapes.updatePropertyFlags(self.shape_ref, index, next.flags.bits());
-        destroyPropertyEntry(rt, old);
+        rt.shapes.updatePropertyFlags(self.shape_ref, index, next_flags.bits());
+        destroyPropertySlot(rt, atom_id, old_slot);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
 
+    /// Key atom for the own property stored at `index`. Property
+    /// metadata (atom + flags) lives in the shape; `self.properties`
+    /// holds only the value slots, indexed 1:1 with the shape props.
+    pub inline fn propAtomAt(self: *const Object, index: usize) atom.Atom {
+        return self.shape_ref.props[index].atom_id;
+    }
+
+    /// Flags for the own property stored at `index` (see `propAtomAt`).
+    pub inline fn propFlagsAt(self: *const Object, index: usize) property.Flags {
+        return property.Flags.fromBits(self.shape_ref.props[index].flags);
+    }
+
+    /// Shape-side metadata records matching `self.properties` by index.
+    /// Clamped to the entry count so a partially appended property
+    /// (entry pushed, shape not yet transitioned) is never exposed.
+    pub inline fn shapeProps(self: *const Object) []const shape.Property {
+        return self.shape_ref.props[0..@min(self.shape_ref.prop_count, self.properties.len)];
+    }
+
     pub fn findProperty(self: *const Object, atom_id: atom.Atom) ?usize {
+        const props = self.shapeProps();
         if (self.shape_ref.hasPropertyHash()) {
             var shape_index = self.shape_ref.firstPropertyIndex(atom_id);
             var steps: usize = 0;
@@ -9403,14 +9376,14 @@ pub const Object = struct {
                 const index: usize = @intCast(shape_index);
                 if (index >= self.shape_ref.prop_count) break;
                 shape_index = self.shape_ref.props[index].hash_next;
-                if (index >= self.properties.len) continue;
-                const entry = self.properties[index];
-                if (!entry.flags.deleted and entry.atom_id == atom_id) return index;
+                if (index >= props.len) continue;
+                const prop = props[index];
+                if (prop.atom_id == atom_id and !property.Flags.fromBits(prop.flags).deleted) return index;
             }
             return null;
         }
-        for (self.properties, 0..) |entry, index| {
-            if (!entry.flags.deleted and entry.atom_id == atom_id) return index;
+        for (props, 0..) |prop, index| {
+            if (prop.atom_id == atom_id and !property.Flags.fromBits(prop.flags).deleted) return index;
         }
         return null;
     }
@@ -9519,33 +9492,23 @@ test "external object value roots seed nested symbol roots" {
     try std.testing.expect(rt.atoms.name(nested_symbol) == null);
 }
 
-fn entryFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descriptor.Descriptor) !property.Entry {
-    const retained_atom = atoms.dup(atom_id);
+fn flagsFromDescriptor(desc: descriptor.Descriptor) property.Flags {
     return switch (desc.kind) {
-        .generic => .{
-            .atom_id = retained_atom,
-            .flags = property.Flags.data(false, desc.enumerable orelse false, desc.configurable orelse false),
-            .slot = .{ .data = JSValue.undefinedValue() },
-        },
-        .data => .{
-            .atom_id = retained_atom,
-            .flags = property.Flags.data(desc.writable orelse false, desc.enumerable orelse false, desc.configurable orelse false),
-            .slot = .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
-        },
-        .accessor => .{
-            .atom_id = retained_atom,
-            .flags = property.Flags.accessorFlags(desc.enumerable orelse false, desc.configurable orelse false),
-            .slot = .{ .accessor = .{
-                .getter = desc.getter.dup(),
-                .setter = desc.setter.dup(),
-            } },
-        },
+        .generic => property.Flags.data(false, desc.enumerable orelse false, desc.configurable orelse false),
+        .data => property.Flags.data(desc.writable orelse false, desc.enumerable orelse false, desc.configurable orelse false),
+        .accessor => property.Flags.accessorFlags(desc.enumerable orelse false, desc.configurable orelse false),
     };
 }
 
-fn destroyPropertyEntry(rt: *JSRuntime, entry: property.Entry) void {
-    destroyPropertySlot(rt, entry.atom_id, entry.slot);
-    if (entry.atom_id != atom.null_atom) rt.atoms.free(entry.atom_id);
+fn slotFromDescriptor(atoms: *atom.AtomTable, atom_id: atom.Atom, desc: descriptor.Descriptor) property.Slot {
+    return switch (desc.kind) {
+        .generic => .{ .data = JSValue.undefinedValue() },
+        .data => .{ .data = dupPropertyDataValue(atoms, atom_id, desc.value) },
+        .accessor => .{ .accessor = .{
+            .getter = desc.getter.dup(),
+            .setter = desc.setter.dup(),
+        } },
+    };
 }
 
 pub fn dupPropertyDataValue(atoms: *atom.AtomTable, atom_id: atom.Atom, value: JSValue) JSValue {
@@ -9575,42 +9538,42 @@ fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
     return object.typedArrayBuffer() != null and object.typedArrayElementSize() != 0;
 }
 
-fn isCompatible(current: property.Entry, desc: descriptor.Descriptor) bool {
-    if (current.flags.configurable) return true;
+fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) bool {
+    if (current_flags.configurable) return true;
     if (desc.configurable orelse false) return false;
     if (desc.enumerable) |enumerable| {
-        if (enumerable != current.flags.enumerable) return false;
+        if (enumerable != current_flags.enumerable) return false;
     }
     if (desc.kind == .generic) return true;
 
-    const current_is_accessor = current.flags.accessor;
+    const current_is_accessor = current_flags.accessor;
     if ((desc.kind == .accessor) != current_is_accessor) return false;
-    if (!current_is_accessor and !current.flags.writable) {
+    if (!current_is_accessor and !current_flags.writable) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !current.slot.data.sameValue(desc.value)) return false;
+        if (desc.kind == .data and desc.value_present and !current_slot.data.sameValue(desc.value)) return false;
     }
     if (current_is_accessor and desc.kind == .accessor) {
-        if (current.slot != .accessor) return false;
-        if (desc.getter_present and !current.slot.accessor.getter.sameValue(desc.getter)) return false;
-        if (desc.setter_present and !current.slot.accessor.setter.sameValue(desc.setter)) return false;
+        if (current_slot != .accessor) return false;
+        if (desc.getter_present and !current_slot.accessor.getter.sameValue(desc.getter)) return false;
+        if (desc.setter_present and !current_slot.accessor.setter.sameValue(desc.setter)) return false;
     }
     return true;
 }
 
-fn mergeDescriptor(current: property.Entry, desc: descriptor.Descriptor) descriptor.Descriptor {
+fn mergeDescriptor(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) descriptor.Descriptor {
     return switch (desc.kind) {
-        .generic => switch (current.slot) {
+        .generic => switch (current_slot) {
             .data => |value| descriptor.Descriptor.data(
                 value,
-                current.flags.writable,
-                desc.enumerable orelse current.flags.enumerable,
-                desc.configurable orelse current.flags.configurable,
+                current_flags.writable,
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
             ),
             .accessor => |accessor| descriptor.Descriptor.accessor(
                 accessor.getter,
                 accessor.setter,
-                desc.enumerable orelse current.flags.enumerable,
-                desc.configurable orelse current.flags.configurable,
+                desc.enumerable orelse current_flags.enumerable,
+                desc.configurable orelse current_flags.configurable,
             ),
             // Auto-init placeholders should be materialized by the
             // caller before reaching `mergeDescriptor`; defining
@@ -9621,25 +9584,25 @@ fn mergeDescriptor(current: property.Entry, desc: descriptor.Descriptor) descrip
             .deleted => desc,
         },
         .data => descriptor.Descriptor.data(
-            if (desc.value_present) desc.value else switch (current.slot) {
+            if (desc.value_present) desc.value else switch (current_slot) {
                 .data => |value| value,
                 else => desc.value,
             },
-            desc.writable orelse if (current.flags.accessor) false else current.flags.writable,
-            desc.enumerable orelse current.flags.enumerable,
-            desc.configurable orelse current.flags.configurable,
+            desc.writable orelse if (current_flags.accessor) false else current_flags.writable,
+            desc.enumerable orelse current_flags.enumerable,
+            desc.configurable orelse current_flags.configurable,
         ),
         .accessor => descriptor.Descriptor.accessor(
-            if (desc.getter_present) desc.getter else switch (current.slot) {
+            if (desc.getter_present) desc.getter else switch (current_slot) {
                 .accessor => |accessor| accessor.getter,
                 else => desc.getter,
             },
-            if (desc.setter_present) desc.setter else switch (current.slot) {
+            if (desc.setter_present) desc.setter else switch (current_slot) {
                 .accessor => |accessor| accessor.setter,
                 else => desc.setter,
             },
-            desc.enumerable orelse current.flags.enumerable,
-            desc.configurable orelse current.flags.configurable,
+            desc.enumerable orelse current_flags.enumerable,
+            desc.configurable orelse current_flags.configurable,
         ),
     };
 }
@@ -9730,9 +9693,9 @@ const IndexKey = struct {
 };
 
 fn hasPropertyIndexKeys(self: Object, rt: *JSRuntime) bool {
-    for (self.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        const index = array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+    for (self.shapeProps()) |prop| {
+        if (property.Flags.fromBits(prop.flags).deleted) continue;
+        const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
         if (!self.hasDenseArrayElement(index)) return true;
     }
     return false;

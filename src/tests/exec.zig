@@ -439,14 +439,12 @@ pub const helpers = struct {
                 shared_engine_baseline_shape_hash = g.shape_ref.hash;
                 shared_engine_baseline_shape_deleted_count = g.shape_ref.deleted_prop_count;
 
-                // Snapshot the baseline property entries
+                // Snapshot the baseline property entries (value slots only;
+                // key atoms and flags are snapshotted with the shape props
+                // below).
                 shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.properties.len) catch unreachable;
                 for (g.properties, 0..) |entry, idx| {
-                    shared_engine_baseline_properties.?[idx] = entry;
-                    shared_engine_baseline_properties.?[idx].slot = entry.slot.dup();
-                    if (entry.atom_id != core.atom.null_atom) {
-                        _ = eng.runtime.atoms.dup(entry.atom_id);
-                    }
+                    shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot.dup() };
                 }
 
                 shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
@@ -505,12 +503,8 @@ pub const helpers = struct {
             const baseline = shared_engine_baseline_property_count;
             if (global.properties.len > baseline) {
                 for (global.properties[baseline..]) |*entry| {
-                    if (entry.flags.deleted) continue;
                     entry.slot.destroy(eng.runtime);
-                    if (entry.atom_id != core.atom.null_atom) eng.runtime.atoms.free(entry.atom_id);
-                    entry.atom_id = core.atom.null_atom;
                     entry.slot = .deleted;
-                    entry.flags.deleted = true;
                 }
                 global.properties = global.properties.ptr[0..baseline];
             }
@@ -520,15 +514,10 @@ pub const helpers = struct {
                 // First, destroy current values below baseline
                 for (global.properties[0..baseline]) |entry| {
                     entry.slot.destroy(eng.runtime);
-                    if (entry.atom_id != core.atom.null_atom) eng.runtime.atoms.free(entry.atom_id);
                 }
                 // Second, restore baseline values (and dup them so they can be modified/freed again)
                 for (baselines, 0..) |base, idx| {
-                    global.properties[idx] = base;
-                    global.properties[idx].slot = base.slot.dup();
-                    if (base.atom_id != core.atom.null_atom) {
-                        _ = eng.runtime.atoms.dup(base.atom_id);
-                    }
+                    global.properties[idx] = .{ .slot = base.slot.dup() };
                 }
             }
 

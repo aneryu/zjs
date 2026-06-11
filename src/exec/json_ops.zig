@@ -825,9 +825,9 @@ fn qjsJsonAppendSimpleArray(
     if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
     const elements = object.arrayElements();
     if (object.length > elements.len) return .fallback;
-    for (object.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        if (core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) != null) return .fallback;
+    for (object.shapeProps()) |prop| {
+        if (core.property.Flags.fromBits(prop.flags).deleted) continue;
+        if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return .fallback;
     }
 
     try stack.append(rt.memory.allocator, object);
@@ -872,18 +872,19 @@ fn qjsJsonAppendSimpleObject(
 
     try buffer.append(rt.memory.allocator, '{');
     var emitted = false;
-    for (object.properties) |entry| {
-        if (entry.flags.deleted or !entry.flags.enumerable) continue;
-        if (rt.atoms.kind(entry.atom_id) == .symbol) continue;
-        if (core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) != null) {
+    for (object.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or !prop_flags.enumerable) continue;
+        if (rt.atoms.kind(prop.atom_id) == .symbol) continue;
+        if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) {
             buffer.shrinkRetainingCapacity(start);
             return .fallback;
         }
-        if (entry.flags.accessor) {
+        if (prop_flags.accessor) {
             buffer.shrinkRetainingCapacity(start);
             return .fallback;
         }
-        const child_value = switch (entry.slot) {
+        const child_value = switch (object.properties[property_index].slot) {
             .data => |stored| stored,
             .auto_init, .accessor, .deleted => {
                 buffer.shrinkRetainingCapacity(start);
@@ -892,7 +893,7 @@ fn qjsJsonAppendSimpleObject(
         };
         const property_start = buffer.items.len;
         if (emitted) try buffer.append(rt.memory.allocator, ',');
-        try builtins.json.appendJsonAtomName(rt, buffer, entry.atom_id);
+        try builtins.json.appendJsonAtomName(rt, buffer, prop.atom_id);
         try buffer.append(rt.memory.allocator, ':');
         switch (try qjsJsonAppendSimpleValue(rt, global, buffer, child_value, false, stack)) {
             .appended => emitted = true,

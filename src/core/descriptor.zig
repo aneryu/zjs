@@ -50,15 +50,15 @@ pub const Descriptor = struct {
         };
     }
 
-    pub fn fromEntry(entry: property.Entry) Descriptor {
-        return switch (entry.slot) {
+    pub fn fromSlot(flags: property.Flags, slot: property.Slot) Descriptor {
+        return switch (slot) {
             .data => |value| .{
                 .kind = .data,
                 .value = value.dup(),
                 .value_present = true,
-                .writable = entry.flags.writable,
-                .enumerable = entry.flags.enumerable,
-                .configurable = entry.flags.configurable,
+                .writable = flags.writable,
+                .enumerable = flags.enumerable,
+                .configurable = flags.configurable,
             },
             .accessor => |accessor_entry| .{
                 .kind = .accessor,
@@ -66,13 +66,13 @@ pub const Descriptor = struct {
                 .getter_present = true,
                 .setter = accessor_entry.setter.dup(),
                 .setter_present = true,
-                .enumerable = entry.flags.enumerable,
-                .configurable = entry.flags.configurable,
+                .enumerable = flags.enumerable,
+                .configurable = flags.configurable,
             },
             // Callers must materialize an `.auto_init` slot before
             // converting it to a descriptor (`Object.getOwnProperty`
             // and the like trigger materialization on the slot itself
-            // before reaching `fromEntry`). Reaching this arm would
+            // before reaching `fromSlot`). Reaching this arm would
             // mean a `.data`-shaped entry was promised but the slot
             // is still a placeholder.
             .auto_init => unreachable,

@@ -1838,10 +1838,11 @@ fn autoInitCollectionNativeBuiltinMatches(info: core.property.AutoInit, expected
 
 pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_id: core.Atom, domain: core.function.NativeBuiltinDomain, expected_id: u32) bool {
     if (proto.exotic != null) return false;
-    for (proto.properties) |entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-        if (entry.flags.accessor) return false;
-        return switch (entry.slot) {
+    for (proto.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
+        if (prop_flags.accessor) return false;
+        return switch (proto.properties[property_index].slot) {
             .data => |method| nativeBuiltinFunctionValueMatches(method, domain, expected_id),
             .auto_init => |info| autoInitNativeBuiltinMatches(info, domain, expected_id),
             .accessor, .deleted => false,
@@ -1852,10 +1853,11 @@ pub fn ownPrototypeEntryIsNativeBuiltinDefault(proto: *const core.Object, atom_i
 
 fn ownPrototypeEntryIsCollectionNativeBuiltinDefault(proto: *const core.Object, atom_id: core.Atom, expected_id: u32, owner_class: core.ClassId) bool {
     if (proto.exotic != null) return false;
-    for (proto.properties) |entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-        if (entry.flags.accessor) return false;
-        return switch (entry.slot) {
+    for (proto.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
+        if (prop_flags.accessor) return false;
+        return switch (proto.properties[property_index].slot) {
             .data => |method| nativeBuiltinFunctionValueMatchesCollectionOwner(method, expected_id, owner_class),
             .auto_init => |info| autoInitCollectionNativeBuiltinMatches(info, expected_id, owner_class),
             .accessor, .deleted => false,

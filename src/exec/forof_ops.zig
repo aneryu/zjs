@@ -123,10 +123,11 @@ pub fn createSimpleForInIterator(rt: *core.JSRuntime, object_value: core.JSValue
         const keys = try rt.memory.alloc(core.Atom, key_count);
         errdefer rt.memory.free(core.Atom, keys);
         var out_index: usize = 0;
-        for (source.properties) |entry| {
-            if (entry.flags.deleted or !entry.flags.enumerable) continue;
-            if (rt.atoms.kind(entry.atom_id) != .string) continue;
-            keys[out_index] = rt.atoms.dup(entry.atom_id);
+        for (source.shapeProps()) |prop| {
+            const prop_flags = core.property.Flags.fromBits(prop.flags);
+            if (prop_flags.deleted or !prop_flags.enumerable) continue;
+            if (rt.atoms.kind(prop.atom_id) != .string) continue;
+            keys[out_index] = rt.atoms.dup(prop.atom_id);
             out_index += 1;
         }
         iterator.iteratorAtomKeysSlot().* = keys;
@@ -141,9 +142,10 @@ pub fn createSimpleForInIterator(rt: *core.JSRuntime, object_value: core.JSValue
 
 fn simpleForInEnumerableStringKeyCount(rt: *core.JSRuntime, source: *core.Object) usize {
     var count: usize = 0;
-    for (source.properties) |entry| {
-        if (entry.flags.deleted or !entry.flags.enumerable) continue;
-        if (rt.atoms.kind(entry.atom_id) != .string) continue;
+    for (source.shapeProps()) |prop| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or !prop_flags.enumerable) continue;
+        if (rt.atoms.kind(prop.atom_id) != .string) continue;
         count += 1;
     }
     return count;
@@ -153,10 +155,10 @@ pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) 
     if (source.class_id != core.class.ids.object or source.flags.is_proxy or source.exotic != null or source.flags.is_array) return false;
     if (builtins.buffer.isTypedArrayObject(source)) return false;
     if (source.arrayElements().len != 0) return false;
-    for (source.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        if (core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) != null) return false;
-        const kind = rt.atoms.kind(entry.atom_id);
+    for (source.shapeProps()) |prop| {
+        if (core.property.Flags.fromBits(prop.flags).deleted) continue;
+        if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return false;
+        const kind = rt.atoms.kind(prop.atom_id);
         if (kind != .string and kind != .symbol and kind != .private) return false;
     }
 
@@ -165,9 +167,10 @@ pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) 
         if (object.flags.is_proxy or object.exotic != null) return false;
         if (builtins.buffer.isTypedArrayObject(object)) return false;
         if (object.arrayElements().len != 0) return false;
-        for (object.properties) |entry| {
-            if (entry.flags.deleted or !entry.flags.enumerable) continue;
-            if (rt.atoms.kind(entry.atom_id) == .symbol or rt.atoms.kind(entry.atom_id) == .private) continue;
+        for (object.shapeProps()) |prop| {
+            const prop_flags = core.property.Flags.fromBits(prop.flags);
+            if (prop_flags.deleted or !prop_flags.enumerable) continue;
+            if (rt.atoms.kind(prop.atom_id) == .symbol or rt.atoms.kind(prop.atom_id) == .private) continue;
             return false;
         }
     }

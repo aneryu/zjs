@@ -737,9 +737,9 @@ fn setArrayLengthForPutFieldFastPath(
     const new_len: u32 = @intCast(length);
     if (new_len < object.length) {
         if (object.arrayElementStorageMode() != .dense) return false;
-        for (object.properties) |entry| {
-            if (entry.flags.deleted) continue;
-            const index = core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) orelse continue;
+        for (object.shapeProps()) |prop| {
+            if (core.property.Flags.fromBits(prop.flags).deleted) continue;
+            const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
             if (index >= new_len) return false;
         }
         object.truncateArrayElements(rt, new_len);

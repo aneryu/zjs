@@ -492,10 +492,11 @@ fn frameHasVarRefBinding(function: *const bytecode.Bytecode, frame: *const frame
 
 fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
     if (global.exotic != null) return false;
-    for (global.properties) |*entry| {
-        if (entry.flags.deleted or entry.atom_id != atom_id) continue;
-        if (entry.flags.accessor) return false;
-        return switch (entry.slot) {
+    for (global.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
+        if (prop_flags.accessor) return false;
+        return switch (global.properties[property_index].slot) {
             .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
                 (info.host_function_kind == core.host_function.ids.external_host and
                     shared_vm.isOutputExternalHostFunctionId(rt, info.external_host_function_id)),

@@ -854,9 +854,10 @@ pub fn qjsTypedArrayConstructArrayLikeOwnDataFast(
     if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return false;
 
     var first_index_property: ?usize = null;
-    for (source_object.properties, 0..) |entry, property_index| {
-        if (entry.flags.deleted or entry.flags.accessor) continue;
-        if (entry.atom_id == core.atom.atomFromUInt32(0)) {
+    for (source_object.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop_flags.accessor) continue;
+        if (prop.atom_id == core.atom.atomFromUInt32(0)) {
             first_index_property = property_index;
             break;
         }
@@ -901,10 +902,11 @@ pub fn typedArrayArrayLikeOwnDataFastPathUsable(source_object: *core.Object, fir
     var index: usize = 0;
     while (index < length) : (index += 1) {
         const property_index = first_property + index;
-        if (property_index >= source_object.properties.len) return false;
-        const entry = source_object.properties[property_index];
-        if (entry.atom_id != core.atom.atomFromUInt32(@intCast(index)) or entry.flags.deleted or entry.flags.accessor) return false;
-        switch (entry.slot) {
+        if (property_index >= source_object.shapeProps().len) return false;
+        const prop = source_object.shapeProps()[property_index];
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop.atom_id != core.atom.atomFromUInt32(@intCast(index)) or prop_flags.deleted or prop_flags.accessor) return false;
+        switch (source_object.properties[property_index].slot) {
             .data => |stored| if (stored.isObject()) return false,
             .auto_init, .accessor, .deleted => return false,
         }

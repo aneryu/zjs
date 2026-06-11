@@ -249,12 +249,12 @@ pub fn initializeCurrentConstructorClassInstanceElements(
 }
 
 pub fn initializeClassPrivateMethods(rt: *core.JSRuntime, instance: *core.Object, home_object: *core.Object) !void {
-    for (home_object.properties) |entry| {
-        if (rt.atoms.kind(entry.atom_id) != .private) continue;
-        if (instance.hasOwnProperty(entry.atom_id)) return error.TypeError;
-        if (home_object.getOwnProperty(entry.atom_id)) |desc| {
+    for (home_object.shapeProps()) |prop| {
+        if (rt.atoms.kind(prop.atom_id) != .private) continue;
+        if (instance.hasOwnProperty(prop.atom_id)) return error.TypeError;
+        if (home_object.getOwnProperty(prop.atom_id)) |desc| {
             defer desc.destroy(rt);
-            instance.defineOwnProperty(rt, entry.atom_id, desc) catch |err| switch (err) {
+            instance.defineOwnProperty(rt, prop.atom_id, desc) catch |err| switch (err) {
                 error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
                 else => return err,
             };
