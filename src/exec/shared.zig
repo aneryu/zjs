@@ -6212,7 +6212,7 @@ pub fn parseSimpleUnicodeLiteralSource(source: []const u8) ?SimpleUnicodeLiteral
             if (index + 1 >= end_limit) return null;
             switch (source[index + 1]) {
                 '0' => {
-                    if (index + 2 < end_limit and std.ascii.isDigit(source[index + 2])) return null;
+                    if (index + 2 < end_limit and unicode_lib.isAsciiDigitByte(source[index + 2])) return null;
                     pattern.units[pattern.len] = 0;
                     pattern.len += 1;
                     index += 2;
@@ -6651,7 +6651,7 @@ pub fn parseSimpleClassSequenceEscapedLiteral(source: []const u8, index: *usize,
             return escaped;
         },
         '0' => {
-            if (index.* + 2 < end_limit and std.ascii.isDigit(source[index.* + 2])) return null;
+            if (index.* + 2 < end_limit and unicode_lib.isAsciiDigitByte(source[index.* + 2])) return null;
             index.* += 2;
             return 0;
         },
@@ -6824,9 +6824,9 @@ pub fn parseUnicodeAstralSpecialSource(source: []const u8) ?UnicodeAstralSpecial
     const pair = readAstralAtom(source, &index) orelse return null;
     if (index >= source.len or source[index] != '{') return null;
     index += 1;
-    if (index >= source.len or source[index] < '0' or source[index] > '9') return null;
+    if (index >= source.len or !unicode_lib.isAsciiDigitByte(source[index])) return null;
     var count: usize = 0;
-    while (index < source.len and source[index] >= '0' and source[index] <= '9') : (index += 1) {
+    while (index < source.len and unicode_lib.isAsciiDigitByte(source[index])) : (index += 1) {
         count = count * 10 + (source[index] - '0');
     }
     if (index >= source.len or source[index] != '}' or count == 0) return null;
