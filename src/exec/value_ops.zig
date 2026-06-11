@@ -491,7 +491,7 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
 }
 
 pub fn createBigIntI128(rt: *core.JSRuntime, value: i128) !core.JSValue {
-    if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64)) {
+    if (core.JSValue.shortBigIntFits(value)) {
         return core.JSValue.shortBigInt(@intCast(value));
     }
     const big = try core.bigint.BigInt.create(rt, value);
@@ -502,8 +502,10 @@ pub fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
     var owned = value;
     errdefer owned.deinit();
     if (owned.toI64()) |val| {
-        owned.deinit();
-        return core.JSValue.shortBigInt(val);
+        if (core.JSValue.shortBigIntFits(val)) {
+            owned.deinit();
+            return core.JSValue.shortBigInt(val);
+        }
     }
     const big = try core.bigint.BigInt.createFromOwned(rt, owned);
     return big.valueRef();
@@ -511,7 +513,9 @@ pub fn createBigIntOwned(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
 
 pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue {
     if (value.toI64()) |val| {
-        return core.JSValue.shortBigInt(val);
+        if (core.JSValue.shortBigIntFits(val)) {
+            return core.JSValue.shortBigInt(val);
+        }
     }
     const big = try core.bigint.BigInt.createFromBigInt(rt, value);
     return big.valueRef();
@@ -814,7 +818,7 @@ pub fn shortBigIntBinary(op: u8, lhs: i64, rhs: i64) ?core.JSValue {
 
 pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue {
     return switch (op) {
-        bytecode.opcode.op.neg => if (value == std.math.minInt(i64)) null else core.JSValue.shortBigInt(-value),
+        bytecode.opcode.op.neg => shortBigIntSub(0, value),
         bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => shortBigIntSub(value, 1),
         bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => shortBigIntAdd(value, 1),
         bytecode.opcode.op.not => core.JSValue.shortBigInt(~value),
@@ -825,18 +829,21 @@ pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue {
 fn shortBigIntAdd(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
+    if (!core.JSValue.shortBigIntFits(result[0])) return null;
     return core.JSValue.shortBigInt(result[0]);
 }
 
 fn shortBigIntSub(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @subWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
+    if (!core.JSValue.shortBigIntFits(result[0])) return null;
     return core.JSValue.shortBigInt(result[0]);
 }
 
 fn shortBigIntMul(lhs: i64, rhs: i64) ?core.JSValue {
     const result = @mulWithOverflow(lhs, rhs);
     if (result[1] != 0) return null;
+    if (!core.JSValue.shortBigIntFits(result[0])) return null;
     return core.JSValue.shortBigInt(result[0]);
 }
 

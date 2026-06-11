@@ -16,9 +16,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const zjs_enable_ic = b.option(bool, "zjs_enable_ic", "Enable shape-keyed inline caches") orelse true;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
+    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse false;
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
+    engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
@@ -31,6 +33,7 @@ pub fn build(b: *std.Build) void {
     const plugin_fixture_options = b.addOptions();
     plugin_fixture_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
+    plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -431,6 +434,7 @@ pub fn build(b: *std.Build) void {
     const test_options = b.addOptions();
     test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
+    test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
     test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));

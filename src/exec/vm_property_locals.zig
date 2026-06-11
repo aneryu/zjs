@@ -2513,7 +2513,7 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
     if (!fitsI64(min_accumulator) or !fitsI64(max_accumulator)) return false;
 
     const final_accumulator = @as(i128, accumulator) + delta.total;
-    if (!fitsI64(final_accumulator)) return false;
+    if (!core.JSValue.shortBigIntFits(final_accumulator)) return false;
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, completion_put, core.JSValue.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
     try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);

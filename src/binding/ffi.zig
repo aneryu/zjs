@@ -808,11 +808,11 @@ fn jsValueLayoutHash() u64 {
     var hasher = std.hash.Fnv1a_64.init();
     hashInt(&hasher, @sizeOf(core.JSValue));
     hashInt(&hasher, @alignOf(core.JSValue));
-    hashInt(&hasher, @offsetOf(core.JSValue, "payload"));
-    hashInt(&hasher, @offsetOf(core.JSValue, "tag"));
-    hashInt(&hasher, @offsetOf(core.JSValue, "padding"));
-    hashInt(&hasher, @sizeOf(@TypeOf(@as(core.JSValue, undefined).payload)));
-    hashInt(&hasher, @sizeOf(@TypeOf(@as(core.JSValue, undefined).tag)));
+    inline for (@typeInfo(core.JSValue.Repr).@"struct".fields) |field| {
+        hasher.update(field.name);
+        hashInt(&hasher, @offsetOf(core.JSValue.Repr, field.name));
+        hashInt(&hasher, @sizeOf(field.type));
+    }
     return hasher.final();
 }
 
