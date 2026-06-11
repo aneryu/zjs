@@ -1286,7 +1286,7 @@ fn sameLooseEqualityType(lhs: core.JSValue, rhs: core.JSValue) bool {
     if (lhs.isSymbol() and rhs.isSymbol()) return true;
     if (lhs.isObject() and rhs.isObject()) return true;
     if (lhs.isFunctionBytecode() and rhs.isFunctionBytecode()) return true;
-    return lhs.tag == rhs.tag;
+    return lhs.tagOf() == rhs.tagOf();
 }
 
 fn isLoosePrimitiveForObject(value: core.JSValue) bool {

@@ -518,8 +518,8 @@ pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValu
 }
 
 pub fn numberValue(value: core.JSValue) ?f64 {
-    if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
-    if (value.tag == core.Tag.float64) return value.asFloat64().?;
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    if (value.isFloat64()) return value.asFloat64().?;
     return null;
 }
 
@@ -865,10 +865,10 @@ fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
 
 fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (a.isSymbol() or b.isSymbol()) return error.TypeError;
-    if (a.isString() and b.tag == core.Tag.int) {
+    if (a.isString() and b.isInt()) {
         if (try stringAddStringInt(rt, a, b.asInt32().?, .suffix)) |out| return out;
     }
-    if (a.tag == core.Tag.int and b.isString()) {
+    if (a.isInt() and b.isString()) {
         if (try stringAddStringInt(rt, b, a.asInt32().?, .prefix)) |out| return out;
     }
     if (a.isString() and b.isString()) return stringAddStrings(rt, a, b);
@@ -1168,7 +1168,7 @@ fn sameAbstractEqualityType(a: core.JSValue, b: core.JSValue) bool {
     if (a.isSymbol() and b.isSymbol()) return true;
     if (a.isObject() and b.isObject()) return true;
     if (a.isFunctionBytecode() and b.isFunctionBytecode()) return true;
-    return a.tag == b.tag;
+    return a.tagOf() == b.tagOf();
 }
 
 fn numberLikeInt(value: core.JSValue) ?i32 {

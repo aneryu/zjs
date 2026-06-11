@@ -1988,7 +1988,7 @@ fn strongSize(object: *core.Object) usize {
 }
 
 fn strongEntryHash(value: core.JSValue) u64 {
-    return switch (value.tag) {
+    return switch (value.tagOf()) {
         core.Tag.int => hashNumber(@floatFromInt(value.asInt32().?)),
         core.Tag.float64 => hashNumber(value.asFloat64().?),
         core.Tag.boolean => mix64(if (value.asBool().?) 0x8d53_0d8d_f34a_2d55 else 0x2eac_9a17_54d3_1c11),
@@ -1999,7 +1999,7 @@ fn strongEntryHash(value: core.JSValue) u64 {
         core.Tag.symbol => mix64(0x19e3_7789_7cc9_8f7d ^ @as(u64, value.asSymbolAtom().?)),
         core.Tag.object, core.Tag.module => hashRefPointer(value),
         core.Tag.function_bytecode => hashObjectPointer(value),
-        else => mix64(tagHashBits(value.tag)),
+        else => mix64(tagHashBits(value.tagOf())),
     };
 }
 
@@ -2078,12 +2078,12 @@ fn hashBigIntValue(value: core.JSValue) u64 {
 }
 
 fn hashRefPointer(value: core.JSValue) u64 {
-    const header = value.refHeader() orelse return mix64(tagHashBits(value.tag));
+    const header = value.refHeader() orelse return mix64(tagHashBits(value.tagOf()));
     return mix64(@as(u64, @intCast(@intFromPtr(header))));
 }
 
 fn hashObjectPointer(value: core.JSValue) u64 {
-    const header = value.objectHeader() orelse return mix64(tagHashBits(value.tag));
+    const header = value.objectHeader() orelse return mix64(tagHashBits(value.tagOf()));
     return mix64(@as(u64, @intCast(@intFromPtr(header))));
 }
 

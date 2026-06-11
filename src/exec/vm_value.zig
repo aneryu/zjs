@@ -774,7 +774,7 @@ fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void
 }
 
 fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).tag == core.Tag.uninitialized;
+    return slotValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.Object {

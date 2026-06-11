@@ -565,8 +565,8 @@ fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
 }
 
 fn primitiveMathNumber(value: core.JSValue) ?f64 {
-    if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
-    if (value.tag == core.Tag.float64) return value.asFloat64().?;
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    if (value.isFloat64()) return value.asFloat64().?;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);

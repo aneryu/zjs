@@ -339,7 +339,7 @@ pub fn qjsMathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *cor
     if (args.len == 2) {
         const a_val = args[0];
         const b_val = args[1];
-        if (a_val.tag == core.Tag.int and b_val.tag == core.Tag.int) {
+        if (a_val.isInt() and b_val.isInt()) {
             const a_i32 = a_val.asInt32().?;
             const b_i32 = b_val.asInt32().?;
             if (a_i32 == 0 and b_i32 == 0) return 0.0;
@@ -387,8 +387,8 @@ pub fn qjsMathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64
 }
 
 pub fn qjsPrimitiveMathNumber(value: core.JSValue) ?f64 {
-    if (value.tag == core.Tag.int) return @floatFromInt(value.asInt32().?);
-    if (value.tag == core.Tag.float64) return value.asFloat64().?;
+    if (value.isInt()) return @floatFromInt(value.asInt32().?);
+    if (value.isFloat64()) return value.asFloat64().?;
     if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
     if (value.isNull()) return 0;
     if (value.isUndefined()) return std.math.nan(f64);

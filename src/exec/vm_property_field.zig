@@ -2176,7 +2176,7 @@ fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, 
 }
 
 fn fastStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue) ?core.JSValue {
-    if (!value.isString() or key.tag != core.Tag.int) return null;
+    if (!value.isString() or !key.isInt()) return null;
     const index_i32 = key.asInt32().?;
     if (index_i32 < 0) return null;
     const header = value.refHeader() orelse return null;

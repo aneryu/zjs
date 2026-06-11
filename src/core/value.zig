@@ -109,8 +109,20 @@ pub const JSValue = extern struct {
         return .{ .payload = 0, .tag = Tag.exception };
     }
 
+    pub inline fn tagOf(self: JSValue) i32 {
+        return self.tag;
+    }
+
     pub fn isNumber(self: JSValue) bool {
         return self.tag == Tag.int or self.tag == Tag.float64;
+    }
+
+    pub inline fn isInt(self: JSValue) bool {
+        return self.tag == Tag.int;
+    }
+
+    pub inline fn isFloat64(self: JSValue) bool {
+        return self.tag == Tag.float64;
     }
 
     pub fn isBigInt(self: JSValue) bool {

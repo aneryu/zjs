@@ -436,7 +436,7 @@ pub fn slotValueBorrow(slot: core.JSValue) core.JSValue {
 }
 
 pub fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).tag == core.Tag.uninitialized;
+    return slotValueBorrow(slot).isUninitialized();
 }
 
 pub fn varRefSlotIsDeleted(slot: core.JSValue) bool {

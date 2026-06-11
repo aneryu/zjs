@@ -2485,7 +2485,7 @@ fn objectFromLastRefValue(value: JSValue) ?*Object {
 }
 
 fn valueMayContainNestedSymbolRoots(value: JSValue) bool {
-    if (value.tag == @import("value.zig").Tag.object) return true;
+    if (value.isObject()) return true;
     const header = value.objectHeader() orelse return false;
     return header.kind == .function_bytecode;
 }

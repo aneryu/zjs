@@ -271,7 +271,7 @@ fn slotValueBorrow(slot: core.JSValue) core.JSValue {
 }
 
 fn varRefSlotIsUninitialized(slot: core.JSValue) bool {
-    return slotValueBorrow(slot).tag == core.Tag.uninitialized;
+    return slotValueBorrow(slot).isUninitialized();
 }
 
 fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
