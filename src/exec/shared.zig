@@ -6986,6 +6986,10 @@ pub fn isAsciiDigitUnit(unit: u16) bool {
     return unicode_lib.isAsciiDigitUnit(unit);
 }
 
+pub fn isAsciiDigitByte(byte: u8) bool {
+    return unicode_lib.isAsciiDigitByte(byte);
+}
+
 pub fn isAsciiWordUnit(unit: u16) bool {
     return unicode_lib.isAsciiWordUnit(unit);
 }

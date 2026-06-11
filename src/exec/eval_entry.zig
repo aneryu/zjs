@@ -220,16 +220,26 @@ fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {
     var saw_digit = false;
     var saw_space_after_digit = false;
     for (source_text) |ch| {
-        if (std.ascii.isDigit(ch)) {
+        if (shared.isAsciiDigitByte(ch)) {
             if (saw_space_after_digit) return true;
             saw_digit = true;
-        } else if (std.ascii.isWhitespace(ch)) {
+        } else if (shared.isAsciiWhitespace(ch)) {
             if (saw_digit) saw_space_after_digit = true;
         } else {
             return false;
         }
     }
     return false;
+}
+
+test "eval numeric script fallback uses shared ASCII classifiers" {
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1 2"));
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\t2"));
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\x0b2"));
+    try std.testing.expect(isWhitespaceSeparatedNumericScript("1\x0c2"));
+    try std.testing.expect(!isWhitespaceSeparatedNumericScript("12"));
+    try std.testing.expect(!isWhitespaceSeparatedNumericScript("1a2"));
+    try std.testing.expect(!isWhitespaceSeparatedNumericScript("1  "));
 }
 
 fn elapsedNanosSince(start: u64) u64 {
