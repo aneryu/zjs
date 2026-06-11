@@ -535,7 +535,7 @@ fn mapSet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: c
 
 fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     if (object.class_id == core.class.ids.weakmap) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
+        const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
         return;
     }
@@ -557,7 +557,7 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
 
 pub fn setWeakMapEntry(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !void {
     if (object.class_id != core.class.ids.weakmap) return error.TypeError;
-    const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
+    const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
     try setWeakMapEntryByIdentityChecked(rt, object, key_identity, value);
 }
 
@@ -583,7 +583,7 @@ fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, k
 
 fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return core.JSValue.undefinedValue();
+        const key_identity = weakKeyIdentityPeek(rt, key) orelse return core.JSValue.undefinedValue();
         const index = findWeakEntry(object, key_identity) orelse return core.JSValue.undefinedValue();
         return object.weakCollectionEntriesSlot().*[index].value.dup();
     }
@@ -1062,7 +1062,7 @@ fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, nam
 
 fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
+        const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value.dup() };
         errdefer entry.destroy(rt);
@@ -1088,7 +1088,7 @@ fn mapGetOrInsertComputed(
 ) !core.JSValue {
     if (!isCallableObject(callback)) return error.TypeError;
     if (object.class_id == core.class.ids.weakmap) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return error.TypeError;
+        const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value.dup();
         var callback_args = [_]core.JSValue{key};
         const value = if (isCallableClosure(callback)) try host.callValue(rt, callback, &callback_args) else try callNativeCallback(rt, callback);
@@ -1164,7 +1164,7 @@ fn callNativeCallback(rt: *core.JSRuntime, callback: core.JSValue) !core.JSValue
 
 fn collectionHas(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return core.JSValue.boolean(false);
+        const key_identity = weakKeyIdentityPeek(rt, key) orelse return core.JSValue.boolean(false);
         return core.JSValue.boolean(findWeakEntry(object, key_identity) != null);
     }
     if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.set) {
@@ -1183,7 +1183,7 @@ fn collectionDeleteNoResult(rt: *core.JSRuntime, object: *core.Object, key: core
 
 fn collectionDeleteBool(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !bool {
     if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
-        const key_identity = weakKeyIdentity(rt, key) orelse return false;
+        const key_identity = weakKeyIdentityPeek(rt, key) orelse return false;
         const index = findWeakEntry(object, key_identity) orelse return false;
         try removeWeakEntry(rt, object, index);
         return true;
@@ -1214,7 +1214,7 @@ fn setAdd(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !core.
 
 fn setAddNoResult(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !void {
     if (object.class_id == core.class.ids.weakset) {
-        const key_identity = weakKeyIdentity(rt, value) orelse return error.TypeError;
+        const key_identity = (try weakKeyIdentityRegister(rt, value)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity) == null) {
             var entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = core.JSValue.undefinedValue() };
             errdefer entry.destroy(rt);
@@ -2357,17 +2357,28 @@ fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void {
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
 
-fn weakKeyIdentity(rt: ?*core.JSRuntime, value: core.JSValue) ?usize {
+/// Returns the weak identity for a WeakMap/WeakSet key, registering objects
+/// in the runtime weak identity registry. Use for inserting paths.
+fn weakKeyIdentityRegister(rt: *core.JSRuntime, value: core.JSValue) !?usize {
+    if (!weakKeyCanBeHeldWeakly(rt, value)) return null;
+    return try core.Object.weakIdentityFromValue(rt, value);
+}
+
+/// Returns the weak identity for a WeakMap/WeakSet key without registering.
+/// Use for read-only paths (get/has/delete): a key that was never weakly
+/// referenced cannot be present in any weak collection.
+fn weakKeyIdentityPeek(rt: *core.JSRuntime, value: core.JSValue) ?usize {
+    if (!weakKeyCanBeHeldWeakly(rt, value)) return null;
+    return core.Object.weakIdentityFromValuePeek(rt, value);
+}
+
+fn weakKeyCanBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (value.asSymbolAtom()) |id| {
-        if (rt) |runtime| {
-            if (runtime.atoms.kind(id) != .symbol) return null;
-            if (symbol_builtin.registryKey(&runtime.atoms, id) != null) return null;
-        }
-        return (@as(usize, @intCast(id)) << 1) | 1;
+        if (rt.atoms.kind(id) != .symbol) return false;
+        if (symbol_builtin.registryKey(&rt.atoms, id) != null) return false;
+        return true;
     }
-    if (!value.isObject()) return null;
-    const header = value.refHeader() orelse return null;
-    return @intFromPtr(header) & ~@as(usize, 1);
+    return value.isObject();
 }
 
 fn collectionClassId(kind: u32) ?core.ClassId {

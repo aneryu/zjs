@@ -402,7 +402,7 @@ pub const WeakPersistentValue = struct {
         callback: ?WeakPersistentCallback,
         callback_context: ?*anyopaque,
     ) !WeakPersistentValue {
-        const identity = object_mod.Object.weakIdentityFromValue(value) orelse return error.InvalidWeakTarget;
+        const identity = (try object_mod.Object.weakIdentityFromValue(runtime, value)) orelse return error.InvalidWeakTarget;
         const slot = try runtime.createWeakRootSlot(identity, callback, callback_context);
         return .{
             .runtime = runtime,
@@ -602,6 +602,18 @@ pub const JSRuntime = struct {
     draining_deferred_weak_value_frees: bool = false,
     borrowed_weak_cleanup_identities: []usize = &.{},
     borrowed_weak_cleanup_identities_capacity: usize = 0,
+    /// O(1) membership companion for `borrowed_weak_cleanup_identities`.
+    /// Only even (object) identities are inserted; symbol identities keep
+    /// the slice-scan semantics of the identity list.
+    borrowed_weak_cleanup_identity_set: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    /// Weak identity registry: maps object header addresses to monotonically
+    /// increasing weak ids and back. Weak slots (WeakRef/WeakMap/WeakSet/
+    /// FinalizationRegistry/WeakRootSlot) store `weak_id << 1` instead of the
+    /// header address, so a recycled allocation can never alias a stale weak
+    /// identity and weak lookups are O(1) instead of a full heap scan.
+    weak_object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    weak_id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
+    next_weak_id: usize = 1,
     borrowed_weak_cleanup_realm_identities: []usize = &.{},
     borrowed_weak_cleanup_realm_identities_capacity: usize = 0,
     borrowed_weak_cleanup_active: bool = false,
@@ -743,6 +755,10 @@ pub const JSRuntime = struct {
         rt.draining_deferred_weak_value_frees = false;
         rt.borrowed_weak_cleanup_identities = &.{};
         rt.borrowed_weak_cleanup_identities_capacity = 0;
+        rt.borrowed_weak_cleanup_identity_set = .empty;
+        rt.weak_object_ids = .empty;
+        rt.weak_id_objects = .empty;
+        rt.next_weak_id = 1;
         rt.borrowed_weak_cleanup_realm_identities = &.{};
         rt.borrowed_weak_cleanup_realm_identities_capacity = 0;
         rt.borrowed_weak_cleanup_active = false;
@@ -858,6 +874,9 @@ pub const JSRuntime = struct {
         self.gc.deinit(self);
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
+        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.allocator);
+        self.weak_object_ids.deinit(self.memory.allocator);
+        self.weak_id_objects.deinit(self.memory.allocator);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
@@ -926,7 +945,9 @@ pub const JSRuntime = struct {
 
     pub fn unregisterObject(self: *JSRuntime, object: *Object) void {
         const notify = self.gc.phase != .deinit;
-        self.clearWeakPersistentIdentity(@intFromPtr(&object.header) & ~@as(usize, 1), notify);
+        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+            self.clearWeakPersistentIdentity(weak_identity, notify);
+        }
         self.unregisterBorrowedReferenceHolder(object);
         self.gc.unlinkObject(&object.header);
     }
@@ -1252,18 +1273,53 @@ pub const JSRuntime = struct {
         return object.value().dup();
     }
 
-    fn liveObjectFromWeakIdentity(self: *JSRuntime, identity: usize) ?*Object {
+    /// Resolves an even weak identity (`weak_id << 1`) to its registered
+    /// object in O(1). Returns null for symbol identities, unregistered ids,
+    /// and objects that are currently being destroyed.
+    pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
         if ((identity & 1) != 0) return null;
-        var current = self.gc.gc_obj_list_head;
-        while (current) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
-            if (header.rc > 0 and header.kind == .object and (@intFromPtr(header) & ~@as(usize, 1)) == identity) {
-                return @alignCast(@fieldParentPtr("header", header));
-            }
-            current = next;
+        const object = self.weak_id_objects.get(identity >> 1) orelse return null;
+        if (object.header.rc == 0) return null;
+        return object;
+    }
+
+    /// Returns the encoded weak identity for `object`, allocating a fresh
+    /// monotonically increasing weak id on first registration.
+    pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
+        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        if (object.has_weak_id) {
+            const weak_id = self.weak_object_ids.get(address) orelse unreachable;
+            return weak_id << 1;
         }
-        return null;
+        const weak_id = self.next_weak_id;
+        try self.weak_object_ids.put(self.memory.allocator, address, weak_id);
+        self.weak_id_objects.put(self.memory.allocator, weak_id, object) catch |err| {
+            _ = self.weak_object_ids.remove(address);
+            return err;
+        };
+        self.next_weak_id += 1;
+        object.has_weak_id = true;
+        return weak_id << 1;
+    }
+
+    /// Returns the encoded weak identity for `object` without registering one.
+    pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
+        if (!object.has_weak_id) return null;
+        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const weak_id = self.weak_object_ids.get(address) orelse return null;
+        return weak_id << 1;
+    }
+
+    /// Removes `object` from the weak identity registry, returning its encoded
+    /// weak identity (if any) so destruction can propagate it to weak slots.
+    pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
+        if (!object.has_weak_id) return null;
+        object.has_weak_id = false;
+        const address = @intFromPtr(&object.header) & ~@as(usize, 1);
+        const weak_id = self.weak_object_ids.get(address) orelse return null;
+        _ = self.weak_object_ids.remove(address);
+        _ = self.weak_id_objects.remove(weak_id);
+        return weak_id << 1;
     }
 
     fn clearLocalRootSlots(self: *JSRuntime) void {
@@ -2238,12 +2294,14 @@ pub const JSRuntime = struct {
                     if (self.borrowed_weak_cleanup_active) {
                         if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
                         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
-                        var enqueued_current_identity = false;
+                        var enqueued_current_identity = true;
                         self.enqueueBorrowedWeakCleanupIdentity(identity) catch {
                             enqueued_current_identity = false;
                         };
-                        if (self.borrowed_weak_cleanup_identities.len != 0 and self.borrowed_weak_cleanup_identities[self.borrowed_weak_cleanup_identities.len - 1] == identity) {
-                            enqueued_current_identity = true;
+                        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+                            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch {
+                                enqueued_current_identity = false;
+                            };
                         }
                         if (enqueued_current_identity) skip_identity = identity;
                     }
@@ -2285,6 +2343,7 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_seen_holder = false;
         self.borrowed_weak_cleanup_needs_rescan = false;
         self.current_deferred_weak_value_free_identity = null;
+        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = if (self.borrowed_weak_cleanup_identities_capacity == 0)
             &.{}
         else
@@ -2301,6 +2360,7 @@ pub const JSRuntime = struct {
         self.borrowed_weak_cleanup_seen_holder = false;
         self.borrowed_weak_cleanup_needs_rescan = false;
         self.current_deferred_weak_value_free_identity = null;
+        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = if (self.borrowed_weak_cleanup_identities_capacity == 0)
             &.{}
         else
@@ -2364,12 +2424,11 @@ pub const JSRuntime = struct {
     pub fn enqueueBorrowedWeakCleanupIdentity(self: *JSRuntime, identity: usize) !void {
         const index = self.borrowed_weak_cleanup_identities.len;
         try self.ensureBorrowedWeakCleanupIdentityCapacity(index + 1);
+        if ((identity & 1) == 0) {
+            try self.borrowed_weak_cleanup_identity_set.put(self.memory.allocator, identity, {});
+        }
         self.borrowed_weak_cleanup_identities = self.borrowed_weak_cleanup_identities.ptr[0 .. index + 1];
         self.borrowed_weak_cleanup_identities[index] = identity;
-        if ((identity & 1) == 0) {
-            const object: *Object = @ptrFromInt(identity);
-            object.in_weak_cleanup = true;
-        }
     }
 
     pub fn enqueueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) !void {
@@ -2378,6 +2437,9 @@ pub const JSRuntime = struct {
         if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
         try self.enqueueBorrowedWeakCleanupIdentity(identity);
+        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+            try self.enqueueBorrowedWeakCleanupIdentity(weak_identity);
+        }
     }
 
     pub fn prequeueBorrowedWeakCleanupIdentityForLastRefValue(self: *JSRuntime, value: JSValue) ?usize {
@@ -2387,14 +2449,16 @@ pub const JSRuntime = struct {
         if (object.is_global) self.enqueueBorrowedWeakCleanupRealmIdentity(identity);
         if (self.borrowed_weak_cleanup_seen_holder) self.markBorrowedWeakCleanupNeedsRescan();
         self.enqueueBorrowedWeakCleanupIdentity(identity) catch return null;
+        if (self.peekWeakObjectIdentity(object)) |weak_identity| {
+            self.enqueueBorrowedWeakCleanupIdentity(weak_identity) catch return null;
+        }
         return identity;
     }
 
     pub fn borrowedWeakCleanupIdentityMatches(self: *const JSRuntime, identity: usize) bool {
         if (identity == 0) return false;
         if ((identity & 1) == 0) {
-            const object: *const Object = @ptrFromInt(identity);
-            return object.in_weak_cleanup;
+            return self.borrowed_weak_cleanup_identity_set.contains(identity);
         }
         var index = self.borrowed_weak_cleanup_identities.len;
         while (index != 0) {
@@ -2407,8 +2471,7 @@ pub const JSRuntime = struct {
     pub inline fn borrowedWeakCleanupIdentityMatchesSlice(self: *const JSRuntime, start_index: usize, identity: usize) bool {
         if (identity == 0) return false;
         if ((identity & 1) == 0) {
-            const object: *const Object = @ptrFromInt(identity);
-            return object.in_weak_cleanup;
+            return self.borrowed_weak_cleanup_identity_set.contains(identity);
         }
         var index = self.borrowed_weak_cleanup_identities.len;
         while (index > start_index) {
@@ -2425,12 +2488,7 @@ pub const JSRuntime = struct {
     pub fn clearBorrowedWeakCleanupIdentities(self: *JSRuntime) void {
         const identities: []usize = if (self.borrowed_weak_cleanup_identities_capacity != 0) self.borrowed_weak_cleanup_identities.ptr[0..self.borrowed_weak_cleanup_identities_capacity] else self.borrowed_weak_cleanup_identities[0..0];
         const realm_identities: []usize = if (self.borrowed_weak_cleanup_realm_identities_capacity != 0) self.borrowed_weak_cleanup_realm_identities.ptr[0..self.borrowed_weak_cleanup_realm_identities_capacity] else self.borrowed_weak_cleanup_realm_identities[0..0];
-        for (self.borrowed_weak_cleanup_identities) |identity| {
-            if ((identity & 1) == 0) {
-                const object: *Object = @ptrFromInt(identity);
-                object.in_weak_cleanup = false;
-            }
-        }
+        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
         self.borrowed_weak_cleanup_identities = &.{};
         self.borrowed_weak_cleanup_identities_capacity = 0;
         self.borrowed_weak_cleanup_realm_identities = &.{};

@@ -222,6 +222,7 @@ fn testBacktraceLocationResolver(_: ?*const anyopaque, pc: usize) core.Backtrace
 }
 
 fn appendWeakCollectionEntry(rt: *core.Runtime, collection: *core.Object, key: *core.Object, value: core.Value) !void {
+    const key_identity = (try core.Object.weakIdentityFromValue(rt, key.value())) orelse unreachable;
     const entries_slot = collection.weakCollectionEntriesSlot();
     const index = entries_slot.*.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
@@ -231,7 +232,7 @@ fn appendWeakCollectionEntry(rt: *core.Runtime, collection: *core.Object, key: *
     const refreshed_entries = collection.weakCollectionEntriesSlot();
     refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
     refreshed_entries.*[index] = .{
-        .key_identity = @intFromPtr(&key.header) & ~@as(usize, 1),
+        .key_identity = key_identity,
         .value = value.dup(),
     };
 }
@@ -252,7 +253,7 @@ fn appendFinalizationRegistryCell(
     const refreshed_entries = registry.finalizationRegistryCellsSlot();
     refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
     refreshed_entries.*[index] = .{
-        .target_identity = core.Object.weakIdentityFromValue(target),
+        .target_identity = try core.Object.weakIdentityFromValue(rt, target),
         .held_value = held_value.dup(),
         .unregister_token = unregister_token.dup(),
     };

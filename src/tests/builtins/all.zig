@@ -928,7 +928,7 @@ test "uri encode decode escape unescape + regexp construct methodCall + promise 
     const weakset_primitive_has = try builtins.collection.methodCall(rt, collection_weakset, 3, &.{core.Value.int32(1)});
     defer weakset_primitive_has.free(rt);
     try std.testing.expectEqual(@as(?bool, false), weakset_primitive_has.asBool());
-    var live_identity = @intFromPtr(weak_key.refHeader().?);
+    var live_identity = (try core.Object.weakIdentityFromValue(rt, weak_key)).?;
     const removed_weakmap_entries = try builtins.collection.sweepWeakEntries(rt, @fieldParentPtr("header", collection_weakmap.refHeader().?), @ptrCast(&live_identity), keepOnlyIdentityLive);
     try std.testing.expectEqual(@as(usize, 1), removed_weakmap_entries);
     const weakmap_after_sweep = try builtins.collection.methodCall(rt, collection_weakmap, 3, &.{weakmap_key});

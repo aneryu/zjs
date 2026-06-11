@@ -34,11 +34,14 @@ RC + 循环回收主路径、old/large 空间记账与 GC scheduler。
   hash put）可改为 header 2-bit 状态机，预期消除每轮 O(对象数) 的 hash
   开销；改动触及 resurrection 与 weak 边扫描的核心正确性，需专门会话以
   全门禁节奏实施。
-- weak identity 当前是裸 header 地址：deref 的 `liveObjectFromWeakIdentity`
-  双份 O(n) 全堆扫描兜底（且存在地址复用 ABA 误命中的理论风险）。已有
-  `borrowed_reference_holders` push 失效体系；方案是 weak_id（u64 递增）
-  双表（ptr→id、id→*Object）+ header flag 门控的销毁清理，替换扫描并根治
-  ABA。
+- ~~weak identity 裸 header 地址 + O(n) 全堆扫描兜底~~：已实施 weak_id
+  （单调递增）双表注册表（`weak_object_ids`/`weak_id_objects`，
+  `Object.has_weak_id` flag 门控销毁清理）。weak 槽（WeakRef/WeakMap/
+  WeakSet/FinalizationRegistry/WeakRootSlot）统一存 `weak_id << 1` 编码
+  （symbol 仍为 `(atom<<1)|1`），`liveObjectFromWeakIdentity` 改为 O(1)
+  查表，地址复用 ABA 误命中随 id 永不复用而根治；matcher 偶数分支由
+  「解引用 header flag」改为批量 identity 哈希集合查询，消除了对已释放
+  对象内存的读取。
 
 JSValue 表示（Phase 5）：访问器封装 pass 已完成——`core/value.zig` 之外的
 直接 `tag`/`payload` 字段访问为零（仅 `binding/ffi.zig` 的 comptime 布局

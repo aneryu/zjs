@@ -1076,7 +1076,10 @@ pub const Object = struct {
     is_with_environment: bool = false,
     is_prototype: bool = false,
     reserved_class_payload_finalizer_slot: bool = false,
-    in_weak_cleanup: bool = false,
+    /// Set once the object has been assigned a weak id in the runtime's weak
+    /// identity registry, so destruction can skip the registry lookup for the
+    /// common case of objects that were never weakly referenced.
+    has_weak_id: bool = false,
     properties: []property.Entry = &.{},
 
     property_capacity: usize = 0,
@@ -1598,13 +1601,23 @@ pub const Object = struct {
 
     fn clearBorrowedReferencesForDestroyedObject(rt: *JSRuntime, destroyed: *Object) void {
         if (rt.gc.phase == .deinit) return;
+        // The address identity drives realm-global clearing (and the OOM
+        // fallback for realm identities); the registered weak identity, if
+        // any, drives weak slot invalidation. Taking the weak identity here
+        // removes the registry entry so stale ids can never resolve again.
         const destroyed_identity = @intFromPtr(&destroyed.header) & ~@as(usize, 1);
+        const weak_identity = rt.takeWeakObjectIdentity(destroyed);
         if (rt.borrowedWeakCleanupActive()) {
             if (destroyed.is_global) rt.enqueueBorrowedWeakCleanupRealmIdentity(destroyed_identity);
             if (rt.isCurrentDeferredWeakValueFreeIdentity(destroyed_identity)) return;
             rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
                 clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
             };
+            if (weak_identity) |identity| {
+                rt.enqueueBorrowedWeakCleanupIdentity(identity) catch {
+                    clearBorrowedReferencesForDestroyedIdentity(rt, identity);
+                };
+            }
             return;
         }
 
@@ -1614,6 +1627,11 @@ pub const Object = struct {
         rt.enqueueBorrowedWeakCleanupIdentity(destroyed_identity) catch {
             clearBorrowedReferencesForDestroyedIdentity(rt, destroyed_identity);
         };
+        if (weak_identity) |identity| {
+            rt.enqueueBorrowedWeakCleanupIdentity(identity) catch {
+                clearBorrowedReferencesForDestroyedIdentity(rt, identity);
+            };
+        }
 
         drainBorrowedWeakCleanup(rt);
     }
@@ -2254,6 +2272,7 @@ pub const Object = struct {
         rt.active_value_roots = &root_frame;
         defer rt.active_value_roots = root_frame.previous;
 
+        const target_identity = try weakIdentityFromValue(rt, rooted_target);
         const entries = self.finalizationRegistryCellsSlot();
         const index = entries.*.len;
         const inserted_holder = !rt.borrowedReferenceHolderRegistered(self);
@@ -2264,7 +2283,7 @@ pub const Object = struct {
         refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
         errdefer refreshed_entries.* = refreshed_entries.*[0..index];
         refreshed_entries.*[index] = .{
-            .target_identity = weakIdentityFromValue(rooted_target),
+            .target_identity = target_identity,
             .held_value = rooted_held_value.dup(),
             .unregister_token = rooted_unregister_token.dup(),
         };
@@ -2988,6 +3007,7 @@ pub const Object = struct {
         rt.active_value_roots = &root_frame;
         defer rt.active_value_roots = root_frame.previous;
 
+        const weak_target_identity = try weakIdentityFromValue(rt, rooted_target);
         try rt.registerBorrowedReferenceHolder(self);
         const payload = self.objectDataPayload() orelse {
             std.debug.assert(self.class_payload_kind == .object_data);
@@ -2995,7 +3015,7 @@ pub const Object = struct {
         };
         const old_target = payload.data;
         payload.data = null;
-        payload.weak_target_identity = weakIdentityFromValue(rooted_target);
+        payload.weak_target_identity = weak_target_identity;
         if (old_target) |stored| stored.free(rt);
         self.pruneBorrowedReferenceHolderIfEmpty(rt);
     }
@@ -3010,7 +3030,7 @@ pub const Object = struct {
             const symbol_atom: atom.Atom = @intCast(atom_id);
             return if (rt.atoms.kind(symbol_atom) == .symbol) JSValue.symbol(symbol_atom) else JSValue.undefinedValue();
         }
-        const target = liveObjectFromWeakIdentity(rt, identity) orelse return JSValue.undefinedValue();
+        const target = rt.liveObjectFromWeakIdentity(identity) orelse return JSValue.undefinedValue();
         return target.value().dup();
     }
 
@@ -5445,15 +5465,17 @@ pub const Object = struct {
 
         sweepDeadWeakEntries(rt, visited, preserved, &symbol_roots, free_set, &free_internal_bytecodes);
         const WeakPersistentSweepContext = struct {
+            rt: *const JSRuntime,
             visited: *const ObjectVisitSet,
             preserved: *const ObjectVisitSet,
             symbol_roots: *const SymbolRootSet,
 
             pub fn isWeakIdentityAlive(self: @This(), identity: usize) bool {
-                return weakEntryKeyIsPreserved(self.visited, self.preserved, self.symbol_roots, identity);
+                return weakEntryKeyIsPreserved(self.rt, self.visited, self.preserved, self.symbol_roots, identity);
             }
         };
         rt.sweepDeadWeakPersistentSlots(WeakPersistentSweepContext{
+            .rt = rt,
             .visited = visited,
             .preserved = preserved,
             .symbol_roots = &symbol_roots,
@@ -6297,7 +6319,7 @@ pub const Object = struct {
                 if (!preserved.contains(address.*)) continue;
                 const current: *Object = @ptrFromInt(address.*);
                 for (current.weakCollectionEntries()) |entry| {
-                    if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, entry.key_identity)) continue;
+                    if (!weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, entry.key_identity)) continue;
                     const before = preserved.count();
                     const before_symbols = symbol_roots.count();
                     try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.value);
@@ -6306,7 +6328,7 @@ pub const Object = struct {
                 for (current.finalizationRegistryCells()) |entry| {
                     if (!entry.isActive()) continue;
                     const target_identity = entry.target_identity orelse continue;
-                    if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) continue;
+                    if (!weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) continue;
                     const before = preserved.count();
                     const before_symbols = symbol_roots.count();
                     try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.held_value);
@@ -6355,7 +6377,7 @@ pub const Object = struct {
                         const cell = &finalization_payload.cells[cell_index];
                         if (!cell.isActive() and !cell.isPending()) continue;
                         const target_identity = cell.target_identity orelse continue;
-                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                        if (weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) {
                             cell.state = .active;
                             continue;
                         }
@@ -6363,7 +6385,7 @@ pub const Object = struct {
                         cell.state = .pending_enqueue;
                         try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.held_value);
                         try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.unregister_token);
-                        if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                        if (weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) {
                             cell.state = .active;
                             continue;
                         }
@@ -6391,7 +6413,7 @@ pub const Object = struct {
             if (current.collectionPayload()) |payload| {
                 var removed_weak_entry = false;
                 while (index < payload.weak_entries.len) {
-                    if (weakEntryKeyIsPreserved(visited, preserved, symbol_roots, payload.weak_entries[index].key_identity)) {
+                    if (weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, payload.weak_entries[index].key_identity)) {
                         index += 1;
                         continue;
                     }
@@ -6410,7 +6432,7 @@ pub const Object = struct {
 
             if (current.objectDataPayload()) |payload| {
                 if (payload.weak_target_identity) |target_identity| {
-                    if (!weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity)) {
+                    if (!weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) {
                         payload.weak_target_identity = null;
                     }
                 }
@@ -6425,7 +6447,7 @@ pub const Object = struct {
                     continue;
                 }
                 if (finalization_payload.cells[index].isActive() and target_identity != null and
-                    weakEntryKeyIsPreserved(visited, preserved, symbol_roots, target_identity.?))
+                    weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity.?))
                 {
                     index += 1;
                     continue;
@@ -6450,6 +6472,7 @@ pub const Object = struct {
     }
 
     fn weakEntryKeyIsPreserved(
+        rt: *const JSRuntime,
         visited: *const ObjectVisitSet,
         preserved: *const ObjectVisitSet,
         symbol_roots: *const SymbolRootSet,
@@ -6460,31 +6483,32 @@ pub const Object = struct {
             if (atom_id > std.math.maxInt(atom.Atom)) return false;
             return symbol_roots.contains(@intCast(atom_id));
         }
-        return visited.contains(key_identity) and preserved.contains(key_identity);
+        const object = rt.liveObjectFromWeakIdentity(key_identity) orelse return false;
+        const address = @intFromPtr(object);
+        return visited.contains(address) and preserved.contains(address);
     }
 
-    pub fn weakIdentityFromValue(stored: JSValue) ?usize {
+    /// Returns the weak identity for `stored`, registering objects in the
+    /// runtime's weak identity registry on first use. Symbols encode as
+    /// `(atom << 1) | 1`; objects encode as `weak_id << 1`.
+    pub fn weakIdentityFromValue(rt: *JSRuntime, stored: JSValue) !?usize {
         if (stored.asSymbolAtom()) |atom_id| return (@as(usize, @intCast(atom_id)) << 1) | 1;
+        const object = objectFromWeakCandidate(stored) orelse return null;
+        return try rt.registerWeakObjectIdentity(object);
+    }
+
+    /// Like `weakIdentityFromValue` but never registers: returns null for
+    /// objects that were never weakly referenced.
+    pub fn weakIdentityFromValuePeek(rt: *const JSRuntime, stored: JSValue) ?usize {
+        if (stored.asSymbolAtom()) |atom_id| return (@as(usize, @intCast(atom_id)) << 1) | 1;
+        const object = objectFromWeakCandidate(stored) orelse return null;
+        return rt.peekWeakObjectIdentity(object);
+    }
+
+    fn objectFromWeakCandidate(stored: JSValue) ?*Object {
         const header = stored.refHeader() orelse return null;
         if (header.kind != .object) return null;
-        return @intFromPtr(header) & ~@as(usize, 1);
-    }
-
-    fn liveObjectFromWeakIdentity(rt: *JSRuntime, key_identity: usize) ?*Object {
-        if ((key_identity & 1) != 0) return null;
-        var current = rt.gc.gc_obj_list_head;
-        while (current) |node| {
-            const next = node.next;
-            const header = gc.headerFromGcNode(node);
-            if (header.rc > 0 and header.kind == .object) {
-                if ((@intFromPtr(header) & ~@as(usize, 1)) == key_identity) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", header));
-                    return obj;
-                }
-            }
-            current = next;
-        }
-        return null;
+        return @alignCast(@fieldParentPtr("header", header));
     }
 
     fn accumulateIncomingReferences(
