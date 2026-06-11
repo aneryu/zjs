@@ -286,6 +286,7 @@ pub fn tryFuseMakeVarRefPercentHexGlobalStringAssignment(
     if (!globalReferenceAtomCanUseFastData(ctx, function, global, frame, lhs_get.atom)) return false;
     const lhs = globalDataPropertyValueForFastPath(ctx.runtime, global, function, lhs_pc, lhs_get.atom) orelse return false;
     const lhs_string = stringFromValue(lhs) orelse return false;
+    if (lhs_string.isRope()) return false;
     const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
 
     const callee_get = decodeVarRefGet(code, lhs_get.next_pc) orelse return false;

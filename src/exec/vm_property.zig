@@ -1457,6 +1457,7 @@ pub fn tryFuseStringFromCharCodeInt32LocalAppend(
         frame.global_lexical_sync_slots[idx];
     const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
     const lhs_string = stringFromValue(lhs) orelse return false;
+    if (lhs_string.isRope()) return false;
     const byte: u8 = @intCast(unit);
     const lhs_header = lhs.refHeader() orelse return false;
     const appended_in_place = @as(usize, @intCast(lhs_header.rc)) <= max_ref_count and

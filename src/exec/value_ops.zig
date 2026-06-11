@@ -890,6 +890,24 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
         return try toStringValue(rt, core.JSValue.int32(int_value));
     }
 
+    // Rope-backed strings must not be flattened by borrowLatin1; chain the
+    // formatted digits through another rope node instead.
+    if (string.isRope()) {
+        const digits_value = try toStringValue(rt, core.JSValue.int32(int_value));
+        const digits_string = stringObject(digits_value) orelse {
+            digits_value.free(rt);
+            return null;
+        };
+        const left = if (position == .prefix) digits_string else string;
+        const right = if (position == .prefix) string else digits_string;
+        const out = core.string.String.createRope(rt, left, right) catch |err| {
+            digits_value.free(rt);
+            return err;
+        };
+        digits_value.free(rt);
+        return out.value();
+    }
+
     const string_bytes = string.borrowLatin1() orelse return null;
     if (int_value >= 0 and int_value < 256) {
         const cached = try rt.smallIntString(@intCast(int_value));
@@ -929,10 +947,22 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
     const b_len = b_string.len();
     if (a_len == 0) return b.dup();
     if (b_len == 0) return a.dup();
+    // If either operand already is a rope, concatenating eagerly would flatten
+    // it; chain another rope node instead (ropes are always >= rope_min_len).
+    if (a_string.isRope() or b_string.isRope()) {
+        const out = try core.string.String.createRope(rt, a_string, b_string);
+        return out.value();
+    }
     if (a.refHeader()) |header| {
         if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
             return a.dup();
         }
+    }
+    // Long concatenations defer the copy through a rope node (QuickJS
+    // JSStringRope analogue); content materializes lazily on first read.
+    if (a_len + b_len >= core.string.String.rope_min_len) {
+        const out = try core.string.String.createRope(rt, a_string, b_string);
+        return out.value();
     }
     // Fast path: both operands are latin1. We allocate the result string
     // directly and memcpy in place, skipping the ArrayList intermediate
@@ -966,6 +996,9 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
 }
 
 fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs_string: *core.string.String) !bool {
+    // Never resolve a rope lhs here: resolveData() would flatten it eagerly.
+    // Bailing out lets the caller build a rope-of-rope instead.
+    if (lhs_string.isRope()) return false;
     return switch (rhs_string.resolveData()) {
         .latin1 => |rhs_bytes| switch (lhs_string.resolveData()) {
             .latin1 => try lhs_string.appendLatin1InPlace(rt, rhs_bytes),
@@ -1014,7 +1047,7 @@ pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, ato
         if (byte > 0x7f) return null;
     }
     if (suffix.len == 0 or repeat_count == 0) return lhs.dup();
-    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, lhs_string.hash);
+    const out = try core.string.String.createLatin1RepeatedConcatWithSeed(rt, lhs_bytes, suffix, repeat_count, lhs_string.contentHash());
     return out.value();
 }
 

@@ -2266,6 +2266,8 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
 ) !bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
     const prefix_string = stringFromValue(prefix_value) orelse return false;
+    // Cheap length probe first: borrowLatin1 on a rope would flatten it.
+    if (prefix_string.len() != 9) return false;
     const prefix_bytes = prefix_string.borrowLatin1() orelse return false;
     if (prefix_bytes.len != 9 or prefix_bytes[0] != '%' or prefix_bytes[3] != '%' or prefix_bytes[6] != '%') return false;
     const byte0 = percentHexByte(prefix_bytes[1], prefix_bytes[2]) orelse return false;
@@ -2561,6 +2563,9 @@ fn tryFuseGlobalStringPercentHexAddStore(
     if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom)) return null;
 
     const lhs_string = stringFromValue(lhs) orelse return null;
+    // Rope lhs: let the generic add path chain another rope node instead of
+    // flattening it here.
+    if (lhs_string.isRope()) return null;
     const lhs_bytes = lhs_string.borrowLatin1() orelse return null;
 
     const suffix_string = try ctx.runtime.percentHexString(@truncate(@as(u32, @bitCast(arg_i32))));

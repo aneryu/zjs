@@ -15,12 +15,14 @@ pub const Data = union(enum) {
         start: usize,
         len: usize,
     },
+    rope: *Rope,
 
     pub fn len(self: Data) usize {
         return switch (self) {
             .latin1 => |bytes| bytes.len,
             .utf16 => |units| units.len,
             .slice => |s| s.len,
+            .rope => |node| node.len,
         };
     }
     pub fn isWide(self: Data) bool {
@@ -28,8 +30,32 @@ pub const Data = union(enum) {
             .latin1 => false,
             .utf16 => true,
             .slice => |s| s.parent.data.isWide(),
+            .rope => |node| node.wide,
         };
     }
+};
+
+/// Deferred concatenation node (QuickJS `JSStringRope` analogue). A rope-backed
+/// `String` keeps `data = .rope` for its whole lifetime; the first content read
+/// materializes the flat buffer into `flat` (and releases the children), so all
+/// borrowed slices stay valid for as long as the owning `String` is alive.
+pub const Rope = struct {
+    left: *String,
+    right: *String,
+    len: usize,
+    wide: bool,
+    rt: *JSRuntime,
+    hash: u32 = 0,
+    flat: FlatCache = .none,
+    /// Intrusive link used only by the iterative destroy path so arbitrarily
+    /// deep rope chains never recurse.
+    chain_next: ?*String = null,
+
+    pub const FlatCache = union(enum) {
+        none,
+        latin1: []u8,
+        utf16: []u16,
+    };
 };
 
 pub const Layout = enum(u8) {
@@ -52,6 +78,9 @@ pub const String = struct {
     capacity: usize,
     hash: u32,
     atom_id: ?u32 = null,
+    /// Set once a string becomes a rope child. Rope nodes snapshot their
+    /// children's content, so in-place appends must be refused from then on.
+    rope_child: bool = false,
 
     /// Returns an owned runtime string. The runtime releases it through
     /// reference counting when all `JSValue` handles are freed.
@@ -248,6 +277,52 @@ pub const String = struct {
         return self;
     }
 
+    /// Minimum combined length (in code units) for the `+` operator to defer
+    /// concatenation through a rope instead of copying eagerly.
+    pub const rope_min_len: usize = 256;
+
+    /// Creates a rope string deferring the concatenation of `left ++ right`.
+    /// Retains both children; content is materialized lazily on first read.
+    pub fn createRope(rt: *JSRuntime, left: *String, right: *String) !*String {
+        const total = try std.math.add(usize, left.len(), right.len());
+        const node = try rt.memory.create(Rope);
+        errdefer rt.memory.destroy(Rope, node);
+        const self = try rt.memory.create(String);
+        node.* = .{
+            .left = left,
+            .right = right,
+            .len = total,
+            .wide = left.isWide() or right.isWide(),
+            .rt = rt,
+        };
+        self.* = .{
+            .header = .{ .kind = .string },
+            .data = .{ .rope = node },
+            .layout = .separate,
+            .capacity = 0,
+            .hash = 0,
+        };
+        gc.retain(&left.header);
+        gc.retain(&right.header);
+        left.rope_child = true;
+        right.rope_child = true;
+        return self;
+    }
+
+    pub fn isRope(self: *const String) bool {
+        return self.data == .rope;
+    }
+
+    /// Content hash usable for hashing string values regardless of rope state.
+    /// Flattens rope-backed strings first so equal contents hash equally.
+    pub fn contentHash(self: *const String) u32 {
+        if (self.data == .rope) {
+            _ = self.resolveData();
+            return self.data.rope.hash;
+        }
+        return self.hash;
+    }
+
     pub fn value(self: *String) JSValue {
         return JSValue.string(&self.header);
     }
@@ -298,12 +373,11 @@ pub const String = struct {
     };
 
     pub fn resolveData(self: *const String) ResolvedData {
-        if (self.data != .slice) {
-            return switch (self.data) {
-                .latin1 => |latin1| .{ .latin1 = latin1 },
-                .utf16 => |utf16| .{ .utf16 = utf16 },
-                else => unreachable,
-            };
+        switch (self.data) {
+            .latin1 => |latin1| return .{ .latin1 = latin1 },
+            .utf16 => |utf16| return .{ .utf16 = utf16 },
+            .rope => |node| return flattenedRopeData(self, node),
+            .slice => {},
         }
         var cursor = self;
         var offset: usize = 0;
@@ -316,7 +390,11 @@ pub const String = struct {
         return switch (cursor.data) {
             .latin1 => |bytes| .{ .latin1 = bytes[offset .. offset + total_len] },
             .utf16 => |units| .{ .utf16 = units[offset .. offset + total_len] },
-            else => unreachable,
+            .rope => |node| switch (flattenedRopeData(cursor, node)) {
+                .latin1 => |bytes| .{ .latin1 = bytes[offset .. offset + total_len] },
+                .utf16 => |units| .{ .utf16 = units[offset .. offset + total_len] },
+            },
+            .slice => unreachable,
         };
     }
 
@@ -340,6 +418,7 @@ pub const String = struct {
         self.header = .{ .kind = .string };
         self.hash = 0;
         self.atom_id = null;
+        self.rope_child = false;
         self.layout = .slice;
         self.capacity = 0;
         self.data = .{ .slice = .{ .parent = parent, .start = start, .len = slice_len } };
@@ -352,12 +431,11 @@ pub const String = struct {
     }
 
     pub fn appendLatin1InPlace(self: *String, rt: *JSRuntime, suffix: []const u8) !bool {
-        if (self.atom_id != null) return false;
+        if (self.atom_id != null or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const bytes = switch (self.data) {
             .latin1 => |bytes| bytes,
-            .utf16 => return false,
-            .slice => return false,
+            .utf16, .slice, .rope => return false,
         };
         const old_len = bytes.len;
         const new_len = old_len + suffix.len;
@@ -387,12 +465,11 @@ pub const String = struct {
     }
 
     pub fn appendUtf16InPlace(self: *String, rt: *JSRuntime, suffix: []const u16) !bool {
-        if (self.atom_id != null) return false;
+        if (self.atom_id != null or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const units = switch (self.data) {
-            .latin1 => return false,
+            .latin1, .slice, .rope => return false,
             .utf16 => |units| units,
-            .slice => return false,
         };
         const old_len = units.len;
         const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
@@ -419,12 +496,11 @@ pub const String = struct {
     }
 
     pub fn appendLatin1ToUtf16InPlace(self: *String, rt: *JSRuntime, suffix: []const u8) !bool {
-        if (self.atom_id != null) return false;
+        if (self.atom_id != null or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const units = switch (self.data) {
-            .latin1 => return false,
+            .latin1, .slice, .rope => return false,
             .utf16 => |units| units,
-            .slice => return false,
         };
         const old_len = units.len;
         const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
@@ -451,12 +527,11 @@ pub const String = struct {
     }
 
     pub fn appendUtf16WidenInPlace(self: *String, rt: *JSRuntime, suffix: []const u16) !bool {
-        if (self.atom_id != null) return false;
+        if (self.atom_id != null or self.rope_child) return false;
         if (suffix.len == 0) return true;
         const bytes = switch (self.data) {
             .latin1 => |bytes| bytes,
-            .utf16 => return false,
-            .slice => return false,
+            .utf16, .slice, .rope => return false,
         };
         const old_len = bytes.len;
         const new_len = checkedAddLength(old_len, suffix.len) orelse return false;
@@ -475,12 +550,11 @@ pub const String = struct {
     }
 
     pub fn appendLatin1RepeatedInPlace(self: *String, rt: *JSRuntime, suffix: []const u8, repeat_count: usize) !bool {
-        if (self.atom_id != null) return false;
+        if (self.atom_id != null or self.rope_child) return false;
         if (repeat_count == 0 or suffix.len == 0) return true;
         const bytes = switch (self.data) {
             .latin1 => |bytes| bytes,
-            .utf16 => return false,
-            .slice => return false,
+            .utf16, .slice, .rope => return false,
         };
 
         const append_len_result = @mulWithOverflow(suffix.len, repeat_count);
@@ -547,6 +621,7 @@ pub const String = struct {
         self.header = .{ .kind = .string };
         self.hash = 0;
         self.atom_id = null;
+        self.rope_child = false;
         self.layout = .compact;
         self.capacity = capacity;
         switch (tag) {
@@ -559,7 +634,7 @@ pub const String = struct {
                 const units: [*]u16 = @ptrCast(@alignCast(payload.ptr));
                 self.data = .{ .utf16 = units[0..unit_count] };
             },
-            .slice => unreachable,
+            .slice, .rope => unreachable,
         }
         return self;
     }
@@ -577,6 +652,7 @@ pub const String = struct {
                 .slice => unreachable,
             },
             .slice => |s| JSValue.string(&s.parent.header).free(rt),
+            .rope => return destroyRopeWrapper(rt, self),
         }
         rt.memory.destroy(String, self);
     }
@@ -588,6 +664,140 @@ pub const String = struct {
     }
 };
 
+fn flattenedRopeData(self: *const String, node: *Rope) String.ResolvedData {
+    flattenRopeNode(node);
+    // Keep the canonical wrapper's hash cache coherent for direct readers.
+    // (When `self` is a transient by-value copy the write is simply lost.)
+    @constCast(self).hash = node.hash;
+    return switch (node.flat) {
+        .latin1 => |buf| .{ .latin1 = buf },
+        .utf16 => |buf| .{ .utf16 = buf },
+        .none => unreachable,
+    };
+}
+
+/// Materializes the rope's content into `node.flat` and releases the children.
+/// Idempotent. Borrowed-slice readers (`resolveData`) cannot propagate errors,
+/// so an allocation failure here is fatal, mirroring unrecoverable internal
+/// OOM behaviour.
+fn flattenRopeNode(node: *Rope) void {
+    if (node.flat != .none) return;
+    const rt = node.rt;
+    if (node.wide) {
+        const buf = rt.memory.alloc(u16, node.len) catch @panic("zjs: out of memory while flattening string rope");
+        copyRopeContent(u16, rt, node, buf);
+        node.flat = .{ .utf16 = buf };
+        node.hash = hashUtf16(buf, 0);
+    } else {
+        const buf = rt.memory.alloc(u8, node.len) catch @panic("zjs: out of memory while flattening string rope");
+        copyRopeContent(u8, rt, node, buf);
+        node.flat = .{ .latin1 = buf };
+        node.hash = hashLatin1(buf, 0);
+    }
+    releaseRopeChildRef(rt, node.left);
+    releaseRopeChildRef(rt, node.right);
+    node.left = undefined;
+    node.right = undefined;
+}
+
+/// Iterative left-to-right leaf copy; never recurses, so arbitrarily deep
+/// rope chains (`s = s + x` loops) cannot overflow the native stack.
+fn copyRopeContent(comptime T: type, rt: *JSRuntime, root: *Rope, out: []T) void {
+    const allocator = rt.memory.allocator;
+    var stack = std.ArrayList(*const String).empty;
+    defer stack.deinit(allocator);
+    stack.append(allocator, root.right) catch @panic("zjs: out of memory while flattening string rope");
+    stack.append(allocator, root.left) catch @panic("zjs: out of memory while flattening string rope");
+    var offset: usize = 0;
+    while (stack.pop()) |item| {
+        if (item.data == .rope) {
+            const child = item.data.rope;
+            if (child.flat == .none) {
+                stack.append(allocator, child.right) catch @panic("zjs: out of memory while flattening string rope");
+                stack.append(allocator, child.left) catch @panic("zjs: out of memory while flattening string rope");
+                continue;
+            }
+            offset += copyResolvedUnits(T, out[offset..], switch (child.flat) {
+                .latin1 => |buf| .{ .latin1 = buf },
+                .utf16 => |buf| .{ .utf16 = buf },
+                .none => unreachable,
+            });
+            continue;
+        }
+        offset += copyResolvedUnits(T, out[offset..], item.resolveData());
+    }
+    std.debug.assert(offset == out.len);
+}
+
+fn copyResolvedUnits(comptime T: type, out: []T, resolved: String.ResolvedData) usize {
+    switch (resolved) {
+        .latin1 => |bytes| {
+            if (T == u8) {
+                @memcpy(out[0..bytes.len], bytes);
+            } else {
+                for (bytes, 0..) |byte, i| out[i] = byte;
+            }
+            return bytes.len;
+        },
+        .utf16 => |units| {
+            if (T == u16) {
+                @memcpy(out[0..units.len], units);
+                return units.len;
+            }
+            // A narrow rope (`wide == false`) can never contain wide leaves:
+            // children are append-protected via `rope_child`.
+            unreachable;
+        },
+    }
+}
+
+fn releaseRopeChildRef(rt: *JSRuntime, child: *String) void {
+    var pending: ?*String = null;
+    releaseStringRefIntoChain(rt, child, &pending);
+    drainRopeDestroyChain(rt, &pending);
+}
+
+fn releaseStringRefIntoChain(rt: *JSRuntime, s: *String, pending: *?*String) void {
+    if (s.data == .rope) {
+        // Manual release for rope wrappers so deep chains destroy iteratively
+        // instead of recursing through gc.release -> destroyFromHeader.
+        std.debug.assert(s.header.rc > 0);
+        s.header.rc -= 1;
+        rt.gc.stats.rc_dec += 1;
+        if (s.header.rc == 0) {
+            s.data.rope.chain_next = pending.*;
+            pending.* = s;
+        }
+        return;
+    }
+    gc.release(rt, &s.header);
+}
+
+fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
+    while (pending.*) |wrapper| {
+        const node = wrapper.data.rope;
+        pending.* = node.chain_next;
+        if (wrapper.atom_id) |atom_id| rt.atoms.free(atom_id);
+        switch (node.flat) {
+            .none => {
+                releaseStringRefIntoChain(rt, node.left, pending);
+                releaseStringRefIntoChain(rt, node.right, pending);
+            },
+            .latin1 => |buf| rt.memory.free(u8, buf),
+            .utf16 => |buf| rt.memory.free(u16, buf),
+        }
+        rt.memory.destroy(Rope, node);
+        rt.memory.destroy(String, wrapper);
+    }
+}
+
+fn destroyRopeWrapper(rt: *JSRuntime, self: *String) void {
+    self.atom_id = null; // already released by destroyFromHeader
+    self.data.rope.chain_next = null;
+    var pending: ?*String = self;
+    drainRopeDestroyChain(rt, &pending);
+}
+
 const InlineAllocationLayout = struct {
     payload_offset: usize,
     total_size: usize,
@@ -598,12 +808,12 @@ fn inlineAllocationLayout(comptime tag: std.meta.Tag(Data), capacity: usize) ?In
     const unit_align = switch (tag) {
         .latin1 => @alignOf(u8),
         .utf16 => @alignOf(u16),
-        .slice => unreachable,
+        .slice, .rope => unreachable,
     };
     const unit_size = switch (tag) {
         .latin1 => @sizeOf(u8),
         .utf16 => @sizeOf(u16),
-        .slice => unreachable,
+        .slice, .rope => unreachable,
     };
     const payload_alignment = std.mem.Alignment.fromByteUnits(unit_align);
     const string_alignment = std.mem.Alignment.of(String);

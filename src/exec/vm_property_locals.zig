@@ -4785,6 +4785,7 @@ fn tryFuseStackAddPercentHexGlobalStore(
 
     const lhs = stack.peekBorrowed() orelse return false;
     const lhs_string = stringFromValue(lhs) orelse return false;
+    if (lhs_string.isRope()) return false;
     const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
     const suffix_string = try ctx.runtime.percentHexString(@truncate(@as(u32, @bitCast(byte_i32))));
     const suffix_bytes = suffix_string.borrowLatin1() orelse return false;
@@ -4932,6 +4933,7 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
 
     const lhs = slotValueBorrowed(frame.locals[local_idx]);
     const lhs_string = stringFromValue(lhs) orelse return false;
+    if (lhs_string.isRope()) return false;
     const byte: u8 = @intCast(unit);
     const has_global_sync_mirror =
         sync_global_lexical_locals and

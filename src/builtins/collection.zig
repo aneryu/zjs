@@ -2012,7 +2012,7 @@ fn hashNumber(number: f64) u64 {
 
 fn hashStringValue(value: core.JSValue) u64 {
     const string = stringFromValue(value) orelse return hashRefPointer(value);
-    return mix64(@as(u64, string.hash) ^ (@as(u64, string.len()) << 32));
+    return mix64(@as(u64, string.contentHash()) ^ (@as(u64, string.len()) << 32));
 }
 
 fn strongEntryHashLatin1Concat(prefix: []const u8, digits: []const u8) u64 {
