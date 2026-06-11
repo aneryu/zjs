@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const atom = @import("../../core/atom.zig");
+const fb_mod = @import("../../core/function_bytecode.zig");
 const bytecode_function = @import("../function.zig");
 const function_def_mod = @import("../function_def.zig");
 const opcode = @import("../opcode.zig");
@@ -96,70 +97,125 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     fb.backtrace_barrier = fd.backtrace_barrier;
     fb.is_indirect_eval = fd.is_indirect_eval;
 
+    // Pack all read-only artifact slices into a single block allocation.
+    // Segments are reserved largest-alignment-first to minimize padding;
+    // the slice fields below point into `fb.block` and `deinit` releases
+    // the whole block at once.
+    const source_len: usize = if (fd.source_text) |source| source.len else 0;
+    var layout = fb_mod.BlockBuilder{};
+    const cpool_off = layout.reserve(JSValue, fd.cpool.len);
+    const call_sites_off = layout.reserve(bytecode_function.CallSite, lowered.call_sites.len);
+    const vardefs_off = layout.reserve(function_def_mod.VarDef, fd.vars.len);
+    const closure_var_off = layout.reserve(function_def_mod.ClosureVar, fd.closure_var.len);
+    const atom_operands_off = layout.reserve(atom.Atom, lowered.atom_operands.len);
+    const arg_names_off = layout.reserve(atom.Atom, fd.args.len);
+    const var_names_off = layout.reserve(atom.Atom, fd.vars.len);
+    const var_ref_names_off = layout.reserve(atom.Atom, fd.closure_var.len);
+    const global_var_names_off = layout.reserve(atom.Atom, fd.global_vars.len);
+    const class_instance_fields_off = layout.reserve(atom.Atom, fd.class_instance_fields.len);
+    const private_bound_names_off = layout.reserve(atom.Atom, fd.private_bound_names.len);
+    const class_private_names_off = layout.reserve(atom.Atom, fd.class_private_names.len);
+    const byte_code_off = layout.reserve(u8, lowered.code.len);
+    const fusion_cold_off = layout.reserve(u8, lowered.code.len);
+    const pc2line_off = layout.reserve(u8, lowered.pc2line_buf.len);
+    const source_off = layout.reserve(u8, source_len);
+    const var_is_lexical_off = layout.reserve(bool, fd.vars.len);
+    const var_is_const_off = layout.reserve(bool, fd.vars.len);
+    const var_ref_is_lexical_off = layout.reserve(bool, fd.closure_var.len);
+    const var_ref_is_const_off = layout.reserve(bool, fd.closure_var.len);
+    fb.block = try fd.memory.allocAlignedBytes(layout.size, fb_mod.block_alignment);
+    const block = fb.block;
+
     // Copy lowered bytecode.
     if (lowered.code.len > 0) {
-        fb.byte_code = try fd.memory.alloc(u8, lowered.code.len);
+        fb.byte_code = fb_mod.blockSlice(block, u8, byte_code_off, lowered.code.len);
         @memcpy(fb.byte_code, lowered.code);
         fb.byte_code_len = @intCast(lowered.code.len);
         if (fd.func_kind == .generator or fd.func_kind == .async_generator) {
             fb.generator_body_pc = findGeneratorBodyMarker(lowered.code) orelse 0;
         }
+        const fusion_cold = fb_mod.blockSlice(block, u8, fusion_cold_off, lowered.code.len);
+        @memset(fusion_cold, 0);
+        fb.fusion_cold = fusion_cold;
     }
     if (lowered.atom_operands.len > 0) {
-        fb.atom_operands = try fd.memory.alloc(atom.Atom, lowered.atom_operands.len);
-        for (lowered.atom_operands, 0..) |atom_id, idx| {
-            fb.atom_operands[idx] = fd.atoms.dup(atom_id);
-        }
+        const atom_operands = fb_mod.blockSlice(block, atom.Atom, atom_operands_off, lowered.atom_operands.len);
+        for (lowered.atom_operands, atom_operands) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
+        fb.atom_operands = atom_operands;
     }
     if (lowered.call_sites.len > 0) {
-        fb.call_sites = try fd.memory.alloc(bytecode_function.CallSite, lowered.call_sites.len);
-        for (lowered.call_sites, 0..) |site, idx| {
-            fb.call_sites[idx] = site;
-            fb.call_sites[idx].atom_id = fd.atoms.dup(site.atom_id);
+        const call_sites = fb_mod.blockSlice(block, bytecode_function.CallSite, call_sites_off, lowered.call_sites.len);
+        for (lowered.call_sites, call_sites) |site, *out| {
+            out.* = site;
+            out.atom_id = fd.atoms.dup(site.atom_id);
         }
+        fb.call_sites = call_sites;
     }
-    try copyArgNamesToFunctionBytecode(fd, fb);
-    try copyVarNamesToFunctionBytecode(fd, fb);
-    try copyVarRefNamesToFunctionBytecode(fd, fb);
-    try copyGlobalVarNamesToFunctionBytecode(fd, fb);
+    if (fd.args.len > 0) {
+        const arg_names = fb_mod.blockSlice(block, atom.Atom, arg_names_off, fd.args.len);
+        for (fd.args, arg_names) |arg, *out| out.* = fd.atoms.dup(arg.var_name);
+        fb.arg_names = arg_names;
+    }
 
-    // Copy vardefs
+    // Copy vardefs plus the var-name metadata views.
     if (fd.vars.len > 0) {
-        fb.vardefs = try fd.memory.alloc(function_def_mod.VarDef, fd.vars.len);
-        @memcpy(fb.vardefs, fd.vars);
-        // Duplicate atoms
-        for (fb.vardefs) |*v| {
-            v.var_name = fd.atoms.dup(v.var_name);
+        const var_names = fb_mod.blockSlice(block, atom.Atom, var_names_off, fd.vars.len);
+        const var_is_lexical = fb_mod.blockSlice(block, bool, var_is_lexical_off, fd.vars.len);
+        const var_is_const = fb_mod.blockSlice(block, bool, var_is_const_off, fd.vars.len);
+        for (fd.vars, var_names, var_is_lexical, var_is_const) |v, *name, *is_lexical, *is_const| {
+            name.* = fd.atoms.dup(v.var_name);
+            is_lexical.* = v.is_lexical;
+            is_const.* = v.is_const;
         }
+        fb.var_names = var_names;
+        fb.var_is_lexical = var_is_lexical;
+        fb.var_is_const = var_is_const;
+
+        const vardefs = fb_mod.blockSlice(block, function_def_mod.VarDef, vardefs_off, fd.vars.len);
+        @memcpy(vardefs, fd.vars);
+        for (vardefs) |*v| v.var_name = fd.atoms.dup(v.var_name);
+        fb.vardefs = vardefs;
     }
 
-    // Copy closure_var
+    // Copy closure_var plus the var-ref metadata views.
     if (fd.closure_var.len > 0) {
-        fb.closure_var = try fd.memory.alloc(function_def_mod.ClosureVar, fd.closure_var.len);
-        @memcpy(fb.closure_var, fd.closure_var);
-        // Duplicate atoms
-        for (fb.closure_var) |*cv| {
-            cv.var_name = fd.atoms.dup(cv.var_name);
+        const var_ref_names = fb_mod.blockSlice(block, atom.Atom, var_ref_names_off, fd.closure_var.len);
+        const var_ref_is_lexical = fb_mod.blockSlice(block, bool, var_ref_is_lexical_off, fd.closure_var.len);
+        const var_ref_is_const = fb_mod.blockSlice(block, bool, var_ref_is_const_off, fd.closure_var.len);
+        for (fd.closure_var, var_ref_names, var_ref_is_lexical, var_ref_is_const) |cv, *name, *is_lexical, *is_const| {
+            name.* = fd.atoms.dup(cv.var_name);
+            is_lexical.* = cv.is_lexical;
+            is_const.* = cv.is_const;
         }
+        fb.var_ref_names = var_ref_names;
+        fb.var_ref_is_lexical = var_ref_is_lexical;
+        fb.var_ref_is_const = var_ref_is_const;
+
+        const closure_var = fb_mod.blockSlice(block, function_def_mod.ClosureVar, closure_var_off, fd.closure_var.len);
+        @memcpy(closure_var, fd.closure_var);
+        for (closure_var) |*cv| cv.var_name = fd.atoms.dup(cv.var_name);
+        fb.closure_var = closure_var;
     }
 
+    if (fd.global_vars.len > 0) {
+        const global_var_names = fb_mod.blockSlice(block, atom.Atom, global_var_names_off, fd.global_vars.len);
+        for (fd.global_vars, global_var_names) |gv, *out| out.* = fd.atoms.dup(gv.var_name);
+        fb.global_var_names = global_var_names;
+    }
     if (fd.class_instance_fields.len > 0) {
-        fb.class_instance_fields = try fd.memory.alloc(atom.Atom, fd.class_instance_fields.len);
-        for (fd.class_instance_fields, 0..) |atom_id, idx| {
-            fb.class_instance_fields[idx] = fd.atoms.dup(atom_id);
-        }
+        const fields = fb_mod.blockSlice(block, atom.Atom, class_instance_fields_off, fd.class_instance_fields.len);
+        for (fd.class_instance_fields, fields) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
+        fb.class_instance_fields = fields;
     }
     if (fd.private_bound_names.len > 0) {
-        fb.private_bound_names = try fd.memory.alloc(atom.Atom, fd.private_bound_names.len);
-        for (fd.private_bound_names, 0..) |atom_id, idx| {
-            fb.private_bound_names[idx] = fd.atoms.dup(atom_id);
-        }
+        const names = fb_mod.blockSlice(block, atom.Atom, private_bound_names_off, fd.private_bound_names.len);
+        for (fd.private_bound_names, names) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
+        fb.private_bound_names = names;
     }
     if (fd.class_private_names.len > 0) {
-        fb.class_private_names = try fd.memory.alloc(atom.Atom, fd.class_private_names.len);
-        for (fd.class_private_names, 0..) |atom_id, idx| {
-            fb.class_private_names[idx] = fd.atoms.dup(atom_id);
-        }
+        const names = fb_mod.blockSlice(block, atom.Atom, class_private_names_off, fd.class_private_names.len);
+        for (fd.class_private_names, names) |atom_id, *out| out.* = fd.atoms.dup(atom_id);
+        fb.class_private_names = names;
     }
 
     // Copy metadata counts
@@ -170,22 +226,18 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     fb.closure_var_count = @intCast(fd.closure_var_count);
     fb.stack_size = lowered.stack_size;
     try bytecode_function.allocateFunctionBytecodeIcSlots(fb);
-    if (fb.byte_code.len != 0) {
-        fb.fusion_cold = try fd.memory.alloc(u8, fb.byte_code.len);
-        @memset(fb.fusion_cold, 0);
-    }
 
     // Copy source location
     fb.atoms.replace(&fb.filename, fd.filename);
     fb.line_num = fd.line_num;
     fb.col_num = fd.col_num;
     if (lowered.pc2line_buf.len != 0) {
-        fb.pc2line_buf = try fd.memory.alloc(u8, lowered.pc2line_buf.len);
+        fb.pc2line_buf = fb_mod.blockSlice(block, u8, pc2line_off, lowered.pc2line_buf.len);
         @memcpy(fb.pc2line_buf, lowered.pc2line_buf);
         fb.pc2line_len = @intCast(lowered.pc2line_buf.len);
     }
     if (fd.source_text) |source| {
-        const owned = try fd.memory.alloc(u8, source.len);
+        const owned = fb_mod.blockSlice(block, u8, source_off, source.len);
         @memcpy(owned, source);
         fb.source = owned;
         fb.source_len = @intCast(source.len);
@@ -193,11 +245,10 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
 
     // Copy constants.
     if (fd.cpool.len > 0) {
-        fb.cpool = try fd.memory.alloc(JSValue, fd.cpool.len);
+        const cpool = fb_mod.blockSlice(block, JSValue, cpool_off, fd.cpool.len);
         fb.cpool_count = @intCast(fd.cpool.len);
-        for (fd.cpool, 0..) |value, idx| {
-            fb.cpool[idx] = value.dup();
-        }
+        for (fd.cpool, cpool) |value, *out| out.* = value.dup();
+        fb.cpool = cpool;
     }
     cacheSimpleNumericBytecode(fb);
 
@@ -771,53 +822,6 @@ fn syncBytecodeGlobalVarNames(function: *bytecode_function.Bytecode, fd: *const 
     for (fd.global_vars, 0..) |gv, idx| {
         function.global_var_names[idx] = fd.atoms.dup(gv.var_name);
     }
-}
-
-fn copyVarNamesToFunctionBytecode(fd: *const function_def_mod.FunctionDef, fb: *bytecode_function.FunctionBytecode) !void {
-    if (fd.vars.len == 0) return;
-    const metadata = try copyVarNameMetadata(fd.memory, fd.atoms, fd.vars);
-    fb.var_names = metadata.names;
-    fb.var_is_lexical = metadata.is_lexical;
-    fb.var_is_const = metadata.is_const;
-}
-
-fn copyGlobalVarNamesToFunctionBytecode(fd: *const function_def_mod.FunctionDef, fb: *bytecode_function.FunctionBytecode) !void {
-    if (fd.global_vars.len == 0) return;
-    fb.global_var_names = try fd.memory.alloc(atom.Atom, fd.global_vars.len);
-    for (fd.global_vars, 0..) |gv, idx| {
-        fb.global_var_names[idx] = fd.atoms.dup(gv.var_name);
-    }
-}
-
-fn copyArgNamesToFunctionBytecode(fd: *const function_def_mod.FunctionDef, fb: *bytecode_function.FunctionBytecode) !void {
-    if (fd.args.len == 0) return;
-    fb.arg_names = try fd.memory.alloc(atom.Atom, fd.args.len);
-    for (fd.args, 0..) |arg, idx| {
-        fb.arg_names[idx] = fd.atoms.dup(arg.var_name);
-    }
-}
-
-fn copyVarRefNamesToFunctionBytecode(fd: *const function_def_mod.FunctionDef, fb: *bytecode_function.FunctionBytecode) !void {
-    if (fd.closure_var.len == 0) return;
-    const names = try fd.memory.alloc(atom.Atom, fd.closure_var.len);
-    errdefer fd.memory.free(atom.Atom, names);
-    const is_lexical = try fd.memory.alloc(bool, fd.closure_var.len);
-    errdefer fd.memory.free(bool, is_lexical);
-    const is_const = try fd.memory.alloc(bool, fd.closure_var.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (names[0..initialized]) |atom_id| fd.atoms.free(atom_id);
-        fd.memory.free(bool, is_const);
-    }
-    for (fd.closure_var, 0..) |cv, idx| {
-        names[idx] = fd.atoms.dup(cv.var_name);
-        is_lexical[idx] = cv.is_lexical;
-        is_const[idx] = cv.is_const;
-        initialized += 1;
-    }
-    fb.var_ref_names = names;
-    fb.var_ref_is_lexical = is_lexical;
-    fb.var_ref_is_const = is_const;
 }
 
 fn installChildFunctionBytecodes(fd: *function_def_mod.FunctionDef, rt: anytype) FinalizeError!void {

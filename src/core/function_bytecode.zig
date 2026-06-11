@@ -98,13 +98,24 @@ pub const CallSite = struct {
 /// bytecode compile-time module.
 ///
 /// Field order matches QuickJS exactly for strong alignment (§1.5.3).
-/// Uses flat per-field allocation instead of QuickJS's single contiguous
-/// allocation - registered as deviation D2 in parser-deviation-matrix.md.
+///
+/// Storage layout: the finalize pipeline packs every read-only artifact
+/// slice (byte_code, cpool, atom tables, vardefs, pc2line, source, ...)
+/// into a single `block` allocation; the slice fields then point inside
+/// that block (see `BlockBuilder`). Fixtures that populate the fields with
+/// individual allocations leave `block` empty, and `deinit` falls back to
+/// the legacy per-slice frees. The IC tables (`ic_slots` / `ic_site_ids` /
+/// `ic_sites`) always stay independent allocations because they are
+/// runtime-mutable and independently released via `deinitIcSlots`.
 pub const FunctionBytecode = struct {
     header: gc.GCObjectHeader,
     gc: gc.GcNode = .{},
     memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
+
+    /// Consolidated storage for the read-only slices below. Empty when the
+    /// fields were populated with individual allocations (fixture path).
+    block: []u8 = &.{},
 
     // Flags (mirrors JSFunctionBytecode packed fields, same order as quickjs.c:770-782)
     is_strict_mode: bool = false,
@@ -192,6 +203,11 @@ pub const FunctionBytecode = struct {
     }
 
     pub fn deinit(self: *FunctionBytecode, rt: anytype) void {
+        // When `block` owns the storage the per-slice frees are skipped;
+        // only the per-element atom/value references are released and the
+        // block is freed once at the end.
+        const owned = self.block.len == 0;
+
         const func_name = self.func_name;
         const filename = self.filename;
         self.func_name = atom.null_atom;
@@ -202,30 +218,30 @@ pub const FunctionBytecode = struct {
         const byte_code = self.byte_code;
         self.byte_code = &.{};
         self.byte_code_len = 0;
-        if (byte_code.len != 0) self.memory.free(u8, byte_code);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.atom_operands);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.arg_names);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.var_names);
-        freeOwnedSlice(bool, self.memory, &self.var_is_lexical);
-        freeOwnedSlice(bool, self.memory, &self.var_is_const);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.var_ref_names);
-        freeOwnedSlice(bool, self.memory, &self.var_ref_is_lexical);
-        freeOwnedSlice(bool, self.memory, &self.var_ref_is_const);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.global_var_names);
+        if (owned and byte_code.len != 0) self.memory.free(u8, byte_code);
+        releaseAtomSlice(self.atoms, self.memory, &self.atom_operands, owned);
+        releaseAtomSlice(self.atoms, self.memory, &self.arg_names, owned);
+        releaseAtomSlice(self.atoms, self.memory, &self.var_names, owned);
+        releaseSlice(bool, self.memory, &self.var_is_lexical, owned);
+        releaseSlice(bool, self.memory, &self.var_is_const, owned);
+        releaseAtomSlice(self.atoms, self.memory, &self.var_ref_names, owned);
+        releaseSlice(bool, self.memory, &self.var_ref_is_lexical, owned);
+        releaseSlice(bool, self.memory, &self.var_ref_is_const, owned);
+        releaseAtomSlice(self.atoms, self.memory, &self.global_var_names, owned);
 
         const vardefs = self.vardefs;
         self.vardefs = &.{};
         for (vardefs) |*v| self.atoms.free(v.var_name);
-        if (vardefs.len != 0) self.memory.free(VarDef, vardefs);
+        if (owned and vardefs.len != 0) self.memory.free(VarDef, vardefs);
 
         const closure_var = self.closure_var;
         self.closure_var = &.{};
         for (closure_var) |*cv| self.atoms.free(cv.var_name);
-        if (closure_var.len != 0) self.memory.free(ClosureVar, closure_var);
+        if (owned and closure_var.len != 0) self.memory.free(ClosureVar, closure_var);
 
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.class_instance_fields);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.private_bound_names);
-        freeOwnedAtomSlice(self.atoms, self.memory, &self.class_private_names);
+        releaseAtomSlice(self.atoms, self.memory, &self.class_instance_fields, owned);
+        releaseAtomSlice(self.atoms, self.memory, &self.private_bound_names, owned);
+        releaseAtomSlice(self.atoms, self.memory, &self.class_private_names, owned);
         const class_fields_init = self.class_fields_init;
         self.class_fields_init = null;
         if (class_fields_init) |stored| stored.free(rt);
@@ -237,31 +253,39 @@ pub const FunctionBytecode = struct {
             slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
-        if (cpool.len != 0) self.memory.free(JSValue, cpool);
+        if (owned and cpool.len != 0) self.memory.free(JSValue, cpool);
 
         const pc2line_buf = self.pc2line_buf;
         self.pc2line_buf = &.{};
         self.pc2line_len = 0;
-        if (pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
+        if (owned and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
 
-        freeOwnedCallSites(self.atoms, self.memory, &self.call_sites);
+        releaseCallSites(self.atoms, self.memory, &self.call_sites, owned);
         if (self.source) |src| {
             self.source = null;
-            self.memory.free(u8, @constCast(src));
+            if (owned) self.memory.free(u8, @constCast(src));
         }
         self.source_len = 0;
         self.deinitIcSlots(&rt.shapes);
 
         const fusion_cold = self.fusion_cold;
         self.fusion_cold = &.{};
-        if (fusion_cold.len != 0) self.memory.free(u8, fusion_cold);
+        if (owned and fusion_cold.len != 0) self.memory.free(u8, fusion_cold);
 
         self.class_fields_init = null;
         self.cpool = &.{};
+
+        const block = self.block;
+        self.block = &.{};
+        if (block.len != 0) self.memory.freeAlignedBytes(block, block_alignment);
     }
 
     pub fn heapByteSize(self: *const FunctionBytecode) usize {
         var bytes: usize = @sizeOf(FunctionBytecode);
+        bytes = addSliceBytes(bytes, ic.Slot, self.ic_slots.len);
+        bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
+        bytes = addSliceBytes(bytes, ic.Site, self.ic_sites.len);
+        if (self.block.len != 0) return addSaturating(bytes, self.block.len);
         bytes = addSliceBytes(bytes, u8, self.byte_code.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.atom_operands.len);
         bytes = addSliceBytes(bytes, atom.Atom, self.arg_names.len);
@@ -279,10 +303,8 @@ pub const FunctionBytecode = struct {
         bytes = addSliceBytes(bytes, atom.Atom, self.class_private_names.len);
         bytes = addSliceBytes(bytes, JSValue, self.cpool.len);
         bytes = addSliceBytes(bytes, u8, self.pc2line_buf.len);
-        bytes = addSliceBytes(bytes, ic.Slot, self.ic_slots.len);
-        bytes = addSliceBytes(bytes, usize, self.ic_site_ids.len);
-        bytes = addSliceBytes(bytes, ic.Site, self.ic_sites.len);
         bytes = addSliceBytes(bytes, CallSite, self.call_sites.len);
+        bytes = addSliceBytes(bytes, u8, self.fusion_cold.len);
         if (self.source) |source| bytes = addSaturating(bytes, source.len);
         return bytes;
     }
@@ -309,24 +331,56 @@ pub const FunctionBytecode = struct {
     }
 };
 
-fn freeOwnedAtomSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]atom.Atom) void {
+/// Alignment of the consolidated `FunctionBytecode.block` allocation. Must
+/// cover the widest element type packed into the block.
+pub const block_alignment: std.mem.Alignment = .fromByteUnits(@max(
+    @alignOf(JSValue),
+    @alignOf(CallSite),
+    @alignOf(VarDef),
+    @alignOf(ClosureVar),
+    @alignOf(atom.Atom),
+));
+
+/// Computes the offsets/total size of the consolidated storage block.
+/// Callers reserve segments (largest alignment first keeps padding minimal)
+/// and then materialize them with `blockSlice` after a single allocation.
+pub const BlockBuilder = struct {
+    size: usize = 0,
+
+    pub fn reserve(self: *BlockBuilder, comptime T: type, len: usize) usize {
+        const offset = std.mem.alignForward(usize, self.size, @alignOf(T));
+        self.size = offset + len * @sizeOf(T);
+        return offset;
+    }
+};
+
+/// Reinterpret a segment of a `block_alignment`-aligned block as a typed
+/// slice. `offset` must come from `BlockBuilder.reserve` with the same `T`.
+pub fn blockSlice(block: []u8, comptime T: type, offset: usize, len: usize) []T {
+    if (len == 0) return &.{};
+    std.debug.assert(offset + len * @sizeOf(T) <= block.len);
+    const ptr: [*]T = @ptrCast(@alignCast(block.ptr + offset));
+    return ptr[0..len];
+}
+
+fn releaseAtomSlice(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]atom.Atom, owned: bool) void {
     const items = slot.*;
     slot.* = &.{};
     for (items) |atom_id| atoms.free(atom_id);
-    if (items.len != 0) mem.free(atom.Atom, items);
+    if (owned and items.len != 0) mem.free(atom.Atom, items);
 }
 
-fn freeOwnedCallSites(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]CallSite) void {
+fn releaseCallSites(atoms: *atom.AtomTable, mem: *memory.MemoryAccount, slot: *[]CallSite, owned: bool) void {
     const items = slot.*;
     slot.* = &.{};
     for (items) |site| atoms.free(site.atom_id);
-    if (items.len != 0) mem.free(CallSite, items);
+    if (owned and items.len != 0) mem.free(CallSite, items);
 }
 
-fn freeOwnedSlice(comptime T: type, mem: *memory.MemoryAccount, slot: *[]T) void {
+fn releaseSlice(comptime T: type, mem: *memory.MemoryAccount, slot: *[]T, owned: bool) void {
     const items = slot.*;
     slot.* = &.{};
-    if (items.len != 0) mem.free(T, items);
+    if (owned and items.len != 0) mem.free(T, items);
 }
 
 fn addSliceBytes(total: usize, comptime T: type, len: usize) usize {
