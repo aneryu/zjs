@@ -2948,8 +2948,8 @@ fn characterClassEscapeUnitMatches(byte: u8, unit: u16) ?bool {
     return switch (byte) {
         'd' => isAsciiDigitUnit(unit),
         'D' => !isAsciiDigitUnit(unit),
-        's' => isEcmaWhitespaceOrLineTerminatorUnit(unit),
-        'S' => !isEcmaWhitespaceOrLineTerminatorUnit(unit),
+        's' => unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit),
+        'S' => !unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit),
         'w' => isAsciiWordUnit(unit),
         'W' => !isAsciiWordUnit(unit),
         else => null,
@@ -2962,24 +2962,6 @@ fn isAsciiDigitUnit(unit: u16) bool {
 
 fn isAsciiWordUnit(unit: u16) bool {
     return unicode.isAsciiWordUnit(unit);
-}
-
-fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
-    return switch (unit) {
-        0x0009...0x000d,
-        0x0020,
-        0x00a0,
-        0x1680,
-        0x2000...0x200a,
-        0x2028,
-        0x2029,
-        0x202f,
-        0x205f,
-        0x3000,
-        0xfeff,
-        => true,
-        else => false,
-    };
 }
 
 fn validateNamedGroupNames(pattern: []const u8, is_unicode: bool) bool {
