@@ -12,7 +12,7 @@
 - `value.zig`: `JSValue` 表示与引用计数入口。
 - `object.zig`: JS 对象、属性表、prototype、class payload 和 child-edge tracing。
 - `function_bytecode.zig`: GC 管理的函数字节码对象。
-- `gc.zig`: GC registry、policy、外部内存记账、nursery/remembered-set 结构和统计。
+- `gc.zig`: GC registry、policy、外部内存记账和统计。
 
 已落地的生命周期模型是：
 
@@ -25,10 +25,25 @@
 - 宿主持有跨调用生命周期的值时，必须使用 public API 中的 handle /
   persistent-root 机制，而不是裸保存 `JSValue`。
 
-`src/core/gc.zig` 已包含 nursery、remembered set、minor request、external memory
-accounting 和 GC scheduler 的实现骨架与测试覆盖；但不要把它理解成已经具备
-moving generational / concurrent old-space GC 的完整生产实现。默认语义仍以
-引用计数、显式根和环清理为主。
+Z-GE 分代脚手架（nursery / remembered-set / dirty-card / minor 调度，默认
+关闭、从未投产）已按 Phase 4 计划整体移除（git 历史可找回）；`gc.zig` 保留
+RC + 循环回收主路径、old/large 空间记账与 GC scheduler。
+
+已评估待做（Phase 4 余项）：
+- 循环回收的 `visited`/`preserved`/`free_set` 三个 AutoHashMap（每轮全堆
+  hash put）可改为 header 2-bit 状态机，预期消除每轮 O(对象数) 的 hash
+  开销；改动触及 resurrection 与 weak 边扫描的核心正确性，需专门会话以
+  全门禁节奏实施。
+- weak identity 当前是裸 header 地址：deref 的 `liveObjectFromWeakIdentity`
+  双份 O(n) 全堆扫描兜底（且存在地址复用 ABA 误命中的理论风险）。已有
+  `borrowed_reference_holders` push 失效体系；方案是 weak_id（u64 递增）
+  双表（ptr→id、id→*Object）+ header flag 门控的销毁清理，替换扫描并根治
+  ABA。
+
+JSValue 表示（Phase 5）：访问器封装 pass 已完成——`core/value.zig` 之外的
+直接 `tag`/`payload` 字段访问为零（仅 `binding/ffi.zig` 的 comptime 布局
+反射保留，用于 NaN-boxing 切换时自动失配 ABI 指纹），NaN-boxing 的 8 字节
+表示可作为 build option 双模式实施。
 
 ## 2. Frontend And TypeScript Erasure
 
