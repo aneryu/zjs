@@ -1639,6 +1639,14 @@ const Compiler = struct {
 
     fn parseClass(self: *Compiler, start: usize, is_backward_dir: bool) CompileError!Atom {
         self.index += 1;
+        if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
+            var ranges = try self.parseClassSetBody();
+            defer ranges.deinit();
+            if (is_backward_dir) try self.emitOp(.prev);
+            try self.emitRangeSet(&ranges);
+            if (is_backward_dir) try self.emitOp(.prev);
+            return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
+        }
         var ranges = RangeSet.init(self.allocator);
         defer ranges.deinit();
         const invert = if (self.index < self.pattern.len and self.pattern[self.index] == '^') blk: {
@@ -1646,7 +1654,6 @@ const Compiler = struct {
             break :blk true;
         } else false;
         const body_start = self.index;
-        var has_class_set_lhs = false;
 
         while (self.index < self.pattern.len) {
             if (self.pattern[self.index] == ']') {
@@ -1660,25 +1667,144 @@ const Compiler = struct {
                 return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
             }
 
-            if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0 and
-                self.index + 1 < self.pattern.len and
-                self.pattern[self.index] == '&' and
-                self.pattern[self.index + 1] == '&')
-            {
-                if (!has_class_set_lhs) return error.InvalidPattern;
-                self.index += 2;
-                var rhs = try self.parseClassAtomOrRange(body_start);
-                defer rhs.deinit();
-                try ranges.intersectWith(&rhs);
-                continue;
-            }
-
             var atom_ranges = try self.parseClassAtomOrRange(body_start);
             defer atom_ranges.deinit();
             try ranges.addSet(&atom_ranges);
-            has_class_set_lhs = true;
         }
         return error.InvalidPattern;
+    }
+
+    fn atMatch(self: *const Compiler, needle: []const u8) bool {
+        return self.index + needle.len <= self.pattern.len and
+            std.mem.eql(u8, self.pattern[self.index..][0..needle.len], needle);
+    }
+
+    /// v-mode ClassSetExpression body. Entered just past the opening `[`
+    /// (top-level or nested); consumes through the matching `]`. The
+    /// expression is one of ClassUnion, ClassIntersection (`&&`-chain) or
+    /// ClassDifference (`--`-chain) — operators must not be mixed at one
+    /// level. Returns the resolved code-point set, case-folded per operand
+    /// when ignoring case and complemented when the class is negated.
+    /// String operands (`\q{...}`, properties of strings) are not
+    /// supported yet and stay rejected.
+    fn parseClassSetBody(self: *Compiler) CompileError!RangeSet {
+        const invert = if (self.index < self.pattern.len and self.pattern[self.index] == '^') blk: {
+            self.index += 1;
+            break :blk true;
+        } else false;
+
+        var result = RangeSet.init(self.allocator);
+        errdefer result.deinit();
+
+        if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
+            self.index += 1;
+            if (invert) try result.invert();
+            return result;
+        }
+
+        const first = try self.parseClassSetOperandRanges(true);
+        result.deinit();
+        result = first.set;
+
+        if (self.atMatch("--")) {
+            // ClassSetRange is only valid inside ClassUnion.
+            if (first.was_range) return error.InvalidPattern;
+            while (true) {
+                if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
+                    self.index += 1;
+                    break;
+                }
+                if (!self.atMatch("--")) return error.InvalidPattern;
+                self.index += 2;
+                var rhs = try self.parseClassSetOperandRanges(false);
+                defer rhs.set.deinit();
+                try rhs.set.invert();
+                try result.intersectWith(&rhs.set);
+            }
+        } else if (self.atMatch("&&")) {
+            if (first.was_range) return error.InvalidPattern;
+            while (true) {
+                if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
+                    self.index += 1;
+                    break;
+                }
+                if (!self.atMatch("&&")) return error.InvalidPattern;
+                self.index += 2;
+                var rhs = try self.parseClassSetOperandRanges(false);
+                defer rhs.set.deinit();
+                try result.intersectWith(&rhs.set);
+            }
+        } else {
+            while (true) {
+                if (self.index >= self.pattern.len) return error.InvalidPattern;
+                if (self.pattern[self.index] == ']') {
+                    self.index += 1;
+                    break;
+                }
+                // Operators must not appear in a union chain.
+                if (self.atMatch("--") or self.atMatch("&&")) return error.InvalidPattern;
+                var rhs = try self.parseClassSetOperandRanges(true);
+                defer rhs.set.deinit();
+                try result.addSet(&rhs.set);
+            }
+        }
+        try result.normalize();
+        if (invert) try result.invert();
+        return result;
+    }
+
+    const ClassSetOperandResult = struct { set: RangeSet, was_range: bool };
+
+    /// One ClassSetOperand (or, when `allow_range`, a ClassSetRange) of a
+    /// v-mode class set expression. The caller owns the returned set.
+    fn parseClassSetOperandRanges(self: *Compiler, allow_range: bool) CompileError!ClassSetOperandResult {
+        if (self.index >= self.pattern.len) return error.InvalidPattern;
+        const raw = self.pattern[self.index];
+        if (raw == ']') return error.InvalidPattern;
+        if (raw == '[') {
+            // Nested class.
+            self.index += 1;
+            const set = try self.parseClassSetBody();
+            return .{ .set = set, .was_range = false };
+        }
+        if (raw != '\\') {
+            // A lone `-` is a ClassSetSyntaxCharacter: never a valid
+            // operand start in v-mode (ranges consume their hyphen below).
+            if (isUnicodeSetsReservedClassByte(raw, true)) return error.InvalidPattern;
+            if (self.index + 1 < self.pattern.len and isUnicodeSetsReservedDoublePunctuator(raw, self.pattern[self.index + 1])) {
+                return error.InvalidPattern;
+            }
+        } else if (self.index + 1 < self.pattern.len and self.pattern[self.index + 1] == 'q') {
+            // ClassStringDisjunction \q{...}: string sets unimplemented.
+            return error.InvalidPattern;
+        }
+
+        var ranges = RangeSet.init(self.allocator);
+        errdefer ranges.deinit();
+        var was_range = false;
+
+        const first = try self.parseClassAtom();
+        const can_be_range = allow_range and first == .code_point and
+            self.index + 1 < self.pattern.len and
+            self.pattern[self.index] == '-' and
+            self.pattern[self.index + 1] != ']' and
+            self.pattern[self.index + 1] != '-';
+        if (can_be_range) {
+            self.index += 1;
+            var second = try self.parseClassAtom();
+            if (second != .code_point) {
+                second.ranges.deinit();
+                return error.InvalidPattern;
+            }
+            if (second.code_point < first.code_point) return error.InvalidPattern;
+            try ranges.addInclusive(first.code_point, second.code_point);
+            was_range = true;
+        } else {
+            try ranges.addAtom(first);
+        }
+        try ranges.normalize();
+        if (self.flags.ignore_case) try ranges.regexpCanonicalize(true);
+        return .{ .set = ranges, .was_range = was_range };
     }
 
     fn parseClassAtomOrRange(self: *Compiler, body_start: usize) CompileError!RangeSet {
