@@ -8617,6 +8617,7 @@ pub fn callBoundFunction(
 pub fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) ![]core.JSValue {
     const bound_args = object.boundArgs();
     const bound_count = bound_args.len;
+    if (bound_count == 0 and args.len == 0) return &.{};
     const combined = try rt.memory.alloc(core.JSValue, bound_count + args.len);
     errdefer rt.memory.free(core.JSValue, combined);
     var filled: usize = 0;

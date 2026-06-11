@@ -3374,27 +3374,7 @@ fn reflectApply(
     return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, args[1], args[0], apply_args.values);
 }
 
-const ValueSliceRoot = struct {
-    rt: ?*core.JSRuntime = null,
-    slices: [1]core.runtime.ValueRootSlice = undefined,
-    frame: core.runtime.ValueRootFrame = .{},
-
-    fn init(self: *ValueSliceRoot, rt: *core.JSRuntime, values: *[]core.JSValue) void {
-        self.rt = rt;
-        self.slices[0] = .{ .mutable = values };
-        self.frame = .{
-            .previous = rt.active_value_roots,
-            .slices = &self.slices,
-        };
-        rt.active_value_roots = &self.frame;
-    }
-
-    fn deinit(self: *ValueSliceRoot) void {
-        const rt = self.rt orelse return;
-        rt.active_value_roots = self.frame.previous;
-        self.rt = null;
-    }
-};
+const ValueSliceRoot = shared_vm.ValueSliceRoot;
 
 const ReflectConstructArguments = struct {
     rt: ?*core.JSRuntime = null,
@@ -4971,36 +4951,9 @@ fn callBoundFunction(
 ) HostError!core.JSValue {
     const target = object.boundTarget() orelse return error.TypeError;
     const bound_this = object.boundThis() orelse return error.TypeError;
-    const combined = try boundFunctionArgs(ctx.runtime, object, args);
-    defer freeBoundArgs(ctx.runtime, combined);
+    const combined = try shared_vm.boundFunctionArgs(ctx.runtime, object, args);
+    defer shared_vm.freeArgs(ctx.runtime, combined);
     return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, bound_this, target, combined);
-}
-
-fn freeBoundArgs(rt: *core.JSRuntime, args: []core.JSValue) void {
-    for (args) |arg| arg.free(rt);
-    if (args.len != 0) rt.memory.free(core.JSValue, args);
-}
-
-fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []const core.JSValue) ![]core.JSValue {
-    const bound_args = object.boundArgs();
-    const bound_count = bound_args.len;
-    if (bound_count == 0 and args.len == 0) return &.{};
-    const combined = try rt.memory.alloc(core.JSValue, bound_count + args.len);
-    errdefer rt.memory.free(core.JSValue, combined);
-    var filled: usize = 0;
-    errdefer {
-        var index: usize = 0;
-        while (index < filled) : (index += 1) combined[index].free(rt);
-    }
-    for (bound_args, 0..) |arg, index| {
-        combined[index] = arg.dup();
-        filled += 1;
-    }
-    for (args, 0..) |arg, arg_index| {
-        combined[bound_count + arg_index] = arg.dup();
-        filled += 1;
-    }
-    return combined;
 }
 
 fn objectToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
@@ -5316,14 +5269,7 @@ fn nativeFunctionDispatchName(rt: *core.JSRuntime, function_object: *core.Object
 }
 
 fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, prefer_dispatch_name: bool) !core.JSValue {
-    if (prefer_dispatch_name) {
-        const dispatch_atom = function_object.nativeDispatchName();
-        if (dispatch_atom != core.atom.null_atom) {
-            const dispatch_name = try rt.atoms.toStringValue(rt, dispatch_atom);
-            if (dispatch_name.isString()) return dispatch_name;
-            dispatch_name.free(rt);
-        }
-    }
+    if (prefer_dispatch_name) return shared_vm.nativeFunctionNameValueLocal(rt, function_object);
     const name_value = function_object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) {
         name_value.free(rt);
@@ -5332,10 +5278,7 @@ fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, p
     return name_value;
 }
 
-fn functionBytecodeFromValue(value: core.JSValue) ?*const function_bytecode.FunctionBytecode {
-    const header = value.objectHeader() orelse return null;
-    return @fieldParentPtr("header", header);
-}
+const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
 
 fn functionBytecodeToStringValue(
     rt: *core.JSRuntime,
@@ -5442,14 +5385,7 @@ fn thisObject(value: core.JSValue) ?*core.Object {
     return @fieldParentPtr("header", header);
 }
 
-fn constructorNameEql(rt: *core.JSRuntime, object: *core.Object, expected: []const u8) !bool {
-    const name_value = nativeFunctionNameValue(rt, object, true) catch return false;
-    defer name_value.free(rt);
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try value_ops.appendRawString(rt, &buffer, name_value);
-    return std.mem.eql(u8, buffer.items, expected);
-}
+const constructorNameEql = shared_vm.constructorNameEqlLocal;
 
 fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object {
     const prototype_value = object.getProperty(core.atom.ids.prototype);

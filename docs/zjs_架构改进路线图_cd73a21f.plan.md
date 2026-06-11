@@ -31,7 +31,7 @@ todos:
     status: pending
   - id: p3-regexp-rope
     content: "Phase 3: 修复 UnicodeSets 排除项与 duplicate named groups；实现 String rope"
-    status: in_progress
+    status: completed
   - id: p4-atom-string
     content: "Phase 4: Atom/String 合一（参照 JSAtomStruct==JSString）+ atom 槽位回收"
     status: pending
