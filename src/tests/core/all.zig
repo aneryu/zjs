@@ -860,16 +860,22 @@ test "strings compare by code unit across storage widths" {
     try std.testing.expect(b.compare(a.*) > 0);
 }
 
-test "atom-backed strings retain atom until string free" {
+test "atom table retains its cached string until the atom dies" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
     const atom_id = try rt.internAtom("ownedAtomName");
     const atom_string = try core.string.String.createAtomBacked(rt, atom_id);
-    rt.atoms.free(atom_id);
-    try std.testing.expect(rt.atoms.name(atom_id) != null);
-    try std.testing.expect(atom_string.eqlBytes("ownedAtomName"));
+    // The table caches the materialized string; repeat conversions reuse it.
+    const again = try core.string.String.createAtomBacked(rt, atom_id);
+    try std.testing.expect(again == atom_string);
+    again.value().free(rt);
+    // Releasing the string does not release the atom: `atom_id` is a weak
+    // back-pointer, and the table keeps its own string reference.
     atom_string.value().free(rt);
+    try std.testing.expect(rt.atoms.name(atom_id) != null);
+    // The last atom reference frees the entry together with its string.
+    rt.atoms.free(atom_id);
     try std.testing.expect(rt.atoms.name(atom_id) == null);
 }
 

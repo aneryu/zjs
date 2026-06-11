@@ -714,6 +714,7 @@ pub const JSRuntime = struct {
         rt.memory.setLimit(options.memory_limit);
         rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
         rt.atoms = atom.AtomTable.init(&rt.memory);
+        rt.atoms.runtime = rt;
         try rt.classes.initInPlace(&rt.memory, &rt.atoms);
         errdefer {
             rt.classes.deinit();
@@ -871,6 +872,10 @@ pub const JSRuntime = struct {
         self.drainDeferredClassPayloadFinalizers();
         self.clearBorrowedWeakCleanupIdentities();
         self.clearPendingFinalizationJobs();
+        // Release the atom table's materialized strings while string
+        // destruction is still operational; `atoms.deinit` (after the GC
+        // teardown below) asserts no cached strings remain.
+        self.atoms.releaseCachedStrings(self);
         self.gc.deinit(self);
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
@@ -1898,9 +1903,9 @@ pub const JSRuntime = struct {
         }
 
         const created = try string.String.createUtf8(self, bytes);
-        if (self.atoms.kind(atom_id) == .string) {
-            created.atom_id = self.atoms.dup(atom_id);
-        }
+        // Seeds the weak back-pointer (and, for non-tagged string atoms,
+        // the table-side cache); no-op for symbol atoms.
+        self.atoms.cacheString(atom_id, created);
         const slot_index = self.recent_atom_string_next % self.recent_atom_strings.len;
         const old = self.recent_atom_strings[slot_index];
         self.recent_atom_strings[slot_index] = .{

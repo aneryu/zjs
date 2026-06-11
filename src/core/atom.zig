@@ -1,5 +1,7 @@
+const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const string = @import("string.zig");
+const JSRuntime = @import("runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
 pub const Atom = u32;
@@ -765,6 +767,13 @@ const predefined_private_map = blk: {
 pub const DynamicAtom = struct {
     id: Atom,
     bytes: []u8,
+    /// Lazily materialized runtime string for this atom (string kind only).
+    /// The table owns one reference; the string's `atom_id` is a weak
+    /// back-pointer (it does not hold an atom reference), so there is no
+    /// rc cycle: the cached string cannot die while it sits in the table,
+    /// and when the atom's ref count reaches zero the table clears the
+    /// back-pointer and releases its string reference.
+    str: ?*string.String = null,
     /// Link in the table's free-slot list, only meaningful while the entry
     /// is dead (`ref_count == 0`). `no_free_slot` terminates the list.
     next_free: EntryIndex = no_free_slot,
@@ -806,6 +815,10 @@ const InternMap = std.HashMapUnmanaged(InternKey, EntryIndex, InternContext, std
 
 pub const AtomTable = struct {
     memory: *memory.MemoryAccount,
+    /// Owning runtime, set right after init. Needed to release cached
+    /// strings (`DynamicAtom.str`) when an atom dies. Tables created
+    /// without a runtime (frontend-only tests) never cache strings.
+    runtime: ?*JSRuntime = null,
     entries: []DynamicAtom = &.{},
     /// Geometric-growth capacity for `entries`. The visible slice length
     /// is the live count; the backing buffer extends to `entries_capacity`.
@@ -822,6 +835,11 @@ pub const AtomTable = struct {
     /// retargeted. Predefined atom ids live below `first_dynamic_atom`
     /// and never enter `entries`, so they are never recycled.
     free_slot_head: EntryIndex = no_free_slot,
+    /// Lazily materialized strings for predefined string-kind atoms,
+    /// indexed by `id - 1`. Same ownership rules as `DynamicAtom.str`;
+    /// predefined ids are never recycled, so entries here are released
+    /// only by `releaseCachedStrings`.
+    predefined_str: [predefined_count]?*string.String = @splat(null),
     pub fn init(account: *memory.MemoryAccount) AtomTable {
         return .{ .memory = account };
     }
@@ -834,13 +852,38 @@ pub const AtomTable = struct {
         self.entries_capacity = 0;
         self.string_index.deinit(account.persistent_allocator);
         self.symbol_index.deinit(account.persistent_allocator);
+        for (&self.predefined_str) |slot| std.debug.assert(slot == null);
         for (entries) |*entry| {
+            // Cached strings must have been released through `free` or
+            // `releaseCachedStrings` while the runtime was still usable.
+            std.debug.assert(entry.str == null);
             const bytes = entry.bytes;
             entry.bytes = &.{};
             if (bytes.len != 0) account.free(u8, bytes);
         }
         self.* = .{ .memory = account };
         if (backing.len != 0) account.free(DynamicAtom, backing);
+    }
+
+    /// Drop every cached atom string (dynamic and predefined). Called by
+    /// the runtime during teardown, while string destruction is still
+    /// fully operational, so `deinit` never has to touch the GC.
+    pub fn releaseCachedStrings(self: *AtomTable, rt: anytype) void {
+        for (&self.predefined_str) |*slot| {
+            if (slot.*) |cached| {
+                slot.* = null;
+                // Predefined ids are never recycled, so the weak
+                // back-pointer can stay valid on the string.
+                gc.release(rt, &cached.header);
+            }
+        }
+        for (self.entries) |*entry| {
+            if (entry.str) |cached| {
+                entry.str = null;
+                cached.atom_id = null;
+                gc.release(rt, &cached.header);
+            }
+        }
     }
 
     pub fn internString(self: *AtomTable, bytes: []const u8) !Atom {
@@ -933,6 +976,12 @@ pub const AtomTable = struct {
                 },
                 .private => {},
             }
+            if (entry.str) |cached| {
+                entry.str = null;
+                std.debug.assert(cached.atom_id == atom);
+                cached.atom_id = null;
+                gc.release(self.runtime.?, &cached.header);
+            }
             const bytes = entry.bytes;
             entry.bytes = &.{};
             if (bytes.len != 0) self.memory.free(u8, bytes);
@@ -977,7 +1026,7 @@ pub const AtomTable = struct {
         return null;
     }
 
-    pub fn toStringValue(self: *const AtomTable, rt: anytype, atom_id: Atom) !JSValue {
+    pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
         if (isTaggedInt(atom_id)) {
             var buf: [10]u8 = undefined;
             const text = try std.fmt.bufPrint(&buf, "{d}", .{atomToUInt32(atom_id)});
@@ -997,8 +1046,58 @@ pub const AtomTable = struct {
             const created = try string.String.createUtf8(rt, text);
             return created.value();
         }
-        const cached = try rt.recentAtomString(atom_id, text);
-        return cached.value().dup();
+        if (self.cachedString(atom_id)) |cached| return cached.value().dup();
+        const created = try string.String.createUtf8(rt, text);
+        self.cacheString(atom_id, created);
+        return created.value();
+    }
+
+    /// Borrowed lookup of the lazily materialized string for a string-kind
+    /// atom. Returns null for tagged ints, dead atoms, and atoms that were
+    /// never converted.
+    pub fn cachedString(self: *const AtomTable, atom_id: Atom) ?*string.String {
+        if (atom_id == null_atom or isTaggedInt(atom_id)) return null;
+        if (isConst(atom_id)) return self.predefined_str[atom_id - 1];
+        const entry = self.findDynamicConst(atom_id) orelse return null;
+        if (!entry.isLive()) return null;
+        return entry.str;
+    }
+
+    /// Bind `s` as the materialized string for `atom_id`, if the slot is
+    /// free and `s` is not already bound elsewhere. The table takes one
+    /// string reference; `s.atom_id` becomes a weak back-pointer (no atom
+    /// reference) cleared when the atom dies. First binding wins; a
+    /// content-equal string interned later simply stays unbound. No-op for
+    /// non-string atoms, so a symbol's description never converts back
+    /// into the symbol atom.
+    pub fn cacheString(self: *AtomTable, atom_id: Atom, s: *string.String) void {
+        if (s.atom_id != null) return;
+        if (isTaggedInt(atom_id)) {
+            // Tagged ints have no table entry, but the id encodes the
+            // value itself and is never recycled: a bare back-pointer is
+            // always safe and makes future internAtom calls free.
+            s.atom_id = atom_id;
+            return;
+        }
+        if (atom_id == null_atom) return;
+        if (isConst(atom_id)) {
+            const pre = predefined_atoms[atom_id - 1];
+            if (pre.kind != .string) return;
+            // Predefined ids are never recycled either, so the weak
+            // back-pointer is safe even when the cache slot is taken.
+            s.atom_id = atom_id;
+            const slot = &self.predefined_str[atom_id - 1];
+            if (slot.* == null) {
+                slot.* = s;
+                gc.retain(&s.header);
+            }
+            return;
+        }
+        const entry = self.findDynamic(atom_id) orelse return;
+        if (!entry.isLive() or entry.kind != .string or entry.str != null) return;
+        entry.str = s;
+        gc.retain(&s.header);
+        s.atom_id = atom_id;
     }
 
     fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, gc_managed_symbol: bool) !Atom {
@@ -1028,6 +1127,7 @@ pub const AtomTable = struct {
             const entry = &self.entries[idx];
             std.debug.assert(!entry.isLive());
             std.debug.assert(entry.id == @as(Atom, @intCast(idx)) + first_dynamic_atom);
+            std.debug.assert(entry.str == null);
             self.free_slot_head = entry.next_free;
             entry.bytes = owned;
             entry.kind = atom_kind;

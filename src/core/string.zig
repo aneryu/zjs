@@ -1,3 +1,4 @@
+const atom_mod = @import("atom.zig");
 const gc = @import("gc.zig");
 const unicode = @import("../libs/unicode.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
@@ -182,14 +183,18 @@ pub const String = struct {
     }
 
     pub fn createAtomBacked(rt: *JSRuntime, atom_id: u32) !*String {
+        // Atom-table cache hit: hand out one more reference to the string
+        // already materialized for this atom, skipping the UTF-8 decode.
+        if (rt.atoms.cachedString(atom_id)) |cached| {
+            gc.retain(&cached.header);
+            return cached;
+        }
         const name = rt.atoms.name(atom_id) orelse return error.InvalidAtom;
         const self = try createUtf8(rt, name);
-        // Only string-kind atoms may seed the bidirectional cache: a
-        // symbol's description string must not convert back into the
-        // symbol atom when later used as a property key.
-        if (rt.atoms.kind(atom_id) == .string) {
-            self.atom_id = rt.atoms.dup(atom_id);
-        }
+        // `cacheString` only binds string-kind atoms: a symbol's
+        // description string must not convert back into the symbol atom
+        // when later used as a property key.
+        rt.atoms.cacheString(atom_id, self);
         return self;
     }
 
@@ -198,10 +203,12 @@ pub const String = struct {
     ///
     /// The atom name uses the same UTF-8/WTF-8 encoding the lexer and the
     /// JSON parser produce, so keys built from runtime strings unify with
-    /// keys interned from source text. The id is cached on `atom_id` (the
-    /// cache holds its own atom reference, released on destroy), making
-    /// repeated conversions of the same string a ref-count bump; the
-    /// reverse direction (`AtomTable.toStringValue`) seeds the same cache.
+    /// keys interned from source text. The string is then bound into the
+    /// atom table's per-atom string cache (`AtomTable.cacheString`): the
+    /// table holds a string reference and `atom_id` becomes a weak
+    /// back-pointer, making repeated conversions of the same string a
+    /// ref-count bump; the reverse direction (`AtomTable.toStringValue`)
+    /// reuses the same cached string with zero conversion.
     /// Rope-backed strings are flattened by the content read.
     pub fn internAtom(self: *String, rt: *JSRuntime) !u32 {
         if (self.atom_id) |cached| return rt.atoms.dup(cached);
@@ -218,7 +225,7 @@ pub const String = struct {
                 break :blk try rt.atoms.internString(utf8.items);
             },
         };
-        self.atom_id = rt.atoms.dup(atom_id);
+        rt.atoms.cacheString(atom_id, self);
         return atom_id;
     }
 
@@ -639,7 +646,13 @@ pub const String = struct {
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         const self: *String = @alignCast(@fieldParentPtr("header", header));
-        if (self.atom_id) |atom_id| rt.atoms.free(atom_id);
+        // `atom_id` is a weak back-pointer: it holds no atom reference.
+        // A string bound to a live dynamic atom cannot be destroyed (the
+        // atom table holds a reference), so reaching here with a dynamic
+        // id would mean the table failed to clear the back-pointer.
+        if (self.atom_id) |atom_id| {
+            std.debug.assert(atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id));
+        }
         destroyUninitialized(rt, self);
     }
 
@@ -811,7 +824,11 @@ fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
     while (pending.*) |wrapper| {
         const node = wrapper.data.rope;
         pending.* = node.chain_next;
-        if (wrapper.atom_id) |atom_id| rt.atoms.free(atom_id);
+        // `atom_id` is a weak back-pointer; nothing to release here. A
+        // wrapper bound to a live dynamic atom cannot reach rc 0.
+        if (wrapper.atom_id) |atom_id| {
+            std.debug.assert(atom_mod.isConst(atom_id) or atom_mod.isTaggedInt(atom_id));
+        }
         switch (node.flat) {
             .none => {
                 releaseStringRefIntoChain(rt, node.left, pending);
@@ -826,7 +843,7 @@ fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
 }
 
 fn destroyRopeWrapper(rt: *JSRuntime, self: *String) void {
-    self.atom_id = null; // already released by destroyFromHeader
+    self.atom_id = null; // weak back-pointer, already validated by destroyFromHeader
     self.data.rope.chain_next = null;
     var pending: ?*String = self;
     drainRopeDestroyChain(rt, &pending);
