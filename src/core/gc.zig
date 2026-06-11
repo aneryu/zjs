@@ -323,7 +323,15 @@ pub const BlockFlags = packed struct(u8) {
     in_cycle_list: bool = false,
     finalizing: bool = false,
     is_pinned: bool = false,
-    _reserved: u4 = 0,
+    /// Cycle-removal scan state (valid only during destroyRuntimeCyclesWithValueRoots;
+    /// unconditionally re-initialized at the start of every cycle-removal round).
+    /// `cycle_visited` = object participates in the current scan (was on the live or
+    /// garbage list when the round started). `cycle_preserved` = object is known live
+    /// (initially live, or resurrected). Free/garbage membership is derived as
+    /// `cycle_visited and !cycle_preserved`.
+    cycle_visited: bool = false,
+    cycle_preserved: bool = false,
+    _reserved: u2 = 0,
 };
 
 /// Z-GE v1.0 8-byte BlockHeader
@@ -597,9 +605,6 @@ pub const Registry = struct {
     stats: GeStats = .{},
 
     // Reusable structures for cycle detection
-    visited: std.AutoHashMap(usize, void),
-    preserved: std.AutoHashMap(usize, void),
-    free_set: std.AutoHashMap(usize, void),
     preserved_bytecodes: std.AutoHashMap(usize, void),
     object_worklist: std.ArrayList(*object.Object),
     bytecode_worklist: std.ArrayList(*FunctionBytecode),
@@ -610,9 +615,6 @@ pub const Registry = struct {
             .policy = policy,
             .old_space = .{},
             .large_space = .{},
-            .visited = std.AutoHashMap(usize, void).init(account.persistent_allocator),
-            .preserved = std.AutoHashMap(usize, void).init(account.persistent_allocator),
-            .free_set = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .preserved_bytecodes = std.AutoHashMap(usize, void).init(account.persistent_allocator),
             .object_worklist = std.ArrayList(*object.Object).empty,
             .bytecode_worklist = std.ArrayList(*FunctionBytecode).empty,
@@ -639,9 +641,6 @@ pub const Registry = struct {
         self.gc_obj_list_head = null;
         self.gc_obj_list_tail = null;
 
-        self.visited.deinit();
-        self.preserved.deinit();
-        self.free_set.deinit();
         self.preserved_bytecodes.deinit();
         self.object_worklist.deinit(self.memory.persistent_allocator);
         self.bytecode_worklist.deinit(self.memory.persistent_allocator);

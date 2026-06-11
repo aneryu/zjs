@@ -5207,34 +5207,31 @@ pub const Object = struct {
             }
         }
 
-        var visited = &rt.gc.visited;
-        visited.clearRetainingCapacity();
-        var preserved = &rt.gc.preserved;
-        preserved.clearRetainingCapacity();
-        var free_set = &rt.gc.free_set;
-        free_set.clearRetainingCapacity();
-
-        // Populate visited and preserved from live list
+        // Initialize the per-header cycle-scan bits. These traversals touch every
+        // candidate node, so bits possibly left set by a previous (early-exited)
+        // round are unconditionally reset here before any query.
+        // visited bit: object participates in this scan.
+        // preserved bit: object is currently known live.
+        // Free/garbage membership is derived as (cycle_visited and !cycle_preserved).
+        var preserved_count: usize = 0;
         {
             var current = rt.gc.gc_obj_list_head;
             while (current) |node| : (current = node.next) {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    try visited.put(@intFromPtr(obj), {});
-                    try preserved.put(@intFromPtr(obj), {});
+                    h.flags.cycle_visited = true;
+                    h.flags.cycle_preserved = true;
+                    preserved_count += 1;
                 }
             }
         }
-        // Populate visited and free_set from garbage list
         {
             var current = tmp_head;
             while (current) |node| : (current = node.next) {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    try visited.put(@intFromPtr(obj), {});
-                    try free_set.put(@intFromPtr(obj), {});
+                    h.flags.cycle_visited = true;
+                    h.flags.cycle_preserved = false;
                 }
             }
         }
@@ -5243,13 +5240,11 @@ pub const Object = struct {
         defer symbol_roots.deinit();
         try seedSymbolRootsFromRuntimeHeldValues(rt, roots, &symbol_roots);
 
-        try scanPreservedWeakAndFinalizationEdges(rt, visited, preserved, &symbol_roots);
+        try scanPreservedWeakAndFinalizationEdges(rt, tmp_head, &symbol_roots, &preserved_count);
 
         const ResurrectHelper = struct {
             pub fn scanAndPreserveValue(
                 runtime: *JSRuntime,
-                visited_set: *const ObjectVisitSet,
-                preserved_set: *ObjectVisitSet,
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
@@ -5258,13 +5253,10 @@ pub const Object = struct {
             ) ObjectGraphError!void {
                 try preserveSymbolValue(runtime, symbol_roots_set, val);
                 if (objectFromValue(val)) |obj| {
-                    const addr = @intFromPtr(obj);
-                    if (visited_set.contains(addr)) {
-                        const entry = try preserved_set.getOrPut(addr);
-                        if (!entry.found_existing) {
-                            try object_worklist.append(runtime.memory.persistent_allocator, obj);
-                            runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
-                        }
+                    if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
+                        obj.header.flags.cycle_preserved = true;
+                        try object_worklist.append(runtime.memory.persistent_allocator, obj);
+                        runtime.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                     }
                 } else if (functionBytecodeFromValue(val)) |const_fb| {
                     const fb = @constCast(const_fb);
@@ -5279,8 +5271,6 @@ pub const Object = struct {
 
             pub fn scanBytecodeChildObjectsAndBytecodes(
                 runtime: *JSRuntime,
-                visited_set: *const ObjectVisitSet,
-                preserved_set: *ObjectVisitSet,
                 preserved_bytecodes: *ObjectVisitSet,
                 symbol_roots_set: *SymbolRootSet,
                 object_worklist: *std.ArrayList(*Object),
@@ -5288,18 +5278,16 @@ pub const Object = struct {
                 fb: *FunctionBytecode,
             ) ObjectGraphError!void {
                 if (fb.class_fields_init) |val| {
-                    try scanAndPreserveValue(runtime, visited_set, preserved_set, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
                 }
                 for (fb.cpool) |val| {
-                    try scanAndPreserveValue(runtime, visited_set, preserved_set, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
+                    try scanAndPreserveValue(runtime, preserved_bytecodes, symbol_roots_set, object_worklist, bytecode_worklist, val);
                 }
             }
         };
 
         const ObjectResurrectVisitor = struct {
             rt: *JSRuntime,
-            visited_set: *const ObjectVisitSet,
-            preserved_set: *ObjectVisitSet,
             preserved_bytecodes: *ObjectVisitSet,
             symbol_roots_set: *SymbolRootSet,
             object_worklist: *std.ArrayList(*Object),
@@ -5309,13 +5297,10 @@ pub const Object = struct {
             pub fn visitObject(self: *@This(), obj_ptr: *?*Object) ObjectGraphError!void {
                 if (obj_ptr.*) |obj| {
                     if (@intFromPtr(obj) == 0) return;
-                    const addr = @intFromPtr(obj);
-                    if (self.visited_set.contains(addr)) {
-                        const entry = try self.preserved_set.getOrPut(addr);
-                        if (!entry.found_existing) {
-                            try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
-                            self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
-                        }
+                    if (obj.header.flags.cycle_visited and !obj.header.flags.cycle_preserved) {
+                        obj.header.flags.cycle_preserved = true;
+                        try self.object_worklist.append(self.rt.memory.persistent_allocator, obj);
+                        self.rt.gc.recordMarkStackDepth(self.object_worklist.items.len + self.bytecode_worklist.items.len);
                     }
                 }
             }
@@ -5323,8 +5308,6 @@ pub const Object = struct {
             pub fn visitValue(self: *@This(), val_ptr: *JSValue) ObjectGraphError!void {
                 try ResurrectHelper.scanAndPreserveValue(
                     self.rt,
-                    self.visited_set,
-                    self.preserved_set,
                     self.preserved_bytecodes,
                     self.symbol_roots_set,
                     self.object_worklist,
@@ -5357,13 +5340,21 @@ pub const Object = struct {
         var bytecode_worklist = &rt.gc.bytecode_worklist;
         bytecode_worklist.clearRetainingCapacity();
 
-        // Initialize object worklist with all objects currently in preserved
+        // Initialize object worklist with all objects currently preserved. At this
+        // point preserved objects live either on the live list (all of them) or on
+        // the garbage list (resurrected via weak/finalization edges, not yet moved).
         {
-            var iterator = preserved.keyIterator();
-            while (iterator.next()) |address| {
-                const obj: *Object = @ptrFromInt(address.*);
-                try object_worklist.append(rt.memory.persistent_allocator, obj);
-                rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
+            for (list_heads) |list_head| {
+                var current = list_head;
+                while (current) |node| : (current = node.next) {
+                    const h = gc.headerFromGcNode(node);
+                    if (h.kind == .object and h.flags.cycle_preserved) {
+                        const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                        try object_worklist.append(rt.memory.persistent_allocator, obj);
+                        rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
+                    }
+                }
             }
         }
 
@@ -5374,8 +5365,6 @@ pub const Object = struct {
                 rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 var visitor = ObjectResurrectVisitor{
                     .rt = rt,
-                    .visited_set = visited,
-                    .preserved_set = preserved,
                     .preserved_bytecodes = preserved_bytecodes,
                     .symbol_roots_set = &symbol_roots,
                     .object_worklist = object_worklist,
@@ -5389,8 +5378,6 @@ pub const Object = struct {
                 rt.gc.recordMarkStackDepth(object_worklist.items.len + bytecode_worklist.items.len);
                 try ResurrectHelper.scanBytecodeChildObjectsAndBytecodes(
                     rt,
-                    visited,
-                    preserved,
                     preserved_bytecodes,
                     &symbol_roots,
                     object_worklist,
@@ -5407,8 +5394,7 @@ pub const Object = struct {
                 const next = node.next;
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    if (preserved.contains(@intFromPtr(obj))) {
+                    if (h.flags.cycle_preserved) {
                         unlinkNodeFromList(&tmp_head, &tmp_tail, node);
                         linkNodeToList(&rt.gc.gc_obj_list_head, &rt.gc.gc_obj_list_tail, node);
                         h.flags.mark = false;
@@ -5425,18 +5411,9 @@ pub const Object = struct {
             }
         }
 
-        // Re-sync free_set
-        free_set.clearRetainingCapacity();
-        {
-            var current = tmp_head;
-            while (current) |node| : (current = node.next) {
-                const h = gc.headerFromGcNode(node);
-                if (h.kind == .object) {
-                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                    try free_set.put(@intFromPtr(obj), {});
-                }
-            }
-        }
+        // Free/garbage membership needs no re-sync: it is derived from the header
+        // bits as (cycle_visited and !cycle_preserved), which now exactly matches
+        // the objects remaining on the garbage list.
 
         var free_internal_bytecodes = ObjectVisitSet.init(rt.memory.allocator);
         defer free_internal_bytecodes.deinit();
@@ -5451,14 +5428,28 @@ pub const Object = struct {
             }
         }
 
+        // Snapshot all preserved objects (after the move-back they are exactly the
+        // live-list objects with the preserved bit set). The snapshot keeps the
+        // guard/unguard loops below safe against list mutation while weak sweeping
+        // and guard release may destroy nodes. The object worklist is empty here,
+        // so reuse its buffer.
+        std.debug.assert(object_worklist.items.len == 0);
+        {
+            var current = rt.gc.gc_obj_list_head;
+            while (current) |node| : (current = node.next) {
+                const h = gc.headerFromGcNode(node);
+                if (h.kind == .object and h.flags.cycle_preserved) {
+                    const obj: *Object = @alignCast(@fieldParentPtr("header", h));
+                    try object_worklist.append(rt.memory.persistent_allocator, obj);
+                }
+            }
+        }
+        const preserved_objects: []const *Object = object_worklist.items;
+
         // Temporarily increment ref counts of all preserved objects and bytecodes
         // to prevent them from being destroyed/freed during weak entries sweeping.
-        {
-            var iterator = preserved.keyIterator();
-            while (iterator.next()) |address| {
-                const current: *Object = @ptrFromInt(address.*);
-                current.header.rc += 1;
-            }
+        for (preserved_objects) |current| {
+            current.header.rc += 1;
         }
         {
             var iterator = preserved_bytecodes.keyIterator();
@@ -5468,35 +5459,27 @@ pub const Object = struct {
             }
         }
 
-        sweepDeadWeakEntries(rt, visited, preserved, &symbol_roots, free_set, &free_internal_bytecodes);
+        sweepDeadWeakEntries(rt, preserved_objects, &symbol_roots, &free_internal_bytecodes);
         const WeakPersistentSweepContext = struct {
             rt: *const JSRuntime,
-            visited: *const ObjectVisitSet,
-            preserved: *const ObjectVisitSet,
             symbol_roots: *const SymbolRootSet,
 
             pub fn isWeakIdentityAlive(self: @This(), identity: usize) bool {
-                return weakEntryKeyIsPreserved(self.rt, self.visited, self.preserved, self.symbol_roots, identity);
+                return weakEntryKeyIsPreserved(self.rt, self.symbol_roots, identity);
             }
         };
         rt.sweepDeadWeakPersistentSlots(WeakPersistentSweepContext{
             .rt = rt,
-            .visited = visited,
-            .preserved = preserved,
             .symbol_roots = &symbol_roots,
         });
         _ = rt.atoms.sweepUnrootedUniqueSymbols(&symbol_roots);
 
         // Decrement protected ref counts back to normal and release any that reached 0.
-        {
-            var iterator = preserved.keyIterator();
-            while (iterator.next()) |address| {
-                const current: *Object = @ptrFromInt(address.*);
-                current.header.rc -= 1;
-                if (current.header.rc == 0) {
-                    current.header.rc = 1;
-                    gc.release(rt, &current.header);
-                }
+        for (preserved_objects) |current| {
+            current.header.rc -= 1;
+            if (current.header.rc == 0) {
+                current.header.rc = 1;
+                gc.release(rt, &current.header);
             }
         }
         {
@@ -5530,7 +5513,7 @@ pub const Object = struct {
                 const h = gc.headerFromGcNode(node);
                 if (h.kind == .function_bytecode) {
                     const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                    clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
+                    clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
                 }
             }
 
@@ -5552,10 +5535,10 @@ pub const Object = struct {
             const h = gc.headerFromGcNode(node);
             if (h.kind == .object) {
                 const obj: *Object = @alignCast(@fieldParentPtr("header", h));
-                try obj.clearReferencesToVisited(rt, free_set, &free_internal_bytecodes);
+                try obj.clearReferencesToVisited(rt, &free_internal_bytecodes);
             } else if (h.kind == .function_bytecode) {
                 const fb: *FunctionBytecode = @alignCast(@fieldParentPtr("header", h));
-                clearFunctionBytecodeReferencesToVisited(rt, fb, free_set, &free_internal_bytecodes);
+                clearFunctionBytecodeReferencesToVisited(rt, fb, &free_internal_bytecodes);
             }
         }
 
@@ -6223,41 +6206,38 @@ pub const Object = struct {
 
     fn scanPreservedObjects(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
         current: *Object,
     ) ObjectGraphError!void {
-        const address = @intFromPtr(current);
-        if (!visited.contains(address)) return;
-        const entry = try preserved.getOrPut(address);
-        if (entry.found_existing) return;
-        try current.scanPreservedChildObjects(rt, visited, preserved, symbol_roots);
+        if (!current.header.flags.cycle_visited) return;
+        if (current.header.flags.cycle_preserved) return;
+        current.header.flags.cycle_preserved = true;
+        preserved_count.* += 1;
+        try current.scanPreservedChildObjects(rt, symbol_roots, preserved_count);
     }
 
     fn scanPreservedChildObjects(
         self: *Object,
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         const ScanPreservedVisitor = struct {
             rt: *JSRuntime,
-            visited: *const ObjectVisitSet,
-            preserved: *ObjectVisitSet,
             symbol_roots: *SymbolRootSet,
+            preserved_count: *usize,
             err: ?ObjectGraphError = null,
 
             pub fn visitObject(sv: *@This(), obj_ptr: *?*Object) !void {
                 if (obj_ptr.*) |obj| {
                     if (@intFromPtr(obj) == 0) return;
-                    try scanPreservedObjects(sv.rt, sv.visited, sv.preserved, sv.symbol_roots, obj);
+                    try scanPreservedObjects(sv.rt, sv.symbol_roots, sv.preserved_count, obj);
                 }
             }
 
             pub fn visitValue(sv: *@This(), val_ptr: *JSValue) !void {
-                try scanPreservedValueObject(sv.rt, sv.visited, sv.preserved, sv.symbol_roots, val_ptr.*);
+                try scanPreservedValueObject(sv.rt, sv.symbol_roots, sv.preserved_count, val_ptr.*);
             }
 
             pub fn visitSymbol(sv: *@This(), sym_ptr: *atom.Atom) !void {
@@ -6276,69 +6256,72 @@ pub const Object = struct {
         };
         var visitor = ScanPreservedVisitor{
             .rt = rt,
-            .visited = visited,
-            .preserved = preserved,
             .symbol_roots = symbol_roots,
+            .preserved_count = preserved_count,
         };
         try self.traceChildEdgesFallible(rt, &visitor);
     }
 
     fn scanPreservedValueObject(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
         stored: JSValue,
     ) ObjectGraphError!void {
         try preserveSymbolValue(rt, symbol_roots, stored);
         if (objectFromValue(stored)) |child| {
-            try scanPreservedObjects(rt, visited, preserved, symbol_roots, child);
+            try scanPreservedObjects(rt, symbol_roots, preserved_count, child);
             return;
         }
         const function_bytecode = functionBytecodeFromValue(stored) orelse return;
-        try scanPreservedFunctionBytecodeChildObjects(rt, visited, preserved, symbol_roots, function_bytecode);
+        try scanPreservedFunctionBytecodeChildObjects(rt, symbol_roots, preserved_count, function_bytecode);
     }
 
     fn scanPreservedFunctionBytecodeChildObjects(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
         function_bytecode: *const FunctionBytecode,
     ) ObjectGraphError!void {
-        if (function_bytecode.class_fields_init) |stored| try scanPreservedValueObject(rt, visited, preserved, symbol_roots, stored);
-        for (function_bytecode.cpool) |stored| try scanPreservedValueObject(rt, visited, preserved, symbol_roots, stored);
+        if (function_bytecode.class_fields_init) |stored| try scanPreservedValueObject(rt, symbol_roots, preserved_count, stored);
+        for (function_bytecode.cpool) |stored| try scanPreservedValueObject(rt, symbol_roots, preserved_count, stored);
     }
 
     fn scanPreservedWeakEdges(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
+        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         var changed = true;
         while (changed) {
             changed = false;
-            var iterator = visited.keyIterator();
-            while (iterator.next()) |address| {
-                if (!preserved.contains(address.*)) continue;
-                const current: *Object = @ptrFromInt(address.*);
-                for (current.weakCollectionEntries()) |entry| {
-                    if (!weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, entry.key_identity)) continue;
-                    const before = preserved.count();
-                    const before_symbols = symbol_roots.count();
-                    try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.value);
-                    if (preserved.count() != before or symbol_roots.count() != before_symbols) changed = true;
-                }
-                for (current.finalizationRegistryCells()) |entry| {
-                    if (!entry.isActive()) continue;
-                    const target_identity = entry.target_identity orelse continue;
-                    if (!weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) continue;
-                    const before = preserved.count();
-                    const before_symbols = symbol_roots.count();
-                    try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.held_value);
-                    try scanPreservedValueObject(rt, visited, preserved, symbol_roots, entry.unregister_token);
-                    if (preserved.count() != before or symbol_roots.count() != before_symbols) changed = true;
+            // Preserved objects live on the live list or (if resurrected via
+            // weak/finalization edges and not yet moved back) the garbage list.
+            const list_heads = [2]?*gc.GcNode{ rt.gc.gc_obj_list_head, tmp_head };
+            for (list_heads) |list_head| {
+                var node_it = list_head;
+                while (node_it) |node| : (node_it = node.next) {
+                    const h = gc.headerFromGcNode(node);
+                    if (h.kind != .object or !h.flags.cycle_preserved) continue;
+                    const current: *Object = @alignCast(@fieldParentPtr("header", h));
+                    for (current.weakCollectionEntries()) |entry| {
+                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, entry.key_identity)) continue;
+                        const before = preserved_count.*;
+                        const before_symbols = symbol_roots.count();
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.value);
+                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
+                    }
+                    for (current.finalizationRegistryCells()) |entry| {
+                        if (!entry.isActive()) continue;
+                        const target_identity = entry.target_identity orelse continue;
+                        if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) continue;
+                        const before = preserved_count.*;
+                        const before_symbols = symbol_roots.count();
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.held_value);
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, entry.unregister_token);
+                        if (preserved_count.* != before or symbol_roots.count() != before_symbols) changed = true;
+                    }
                 }
             }
         }
@@ -6346,24 +6329,23 @@ pub const Object = struct {
 
     fn scanPreservedWeakAndFinalizationEdges(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
+        tmp_head: ?*gc.GcNode,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         while (true) {
-            const before_objects = preserved.count();
+            const before_objects = preserved_count.*;
             const before_symbols = symbol_roots.count();
-            try scanPreservedWeakEdges(rt, visited, preserved, symbol_roots);
-            try queueFinalizationCleanupJobs(rt, visited, preserved, symbol_roots);
-            if (preserved.count() == before_objects and symbol_roots.count() == before_symbols) return;
+            try scanPreservedWeakEdges(rt, tmp_head, symbol_roots, preserved_count);
+            try queueFinalizationCleanupJobs(rt, symbol_roots, preserved_count);
+            if (preserved_count.* == before_objects and symbol_roots.count() == before_symbols) return;
         }
     }
 
     fn queueFinalizationCleanupJobs(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *ObjectVisitSet,
         symbol_roots: *SymbolRootSet,
+        preserved_count: *usize,
     ) ObjectGraphError!void {
         var current_node = rt.gc.gc_obj_list_head;
         while (current_node) |node| {
@@ -6371,7 +6353,7 @@ pub const Object = struct {
             const header = gc.headerFromGcNode(node);
             if (header.kind == .object) {
                 const current: *Object = @alignCast(@fieldParentPtr("header", header));
-                if (preserved.contains(@intFromPtr(current))) {
+                if (header.flags.cycle_preserved) {
                     const finalization_payload = current.finalizationRegistryPayload() orelse {
                         current.pruneBorrowedReferenceHolderIfEmpty(rt);
                         current_node = next;
@@ -6382,15 +6364,15 @@ pub const Object = struct {
                         const cell = &finalization_payload.cells[cell_index];
                         if (!cell.isActive() and !cell.isPending()) continue;
                         const target_identity = cell.target_identity orelse continue;
-                        if (weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) {
+                        if (weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) {
                             cell.state = .active;
                             continue;
                         }
 
                         cell.state = .pending_enqueue;
-                        try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.held_value);
-                        try scanPreservedValueObject(rt, visited, preserved, symbol_roots, cell.unregister_token);
-                        if (weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) {
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, cell.held_value);
+                        try scanPreservedValueObject(rt, symbol_roots, preserved_count, cell.unregister_token);
+                        if (weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) {
                             cell.state = .active;
                             continue;
                         }
@@ -6405,25 +6387,21 @@ pub const Object = struct {
 
     fn sweepDeadWeakEntries(
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *const ObjectVisitSet,
+        preserved_objects: []const *Object,
         symbol_roots: *const SymbolRootSet,
-        free_set: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        var iterator = preserved.keyIterator();
-        while (iterator.next()) |address| {
-            const current: *Object = @ptrFromInt(address.*);
+        for (preserved_objects) |current| {
             var index: usize = 0;
             if (current.collectionPayload()) |payload| {
                 var removed_weak_entry = false;
                 while (index < payload.weak_entries.len) {
-                    if (weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, payload.weak_entries[index].key_identity)) {
+                    if (weakEntryKeyIsPreserved(rt, symbol_roots, payload.weak_entries[index].key_identity)) {
                         index += 1;
                         continue;
                     }
 
-                    clearValueReferenceToVisited(rt, &payload.weak_entries[index].value, free_set, internal_bytecodes);
+                    clearValueReferenceToVisited(rt, &payload.weak_entries[index].value, internal_bytecodes);
                     payload.weak_entries[index].destroy(rt);
                     const last_idx = payload.weak_entries.len - 1;
                     if (index < last_idx) {
@@ -6437,7 +6415,7 @@ pub const Object = struct {
 
             if (current.objectDataPayload()) |payload| {
                 if (payload.weak_target_identity) |target_identity| {
-                    if (!weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity)) {
+                    if (!weakEntryKeyIsPreserved(rt, symbol_roots, target_identity)) {
                         payload.weak_target_identity = null;
                     }
                 }
@@ -6452,14 +6430,14 @@ pub const Object = struct {
                     continue;
                 }
                 if (finalization_payload.cells[index].isActive() and target_identity != null and
-                    weakEntryKeyIsPreserved(rt, visited, preserved, symbol_roots, target_identity.?))
+                    weakEntryKeyIsPreserved(rt, symbol_roots, target_identity.?))
                 {
                     index += 1;
                     continue;
                 }
 
-                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].held_value, free_set, internal_bytecodes);
-                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].unregister_token, free_set, internal_bytecodes);
+                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].held_value, internal_bytecodes);
+                clearValueReferenceToVisited(rt, &finalization_payload.cells[index].unregister_token, internal_bytecodes);
                 finalization_payload.cells[index].destroy(rt);
                 const last_idx = finalization_payload.cells.len - 1;
                 if (index < last_idx) {
@@ -6478,8 +6456,6 @@ pub const Object = struct {
 
     fn weakEntryKeyIsPreserved(
         rt: *const JSRuntime,
-        visited: *const ObjectVisitSet,
-        preserved: *const ObjectVisitSet,
         symbol_roots: *const SymbolRootSet,
         key_identity: usize,
     ) bool {
@@ -6489,8 +6465,7 @@ pub const Object = struct {
             return symbol_roots.contains(@intCast(atom_id));
         }
         const object = rt.liveObjectFromWeakIdentity(key_identity) orelse return false;
-        const address = @intFromPtr(object);
-        return visited.contains(address) and preserved.contains(address);
+        return object.header.flags.cycle_visited and object.header.flags.cycle_preserved;
     }
 
     /// Returns the weak identity for `stored`, registering objects in the
@@ -6604,28 +6579,33 @@ pub const Object = struct {
         entry.* += 1;
     }
 
+    /// True when `child` is condemned garbage in the current cycle-removal round
+    /// (it was scanned and was not preserved/resurrected).
+    inline fn objectIsCycleGarbage(child: *const Object) bool {
+        return child.header.flags.cycle_visited and !child.header.flags.cycle_preserved;
+    }
+
     fn clearReferencesToVisited(
         self: *Object,
         rt: *JSRuntime,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) ObjectGraphError!void {
         const ClearReferencesVisitor = struct {
             rt: *JSRuntime,
-            visited: *const ObjectVisitSet,
             internal_bytecodes: *const ObjectVisitSet,
 
             pub fn visitObject(cv: @This(), obj_ptr: *?*Object) !void {
+                _ = cv;
                 if (obj_ptr.*) |obj| {
                     if (@intFromPtr(obj) == 0) return;
-                    if (cv.visited.contains(@intFromPtr(obj))) {
+                    if (objectIsCycleGarbage(obj)) {
                         obj_ptr.* = null;
                     }
                 }
             }
 
             pub fn visitValue(cv: @This(), val_ptr: *JSValue) !void {
-                clearValueReferenceToVisited(cv.rt, val_ptr, cv.visited, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, val_ptr, cv.internal_bytecodes);
             }
 
             pub fn visitSymbol(cv: @This(), sym_ptr: *atom.Atom) !void {
@@ -6634,17 +6614,16 @@ pub const Object = struct {
             }
 
             pub fn visitWeakCollectionEntry(cv: @This(), entry: *WeakCollectionEntry) !void {
-                clearValueReferenceToVisited(cv.rt, &entry.value, cv.visited, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, &entry.value, cv.internal_bytecodes);
             }
 
             pub fn visitFinalizationCell(cv: @This(), entry: *FinalizationRegistryCell) !void {
-                clearValueReferenceToVisited(cv.rt, &entry.held_value, cv.visited, cv.internal_bytecodes);
-                clearValueReferenceToVisited(cv.rt, &entry.unregister_token, cv.visited, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, &entry.held_value, cv.internal_bytecodes);
+                clearValueReferenceToVisited(cv.rt, &entry.unregister_token, cv.internal_bytecodes);
             }
         };
         try self.traceChildEdgesFallible(rt, ClearReferencesVisitor{
             .rt = rt,
-            .visited = visited,
             .internal_bytecodes = internal_bytecodes,
         });
     }
@@ -6652,18 +6631,17 @@ pub const Object = struct {
     fn clearOptionalReferenceToVisited(
         rt: *JSRuntime,
         maybe_value: *?JSValue,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
         if (maybe_value.*) |*stored| {
-            if (valueReferencesVisited(stored.*, visited)) {
+            if (valueReferencesVisited(stored.*)) {
                 maybe_value.* = null;
                 return;
             }
             if (functionBytecodeFromValue(stored.*)) |function_bytecode| {
                 if (!internal_bytecodes.contains(@intFromPtr(function_bytecode))) return;
                 maybe_value.* = null;
-                clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, visited, internal_bytecodes);
+                clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, internal_bytecodes);
             }
         }
     }
@@ -6671,38 +6649,36 @@ pub const Object = struct {
     fn clearValueReferenceToVisited(
         rt: *JSRuntime,
         stored: *JSValue,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        if (valueReferencesVisited(stored.*, visited)) {
+        if (valueReferencesVisited(stored.*)) {
             stored.* = JSValue.undefinedValue();
             return;
         }
         if (functionBytecodeFromValue(stored.*)) |function_bytecode| {
             if (!internal_bytecodes.contains(@intFromPtr(function_bytecode))) return;
             stored.* = JSValue.undefinedValue();
-            clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, visited, internal_bytecodes);
+            clearFunctionBytecodeReferencesToVisited(rt, function_bytecode, internal_bytecodes);
             return;
         }
         const cell = varRefCellFromValue(stored.*) orelse return;
         if (cell.varRefValueSlot().*) |cell_value| {
-            if (valueReferencesVisited(cell_value, visited)) cell.varRefValueSlot().* = JSValue.undefinedValue();
+            if (valueReferencesVisited(cell_value)) cell.varRefValueSlot().* = JSValue.undefinedValue();
         }
     }
 
     fn clearFunctionBytecodeReferencesToVisited(
         rt: *JSRuntime,
         function_bytecode: *FunctionBytecode,
-        visited: *const ObjectVisitSet,
         internal_bytecodes: *const ObjectVisitSet,
     ) void {
-        if (function_bytecode.class_fields_init) |*stored| clearValueReferenceToVisited(rt, stored, visited, internal_bytecodes);
-        for (function_bytecode.cpool) |*stored| clearValueReferenceToVisited(rt, stored, visited, internal_bytecodes);
+        if (function_bytecode.class_fields_init) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
+        for (function_bytecode.cpool) |*stored| clearValueReferenceToVisited(rt, stored, internal_bytecodes);
     }
 
-    fn valueReferencesVisited(stored: JSValue, visited: *const ObjectVisitSet) bool {
+    fn valueReferencesVisited(stored: JSValue) bool {
         const child = objectFromValue(stored) orelse return false;
-        return visited.contains(@intFromPtr(child));
+        return objectIsCycleGarbage(child);
     }
 
     fn functionBytecodeFromValue(stored: JSValue) ?*FunctionBytecode {
