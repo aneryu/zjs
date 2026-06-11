@@ -34,7 +34,7 @@ todos:
     status: completed
   - id: p4-atom-string
     content: "Phase 4: Atom/String 合一（参照 JSAtomStruct==JSString）+ atom 槽位回收"
-    status: pending
+    status: completed
   - id: p4-fb-compact
     content: "Phase 4: FunctionBytecode 单块布局消解 D2；编译期 Bytecode/FunctionDef 双轨收敛"
     status: pending
