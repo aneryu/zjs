@@ -1765,7 +1765,7 @@ pub fn parseFastReplacementPattern(replacement: []const u8, capture_count: usize
             '1'...'9' => {
                 var capture_index: usize = next - '0';
                 var consumed: usize = 1;
-                if (index + 2 < replacement.len and std.ascii.isDigit(replacement[index + 2])) {
+                if (index + 2 < replacement.len and unicode_lib.isAsciiDigitByte(replacement[index + 2])) {
                     const two_digit = capture_index * 10 + (replacement[index + 2] - '0');
                     if (two_digit >= 1 and two_digit <= capture_count) {
                         capture_index = two_digit;
