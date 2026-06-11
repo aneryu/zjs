@@ -788,153 +788,23 @@ pub const ensureLocalsCapacity = utils.ensureLocalsCapacity;
 pub const ensureVarRefsCapacity = utils.ensureVarRefsCapacity;
 pub const catchTargetFromMarker = utils.catchTargetFromMarker;
 
-pub fn createForInIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    object_value: core.JSValue,
-) !core.JSValue {
-    const rt = ctx.runtime;
-    if (try createSimpleForInIterator(rt, object_value)) |simple| return simple;
-
-    var iterator_val = core.JSValue.undefinedValue();
-    var source_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &iterator_val },
-        .{ .value = &source_val },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-    defer source_val.free(rt);
-
-    const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
-    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
-    iterator_val = iterator.value();
-
-    var out_index: u32 = 0;
-
-    if (!object_value.isNull() and !object_value.isUndefined()) {
-        source_val = if (object_value.isObject()) object_value.dup() else try primitiveObjectForAccess(rt, global, object_value);
-        var seen: []core.Atom = &.{};
-        defer freeAtomList(rt, seen);
-        var current: ?*core.Object = try property_ops.expectObject(source_val);
-        const root = current;
-        while (current) |object| {
-            if (root != null and object == root.? and builtins.buffer.isTypedArrayObject(object)) {
-                const length = builtins.buffer.typedArrayLength(rt, object) catch 0;
-                var index: u32 = 0;
-                while (index < length) : (index += 1) {
-                    const key = core.atom.atomFromUInt32(index);
-                    try appendAtom(rt, &seen, key);
-                    const key_value = try rt.atoms.toStringValue(rt, key);
-                    defer key_value.free(rt);
-                    try iterator.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(key_value, true, true, true));
-                    out_index += 1;
-                }
-            }
-            const keys = try objectRestOwnKeys(ctx, output, global, object);
-            defer core.Object.freeKeys(rt, keys);
-
-            for (keys) |key| {
-                if (rt.atoms.kind(key) == .symbol) continue;
-                if (atomListContains(seen, key)) continue;
-                try appendAtom(rt, &seen, key);
-                if (object.moduleNamespaceOwnBindingValue(key)) |binding_value| {
-                    defer binding_value.free(rt);
-                    if (binding_value.isUninitialized()) return error.ReferenceError;
-                }
-                const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, key, null, null) orelse continue;
-                defer desc.destroy(rt);
-                if (!(desc.enumerable orelse false)) continue;
-                const key_value = try rt.atoms.toStringValue(rt, key);
-                defer key_value.free(rt);
-                try iterator.defineOwnProperty(rt, core.atom.atomFromUInt32(out_index), core.Descriptor.data(key_value, true, true, true));
-                out_index += 1;
-            }
-
-            current = try qjsObjectGetPrototypeOfStep(ctx, output, global, object, null, null);
-        }
-
-        const source_key = try rt.internAtom("__source");
-        defer rt.atoms.free(source_key);
-        try iterator.defineOwnProperty(rt, source_key, core.Descriptor.data(source_val, true, false, true));
-    }
-    iterator.length = out_index;
-
-    const index_key = try rt.internAtom("__index");
-    defer rt.atoms.free(index_key);
-    try iterator.defineOwnProperty(rt, index_key, core.Descriptor.data(core.JSValue.int32(0), true, true, true));
-    return iterator.value();
-}
-
-pub fn createSimpleForInIterator(rt: *core.JSRuntime, object_value: core.JSValue) !?core.JSValue {
-    if (object_value.isNull() or object_value.isUndefined()) return null;
-    if (!object_value.isObject()) return null;
-    const source = objectFromValue(object_value) orelse return null;
-    if (!simpleForInRootCanUseFastPath(rt, source)) return null;
-    const key_count = simpleForInEnumerableStringKeyCount(rt, source);
-    const out_length = std.math.cast(u32, key_count) orelse return null;
-
-    const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
-    errdefer core.Object.destroyFromHeader(rt, &iterator.header);
-    if (key_count != 0) {
-        const keys = try rt.memory.alloc(core.Atom, key_count);
-        errdefer rt.memory.free(core.Atom, keys);
-        var out_index: usize = 0;
-        for (source.properties) |entry| {
-            if (entry.flags.deleted or !entry.flags.enumerable) continue;
-            if (rt.atoms.kind(entry.atom_id) != .string) continue;
-            keys[out_index] = rt.atoms.dup(entry.atom_id);
-            out_index += 1;
-        }
-        iterator.iteratorAtomKeysSlot().* = keys;
-    }
-    iterator.length = out_length;
-
-    iterator.iteratorKindSlot().* = iter_vm.simple_for_in_iterator_kind;
-    iterator.iteratorIndexSlot().* = 0;
-    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), object_value.dup());
-    return iterator.value();
-}
-
-fn simpleForInEnumerableStringKeyCount(rt: *core.JSRuntime, source: *core.Object) usize {
-    var count: usize = 0;
-    for (source.properties) |entry| {
-        if (entry.flags.deleted or !entry.flags.enumerable) continue;
-        if (rt.atoms.kind(entry.atom_id) != .string) continue;
-        count += 1;
-    }
-    return count;
-}
-
-pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) bool {
-    if (source.class_id != core.class.ids.object or source.is_proxy or source.exotic != null or source.is_array) return false;
-    if (builtins.buffer.isTypedArrayObject(source)) return false;
-    if (source.arrayElements().len != 0) return false;
-    for (source.properties) |entry| {
-        if (entry.flags.deleted) continue;
-        if (core.array.arrayIndexFromAtom(&rt.atoms, entry.atom_id) != null) return false;
-        const kind = rt.atoms.kind(entry.atom_id);
-        if (kind != .string and kind != .symbol and kind != .private) return false;
-    }
-
-    var proto = source.getPrototype();
-    while (proto) |object| : (proto = object.getPrototype()) {
-        if (object.is_proxy or object.exotic != null) return false;
-        if (builtins.buffer.isTypedArrayObject(object)) return false;
-        if (object.arrayElements().len != 0) return false;
-        for (object.properties) |entry| {
-            if (entry.flags.deleted or !entry.flags.enumerable) continue;
-            if (rt.atoms.kind(entry.atom_id) == .symbol or rt.atoms.kind(entry.atom_id) == .private) continue;
-            return false;
-        }
-    }
-    return true;
-}
+// --- for-in/for-of iterator helpers moved to forof_ops.zig ---
+pub const forof_ops = @import("forof_ops.zig");
+pub const createForInIterator = forof_ops.createForInIterator;
+pub const createSimpleForInIterator = forof_ops.createSimpleForInIterator;
+pub const simpleForInRootCanUseFastPath = forof_ops.simpleForInRootCanUseFastPath;
+pub const findForOfIteratorIndex = forof_ops.findForOfIteratorIndex;
+pub const isIteratorLikeValue = forof_ops.isIteratorLikeValue;
+pub const closeStackTopForOfIteratorForPendingError = forof_ops.closeStackTopForOfIteratorForPendingError;
+pub const closeStackTopForOfIteratorForPendingErrorWithFrame = forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame;
+pub const closeStackTopForOfIteratorForPendingErrorInternal = forof_ops.closeStackTopForOfIteratorForPendingErrorInternal;
+pub const findTopClosableForOfRecordIndex = forof_ops.findTopClosableForOfRecordIndex;
+pub const isForOfRecordAt = forof_ops.isForOfRecordAt;
+pub const hasCatchMarkerAboveForOfRecord = forof_ops.hasCatchMarkerAboveForOfRecord;
+pub const activeDestructuringStateTargetsIterator = forof_ops.activeDestructuringStateTargetsIterator;
+pub const destructuringStateTargetsIteratorInValues = forof_ops.destructuringStateTargetsIteratorInValues;
+pub const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
+pub const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
 
 pub fn atomListContains(list: []const core.Atom, needle: core.Atom) bool {
     for (list) |atom_id| {
@@ -956,118 +826,6 @@ pub fn appendAtom(rt: *core.JSRuntime, list: *[]core.Atom, atom_id: core.Atom) !
 pub fn freeAtomList(rt: *core.JSRuntime, list: []core.Atom) void {
     for (list) |atom_id| rt.atoms.free(atom_id);
     if (list.len != 0) rt.memory.free(core.Atom, list);
-}
-
-pub fn findForOfIteratorIndex(rt: *core.JSRuntime, stack: *const stack_mod.Stack) !usize {
-    var index = stack.values.len;
-    while (index > 0) {
-        index -= 1;
-        const value = stack.values[index];
-        if (isIteratorLikeValue(rt, value)) return index;
-    }
-    return error.StackUnderflow;
-}
-
-pub fn isIteratorLikeValue(rt: *core.JSRuntime, value: core.JSValue) bool {
-    const object = property_ops.expectObject(value) catch return false;
-    if (object.cachedIteratorNext() != null) return true;
-    const next_key = rt.internAtom("next") catch return false;
-    defer rt.atoms.free(next_key);
-    const next_value = object.getProperty(next_key);
-    defer next_value.free(rt);
-    return isCallableValue(next_value);
-}
-
-pub fn closeStackTopForOfIteratorForPendingError(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *const stack_mod.Stack,
-) !void {
-    return closeStackTopForOfIteratorForPendingErrorInternal(ctx, output, global, stack, null);
-}
-
-pub fn closeStackTopForOfIteratorForPendingErrorWithFrame(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *const stack_mod.Stack,
-    frame: *const frame_mod.Frame,
-) !void {
-    return closeStackTopForOfIteratorForPendingErrorInternal(ctx, output, global, stack, frame);
-}
-
-pub fn closeStackTopForOfIteratorForPendingErrorInternal(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *const stack_mod.Stack,
-    frame: ?*const frame_mod.Frame,
-) !void {
-    const record_index = findTopClosableForOfRecordIndex(stack) orelse return;
-    const iterator_value = stack.values[record_index].dup();
-    defer iterator_value.free(ctx.runtime);
-    if (property_ops.expectObject(iterator_value)) |object| {
-        if (isDestructuringIteratorState(object)) return;
-    } else |_| {}
-    if (frame) |active_frame| {
-        if (activeDestructuringStateTargetsIterator(stack.values, active_frame, iterator_value)) return;
-    }
-
-    const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
-    defer if (pending_exception) |value| value.free(ctx.runtime);
-    closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
-    if (ctx.hasException()) ctx.clearException();
-    if (pending_exception) |value| _ = ctx.throwValue(value.dup());
-}
-
-pub fn findTopClosableForOfRecordIndex(stack: *const stack_mod.Stack) ?usize {
-    if (stack.values.len < 3) return null;
-    var index = stack.values.len - 3;
-    while (true) {
-        if (isForOfRecordAt(stack, index) and !hasCatchMarkerAboveForOfRecord(stack, index)) {
-            return index;
-        }
-        if (index == 0) break;
-        index -= 1;
-    }
-    return null;
-}
-
-pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
-    if (index + 2 >= stack.values.len) return false;
-    return stack.values[index].isObject() and
-        isCallableValue(stack.values[index + 1]) and
-        stack.values[index + 2].isCatchOffset();
-}
-
-pub fn hasCatchMarkerAboveForOfRecord(stack: *const stack_mod.Stack, record_index: usize) bool {
-    var index = record_index + 3;
-    while (index < stack.values.len) : (index += 1) {
-        if (stack.values[index].isCatchOffset()) return true;
-    }
-    return false;
-}
-
-pub fn activeDestructuringStateTargetsIterator(
-    stack_values: []const core.JSValue,
-    frame: *const frame_mod.Frame,
-    iterator_value: core.JSValue,
-) bool {
-    return destructuringStateTargetsIteratorInValues(stack_values, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.locals, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.args, iterator_value) or
-        destructuringStateTargetsIteratorInValues(frame.var_refs, iterator_value);
-}
-
-pub fn destructuringStateTargetsIteratorInValues(values: []const core.JSValue, iterator_value: core.JSValue) bool {
-    for (values) |value| {
-        const object = property_ops.expectObject(value) catch continue;
-        if (!isDestructuringIteratorState(object)) continue;
-        const target = (object.iteratorTargetSlot().*) orelse continue;
-        if (sameObjectIdentity(target, iterator_value)) return true;
-    }
-    return false;
 }
 
 pub fn functionConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
@@ -1190,6 +948,27 @@ pub const qjsMathRound = builtin_glue.qjsMathRound;
 pub const qjsMathHypot = builtin_glue.qjsMathHypot;
 pub const qjsMathImul = builtin_glue.qjsMathImul;
 pub const qjsMathSign = builtin_glue.qjsMathSign;
+pub const qjsCollectionNativeRecord = builtin_glue.qjsCollectionNativeRecord;
+pub const qjsMapGroupByRecord = builtin_glue.qjsMapGroupByRecord;
+pub const qjsBufferNativeRecord = builtin_glue.qjsBufferNativeRecord;
+pub const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
+pub const qjsDataViewConstructorArgs = builtin_glue.qjsDataViewConstructorArgs;
+pub const qjsDataViewAccessor = builtin_glue.qjsDataViewAccessor;
+pub const qjsDataViewGet = builtin_glue.qjsDataViewGet;
+pub const qjsDataViewSet = builtin_glue.qjsDataViewSet;
+pub const qjsDataViewSetCoerceValue = builtin_glue.qjsDataViewSetCoerceValue;
+pub const qjsErrorIsError = builtin_glue.qjsErrorIsError;
+pub const qjsWeakRefDeref = builtin_glue.qjsWeakRefDeref;
+pub const qjsFinalizationRegistryRegister = builtin_glue.qjsFinalizationRegistryRegister;
+pub const qjsFinalizationRegistryUnregister = builtin_glue.qjsFinalizationRegistryUnregister;
+pub const qjsFinalizationRegistryAppendCell = builtin_glue.qjsFinalizationRegistryAppendCell;
+pub const qjsCanBeHeldWeakly = builtin_glue.qjsCanBeHeldWeakly;
+pub const qjsSymbolFor = builtin_glue.qjsSymbolFor;
+pub const qjsSymbolKeyFor = builtin_glue.qjsSymbolKeyFor;
+pub const qjsCreateBuiltinFunction = builtin_glue.qjsCreateBuiltinFunction;
+pub const constructCollectionFromVm = builtin_glue.constructCollectionFromVm;
+pub const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
+pub const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
 
 pub fn valueTruthy(value: core.JSValue) bool {
     return value_ops.isTruthy(value);
@@ -1710,87 +1489,6 @@ pub fn execApplyEval(
     defer result.free(ctx.runtime);
     try stack.push(result);
     return .done;
-}
-
-pub fn qjsCollectionNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    return collection_vm.qjsCollectionNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame);
-}
-
-pub fn qjsMapGroupByRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    prototype: ?*core.Object,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    return collection_vm.qjsMapGroupByRecord(ctx, output, global, args, prototype, caller_function, caller_frame);
-}
-
-pub fn qjsBufferNativeRecord(
-    ctx: *core.JSContext,
-    receiver: core.JSValue,
-    id: u32,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (id == @intFromEnum(builtins.buffer.StaticMethod.is_view)) return qjsArrayBufferIsView(args);
-    if (builtins.buffer.arrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try qjsArrayBufferAccessor(ctx, receiver, accessor_name));
-    }
-    if (builtins.buffer.sharedArrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try qjsSharedArrayBufferAccessor(ctx, receiver, accessor_name));
-    }
-    if (builtins.buffer.dataViewAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try qjsDataViewAccessor(ctx, receiver, accessor_name));
-    }
-    if (builtins.buffer.typedArrayAccessorNameFromRecordId(id)) |accessor_name| {
-        return @as(?core.JSValue, try qjsTypedArrayAccessor(ctx, receiver, accessor_name));
-    }
-    if (try qjsArrayBufferPrototypeNativeRecord(ctx, receiver, id, args)) |value| return value;
-    if (builtins.buffer.dataViewGetKindFromRecordId(id)) |method_id| {
-        const global = ctx.global orelse {
-            const value = try (builtins.buffer.dataViewGet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            });
-            return @as(?core.JSValue, value);
-        };
-        const value = try (qjsDataViewGet(ctx, null, global, receiver, method_id, args) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            error.RangeError => error.RangeError,
-            else => err,
-        });
-        return @as(?core.JSValue, value);
-    }
-    if (builtins.buffer.dataViewSetKindFromRecordId(id)) |method_id| {
-        const global = ctx.global orelse {
-            const value = try (builtins.buffer.dataViewSet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                error.RangeError => error.RangeError,
-                else => err,
-            });
-            return @as(?core.JSValue, value);
-        };
-        const value = try (qjsDataViewSet(ctx, null, global, receiver, method_id, args) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            error.RangeError => error.RangeError,
-            else => err,
-        });
-        return @as(?core.JSValue, value);
-    }
-    return null;
 }
 
 pub fn handleCatchableRuntimeError(
@@ -3879,36 +3577,6 @@ pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_
     return false;
 }
 
-pub const DataViewConstructorArgs = struct {
-    byte_offset: usize,
-    view_length: ?usize,
-    has_offset: bool,
-};
-
-pub fn qjsDataViewConstructorArgs(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-) !DataViewConstructorArgs {
-    if (args.len < 1) return error.TypeError;
-    try builtins.buffer.dataViewRequireArrayBuffer(args[0]);
-    const byte_offset = if (args.len >= 2)
-        try qjsTypedArrayConstructToIndex(ctx, output, global, args[1])
-    else
-        @as(usize, 0);
-    const view_length = if (args.len >= 3 and !args[2].isUndefined())
-        try qjsTypedArrayConstructToIndex(ctx, output, global, args[2])
-    else
-        null;
-    try builtins.buffer.dataViewValidateConstructorRange(ctx.runtime, args[0], byte_offset, view_length);
-    return .{
-        .byte_offset = byte_offset,
-        .view_length = view_length,
-        .has_offset = args.len >= 2,
-    };
-}
-
 pub fn initializeClassInstanceElements(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3976,124 +3644,6 @@ pub fn initializeClassInstanceFields(rt: *core.JSRuntime, instance: core.JSValue
         const effective_atom = remapPrivateAtomForOperation(rt, null, remap_object, atom_id);
         try defineClassFieldDataProperty(rt, object, effective_atom, core.JSValue.undefinedValue());
     }
-}
-
-pub fn qjsDataViewAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.dataview) return error.TypeError;
-    if (std.mem.eql(u8, accessor, "buffer")) {
-        return (object.typedArrayBuffer() orelse return error.TypeError).dup();
-    }
-    if (std.mem.eql(u8, accessor, "byteLength")) {
-        return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteLength(ctx.runtime, object)));
-    }
-    if (std.mem.eql(u8, accessor, "byteOffset")) {
-        return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteOffset(ctx.runtime, object)));
-    }
-    return error.TypeError;
-}
-
-pub fn qjsDataViewGet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    try builtins.buffer.dataViewRequire(receiver);
-    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const index = try qjsTypedArrayConstructToIndex(ctx, output, global, index_arg);
-    const little_endian = args.len >= 2 and value_ops.isTruthy(args[1]);
-    const call_args = [_]core.JSValue{ lengthIndexValue(index), core.JSValue.boolean(little_endian) };
-    return builtins.buffer.dataViewGet(ctx.runtime, receiver, method_id, call_args[0..]);
-}
-
-pub fn qjsDataViewSet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    receiver: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    try builtins.buffer.dataViewRejectImmutable(ctx.runtime, receiver);
-    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const index = try qjsTypedArrayConstructToIndex(ctx, output, global, index_arg);
-    const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const coerced_value = try qjsDataViewSetCoerceValue(ctx, output, global, method_id, value_arg);
-    defer coerced_value.free(ctx.runtime);
-    const little_endian = args.len >= 3 and value_ops.isTruthy(args[2]);
-    const call_args = [_]core.JSValue{ lengthIndexValue(index), coerced_value, core.JSValue.boolean(little_endian) };
-    return builtins.buffer.dataViewSet(ctx.runtime, receiver, method_id, call_args[0..]);
-}
-
-pub fn qjsDataViewSetCoerceValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    method_id: u32,
-    value: core.JSValue,
-) !core.JSValue {
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    errdefer primitive.free(ctx.runtime);
-    if (method_id == 9 or method_id == 10) return primitive;
-    if (primitive.isBigInt()) return error.TypeError;
-    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    primitive.free(ctx.runtime);
-    return number_value;
-}
-
-pub fn qjsErrorIsError(args: []const core.JSValue) core.JSValue {
-    if (args.len < 1) return core.JSValue.boolean(false);
-    const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
-    return core.JSValue.boolean(object.class_id == core.class.ids.error_);
-}
-
-pub fn qjsWeakRefDeref(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.weak_ref) return error.TypeError;
-    return object.weakRefDeref(rt);
-}
-
-pub fn qjsFinalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.finalization_registry) return error.TypeError;
-    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-    if (builtins.object.sameValue(target, held_value)) return error.TypeError;
-    if (!unregister_token.isUndefined() and !qjsCanBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
-    if (builtins.object.sameValue(target, receiver)) return core.JSValue.undefinedValue();
-    try qjsFinalizationRegistryAppendCell(ctx.runtime, object, target, held_value, unregister_token);
-    return core.JSValue.undefinedValue();
-}
-
-pub fn qjsFinalizationRegistryUnregister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    const object = objectFromValue(receiver) orelse return error.TypeError;
-    if (object.class_id != core.class.ids.finalization_registry) return error.TypeError;
-    const token = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!qjsCanBeHeldWeakly(ctx.runtime, token)) return error.TypeError;
-    return core.JSValue.boolean(object.unregisterFinalizationRegistryCells(ctx.runtime, token));
-}
-
-pub fn qjsFinalizationRegistryAppendCell(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    target: core.JSValue,
-    held_value: core.JSValue,
-    unregister_token: core.JSValue,
-) !void {
-    try object.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
-}
-
-pub fn qjsCanBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (value.isObject()) return true;
-    if (value.asSymbolAtom()) |atom_id| {
-        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
-    }
-    return false;
 }
 
 test "qjsConstructWeakRefWithPrototype roots direct symbol target while creating weak ref" {
@@ -4198,140 +3748,6 @@ test "qjsFinalizationRegistryAppendCell roots direct symbol fields while allocat
     try std.testing.expect(rt.atoms.name(target_atom) == null);
     try std.testing.expect(rt.atoms.name(held_atom) == null);
     try std.testing.expect(rt.atoms.name(token_atom) == null);
-}
-
-pub fn qjsSymbolFor(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const key = if (args.len >= 1)
-        try toStringBytesForSymbol(ctx, output, global, args[0], caller_function, caller_frame)
-    else
-        try ctx.runtime.memory.allocator.dupe(u8, "undefined");
-    defer ctx.runtime.memory.allocator.free(key);
-
-    const registered = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "{s}{s}", .{ builtins.symbol.registry_prefix, key });
-    defer ctx.runtime.memory.allocator.free(registered);
-    const atom_id = try ctx.runtime.atoms.internRegisteredValueSymbol(registered);
-    return core.JSValue.symbol(atom_id);
-}
-
-pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const atom_id = value.asSymbolAtom() orelse return error.TypeError;
-    const key = builtins.symbol.registryKey(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
-    return value_ops.createStringValue(rt, key);
-}
-
-pub fn qjsCreateBuiltinFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function = try builtins.function.nativeFunction(rt, name, length);
-    errdefer function.free(rt);
-    const object = objectFromValue(function) orelse return error.TypeError;
-    try object.setFunctionRealmGlobalPtr(rt, global);
-    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
-        try object.setPrototype(rt, function_proto);
-    }
-    return function;
-}
-
-pub fn constructCollectionFromVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    constructor: core.JSValue,
-    kind: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const prototype = try constructorPrototypeObject(ctx.runtime, constructor);
-    return constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
-}
-
-pub fn addCollectionEntriesFromIterator(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    collection_value: core.JSValue,
-    kind: u32,
-    iterable_value: core.JSValue,
-    adder: core.JSValue,
-) !void {
-    const iterator_method = try getIteratorMethod(ctx, output, global, iterable_value);
-    defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return error.TypeError;
-    const iterator_value = try callValueOrBytecode(ctx, output, global, iterable_value, iterator_method, &.{}, null, null);
-    defer iterator_value.free(ctx.runtime);
-    _ = try property_ops.expectObject(iterator_value);
-
-    while (true) {
-        const step = iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
-        };
-        defer step.value.free(ctx.runtime);
-        if (step.done) return;
-
-        if (kind == 1 or kind == 3) {
-            const entry = property_ops.expectObject(step.value) catch {
-                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, error.TypeError, null, null);
-            };
-            const key = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(0), null, null) catch |err| {
-                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
-            };
-            defer key.free(ctx.runtime);
-            const value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(1), null, null) catch |err| {
-                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
-            };
-            defer value.free(ctx.runtime);
-            callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{ key, value }) catch |err| {
-                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
-            };
-        } else {
-            callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{step.value}) catch |err| {
-                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
-            };
-        }
-    }
-}
-
-pub fn callCollectionAdderFromVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    collection_value: core.JSValue,
-    adder: core.JSValue,
-    args: []const core.JSValue,
-) !void {
-    const out = try callValueOrBytecode(ctx, output, global, collection_value, adder, args, null, null);
-    out.free(ctx.runtime);
-}
-
-pub fn closeIteratorFromVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-) !void {
-    try closeIteratorFromVmImpl(ctx, output, global, iterator_value);
-}
-
-pub fn closeIteratorFromVmImpl(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    iterator_value: core.JSValue,
-) !void {
-    const return_key = try ctx.runtime.internAtom("return");
-    defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    defer return_method.free(ctx.runtime);
-    if (return_method.isUndefined() or return_method.isNull()) return;
-    if (!isCallableValue(return_method)) return error.TypeError;
-    const out = try callValueOrBytecode(ctx, output, global, iterator_value, return_method, &.{}, null, null);
-    defer out.free(ctx.runtime);
-    if (!out.isObject()) return error.TypeError;
 }
 
 pub fn isBuiltinConstructorName(name: []const u8) bool {

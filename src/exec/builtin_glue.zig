@@ -1,11 +1,14 @@
-//! Native-record glue for Math, Number/BigInt, parseInt/parseFloat, URI, JSON and Date builtins.
+//! Native-record glue for Math, Number/BigInt, parseInt/parseFloat, URI, JSON and Date builtins,
+//! plus collections (Map/Set), weak refs/FinalizationRegistry, Symbol registry and DataView.
 
 const builtins = @import("../builtins/root.zig");
 const bytecode = @import("../bytecode/root.zig");
+const collection_vm = @import("array_ops.zig");
 const core = @import("../core/root.zig");
 const date_vm = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
 const json_vm = @import("json_ops.zig");
+const property_ops = @import("property_ops.zig");
 const std = @import("std");
 const value_ops = @import("value_ops.zig");
 
@@ -13,9 +16,26 @@ const shared_vm = @import("shared.zig");
 
 // Helpers that remain in shared.zig (generic utilities outside the builtin
 // glue cluster).
+const callValueOrBytecode = shared_vm.callValueOrBytecode;
+const constructCollectionWithPrototypeFromVm = shared_vm.constructCollectionWithPrototypeFromVm;
 const constructorNameEqlLocal = shared_vm.constructorNameEqlLocal;
+const constructorPrototypeObject = shared_vm.constructorPrototypeObject;
+const functionPrototypeFromGlobal = shared_vm.functionPrototypeFromGlobal;
+const getIteratorMethod = shared_vm.getIteratorMethod;
+const getValueProperty = shared_vm.getValueProperty;
+const isCallableValue = shared_vm.isCallableValue;
+const iteratorCloseWithCompletionAndPropagate = shared_vm.iteratorCloseWithCompletionAndPropagate;
+const iteratorStepValue = shared_vm.iteratorStepValue;
+const lengthIndexValue = shared_vm.lengthIndexValue;
 const objectFromValue = shared_vm.objectFromValue;
+const qjsArrayBufferAccessor = shared_vm.qjsArrayBufferAccessor;
+const qjsArrayBufferIsView = shared_vm.qjsArrayBufferIsView;
+const qjsArrayBufferPrototypeNativeRecord = shared_vm.qjsArrayBufferPrototypeNativeRecord;
+const qjsSharedArrayBufferAccessor = shared_vm.qjsSharedArrayBufferAccessor;
+const qjsTypedArrayAccessor = shared_vm.qjsTypedArrayAccessor;
+const qjsTypedArrayConstructToIndex = shared_vm.qjsTypedArrayConstructToIndex;
 const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
+const toStringBytesForSymbol = shared_vm.toStringBytesForSymbol;
 const toStringForAnnexB = shared_vm.toStringForAnnexB;
 const toUint32Number = shared_vm.toUint32Number;
 
@@ -428,4 +448,341 @@ pub fn qjsMathImul(lhs: f64, rhs: f64) i32 {
 pub fn qjsMathSign(value: f64) f64 {
     if (std.math.isNan(value) or value == 0) return value;
     return if (value < 0) -1 else 1;
+}
+
+pub fn qjsCollectionNativeRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    return collection_vm.qjsCollectionNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame);
+}
+
+pub fn qjsMapGroupByRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    prototype: ?*core.Object,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !?core.JSValue {
+    return collection_vm.qjsMapGroupByRecord(ctx, output, global, args, prototype, caller_function, caller_frame);
+}
+
+pub fn qjsBufferNativeRecord(
+    ctx: *core.JSContext,
+    receiver: core.JSValue,
+    id: u32,
+    args: []const core.JSValue,
+) !?core.JSValue {
+    if (id == @intFromEnum(builtins.buffer.StaticMethod.is_view)) return qjsArrayBufferIsView(args);
+    if (builtins.buffer.arrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
+        return @as(?core.JSValue, try qjsArrayBufferAccessor(ctx, receiver, accessor_name));
+    }
+    if (builtins.buffer.sharedArrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
+        return @as(?core.JSValue, try qjsSharedArrayBufferAccessor(ctx, receiver, accessor_name));
+    }
+    if (builtins.buffer.dataViewAccessorNameFromRecordId(id)) |accessor_name| {
+        return @as(?core.JSValue, try qjsDataViewAccessor(ctx, receiver, accessor_name));
+    }
+    if (builtins.buffer.typedArrayAccessorNameFromRecordId(id)) |accessor_name| {
+        return @as(?core.JSValue, try qjsTypedArrayAccessor(ctx, receiver, accessor_name));
+    }
+    if (try qjsArrayBufferPrototypeNativeRecord(ctx, receiver, id, args)) |value| return value;
+    if (builtins.buffer.dataViewGetKindFromRecordId(id)) |method_id| {
+        const global = ctx.global orelse {
+            const value = try (builtins.buffer.dataViewGet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                error.RangeError => error.RangeError,
+                else => err,
+            });
+            return @as(?core.JSValue, value);
+        };
+        const value = try (qjsDataViewGet(ctx, null, global, receiver, method_id, args) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            error.RangeError => error.RangeError,
+            else => err,
+        });
+        return @as(?core.JSValue, value);
+    }
+    if (builtins.buffer.dataViewSetKindFromRecordId(id)) |method_id| {
+        const global = ctx.global orelse {
+            const value = try (builtins.buffer.dataViewSet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                error.RangeError => error.RangeError,
+                else => err,
+            });
+            return @as(?core.JSValue, value);
+        };
+        const value = try (qjsDataViewSet(ctx, null, global, receiver, method_id, args) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            error.RangeError => error.RangeError,
+            else => err,
+        });
+        return @as(?core.JSValue, value);
+    }
+    return null;
+}
+
+pub const DataViewConstructorArgs = struct {
+    byte_offset: usize,
+    view_length: ?usize,
+    has_offset: bool,
+};
+
+pub fn qjsDataViewConstructorArgs(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+) !DataViewConstructorArgs {
+    if (args.len < 1) return error.TypeError;
+    try builtins.buffer.dataViewRequireArrayBuffer(args[0]);
+    const byte_offset = if (args.len >= 2)
+        try qjsTypedArrayConstructToIndex(ctx, output, global, args[1])
+    else
+        @as(usize, 0);
+    const view_length = if (args.len >= 3 and !args[2].isUndefined())
+        try qjsTypedArrayConstructToIndex(ctx, output, global, args[2])
+    else
+        null;
+    try builtins.buffer.dataViewValidateConstructorRange(ctx.runtime, args[0], byte_offset, view_length);
+    return .{
+        .byte_offset = byte_offset,
+        .view_length = view_length,
+        .has_offset = args.len >= 2,
+    };
+}
+
+pub fn qjsDataViewAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.dataview) return error.TypeError;
+    if (std.mem.eql(u8, accessor, "buffer")) {
+        return (object.typedArrayBuffer() orelse return error.TypeError).dup();
+    }
+    if (std.mem.eql(u8, accessor, "byteLength")) {
+        return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteLength(ctx.runtime, object)));
+    }
+    if (std.mem.eql(u8, accessor, "byteOffset")) {
+        return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteOffset(ctx.runtime, object)));
+    }
+    return error.TypeError;
+}
+
+pub fn qjsDataViewGet(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    try builtins.buffer.dataViewRequire(receiver);
+    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const index = try qjsTypedArrayConstructToIndex(ctx, output, global, index_arg);
+    const little_endian = args.len >= 2 and value_ops.isTruthy(args[1]);
+    const call_args = [_]core.JSValue{ lengthIndexValue(index), core.JSValue.boolean(little_endian) };
+    return builtins.buffer.dataViewGet(ctx.runtime, receiver, method_id, call_args[0..]);
+}
+
+pub fn qjsDataViewSet(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    try builtins.buffer.dataViewRejectImmutable(ctx.runtime, receiver);
+    const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const index = try qjsTypedArrayConstructToIndex(ctx, output, global, index_arg);
+    const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const coerced_value = try qjsDataViewSetCoerceValue(ctx, output, global, method_id, value_arg);
+    defer coerced_value.free(ctx.runtime);
+    const little_endian = args.len >= 3 and value_ops.isTruthy(args[2]);
+    const call_args = [_]core.JSValue{ lengthIndexValue(index), coerced_value, core.JSValue.boolean(little_endian) };
+    return builtins.buffer.dataViewSet(ctx.runtime, receiver, method_id, call_args[0..]);
+}
+
+pub fn qjsDataViewSetCoerceValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    method_id: u32,
+    value: core.JSValue,
+) !core.JSValue {
+    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    errdefer primitive.free(ctx.runtime);
+    if (method_id == 9 or method_id == 10) return primitive;
+    if (primitive.isBigInt()) return error.TypeError;
+    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
+    primitive.free(ctx.runtime);
+    return number_value;
+}
+
+pub fn qjsErrorIsError(args: []const core.JSValue) core.JSValue {
+    if (args.len < 1) return core.JSValue.boolean(false);
+    const object = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
+    return core.JSValue.boolean(object.class_id == core.class.ids.error_);
+}
+
+pub fn qjsWeakRefDeref(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.weak_ref) return error.TypeError;
+    return object.weakRefDeref(rt);
+}
+
+pub fn qjsFinalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.finalization_registry) return error.TypeError;
+    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
+    if (builtins.object.sameValue(target, held_value)) return error.TypeError;
+    if (!unregister_token.isUndefined() and !qjsCanBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
+    if (builtins.object.sameValue(target, receiver)) return core.JSValue.undefinedValue();
+    try qjsFinalizationRegistryAppendCell(ctx.runtime, object, target, held_value, unregister_token);
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsFinalizationRegistryUnregister(ctx: *core.JSContext, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const object = objectFromValue(receiver) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.finalization_registry) return error.TypeError;
+    const token = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (!qjsCanBeHeldWeakly(ctx.runtime, token)) return error.TypeError;
+    return core.JSValue.boolean(object.unregisterFinalizationRegistryCells(ctx.runtime, token));
+}
+
+pub fn qjsFinalizationRegistryAppendCell(
+    rt: *core.JSRuntime,
+    object: *core.Object,
+    target: core.JSValue,
+    held_value: core.JSValue,
+    unregister_token: core.JSValue,
+) !void {
+    try object.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
+}
+
+pub fn qjsCanBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
+    if (value.isObject()) return true;
+    if (value.asSymbolAtom()) |atom_id| {
+        return rt.atoms.kind(atom_id) == .symbol and builtins.symbol.registryKey(&rt.atoms, atom_id) == null;
+    }
+    return false;
+}
+
+pub fn qjsSymbolFor(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const key = if (args.len >= 1)
+        try toStringBytesForSymbol(ctx, output, global, args[0], caller_function, caller_frame)
+    else
+        try ctx.runtime.memory.allocator.dupe(u8, "undefined");
+    defer ctx.runtime.memory.allocator.free(key);
+
+    const registered = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "{s}{s}", .{ builtins.symbol.registry_prefix, key });
+    defer ctx.runtime.memory.allocator.free(registered);
+    const atom_id = try ctx.runtime.atoms.internRegisteredValueSymbol(registered);
+    return core.JSValue.symbol(atom_id);
+}
+
+pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
+    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const atom_id = value.asSymbolAtom() orelse return error.TypeError;
+    const key = builtins.symbol.registryKey(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
+    return value_ops.createStringValue(rt, key);
+}
+
+pub fn qjsCreateBuiltinFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
+    const function = try builtins.function.nativeFunction(rt, name, length);
+    errdefer function.free(rt);
+    const object = objectFromValue(function) orelse return error.TypeError;
+    try object.setFunctionRealmGlobalPtr(rt, global);
+    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
+        try object.setPrototype(rt, function_proto);
+    }
+    return function;
+}
+
+pub fn constructCollectionFromVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: core.JSValue,
+    kind: u32,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const prototype = try constructorPrototypeObject(ctx.runtime, constructor);
+    return constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
+}
+
+pub fn addCollectionEntriesFromIterator(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    collection_value: core.JSValue,
+    kind: u32,
+    iterable_value: core.JSValue,
+    adder: core.JSValue,
+) !void {
+    const iterator_method = try getIteratorMethod(ctx, output, global, iterable_value);
+    defer iterator_method.free(ctx.runtime);
+    if (!isCallableValue(iterator_method)) return error.TypeError;
+    const iterator_value = try callValueOrBytecode(ctx, output, global, iterable_value, iterator_method, &.{}, null, null);
+    defer iterator_value.free(ctx.runtime);
+    _ = try property_ops.expectObject(iterator_value);
+
+    while (true) {
+        const step = iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+        };
+        defer step.value.free(ctx.runtime);
+        if (step.done) return;
+
+        if (kind == 1 or kind == 3) {
+            const entry = property_ops.expectObject(step.value) catch {
+                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, error.TypeError, null, null);
+            };
+            const key = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(0), null, null) catch |err| {
+                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+            };
+            defer key.free(ctx.runtime);
+            const value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(1), null, null) catch |err| {
+                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+            };
+            defer value.free(ctx.runtime);
+            callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{ key, value }) catch |err| {
+                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+            };
+        } else {
+            callCollectionAdderFromVm(ctx, output, global, collection_value, adder, &.{step.value}) catch |err| {
+                return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, err, null, null);
+            };
+        }
+    }
+}
+
+pub fn callCollectionAdderFromVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    collection_value: core.JSValue,
+    adder: core.JSValue,
+    args: []const core.JSValue,
+) !void {
+    const out = try callValueOrBytecode(ctx, output, global, collection_value, adder, args, null, null);
+    out.free(ctx.runtime);
 }
