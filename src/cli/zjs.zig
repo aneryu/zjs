@@ -1,5 +1,7 @@
 const std = @import("std");
-const public_api = @import("zjs");
+const engine = @import("zjs");
+const public_api = engine.public_api;
+const unicode = engine.libs.unicode;
 const zjs = public_api;
 const runtime_layer = public_api.runtime;
 
@@ -424,10 +426,11 @@ fn sourceLooksLikeModule(source: []const u8) bool {
     var brace_depth: usize = 0;
     while (index < source.len) {
         const byte = source[index];
+        if (unicode.isAsciiWhitespaceByte(byte)) {
+            index += 1;
+            continue;
+        }
         switch (byte) {
-            ' ', '\t', '\r', '\n', 0x0b, 0x0c => {
-                index += 1;
-            },
             '/' => {
                 if (index + 1 < source.len and source[index + 1] == '/') {
                     index += 2;
@@ -503,8 +506,11 @@ fn skipTemplate(source: []const u8, start: usize) usize {
 fn skipSpacesAndComments(source: []const u8, start: usize) usize {
     var index = start;
     while (index < source.len) {
+        if (unicode.isAsciiWhitespaceByte(source[index])) {
+            index += 1;
+            continue;
+        }
         switch (source[index]) {
-            ' ', '\t', '\r', '\n', 0x0b, 0x0c => index += 1,
             '/' => {
                 if (index + 1 < source.len and source[index + 1] == '/') {
                     index += 2;
@@ -522,11 +528,11 @@ fn skipSpacesAndComments(source: []const u8, start: usize) usize {
 }
 
 fn isIdentifierStart(byte: u8) bool {
-    return (byte >= 'A' and byte <= 'Z') or (byte >= 'a' and byte <= 'z') or byte == '_' or byte == '$';
+    return unicode.isAsciiIdentifierStartByte(byte);
 }
 
 fn isIdentifierContinue(byte: u8) bool {
-    return isIdentifierStart(byte) or (byte >= '0' and byte <= '9');
+    return unicode.isAsciiIdentifierPartByte(byte);
 }
 
 fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *Runtime) !void {
