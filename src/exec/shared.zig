@@ -850,77 +850,22 @@ pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: [
 
 pub const stackValueFromTop = utils.stackValueFromTop;
 
-pub fn toPrimitiveForAddition(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    if (!value.isObject()) return value.dup();
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
-    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    defer method.free(ctx.runtime);
-    if (!method.isUndefined() and !method.isNull()) {
-        if (!isCallableValue(method)) return error.TypeError;
-        const hint = try value_ops.createStringValue(ctx.runtime, "default");
-        defer hint.free(ctx.runtime);
-        const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, null, null);
-        if (primitive.isObject()) {
-            primitive.free(ctx.runtime);
-            return error.TypeError;
-        }
-        return primitive;
-    }
-
-    return toOrdinaryPrimitive(ctx, output, global, value);
-}
-
-pub fn toPrimitiveForNumber(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    if (!value.isObject()) return value.dup();
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitiveNumber(ctx, output, global, value);
-    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    defer method.free(ctx.runtime);
-    if (!method.isUndefined() and !method.isNull()) {
-        if (!isCallableValue(method)) return error.TypeError;
-        const hint = try value_ops.createStringValue(ctx.runtime, "number");
-        defer hint.free(ctx.runtime);
-        const primitive = try callValueOrBytecode(ctx, output, global, value, method, &.{hint}, null, null);
-        if (primitive.isObject()) {
-            primitive.free(ctx.runtime);
-            return error.TypeError;
-        }
-        return primitive;
-    }
-
-    return toOrdinaryPrimitiveNumber(ctx, output, global, value);
-}
-
-pub fn toOrdinaryPrimitive(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "valueOf", null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", null, null)) |primitive| return primitive;
-    return error.TypeError;
-}
-
-pub fn toOrdinaryPrimitiveNumber(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "valueOf", null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, "toString", null, null)) |primitive| return primitive;
-    return error.TypeError;
-}
+// --- Primitive coercion moved to coercion_ops.zig ---
+pub const coercion_ops = @import("coercion_ops.zig");
+pub const toPrimitiveForAddition = coercion_ops.toPrimitiveForAddition;
+pub const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+pub const toOrdinaryPrimitive = coercion_ops.toOrdinaryPrimitive;
+pub const toOrdinaryPrimitiveNumber = coercion_ops.toOrdinaryPrimitiveNumber;
+pub const valueTruthy = coercion_ops.valueTruthy;
+pub const toUint16CodeUnit = coercion_ops.toUint16CodeUnit;
+pub const toLengthIndex = coercion_ops.toLengthIndex;
+pub const toLengthNumber = coercion_ops.toLengthNumber;
+pub const fastToLengthIndex = coercion_ops.fastToLengthIndex;
+pub const toUint32Number = coercion_ops.toUint32Number;
+pub const uint32NumberValue = coercion_ops.uint32NumberValue;
+pub const coerceOptionalNumberMethodArgument = coercion_ops.coerceOptionalNumberMethodArgument;
+pub const primitiveWrapperStoredValue = coercion_ops.primitiveWrapperStoredValue;
+pub const toNumberForDateMethod = coercion_ops.toNumberForDateMethod;
 
 // --- Builtin glue moved to builtin_glue.zig ---
 pub const builtin_glue = @import("builtin_glue.zig");
@@ -969,10 +914,6 @@ pub const qjsCreateBuiltinFunction = builtin_glue.qjsCreateBuiltinFunction;
 pub const constructCollectionFromVm = builtin_glue.constructCollectionFromVm;
 pub const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
 pub const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
-
-pub fn valueTruthy(value: core.JSValue) bool {
-    return value_ops.isTruthy(value);
-}
 
 // --- Local/arg/var-ref slot ops moved to slot_ops.zig ---
 pub const slot_ops = @import("slot_ops.zig");
@@ -2228,13 +2169,6 @@ pub const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionN
 pub const appendCallSiteFunctionName = error_stack_ops.appendCallSiteFunctionName;
 pub const appendCallSiteFileName = error_stack_ops.appendCallSiteFileName;
 
-pub fn toUint16CodeUnit(number: f64) u16 {
-    if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
-    const int = if (number < 0) -@floor(@abs(number)) else @floor(number);
-    const modulo = @mod(int, 65536.0);
-    return @intFromFloat(modulo);
-}
-
 // --- RegExp fast paths moved to regexp_fastpath.zig ---
 pub const regexp_fastpath = @import("regexp_fastpath.zig");
 pub const qjsRegExpFunctionCall = regexp_fastpath.qjsRegExpFunctionCall;
@@ -2388,42 +2322,8 @@ pub fn byteIsAscii(byte: u8) bool {
     return byte < 0x80;
 }
 
-pub fn toLengthIndex(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize {
-    const length = try toLengthNumber(ctx, output, global, value);
-    if (length >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
-    return @intFromFloat(length);
-}
-
-pub fn toLengthNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
-    if (primitive.isBigInt()) return error.TypeError;
-    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    defer number_value.free(ctx.runtime);
-    const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
-    if (std.math.isNan(number) or number <= 0) return 0;
-    const max_length = 9007199254740991.0;
-    if (number >= max_length) return max_length;
-    return @floor(number);
-}
-
 pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
     return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
-}
-
-pub fn fastToLengthIndex(value: core.JSValue) ?usize {
-    if (value.asInt32()) |int_value| {
-        if (int_value <= 0) return 0;
-        return @intCast(int_value);
-    }
-    if (value.asFloat64()) |number| {
-        if (std.math.isNan(number) or number <= 0) return 0;
-        const max_length = 9007199254740991.0;
-        const clamped = if (number >= max_length) max_length else @floor(number);
-        if (clamped >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
-        return @intFromFloat(clamped);
-    }
-    return null;
 }
 
 pub fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
@@ -2460,34 +2360,20 @@ pub fn isLineTerminatorUnit(unit: u16) bool {
     return unicode_lib.isEcmaLineTerminatorUnit(unit);
 }
 
-pub fn isRegExpLineTerminator(unit: u16) bool {
-    return unicode_lib.isEcmaLineTerminatorUnit(unit);
-}
-
-pub fn classEscapeRunLengthLatin1(source: []const u8, bytes: []const u8, start: usize) usize {
-    if (!classEscapeIsQuantified(source)) return 1;
-    var end = start;
-    while (end < bytes.len and classEscapeUnitMatches(source, bytes[end])) : (end += 1) {}
-    return end - start;
-}
-
-pub fn classEscapeRunLengthUtf16(source: []const u8, units: []const u16, start: usize) usize {
-    if (!classEscapeIsQuantified(source)) return 1;
-    var end = start;
-    while (end < units.len and classEscapeUnitMatches(source, units[end])) : (end += 1) {}
-    return end - start;
-}
-
-pub fn classEscapeIsQuantified(source: []const u8) bool {
-    const kind_index = classEscapeKindIndex(source) orelse return false;
-    return source.len == kind_index + 2 and source[kind_index + 1] == '+';
-}
-
-pub fn classEscapeKindIndex(source: []const u8) ?usize {
-    if (source.len < 2 or source[0] != '\\') return null;
-    if (source[1] == '\\') return if (source.len >= 3) 2 else null;
-    return 1;
-}
+// --- Residual RegExp support helpers moved to regexp_fastpath.zig ---
+pub const isRegExpLineTerminator = regexp_fastpath.isRegExpLineTerminator;
+pub const classEscapeRunLengthLatin1 = regexp_fastpath.classEscapeRunLengthLatin1;
+pub const classEscapeRunLengthUtf16 = regexp_fastpath.classEscapeRunLengthUtf16;
+pub const classEscapeIsQuantified = regexp_fastpath.classEscapeIsQuantified;
+pub const classEscapeKindIndex = regexp_fastpath.classEscapeKindIndex;
+pub const isRegExpSyntaxByte = regexp_fastpath.isRegExpSyntaxByte;
+pub const hasFlag = regexp_fastpath.hasFlag;
+pub const regexpLastIndex = regexp_fastpath.regexpLastIndex;
+pub const setRegExpLastIndex = regexp_fastpath.setRegExpLastIndex;
+pub const updateRegExpLegacyStaticsNoCaptures = regexp_fastpath.updateRegExpLegacyStaticsNoCaptures;
+pub const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
+pub const appendDecodedRegExpGroupName = regexp_fastpath.appendDecodedRegExpGroupName;
+pub const readRegExpGroupNameEscape = regexp_fastpath.readRegExpGroupNameEscape;
 
 pub fn isEcmaWhitespaceOrLineTerminator(unit: u16) bool {
     return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
@@ -2530,165 +2416,6 @@ pub const RegExpCapture = struct {
     undefined: bool = false,
     name: ?[]const u8 = null,
 };
-
-pub fn isRegExpSyntaxByte(byte: u8) bool {
-    return switch (byte) {
-        '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|' => true,
-        else => false,
-    };
-}
-
-pub fn hasFlag(flags: []const u8, flag: u8) bool {
-    return std.mem.indexOfScalar(u8, flags, flag) != null;
-}
-
-pub fn regexpLastIndex(rt: *core.JSRuntime, object: *core.Object) usize {
-    const value = object.getProperty(core.atom.ids.lastIndex);
-    defer value.free(rt);
-    if (value.asInt32()) |int_value| return if (int_value < 0) 0 else @intCast(int_value);
-    if (value.asFloat64()) |float_value| {
-        if (std.math.isNan(float_value) or float_value <= 0) return 0;
-        if (float_value >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
-        return @intFromFloat(@floor(float_value));
-    }
-    return 0;
-}
-
-pub fn setRegExpLastIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
-    const value = if (index <= @as(usize, @intCast(std.math.maxInt(i32))))
-        core.JSValue.int32(@intCast(index))
-    else
-        core.JSValue.float64(@floatFromInt(index));
-    object.setProperty(rt, core.atom.ids.lastIndex, value) catch return error.TypeError;
-}
-
-pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, input_len: usize) !void {
-    const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return;
-    if (regexp_ctor.class_payload_kind != .function) return;
-    const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
-    const already_lazy_no_capture = legacy.lazy_no_capture_match;
-
-    try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.input, input_value);
-    if (!already_lazy_no_capture) {
-        clearRegExpLegacySlot(rt, &legacy.last_match);
-        clearRegExpLegacySlot(rt, &legacy.left_context);
-        clearRegExpLegacySlot(rt, &legacy.right_context);
-        clearRegExpLegacySlot(rt, &legacy.last_paren);
-        for (&legacy.captures) |*capture| clearRegExpLegacySlot(rt, capture);
-    }
-
-    legacy.lazy_no_capture_match = true;
-    legacy.lazy_match_index = found.index;
-    legacy.lazy_match_len = found.len;
-    legacy.lazy_input_len = input_len;
-}
-
-pub fn createRegExpIndexPair(rt: *core.JSRuntime, global: *core.Object, start: usize, end: usize) !core.JSValue {
-    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, &out.header);
-    try defineSplitValueElement(rt, out, 0, core.JSValue.int32(@intCast(start)));
-    try defineSplitValueElement(rt, out, 1, core.JSValue.int32(@intCast(end)));
-    return out.value();
-}
-
-pub fn appendDecodedRegExpGroupName(rt: *core.JSRuntime, out: *std.ArrayList(u8), name: []const u8) !void {
-    var index: usize = 0;
-    while (index < name.len) {
-        if (name[index] == '\\' and index + 1 < name.len and name[index + 1] == 'u') {
-            if (readRegExpGroupNameEscape(name, &index)) |cp| {
-                var code_point = cp;
-                if (isHighSurrogateCodePoint(cp)) {
-                    const saved = index;
-                    if (readRegExpGroupNameEscape(name, &index)) |low| {
-                        if (isLowSurrogateCodePoint(low)) {
-                            code_point = combinedSurrogateCodePoint(@intCast(cp), @intCast(low));
-                        } else {
-                            index = saved;
-                        }
-                    } else {
-                        index = saved;
-                    }
-                }
-                try appendUtf8CodePointForRegExpName(rt, out, code_point);
-                continue;
-            }
-        }
-        try out.append(rt.memory.allocator, name[index]);
-        index += 1;
-    }
-}
-
-pub fn readRegExpGroupNameEscape(name: []const u8, index: *usize) ?u21 {
-    if (index.* + 2 > name.len or name[index.*] != '\\' or name[index.* + 1] != 'u') return null;
-    var pos = index.* + 2;
-    if (pos < name.len and name[pos] == '{') {
-        pos += 1;
-        var value: u32 = 0;
-        var saw_digit = false;
-        while (pos < name.len and name[pos] != '}') : (pos += 1) {
-            const digit = hexNibble(name[pos]) orelse return null;
-            saw_digit = true;
-            value = value * 16 + digit;
-            if (value > 0x10ffff) return null;
-        }
-        if (!saw_digit or pos >= name.len or name[pos] != '}') return null;
-        index.* = pos + 1;
-        return @intCast(value);
-    }
-    if (pos >= name.len or hexNibble(name[pos]) == null) return null;
-    var available_hex: usize = 0;
-    while (pos + available_hex < name.len and available_hex < 4 and hexNibble(name[pos + available_hex]) != null) : (available_hex += 1) {}
-    const digit_count: usize = if (available_hex >= 4) 4 else available_hex;
-    var value: u32 = 0;
-    var count: usize = 0;
-    while (count < digit_count) : (count += 1) {
-        const digit = hexNibble(name[pos + count]) orelse return null;
-        value = value * 16 + digit;
-    }
-    index.* = pos + digit_count;
-    return @intCast(value);
-}
-
-pub fn toUint32Number(number: f64) u32 {
-    if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
-    const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
-    const modulo = @mod(integer, 4294967296.0);
-    return @intFromFloat(modulo);
-}
-
-pub fn uint32NumberValue(value: u32) core.JSValue {
-    if (value <= @as(u32, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(value));
-    return core.JSValue.float64(@floatFromInt(value));
-}
-
-pub fn coerceOptionalNumberMethodArgument(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    preserve_undefined: bool,
-) !?core.JSValue {
-    if (args.len == 0) return null;
-    if (preserve_undefined and args[0].isUndefined()) return null;
-    const primitive = try toPrimitiveForNumber(ctx, output, global, args[0]);
-    defer primitive.free(ctx.runtime);
-    if (primitive.isBigInt()) return error.TypeError;
-    return try value_ops.toNumberValue(ctx.runtime, primitive);
-}
-
-pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue {
-    _ = rt;
-    if (!value.isObject()) return null;
-    const object = property_ops.expectObject(value) catch return null;
-    switch (object.class_id) {
-        core.class.ids.number,
-        core.class.ids.boolean,
-        core.class.ids.big_int,
-        core.class.ids.symbol,
-        => if (object.objectData()) |stored| return stored.dup() else return null,
-        else => return null,
-    }
-}
 
 pub fn qjsFunctionHasInstanceCall(
     ctx: *core.JSContext,
@@ -2830,24 +2557,6 @@ pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, f
     const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "not a function");
     _ = ctx.throwValue(error_value);
     return error.JSException;
-}
-
-pub fn toNumberForDateMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (value.isObject()) {
-        const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-        defer primitive.free(ctx.runtime);
-        return value_ops.toNumberValue(ctx.runtime, primitive);
-    }
-    _ = caller_function;
-    _ = caller_frame;
-    return value_ops.toNumberValue(ctx.runtime, value);
 }
 
 pub fn constructValueOrBytecode(

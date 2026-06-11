@@ -21,23 +21,28 @@ const anchoredSingleNonWhitespaceMatches = shared_vm.anchoredSingleNonWhitespace
 const anchoredStringPropertyName = shared_vm.anchoredStringPropertyName;
 const appendStringValueUnits = shared_vm.appendStringValueUnits;
 const appendUtf16UnitsAsUtf8 = shared_vm.appendUtf16UnitsAsUtf8;
+const appendUtf8CodePointForRegExpName = shared_vm.appendUtf8CodePointForRegExpName;
+const arrayPrototypeFromGlobal = shared_vm.arrayPrototypeFromGlobal;
 const byteIsAscii = shared_vm.byteIsAscii;
 const bytesAreAscii = shared_vm.bytesAreAscii;
 const callValueOrBytecode = shared_vm.callValueOrBytecode;
+const classEscapeUnitMatches = shared_vm.classEscapeUnitMatches;
 const codePointFromSurrogatePair = shared_vm.codePointFromSurrogatePair;
+const combinedSurrogateCodePoint = shared_vm.combinedSurrogateCodePoint;
 const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
 const createRegExpMatchArrayFromValue = shared_vm.createRegExpMatchArrayFromValue;
 const createRegExpMatchArrayNoCapturesFromValue = shared_vm.createRegExpMatchArrayNoCapturesFromValue;
+const defineSplitValueElement = shared_vm.defineSplitValueElement;
 const fastToLengthIndex = shared_vm.fastToLengthIndex;
 const findStringClassEscapeMatch = shared_vm.findStringClassEscapeMatch;
 const getValueProperty = shared_vm.getValueProperty;
-const hasFlag = shared_vm.hasFlag;
 const hexNibble = shared_vm.hexNibble;
 const isCallableValue = shared_vm.isCallableValue;
+const isHighSurrogateCodePoint = shared_vm.isHighSurrogateCodePoint;
 const isHighSurrogateUnit = shared_vm.isHighSurrogateUnit;
 const isLineTerminatorUnit = shared_vm.isLineTerminatorUnit;
+const isLowSurrogateCodePoint = shared_vm.isLowSurrogateCodePoint;
 const isLowSurrogateUnit = shared_vm.isLowSurrogateUnit;
-const isRegExpSyntaxByte = shared_vm.isRegExpSyntaxByte;
 const isSameRealmRegExpPrototypeGetter = shared_vm.isSameRealmRegExpPrototypeGetter;
 const isSimpleStringClassEscapeSource = shared_vm.isSimpleStringClassEscapeSource;
 const isStringLineEndPosition = shared_vm.isStringLineEndPosition;
@@ -88,7 +93,6 @@ const toStringForAnnexB = shared_vm.toStringForAnnexB;
 const unicodeAstralSpecialMatch = shared_vm.unicodeAstralSpecialMatch;
 const unicodeLowSurrogateLiteralMatch = shared_vm.unicodeLowSurrogateLiteralMatch;
 const updateRegExpLegacyStaticsForMatch = shared_vm.updateRegExpLegacyStaticsForMatch;
-const updateRegExpLegacyStaticsNoCaptures = shared_vm.updateRegExpLegacyStaticsNoCaptures;
 const valueTruthy = shared_vm.valueTruthy;
 
 pub fn qjsRegExpFunctionCall(
@@ -3093,4 +3097,151 @@ pub fn negatedSurrogatePairClassAt(high: u16, low: u16, string_value: core.strin
     const cp = stringCodePointAt(string_value, pos) orelse return null;
     if (cp.len == 2 and string_value.codeUnitAt(pos) == high and string_value.codeUnitAt(pos + 1) == low) return null;
     return .{ .index = pos, .len = cp.len };
+}
+
+pub fn isRegExpLineTerminator(unit: u16) bool {
+    return unicode_lib.isEcmaLineTerminatorUnit(unit);
+}
+
+pub fn classEscapeRunLengthLatin1(source: []const u8, bytes: []const u8, start: usize) usize {
+    if (!classEscapeIsQuantified(source)) return 1;
+    var end = start;
+    while (end < bytes.len and classEscapeUnitMatches(source, bytes[end])) : (end += 1) {}
+    return end - start;
+}
+
+pub fn classEscapeRunLengthUtf16(source: []const u8, units: []const u16, start: usize) usize {
+    if (!classEscapeIsQuantified(source)) return 1;
+    var end = start;
+    while (end < units.len and classEscapeUnitMatches(source, units[end])) : (end += 1) {}
+    return end - start;
+}
+
+pub fn classEscapeIsQuantified(source: []const u8) bool {
+    const kind_index = classEscapeKindIndex(source) orelse return false;
+    return source.len == kind_index + 2 and source[kind_index + 1] == '+';
+}
+
+pub fn classEscapeKindIndex(source: []const u8) ?usize {
+    if (source.len < 2 or source[0] != '\\') return null;
+    if (source[1] == '\\') return if (source.len >= 3) 2 else null;
+    return 1;
+}
+
+pub fn isRegExpSyntaxByte(byte: u8) bool {
+    return switch (byte) {
+        '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|' => true,
+        else => false,
+    };
+}
+
+pub fn hasFlag(flags: []const u8, flag: u8) bool {
+    return std.mem.indexOfScalar(u8, flags, flag) != null;
+}
+
+pub fn regexpLastIndex(rt: *core.JSRuntime, object: *core.Object) usize {
+    const value = object.getProperty(core.atom.ids.lastIndex);
+    defer value.free(rt);
+    if (value.asInt32()) |int_value| return if (int_value < 0) 0 else @intCast(int_value);
+    if (value.asFloat64()) |float_value| {
+        if (std.math.isNan(float_value) or float_value <= 0) return 0;
+        if (float_value >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
+        return @intFromFloat(@floor(float_value));
+    }
+    return 0;
+}
+
+pub fn setRegExpLastIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
+    const value = if (index <= @as(usize, @intCast(std.math.maxInt(i32))))
+        core.JSValue.int32(@intCast(index))
+    else
+        core.JSValue.float64(@floatFromInt(index));
+    object.setProperty(rt, core.atom.ids.lastIndex, value) catch return error.TypeError;
+}
+
+pub fn updateRegExpLegacyStaticsNoCaptures(rt: *core.JSRuntime, global: *core.Object, input_value: core.JSValue, found: RegExpMatch, input_len: usize) !void {
+    const regexp_ctor = regExpConstructorFromGlobal(rt, global) catch return;
+    if (regexp_ctor.class_payload_kind != .function) return;
+    const legacy = try regexp_ctor.ensureRegExpLegacyStatics(rt);
+    const already_lazy_no_capture = legacy.lazy_no_capture_match;
+
+    try replaceRegExpLegacySlot(rt, regexp_ctor, &legacy.input, input_value);
+    if (!already_lazy_no_capture) {
+        clearRegExpLegacySlot(rt, &legacy.last_match);
+        clearRegExpLegacySlot(rt, &legacy.left_context);
+        clearRegExpLegacySlot(rt, &legacy.right_context);
+        clearRegExpLegacySlot(rt, &legacy.last_paren);
+        for (&legacy.captures) |*capture| clearRegExpLegacySlot(rt, capture);
+    }
+
+    legacy.lazy_no_capture_match = true;
+    legacy.lazy_match_index = found.index;
+    legacy.lazy_match_len = found.len;
+    legacy.lazy_input_len = input_len;
+}
+
+pub fn createRegExpIndexPair(rt: *core.JSRuntime, global: *core.Object, start: usize, end: usize) !core.JSValue {
+    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
+    errdefer core.Object.destroyFromHeader(rt, &out.header);
+    try defineSplitValueElement(rt, out, 0, core.JSValue.int32(@intCast(start)));
+    try defineSplitValueElement(rt, out, 1, core.JSValue.int32(@intCast(end)));
+    return out.value();
+}
+
+pub fn appendDecodedRegExpGroupName(rt: *core.JSRuntime, out: *std.ArrayList(u8), name: []const u8) !void {
+    var index: usize = 0;
+    while (index < name.len) {
+        if (name[index] == '\\' and index + 1 < name.len and name[index + 1] == 'u') {
+            if (readRegExpGroupNameEscape(name, &index)) |cp| {
+                var code_point = cp;
+                if (isHighSurrogateCodePoint(cp)) {
+                    const saved = index;
+                    if (readRegExpGroupNameEscape(name, &index)) |low| {
+                        if (isLowSurrogateCodePoint(low)) {
+                            code_point = combinedSurrogateCodePoint(@intCast(cp), @intCast(low));
+                        } else {
+                            index = saved;
+                        }
+                    } else {
+                        index = saved;
+                    }
+                }
+                try appendUtf8CodePointForRegExpName(rt, out, code_point);
+                continue;
+            }
+        }
+        try out.append(rt.memory.allocator, name[index]);
+        index += 1;
+    }
+}
+
+pub fn readRegExpGroupNameEscape(name: []const u8, index: *usize) ?u21 {
+    if (index.* + 2 > name.len or name[index.*] != '\\' or name[index.* + 1] != 'u') return null;
+    var pos = index.* + 2;
+    if (pos < name.len and name[pos] == '{') {
+        pos += 1;
+        var value: u32 = 0;
+        var saw_digit = false;
+        while (pos < name.len and name[pos] != '}') : (pos += 1) {
+            const digit = hexNibble(name[pos]) orelse return null;
+            saw_digit = true;
+            value = value * 16 + digit;
+            if (value > 0x10ffff) return null;
+        }
+        if (!saw_digit or pos >= name.len or name[pos] != '}') return null;
+        index.* = pos + 1;
+        return @intCast(value);
+    }
+    if (pos >= name.len or hexNibble(name[pos]) == null) return null;
+    var available_hex: usize = 0;
+    while (pos + available_hex < name.len and available_hex < 4 and hexNibble(name[pos + available_hex]) != null) : (available_hex += 1) {}
+    const digit_count: usize = if (available_hex >= 4) 4 else available_hex;
+    var value: u32 = 0;
+    var count: usize = 0;
+    while (count < digit_count) : (count += 1) {
+        const digit = hexNibble(name[pos + count]) orelse return null;
+        value = value * 16 + digit;
+    }
+    index.* = pos + digit_count;
+    return @intCast(value);
 }
