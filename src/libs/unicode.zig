@@ -44,6 +44,19 @@ pub const CodePointRange = struct {
     hi: u21,
 };
 
+pub const ecmaWhitespaceOrLineTerminatorRanges = [_]CodePointRange{
+    .{ .lo = 0x0009, .hi = 0x000d + 1 },
+    .{ .lo = 0x0020, .hi = 0x0020 + 1 },
+    .{ .lo = 0x00a0, .hi = 0x00a0 + 1 },
+    .{ .lo = 0x1680, .hi = 0x1680 + 1 },
+    .{ .lo = 0x2000, .hi = 0x200a + 1 },
+    .{ .lo = 0x2028, .hi = 0x2029 + 1 },
+    .{ .lo = 0x202f, .hi = 0x202f + 1 },
+    .{ .lo = 0x205f, .hi = 0x205f + 1 },
+    .{ .lo = 0x3000, .hi = 0x3000 + 1 },
+    .{ .lo = 0xfeff, .hi = 0xfeff + 1 },
+};
+
 pub const SurrogatePair = struct {
     high: u16,
     low: u16,
@@ -112,22 +125,15 @@ pub fn isEcmaLineTerminatorUnit(unit: u16) bool {
     return isEcmaLineTerminatorCodePoint(@intCast(unit));
 }
 
+pub fn isEcmaWhitespaceOrLineTerminatorCodePoint(cp: u21) bool {
+    inline for (ecmaWhitespaceOrLineTerminatorRanges) |range| {
+        if (cp >= range.lo and cp < range.hi) return true;
+    }
+    return false;
+}
+
 pub fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
-    return switch (unit) {
-        0x0009...0x000d,
-        0x0020,
-        0x00a0,
-        0x1680,
-        0x2000...0x200a,
-        0x2028,
-        0x2029,
-        0x202f,
-        0x205f,
-        0x3000,
-        0xfeff,
-        => true,
-        else => false,
-    };
+    return isEcmaWhitespaceOrLineTerminatorCodePoint(@intCast(unit));
 }
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
@@ -1660,6 +1666,8 @@ test "unicode ECMAScript whitespace and line terminator helper covers spec units
     };
     for (whitespace_units) |unit| {
         try std.testing.expect(isEcmaWhitespaceOrLineTerminatorUnit(unit));
+        try std.testing.expect(isEcmaWhitespaceOrLineTerminatorCodePoint(unit));
+        try std.testing.expect(rangesContain(ecmaWhitespaceOrLineTerminatorRanges[0..], unit));
     }
 
     const non_whitespace_units = [_]u16{
@@ -1674,6 +1682,8 @@ test "unicode ECMAScript whitespace and line terminator helper covers spec units
     };
     for (non_whitespace_units) |unit| {
         try std.testing.expect(!isEcmaWhitespaceOrLineTerminatorUnit(unit));
+        try std.testing.expect(!isEcmaWhitespaceOrLineTerminatorCodePoint(unit));
+        try std.testing.expect(!rangesContain(ecmaWhitespaceOrLineTerminatorRanges[0..], unit));
     }
 }
 

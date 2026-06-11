@@ -2355,16 +2355,9 @@ const RangeSet = struct {
                 if (escaped == 'D') try self.invert();
             },
             's', 'S' => {
-                try self.addHalfOpen(0x0009, 0x000d + 1);
-                try self.addHalfOpen(0x0020, 0x0020 + 1);
-                try self.addHalfOpen(0x00a0, 0x00a0 + 1);
-                try self.addHalfOpen(0x1680, 0x1680 + 1);
-                try self.addHalfOpen(0x2000, 0x200a + 1);
-                try self.addHalfOpen(0x2028, 0x2029 + 1);
-                try self.addHalfOpen(0x202f, 0x202f + 1);
-                try self.addHalfOpen(0x205f, 0x205f + 1);
-                try self.addHalfOpen(0x3000, 0x3000 + 1);
-                try self.addHalfOpen(0xfeff, 0xfeff + 1);
+                for (unicode.ecmaWhitespaceOrLineTerminatorRanges) |range| {
+                    try self.addHalfOpen(range.lo, range.hi);
+                }
                 if (escaped == 'S') try self.invert();
             },
             'w', 'W' => {
