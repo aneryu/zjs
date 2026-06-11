@@ -10223,7 +10223,7 @@ pub fn looksLikeStatementFunctionKeyword(source: []const u8, keyword_index: usiz
     while (cursor > 0) {
         cursor -= 1;
         const ch = source[cursor];
-        if (std.ascii.isWhitespace(ch)) continue;
+        if (isAsciiWhitespace(ch)) continue;
         return ch == ';' or ch == '{' or ch == '}';
     }
     return true;
@@ -10443,7 +10443,7 @@ pub fn evalFunctionDeclarationNameAt(rt: *core.JSRuntime, source: []const u8, ke
     defer name_bytes.deinit(rt.memory.allocator);
     while (index < source.len) {
         const b = source[index];
-        if (b == '(' or std.ascii.isWhitespace(b)) break;
+        if (b == '(' or isAsciiWhitespace(b)) break;
         if (b == '\\' and index + 1 < source.len and source[index + 1] == 'u') {
             try appendIdentifierEscape(rt, &name_bytes, source, &index);
             continue;
@@ -10471,7 +10471,7 @@ pub fn simpleEvalFunctionDeclarationNames(rt: *core.JSRuntime, source: []const u
     defer name_bytes.deinit(rt.memory.allocator);
     while (index < source.len) {
         const b = source[index];
-        if (b == '(' or std.ascii.isWhitespace(b)) break;
+        if (b == '(' or isAsciiWhitespace(b)) break;
         if (b == '\\' and index + 1 < source.len and source[index + 1] == 'u') {
             try appendIdentifierEscape(rt, &name_bytes, source, &index);
             continue;
@@ -10490,8 +10490,21 @@ pub fn simpleEvalFunctionDeclarationNames(rt: *core.JSRuntime, source: []const u
 
 pub fn skipAsciiWhitespace(source: []const u8, start: usize) usize {
     var index = start;
-    while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
+    while (index < source.len and isAsciiWhitespace(source[index])) : (index += 1) {}
     return index;
+}
+
+test "shared ascii whitespace helper covers source scanners" {
+    try std.testing.expect(isAsciiWhitespace(' '));
+    try std.testing.expect(isAsciiWhitespace('\t'));
+    try std.testing.expect(isAsciiWhitespace('\n'));
+    try std.testing.expect(isAsciiWhitespace('\r'));
+    try std.testing.expect(isAsciiWhitespace(0x0b));
+    try std.testing.expect(isAsciiWhitespace(0x0c));
+    try std.testing.expect(!isAsciiWhitespace('a'));
+    try std.testing.expect(!isAsciiWhitespace(0x85));
+    try std.testing.expectEqual(@as(usize, 6), skipAsciiWhitespace(" \t\n\r\x0b\x0cname", 0));
+    try std.testing.expectEqual(@as(usize, 6), skipAsciiWhitespace(" \t\n\r\x0b\x0cname", 6));
 }
 
 pub fn startsWithKeyword(source: []const u8, keyword: []const u8) bool {
@@ -10932,7 +10945,7 @@ pub fn directEvalVarNameIsNonLeadingFunctionCallerArg(
         }
         if (source.len >= cursor + name.len and std.mem.eql(u8, source[cursor..][0..name.len], name)) {
             const after = cursor + name.len;
-            if (after >= source.len or source[after] == '(' or std.ascii.isWhitespace(source[after])) return true;
+            if (after >= source.len or source[after] == '(' or isAsciiWhitespace(source[after])) return true;
         }
         search_start = idx + "function".len;
     }
