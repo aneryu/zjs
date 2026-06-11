@@ -117,11 +117,13 @@ Opcode family 仍拆到 `src/exec/vm_*.zig`：
 - opcode profiling helper: `vm_profile.zig`
 
 Shared execution helpers still live in `src/exec/shared.zig`; current perf docs
-track ongoing decomposition work, but `shared.zig` has not disappeared. Recent
-splits: `regexp_fastpath.zig`（RegExp 快路径，3.1K 行）、`slot_ops.zig`
-（locals/args/var-ref 槽位操作）、`vm_property_private.zig` 与
-`vm_property_ref.zig`（private field / with+ref opcode 处理）。shared.zig
-当前约 12K 行、vm_property.zig 约 12.5K 行，继续按域收敛。
+track ongoing decomposition work, but `shared.zig` has not disappeared. Splits
+so far: `regexp_fastpath.zig`（RegExp 快路径）、`slot_ops.zig`（槽位操作）、
+`builtin_glue.zig`（Math/Number/URI/JSON/collections/weak/Symbol/DataView
+glue）、`error_stack_ops.zig`、`forof_ops.zig`（迭代器记录与关闭路径）；
+`vm_property.zig` 按 globals/locals/field/ref/private 拆为五个子模块
+（13135 → 2125 行，达成 <3K 目标）。shared.zig 当前约 10.8K 行（自 15.3K），
+剩余大簇为 call runtime 核心与 direct-eval 支撑，继续按域收敛。
 
 RegExp 语义状态：duplicate named groups（alternation 路径验证 + `\k` 多发射 +
 groups matched 优先）、quantifier 每迭代 capture 清零（对齐 RepeatMatcher，
