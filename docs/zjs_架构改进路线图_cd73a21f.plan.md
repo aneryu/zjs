@@ -22,16 +22,16 @@ todos:
     status: completed
   - id: p2-split-shared
     content: "Phase 2: 拆分 shared.zig(15K) 与 vm_property.zig(13K)，合并 call.zig 重叠逻辑与 popCatchMarker 双实现"
-    status: pending
+    status: in_progress
   - id: p2-ic-opcodes
     content: "Phase 2: 接通预留 opcode 246-248（get_field_data_slot 等）的 emit+dispatch；删除 legacy bytecode/scope.zig 死路径"
-    status: pending
+    status: completed
   - id: p3-pipeline
     content: "Phase 3: 补 add_module_variables/add_eval_variables/scope 重链 pass，补全 is_captured/var_ref_count 链路"
     status: pending
   - id: p3-regexp-rope
     content: "Phase 3: 修复 UnicodeSets 排除项与 duplicate named groups；实现 String rope"
-    status: pending
+    status: in_progress
   - id: p4-atom-string
     content: "Phase 4: Atom/String 合一（参照 JSAtomStruct==JSString）+ atom 槽位回收"
     status: pending
