@@ -59,8 +59,6 @@ const Header = struct {
 };
 
 const header_len = 8;
-const cp_ls = 0x2028;
-const cp_ps = 0x2029;
 const int32_max: u32 = 0x7fffffff;
 
 const Op = enum(u8) {
@@ -1003,7 +1001,7 @@ fn canonicalize(code_point: u21, is_unicode: bool) u21 {
 }
 
 fn isLineTerminator(code_point: u21) bool {
-    return code_point == '\n' or code_point == '\r' or code_point == cp_ls or code_point == cp_ps;
+    return unicode.isEcmaLineTerminatorCodePoint(code_point);
 }
 
 fn isWordChar(code_point: u21) bool {

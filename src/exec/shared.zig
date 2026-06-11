@@ -6747,7 +6747,7 @@ pub fn isUnitsLineEndPosition(units: []const u16, pos: usize, multiline: bool) b
 }
 
 pub fn isLineTerminatorUnit(unit: u16) bool {
-    return unit == '\n' or unit == '\r' or unit == 0x2028 or unit == 0x2029;
+    return unicode_lib.isEcmaLineTerminatorUnit(unit);
 }
 
 pub const SurrogatePairClassPattern = struct {
@@ -6939,7 +6939,7 @@ pub fn negatedSurrogatePairClassAt(high: u16, low: u16, string_value: core.strin
 }
 
 pub fn isRegExpLineTerminator(unit: u16) bool {
-    return unit == '\n' or unit == '\r' or unit == 0x2028 or unit == 0x2029;
+    return unicode_lib.isEcmaLineTerminatorUnit(unit);
 }
 
 pub fn classEscapeRunLengthLatin1(source: []const u8, bytes: []const u8, start: usize) usize {

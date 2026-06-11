@@ -104,6 +104,14 @@ pub fn isWhiteSpace(c: u21) bool {
     return isInTable(c, data.unicode_prop_White_Space_table[0..], data.unicode_prop_White_Space_index[0..]);
 }
 
+pub fn isEcmaLineTerminatorCodePoint(cp: u21) bool {
+    return cp == '\n' or cp == '\r' or cp == 0x2028 or cp == 0x2029;
+}
+
+pub fn isEcmaLineTerminatorUnit(unit: u16) bool {
+    return isEcmaLineTerminatorCodePoint(@intCast(unit));
+}
+
 pub fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
     return switch (unit) {
         0x0009...0x000d,
@@ -1666,6 +1674,22 @@ test "unicode ECMAScript whitespace and line terminator helper covers spec units
     };
     for (non_whitespace_units) |unit| {
         try std.testing.expect(!isEcmaWhitespaceOrLineTerminatorUnit(unit));
+    }
+}
+
+test "unicode ECMAScript line terminator helpers cover unit and code point forms" {
+    const line_terminators = [_]u21{ '\n', '\r', 0x2028, 0x2029 };
+    for (line_terminators) |cp| {
+        try std.testing.expect(isEcmaLineTerminatorCodePoint(cp));
+        try std.testing.expect(isEcmaLineTerminatorUnit(@intCast(cp)));
+    }
+
+    const non_line_terminators = [_]u21{ 0x000b, 0x000c, ' ', 0x0085, 0x2000, 0xfeff, 0x10000 };
+    for (non_line_terminators) |cp| {
+        try std.testing.expect(!isEcmaLineTerminatorCodePoint(cp));
+        if (cp <= std.math.maxInt(u16)) {
+            try std.testing.expect(!isEcmaLineTerminatorUnit(@intCast(cp)));
+        }
     }
 }
 
