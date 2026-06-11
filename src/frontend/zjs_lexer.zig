@@ -2116,7 +2116,12 @@ fn isTypeAnnotationColon(src: []const u8, tokens: []const TSToken, colon_idx: us
     if (enclosing) |open_idx| {
         const open = tokens[open_idx].text(src);
         if (textEql(open, "(")) return isParameterList(src, tokens, open_idx);
-        if (textEql(open, "{")) return braceBelongsToClass(src, tokens, open_idx) and classFieldSegmentAllowsType(src, tokens, open_idx, colon_idx);
+        if (textEql(open, "{")) {
+            if (braceBelongsToClass(src, tokens, open_idx)) {
+                return classFieldSegmentAllowsType(src, tokens, open_idx, colon_idx);
+            }
+            return isVariableDeclarationType(src, tokens, colon_idx);
+        }
         return false;
     }
 

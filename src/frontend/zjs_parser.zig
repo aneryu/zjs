@@ -6588,7 +6588,9 @@ fn skipTemplateInPredeclareScan(s: *ParseState, first: tok.Token) Error!void {
             var t = s.lex.next() catch return Error.UnexpectedToken;
             defer s.lex.freeToken(&t);
             switch (t.val) {
-                tok.TOK_EOF => return,
+                tok.TOK_EOF => {
+                    return;
+                },
                 tok.TOK_TEMPLATE => {
                     try skipTemplateInPredeclareScan(s, t);
                     previous_token_kind = tok.TOK_TEMPLATE;
@@ -6602,7 +6604,9 @@ fn skipTemplateInPredeclareScan(s: *ParseState, first: tok.Token) Error!void {
                 },
                 '{', '(', '[' => expr_depth += 1,
                 '}', ')', ']' => {
-                    if (t.val == '}' and expr_depth == 0) break;
+                    if (t.val == '}' and expr_depth == 0) {
+                        break;
+                    }
                     if (expr_depth != 0) expr_depth -= 1;
                 },
                 else => {},
