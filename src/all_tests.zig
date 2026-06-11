@@ -97,6 +97,10 @@ fn refAllDeclsRecursive(comptime Container: type, comptime visited: anytype) voi
 
 test {
     refAllDeclsRecursive(kernel_api, .{});
+    // The emoji helpers are a public library export whose remaining engine
+    // callers went away with the exact RegExp string-property support; keep
+    // their tests in the suite explicitly.
+    std.testing.refAllDecls(libs.emoji);
     std.testing.refAllDecls(@import("tests/engine_production.zig"));
     std.testing.refAllDecls(@import("tests/embedding_examples.zig"));
     std.testing.refAllDecls(@import("tests/core.zig"));

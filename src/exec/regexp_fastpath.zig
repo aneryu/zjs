@@ -16,9 +16,7 @@ const shared_vm = @import("shared.zig");
 // outside the fast-path cluster).
 const RegExpCapture = shared_vm.RegExpCapture;
 const RegExpMatch = shared_vm.RegExpMatch;
-const anchoredRgiEmojiMatches = shared_vm.anchoredRgiEmojiMatches;
 const anchoredSingleNonWhitespaceMatches = shared_vm.anchoredSingleNonWhitespaceMatches;
-const anchoredStringPropertyName = shared_vm.anchoredStringPropertyName;
 const appendStringValueUnits = shared_vm.appendStringValueUnits;
 const appendUtf16UnitsAsUtf8 = shared_vm.appendUtf16UnitsAsUtf8;
 const appendUtf8CodePointForRegExpName = shared_vm.appendUtf8CodePointForRegExpName;
@@ -1644,49 +1642,8 @@ pub fn regexpSimpleClassAlternationPattern(rt: *core.JSRuntime, regexp_object: *
     return pattern;
 }
 
-pub fn qjsRegExpExecAnchoredRgiEmojiFallback(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    regexp_value: core.JSValue,
-    string_value: core.JSValue,
-    use_last_index: bool,
-    is_global: bool,
-    is_sticky: bool,
-    has_indices: bool,
-    input_len: usize,
-    start_index: usize,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const update_last_index = use_last_index and (is_global or is_sticky);
-    if (start_index != 0 or !anchoredRgiEmojiMatches(string_value)) {
-        if (update_last_index) try setValuePropertyStrict(ctx, output, global, regexp_value, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
-        return core.JSValue.nullValue();
-    }
-
-    if (update_last_index) {
-        const next_value = if (input_len <= @as(usize, @intCast(std.math.maxInt(i32))))
-            core.JSValue.int32(@intCast(input_len))
-        else
-            core.JSValue.float64(@floatFromInt(input_len));
-        try setValuePropertyStrict(ctx, output, global, regexp_value, core.atom.ids.lastIndex, next_value, caller_function, caller_frame);
-    }
-
-    return try createRegExpMatchArrayFromValue(ctx.runtime, global, string_value, .{
-        .index = 0,
-        .len = input_len,
-        .capture_count = 0,
-    }, has_indices);
-}
-
 pub fn regExpFlagsContain(flags: []const u8, needle: u8) bool {
     return std.mem.indexOfScalar(u8, flags, needle) != null;
-}
-
-pub fn isAnchoredRgiEmojiSource(source: []const u8) bool {
-    const name = anchoredStringPropertyName(source) orelse return false;
-    return std.mem.eql(u8, name, "RGI_Emoji");
 }
 
 pub fn isRegExpValue(value: core.JSValue) bool {

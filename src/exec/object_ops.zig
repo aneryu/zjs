@@ -71,7 +71,6 @@ const evalBytecodeHasVarDeclarations = shared_vm.evalBytecodeHasVarDeclarations;
 const evalLocalSlotIsEvalVarCell = shared_vm.evalLocalSlotIsEvalVarCell;
 const exactScriptExtensionsAliasTarget = shared_vm.exactScriptExtensionsAliasTarget;
 const findPropertyEscapeMatch = shared_vm.findPropertyEscapeMatch;
-const findStringPropertyEscapeMatch = shared_vm.findStringPropertyEscapeMatch;
 const findUnicodePropertyOnlyClassMatch = shared_vm.findUnicodePropertyOnlyClassMatch;
 const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
 const functionBytecodeHasClosureVarName = shared_vm.functionBytecodeHasClosureVarName;
@@ -86,7 +85,6 @@ const getFastStringPrimitiveDataProperty = shared_vm.getFastStringPrimitiveDataP
 const getStringIndexValue = shared_vm.getStringIndexValue;
 const importMetaUrlValue = shared_vm.importMetaUrlValue;
 const installLexicalPrivateNameRemap = shared_vm.installLexicalPrivateNameRemap;
-const isAnchoredRgiEmojiSource = shared_vm.isAnchoredRgiEmojiSource;
 const isBlockedByUnscopables = shared_vm.isBlockedByUnscopables;
 const isCallableValue = shared_vm.isCallableValue;
 const isConstructorLike = shared_vm.isConstructorLike;
@@ -112,7 +110,6 @@ const qjsObjectToLocaleStringCall = shared_vm.qjsObjectToLocaleStringCall;
 const qjsObjectToStringCall = shared_vm.qjsObjectToStringCall;
 const qjsReflectConstructGenericCallable = shared_vm.qjsReflectConstructGenericCallable;
 const qjsRegExpAutoInitBuiltinMatches = shared_vm.qjsRegExpAutoInitBuiltinMatches;
-const qjsRegExpExecAnchoredRgiEmojiFallback = shared_vm.qjsRegExpExecAnchoredRgiEmojiFallback;
 const qjsRegExpNativeBuiltinMatches = shared_vm.qjsRegExpNativeBuiltinMatches;
 const qjsWorkerNativeFunction = shared_vm.qjsWorkerNativeFunction;
 const readUtf16CodePoint = shared_vm.readUtf16CodePoint;
@@ -128,7 +125,6 @@ const shouldSkipDirectEvalScopeCaptureName = shared_vm.shouldSkipDirectEvalScope
 const slotValueDup = shared_vm.slotValueDup;
 const storeRealmValue = shared_vm.storeRealmValue;
 const stringObjectHasIndexProperty = shared_vm.stringObjectHasIndexProperty;
-const stringPropertyEscapePattern = shared_vm.stringPropertyEscapePattern;
 const stringSliceValue = shared_vm.stringSliceValue;
 const throwPrivateBrandTypeError = shared_vm.throwPrivateBrandTypeError;
 const throwRangeErrorMessage = shared_vm.throwRangeErrorMessage;
@@ -1116,24 +1112,8 @@ pub fn qjsRegExpExecPropertyFallback(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (isAnchoredRgiEmojiSource(source) and regExpFlagsContain(flags, 'v')) {
-        return try qjsRegExpExecAnchoredRgiEmojiFallback(ctx, output, global, regexp_value, string_value, use_last_index, is_global, is_sticky, has_indices, input_len, start_index, caller_function, caller_frame);
-    }
     if (isAnchoredBinaryPropertySource(source)) {
         return try qjsRegExpExecAnchoredPropertyFallback(ctx, output, global, regexp_value, source, string_value, use_last_index, is_global, is_sticky, has_indices, input_len, start_index, caller_function, caller_frame);
-    }
-    if (regExpFlagsContain(flags, 'v')) {
-        if (findStringPropertyEscapeMatch(source, string_value, start_index, is_sticky)) |match| {
-            const update_last_index = use_last_index and (is_global or is_sticky);
-            if (update_last_index) {
-                const next_value = if (match.index + match.len <= @as(usize, @intCast(std.math.maxInt(i32))))
-                    core.JSValue.int32(@intCast(match.index + match.len))
-                else
-                    core.JSValue.float64(@floatFromInt(match.index + match.len));
-                try setValuePropertyStrict(ctx, output, global, regexp_value, core.atom.ids.lastIndex, next_value, caller_function, caller_frame);
-            }
-            return try createRegExpMatchArrayFromValue(ctx.runtime, global, string_value, match, has_indices);
-        }
     }
     if (regExpFlagsContain(flags, 'u') or regExpFlagsContain(flags, 'v')) {
         if (findUnicodePropertyOnlyClassMatch(source, string_value, start_index, is_sticky)) |match| {
@@ -1204,10 +1184,6 @@ pub fn qjsRegExpExecAnchoredPropertyFallback(
 }
 
 pub fn regexpSourceUsesZigPropertyFallback(source: []const u8, flags: []const u8) bool {
-    if (regExpFlagsContain(flags, 'v')) {
-        if (isAnchoredRgiEmojiSource(source)) return true;
-        if (stringPropertyEscapePattern(source)) |name| return std.mem.eql(u8, name, "RGI_Emoji");
-    }
     if ((regExpFlagsContain(flags, 'u') or regExpFlagsContain(flags, 'v')) and unicodePropertyOnlyClassSource(source)) return true;
     if (anchoredBinaryPropertyName(source)) |name| return isUnknownScriptName(name);
     if (propertyEscapePattern(source)) |parsed| return isUnknownScriptName(parsed.name);

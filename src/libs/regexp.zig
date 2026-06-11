@@ -1,5 +1,6 @@
 const std = @import("std");
 const unicode = @import("unicode.zig");
+const emoji_sequences = @import("emoji_sequences.zig");
 
 pub const max_captures = 256;
 const max_stack = 256;
@@ -1566,6 +1567,14 @@ const Compiler = struct {
                     try self.emitCharacterAtom(canonicalizeLiteral(escaped, self.flags), is_backward_dir);
                     return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
                 }
+                if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
+                    if (try self.parseStringPropertyEscape()) |string_set| {
+                        var set = string_set;
+                        defer set.deinit();
+                        try self.emitClassSet(&set, is_backward_dir);
+                        return .{ .start = start, .simple_char_count = null, .quantifiable = true, .capture_count_before = self.capture_count };
+                    }
+                }
                 const inverted = escaped == 'P';
                 var ranges = try self.parseUnicodePropertyEscape(inverted);
                 defer ranges.deinit();
@@ -1758,9 +1767,7 @@ const Compiler = struct {
     /// ClassDifference (`--`-chain) — operators must not be mixed at one
     /// level. Returns the resolved class set, case-folded per operand when
     /// ignoring case and complemented when the class is negated (negation
-    /// of a set that may contain strings is a SyntaxError). Properties of
-    /// strings (`\p{RGI_Emoji}` etc.) are not supported yet and stay
-    /// rejected.
+    /// of a set that may contain strings is a SyntaxError).
     fn parseClassSetBody(self: *Compiler) CompileError!ClassSet {
         const invert = if (self.index < self.pattern.len and self.pattern[self.index] == '^') blk: {
             self.index += 1;
@@ -1853,6 +1860,10 @@ const Compiler = struct {
             }
         } else if (self.index + 1 < self.pattern.len and self.pattern[self.index + 1] == 'q') {
             return .{ .set = try self.parseClassStringDisjunction(), .was_range = false };
+        } else if (self.index + 1 < self.pattern.len and (self.pattern[self.index + 1] == 'p' or self.pattern[self.index + 1] == 'P')) {
+            if (try self.parseStringPropertyEscape()) |set| {
+                return .{ .set = set, .was_range = false };
+            }
         }
 
         var set = ClassSet.init(self.allocator);
@@ -1937,18 +1948,15 @@ const Compiler = struct {
             return;
         }
 
-        // Sort strings by descending length (stable insertion sort; the
-        // list is small). The empty string, if present, lands last.
+        // Sort strings by descending length (stable, preserving insertion
+        // order between equal lengths per spec ordering). The empty string,
+        // if present, lands last.
         const items = set.strings.items;
-        var i: usize = 1;
-        while (i < items.len) : (i += 1) {
-            const key = items[i];
-            var j = i;
-            while (j > 0 and items[j - 1].len < key.len) : (j -= 1) {
-                items[j] = items[j - 1];
+        std.sort.block([]u21, items, {}, struct {
+            fn longerFirst(_: void, lhs: []u21, rhs: []u21) bool {
+                return lhs.len > rhs.len;
             }
-            items[j] = key;
-        }
+        }.longerFirst);
 
         const has_empty = items.len > 0 and items[items.len - 1].len == 0;
         const string_count = items.len - @intFromBool(has_empty);
@@ -2367,6 +2375,99 @@ const Compiler = struct {
 
     fn parseGroupName(self: *Compiler) CompileError![]const u8 {
         return parseGroupNameAt(self.pattern, &self.index);
+    }
+
+    /// The seven v-mode Unicode properties of strings (UTS #51 sequence
+    /// properties; sec-static-semantics-unicodematchpropertyofstrings).
+    const StringProperty = enum {
+        basic_emoji,
+        emoji_keycap_sequence,
+        rgi_emoji,
+        rgi_emoji_flag_sequence,
+        rgi_emoji_modifier_sequence,
+        rgi_emoji_tag_sequence,
+        rgi_emoji_zwj_sequence,
+    };
+
+    fn stringPropertyByName(name: []const u8) ?StringProperty {
+        const names = [_]struct { []const u8, StringProperty }{
+            .{ "Basic_Emoji", .basic_emoji },
+            .{ "Emoji_Keycap_Sequence", .emoji_keycap_sequence },
+            .{ "RGI_Emoji", .rgi_emoji },
+            .{ "RGI_Emoji_Flag_Sequence", .rgi_emoji_flag_sequence },
+            .{ "RGI_Emoji_Modifier_Sequence", .rgi_emoji_modifier_sequence },
+            .{ "RGI_Emoji_Tag_Sequence", .rgi_emoji_tag_sequence },
+            .{ "RGI_Emoji_ZWJ_Sequence", .rgi_emoji_zwj_sequence },
+        };
+        for (names) |entry| {
+            if (std.mem.eql(u8, entry[0], name)) return entry[1];
+        }
+        return null;
+    }
+
+    /// When the `\p{...}`/`\P{...}` escape at `self.index` names a v-mode
+    /// property of strings, consumes it and returns its class set. `\P` of
+    /// a property of strings is a SyntaxError (MayContainStrings under
+    /// complement). Any other escape leaves the position untouched and
+    /// returns null so the regular code-point property path applies.
+    fn parseStringPropertyEscape(self: *Compiler) CompileError!?ClassSet {
+        std.debug.assert(self.pattern[self.index] == '\\');
+        std.debug.assert(self.pattern[self.index + 1] == 'p' or self.pattern[self.index + 1] == 'P');
+        if (self.index + 2 >= self.pattern.len or self.pattern[self.index + 2] != '{') return null;
+        var end = self.index + 3;
+        while (end < self.pattern.len and self.pattern[end] != '}') : (end += 1) {}
+        if (end >= self.pattern.len) return null;
+        const property = stringPropertyByName(self.pattern[self.index + 3 .. end]) orelse return null;
+        if (self.pattern[self.index + 1] == 'P') return error.InvalidPattern;
+        self.index = end + 1;
+        return try self.buildStringPropertyClassSet(property);
+    }
+
+    fn buildStringPropertyClassSet(self: *Compiler, property: StringProperty) CompileError!ClassSet {
+        var set = ClassSet.init(self.allocator);
+        errdefer set.deinit();
+        switch (property) {
+            .basic_emoji => try self.addBasicEmoji(&set),
+            .emoji_keycap_sequence => try self.addPropertyStrings(&set, &emoji_sequences.emoji_keycap_sequences),
+            .rgi_emoji_flag_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_flag_sequences),
+            .rgi_emoji_modifier_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_modifier_sequences),
+            .rgi_emoji_tag_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_tag_sequences),
+            .rgi_emoji_zwj_sequence => try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_zwj_sequences),
+            .rgi_emoji => {
+                // RGI_Emoji is the union of the six other properties of
+                // strings (UTS #51); their sequence sets are pairwise
+                // disjoint, so plain concatenation needs no dedup.
+                try self.addBasicEmoji(&set);
+                try self.addPropertyStrings(&set, &emoji_sequences.emoji_keycap_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_flag_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_modifier_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_tag_sequences);
+                try self.addPropertyStrings(&set, &emoji_sequences.rgi_emoji_zwj_sequences);
+            },
+        }
+        try set.ranges.normalize();
+        if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
+        return set;
+    }
+
+    fn addBasicEmoji(self: *Compiler, set: *ClassSet) CompileError!void {
+        for (emoji_sequences.basic_emoji_ranges) |range| {
+            try set.ranges.addInclusive(range.lo, range.hi);
+        }
+        try self.addPropertyStrings(set, &emoji_sequences.basic_emoji_sequences);
+    }
+
+    fn addPropertyStrings(self: *Compiler, set: *ClassSet, property_sequences: []const []const u21) CompileError!void {
+        try set.strings.ensureUnusedCapacity(self.allocator, property_sequences.len);
+        for (property_sequences) |sequence| {
+            const copy = try self.allocator.dupe(u21, sequence);
+            if (self.flags.ignore_case) {
+                for (copy) |*cp| cp.* = canonicalize(cp.*, true);
+            }
+            // The generated tables are already deduplicated, so skip
+            // ClassSet.addOwnedString's linear duplicate scan.
+            set.strings.appendAssumeCapacity(copy);
+        }
     }
 
     fn parseUnicodePropertyEscape(self: *Compiler, inverted: bool) CompileError!RangeSet {

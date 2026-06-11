@@ -2147,19 +2147,6 @@ pub fn nativeFunctionMatcherUnicodeClassAsciiResult(source: []const u8, flags: [
     return false;
 }
 
-pub fn findStringPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, start_index: usize, sticky: bool) ?RegExpMatch {
-    const name = stringPropertyEscapePattern(source) orelse return null;
-    if (!std.mem.eql(u8, name, "RGI_Emoji")) return null;
-    const units = stringValueUnits(string_value) orelse return null;
-    const match = emoji.findRgiEmojiMatch(units, start_index, sticky) orelse return null;
-    return .{ .index = match.index, .len = match.len };
-}
-
-pub fn anchoredRgiEmojiMatches(string_value: core.JSValue) bool {
-    const units = stringValueUnits(string_value) orelse return false;
-    return emoji.rgiEmojiSequencesCover(units);
-}
-
 pub fn stringValueUnits(string_value: core.JSValue) ?emoji.StringUnits {
     const header = string_value.refHeader() orelse return null;
     if (!string_value.isString()) return null;
@@ -2201,23 +2188,6 @@ pub fn findPropertyEscapeMatch(source: []const u8, string_value: core.JSValue, s
         },
     }
     return null;
-}
-
-pub fn anchoredStringPropertyName(source: []const u8) ?[]const u8 {
-    const positive_prefix = "^\\p{";
-    const suffix = "}+$";
-    if (!std.mem.startsWith(u8, source, positive_prefix)) return null;
-    if (!std.mem.endsWith(u8, source, suffix)) return null;
-    if (source.len <= positive_prefix.len + suffix.len) return null;
-    return source[positive_prefix.len .. source.len - suffix.len];
-}
-
-pub fn stringPropertyEscapePattern(source: []const u8) ?[]const u8 {
-    const positive_prefix = "\\p{";
-    if (!std.mem.startsWith(u8, source, positive_prefix)) return null;
-    if (source.len <= positive_prefix.len or source[source.len - 1] != '}') return null;
-    const name = source[positive_prefix.len .. source.len - 1];
-    return if (std.mem.eql(u8, name, "RGI_Emoji")) name else null;
 }
 
 pub fn unicodePropertyRunCodePointMatches(pattern: UnicodePropertyRunPattern, code_point: u21) bool {

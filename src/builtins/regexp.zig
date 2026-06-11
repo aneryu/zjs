@@ -375,7 +375,6 @@ fn isNativeFunctionMatcherUnicodeClass(pattern: []const u8, flags: []const u8) b
 }
 
 fn isSupportedPropertyEscapeFallback(pattern: []const u8, flags: []const u8) bool {
-    if (isSupportedStringPropertyEscapeFallback(pattern, flags)) return true;
     if (!propertyEscapeFallbackFlags(flags)) return false;
     if (supportedPropertyEscapePatternName(pattern)) |_| return true;
     const positive_prefix = "^\\p{";
@@ -392,17 +391,6 @@ fn isSupportedPropertyEscapeFallback(pattern: []const u8, flags: []const u8) boo
     return isSupportedUnicodePropertyExpression(pattern[prefix_len .. pattern.len - suffix.len]);
 }
 
-fn isSupportedStringPropertyEscapeFallback(pattern: []const u8, flags: []const u8) bool {
-    if (!stringPropertyEscapeFallbackFlags(flags)) return false;
-    if (supportedStringPropertyEscapePatternName(pattern)) |_| return true;
-    const positive_prefix = "^\\p{";
-    if (!std.mem.startsWith(u8, pattern, positive_prefix)) return false;
-    const suffix = "}+$";
-    if (!std.mem.endsWith(u8, pattern, suffix)) return false;
-    if (pattern.len <= positive_prefix.len + suffix.len) return false;
-    return isSupportedStringUnicodePropertyExpression(pattern[positive_prefix.len .. pattern.len - suffix.len]);
-}
-
 fn propertyEscapeFallbackFlags(flags: []const u8) bool {
     var has_u = false;
     for (flags) |flag| {
@@ -413,18 +401,6 @@ fn propertyEscapeFallbackFlags(flags: []const u8) bool {
         }
     }
     return has_u;
-}
-
-fn stringPropertyEscapeFallbackFlags(flags: []const u8) bool {
-    var has_v = false;
-    for (flags) |flag| {
-        switch (flag) {
-            'd', 'g', 'y' => {},
-            'v' => has_v = true,
-            else => return false,
-        }
-    }
-    return has_v;
 }
 
 fn supportedPropertyEscapePatternName(pattern: []const u8) ?[]const u8 {
@@ -440,19 +416,6 @@ fn supportedPropertyEscapePatternName(pattern: []const u8) ?[]const u8 {
     const name = pattern[prefix_len .. pattern.len - 1];
     if (!isSupportedUnicodePropertyExpression(name)) return null;
     return name;
-}
-
-fn supportedStringPropertyEscapePatternName(pattern: []const u8) ?[]const u8 {
-    const positive_prefix = "\\p{";
-    if (!std.mem.startsWith(u8, pattern, positive_prefix)) return null;
-    if (pattern.len <= positive_prefix.len or pattern[pattern.len - 1] != '}') return null;
-    const name = pattern[positive_prefix.len .. pattern.len - 1];
-    if (!isSupportedStringUnicodePropertyExpression(name)) return null;
-    return name;
-}
-
-fn isSupportedStringUnicodePropertyExpression(name: []const u8) bool {
-    return std.mem.eql(u8, name, "RGI_Emoji");
 }
 
 fn isSimpleGlobalClassEscapePattern(pattern: []const u8, flags: []const u8) bool {
