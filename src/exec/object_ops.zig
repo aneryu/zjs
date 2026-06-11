@@ -2946,6 +2946,9 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         defer rt.atoms.free(atom);
+        // Duplicate named groups share one property; the participating
+        // (matched) capture wins, an unset duplicate must not overwrite it.
+        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
         const value = if (capture.undefined)
             core.JSValue.undefinedValue()
         else
@@ -2984,6 +2987,9 @@ pub fn defineRegExpGroupsProperty(rt: *core.JSRuntime, out: *core.Object, input_
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         defer rt.atoms.free(atom);
+        // Duplicate named groups share one property; the participating
+        // (matched) capture wins, an unset duplicate must not overwrite it.
+        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
         const value = if (capture.undefined)
             core.JSValue.undefinedValue()
         else
@@ -3025,6 +3031,9 @@ pub fn defineRegExpGroupsPropertyFromValue(rt: *core.JSRuntime, out: *core.Objec
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         defer rt.atoms.free(atom);
+        // Duplicate named groups share one property; the participating
+        // (matched) capture wins, an unset duplicate must not overwrite it.
+        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
         const value = if (capture.undefined)
             core.JSValue.undefinedValue()
         else

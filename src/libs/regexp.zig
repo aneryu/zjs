@@ -1113,6 +1113,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags_str: []c
     };
     errdefer compiler.code.deinit(allocator);
     defer compiler.capture_names.deinit(allocator);
+    defer compiler.deinitNamedGroupPaths();
 
     try compiler.emitHeader();
     if (!parsed_flags.sticky) {
@@ -1243,6 +1244,49 @@ const Compiler = struct {
     code: std.ArrayList(u8),
     capture_names: std.ArrayList(?[]const u8) = .empty,
     has_named_captures: bool = false,
+    /// Current alternation path: one alternative counter per enclosing
+    /// Disjunction. Two named groups may share a name only when their
+    /// paths diverge (they sit in different alternatives of some common
+    /// Disjunction), per the duplicate-named-groups proposal.
+    alt_path: std.ArrayList(u32) = .empty,
+    named_group_paths: std.ArrayList(NamedGroupPath) = .empty,
+
+    const NamedGroupPath = struct {
+        name: []const u8,
+        path: []u32,
+    };
+
+    fn deinitNamedGroupPaths(self: *Compiler) void {
+        for (self.named_group_paths.items) |record| self.allocator.free(record.path);
+        self.named_group_paths.deinit(self.allocator);
+        self.alt_path.deinit(self.allocator);
+    }
+
+    /// A duplicate of `name` is allowed only when every already-recorded
+    /// group with the same name diverges from the current alternation
+    /// path: the first differing position marks the shared Disjunction
+    /// whose distinct alternatives keep the two groups mutually
+    /// exclusive. A prefix relation (one group nested inside the other's
+    /// alternative chain) means both could participate in one match.
+    fn duplicateNameAllowed(self: *const Compiler, name: []const u8) bool {
+        const current = self.alt_path.items;
+        for (self.named_group_paths.items) |record| {
+            if (!groupNamesEqual(record.name, name)) continue;
+            const limit = @min(record.path.len, current.len);
+            var i: usize = 0;
+            const diverges = while (i < limit) : (i += 1) {
+                if (record.path[i] != current[i]) break true;
+            } else false;
+            if (!diverges) return false;
+        }
+        return true;
+    }
+
+    fn recordNamedGroupPath(self: *Compiler, name: []const u8) CompileError!void {
+        const path = try self.allocator.dupe(u32, self.alt_path.items);
+        errdefer self.allocator.free(path);
+        try self.named_group_paths.append(self.allocator, .{ .name = name, .path = path });
+    }
 
     fn emitHeader(self: *Compiler) !void {
         try self.code.appendNTimes(self.allocator, 0, header_len);
@@ -1268,9 +1312,12 @@ const Compiler = struct {
 
     fn parseDisjunction(self: *Compiler, terminator: ?u8, is_backward_dir: bool) CompileError!void {
         const start = self.code.items.len;
+        try self.alt_path.append(self.allocator, 0);
+        defer _ = self.alt_path.pop();
         try self.parseAlternative(terminator, is_backward_dir);
         while (self.index < self.pattern.len and self.pattern[self.index] == '|') {
             self.index += 1;
+            self.alt_path.items[self.alt_path.items.len - 1] += 1;
             const previous_len = self.code.items.len - start;
             try self.insertBytes(start, 5);
             self.code.items[start] = opByte(.split_next_first);
@@ -1398,7 +1445,8 @@ const Compiler = struct {
         const capture_index = self.capture_count;
         self.capture_count += 1;
         if (maybe_name) |name| {
-            if (self.findCaptureName(name, capture_index) != null) return error.InvalidPattern;
+            if (!self.duplicateNameAllowed(name)) return error.InvalidPattern;
+            try self.recordNamedGroupPath(name);
             self.has_named_captures = true;
         }
         try self.capture_names.append(self.allocator, maybe_name);
@@ -1542,13 +1590,26 @@ const Compiler = struct {
                     try self.emitCharacterAtom(canonicalizeLiteral('k', self.flags), is_backward_dir);
                     return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
                 };
-                const capture_index = self.findCaptureName(name, self.capture_count) orelse self.findScannedCaptureName(name) orelse {
+                // With duplicate named groups, `\k<name>` references every
+                // group carrying the name. At most one of them participates
+                // in a match (duplicates must sit in different alternatives),
+                // and an unset capture matches the empty string, so emitting
+                // one back_reference per same-named group composes to "match
+                // the participating one".
+                var emitted_back_reference = false;
+                var name_capture_index: usize = 1;
+                while (name_capture_index < self.total_capture_count and name_capture_index - 1 < self.all_capture_names.len) : (name_capture_index += 1) {
+                    const existing = self.all_capture_names[name_capture_index - 1] orelse continue;
+                    if (!groupNamesEqual(existing, name)) continue;
+                    try self.emitOpU8(if (is_backward_dir) .backward_back_reference else .back_reference, @intCast(name_capture_index));
+                    emitted_back_reference = true;
+                }
+                if (!emitted_back_reference) {
                     if (self.flags.unicode or self.patternHasNamedCaptures()) return error.InvalidPattern;
                     self.index = escape_start + 2;
                     try self.emitCharacterAtom(canonicalizeLiteral('k', self.flags), is_backward_dir);
                     return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
-                };
-                try self.emitOpU8(if (is_backward_dir) .backward_back_reference else .back_reference, @intCast(capture_index));
+                }
                 return .{ .start = start, .simple_char_count = null, .quantifiable = true, .capture_count_before = self.capture_count };
             },
             else => {
@@ -1827,15 +1888,19 @@ const Compiler = struct {
                 return;
             }
         }
-        var atom_start = atom.start;
-        if (min == 0 and self.capture_count != atom.capture_count_before) {
+        // Per RepeatMatcher, every iteration entry clears the captures
+        // inside the repeated Atom, so the reset stays INSIDE the loop
+        // body (it gets wrapped together with the atom below). QuickJS
+        // hoists the reset out of the loop (resetting once, before the
+        // first iteration), which deviates from the spec for patterns
+        // like /^(?:(x)|z){2}\1$/ and the duplicate-named-groups tests.
+        if (self.capture_count != atom.capture_count_before) {
             try self.insertBytes(atom.start, 3);
             self.code.items[atom.start] = opByte(.save_reset);
             self.code.items[atom.start + 1] = atom.capture_count_before;
             self.code.items[atom.start + 2] = self.capture_count - 1;
-            atom_start += 3;
         }
-        try self.wrapGenericQuantifier(atom_start, min, max, greedy);
+        try self.wrapGenericQuantifier(atom.start, min, max, greedy);
     }
 
     fn wrapSimpleGreedyQuantifier(self: *Compiler, atom_start: usize, char_count: u32, min: u32, max: u32) !void {

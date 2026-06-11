@@ -1,12 +1,11 @@
 {
-  "total_skipped": 5190,
+  "total_skipped": 5174,
   "features": [
     { "feature": "Temporal", "skipped": 4602 },
     { "feature": "source-phase-imports", "skipped": 230 },
     { "feature": "import-defer", "skipped": 229 },
     { "feature": "ShadowRealm", "skipped": 64 },
     { "feature": "decorators", "skipped": 24 },
-    { "feature": "regexp-duplicate-named-groups", "skipped": 16 },
     { "feature": "host-gc-required", "skipped": 15 },
     { "feature": "Intl.Era-monthcode", "skipped": 10 }
   ]
