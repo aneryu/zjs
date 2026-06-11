@@ -364,19 +364,17 @@ fn encodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, 
 }
 
 fn percentEncodedByte(byte: u8) [3]u8 {
-    const hex = "0123456789ABCDEF";
-    return .{ '%', hex[byte >> 4], hex[byte & 0x0f] };
+    return .{ '%', unicode.asciiUpperHexDigitChar(byte >> 4), unicode.asciiUpperHexDigitChar(byte & 0x0f) };
 }
 
 fn percentEncodedUnit(unit: u16) [6]u8 {
-    const hex = "0123456789ABCDEF";
     return .{
         '%',
         'u',
-        hex[(unit >> 12) & 0x0f],
-        hex[(unit >> 8) & 0x0f],
-        hex[(unit >> 4) & 0x0f],
-        hex[unit & 0x0f],
+        unicode.asciiUpperHexDigitChar((unit >> 12) & 0x0f),
+        unicode.asciiUpperHexDigitChar((unit >> 8) & 0x0f),
+        unicode.asciiUpperHexDigitChar((unit >> 4) & 0x0f),
+        unicode.asciiUpperHexDigitChar(unit & 0x0f),
     };
 }
 

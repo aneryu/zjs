@@ -3562,9 +3562,8 @@ fn appendUnicodeEscape(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: u1
 }
 
 fn appendHexByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
-    const hex = "0123456789abcdef";
-    try buffer.append(rt.memory.allocator, hex[byte >> 4]);
-    try buffer.append(rt.memory.allocator, hex[byte & 0x0f]);
+    try buffer.append(rt.memory.allocator, unicode.asciiLowerHexDigitChar(byte >> 4));
+    try buffer.append(rt.memory.allocator, unicode.asciiLowerHexDigitChar(byte & 0x0f));
 }
 
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {

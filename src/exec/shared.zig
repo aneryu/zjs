@@ -9723,12 +9723,11 @@ pub fn decodeHexInto(source: []const u8, target: []u8) !Uint8ArrayCodecProgress 
 }
 
 pub fn encodeHexBytes(rt: *core.JSRuntime, bytes: []const u8) !std.ArrayList(u8) {
-    const alphabet = "0123456789abcdef";
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(rt.memory.allocator);
     for (bytes) |byte| {
-        try out.append(rt.memory.allocator, alphabet[byte >> 4]);
-        try out.append(rt.memory.allocator, alphabet[byte & 0x0f]);
+        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte >> 4));
+        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte & 0x0f));
     }
     return out;
 }

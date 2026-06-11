@@ -181,6 +181,16 @@ pub fn asciiUpperHexDigitValueByte(byte: u8) ?u8 {
     return null;
 }
 
+pub fn asciiLowerHexDigitChar(nibble: usize) u8 {
+    std.debug.assert(nibble < 16);
+    return "0123456789abcdef"[nibble];
+}
+
+pub fn asciiUpperHexDigitChar(nibble: usize) u8 {
+    std.debug.assert(nibble < 16);
+    return "0123456789ABCDEF"[nibble];
+}
+
 pub fn isAsciiHexDigitByte(byte: u8) bool {
     return asciiHexDigitValueByte(byte) != null;
 }
@@ -1676,6 +1686,14 @@ test "unicode ascii hex helpers cover digit values" {
     try std.testing.expectEqual(@as(u8, 15), asciiUpperHexDigitValueByte('F'));
     try std.testing.expectEqual(@as(?u8, null), asciiUpperHexDigitValueByte('a'));
     try std.testing.expectEqual(@as(?u8, null), asciiUpperHexDigitValueByte('g'));
+
+    try std.testing.expectEqual(@as(u8, '0'), asciiLowerHexDigitChar(0));
+    try std.testing.expectEqual(@as(u8, 'a'), asciiLowerHexDigitChar(10));
+    try std.testing.expectEqual(@as(u8, 'f'), asciiLowerHexDigitChar(15));
+
+    try std.testing.expectEqual(@as(u8, '0'), asciiUpperHexDigitChar(0));
+    try std.testing.expectEqual(@as(u8, 'A'), asciiUpperHexDigitChar(10));
+    try std.testing.expectEqual(@as(u8, 'F'), asciiUpperHexDigitChar(15));
 }
 
 test "unicode ascii radix digit helper covers base-36 digit values" {

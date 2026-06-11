@@ -13,6 +13,7 @@ const module = @import("module.zig");
 const object_mod = @import("object.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
+const unicode = @import("../libs/unicode.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = object_mod.Object;
 const profile = @import("profile.zig");
@@ -2218,11 +2219,10 @@ pub const JSRuntime = struct {
 
     pub fn percentHexString(self: *JSRuntime, value: u8) !*string.String {
         if (self.percent_hex_strings[value]) |cached| return cached;
-        const digits = "0123456789ABCDEF";
         const bytes: [3]u8 = .{
             '%',
-            digits[value >> 4],
-            digits[value & 0x0f],
+            unicode.asciiUpperHexDigitChar(value >> 4),
+            unicode.asciiUpperHexDigitChar(value & 0x0f),
         };
         const created = try string.String.createAscii(self, &bytes);
         self.percent_hex_strings[value] = created;
