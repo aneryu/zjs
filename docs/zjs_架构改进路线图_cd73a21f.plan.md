@@ -40,7 +40,7 @@ todos:
     status: pending
   - id: p4-gc-weakref
     content: "Phase 4: WeakRef 注册表替换 O(n) 扫描；移除 Z-GE 分代脚手架；Object 头瘦身与属性元数据去重"
-    status: in_progress
+    status: completed
   - id: p5-nanbox
     content: "Phase 5: JSValue 访问器封装 pass + comptime 可切换 NaN-boxing，双模式跑门禁后按收益翻转默认"
     status: completed
