@@ -7,19 +7,19 @@ todos:
     status: completed
   - id: p1-unified-stack
     content: "Phase 1: 统一连续 VM 栈（args|locals|operand）替换每调用堆分配 Stack，FrameRootScope 改 root 栈区间"
-    status: in_progress
+    status: completed
   - id: p1-inline-calls
     content: "Phase 1: 字节码函数调用在同一解释器循环内 push/pop 帧，消除递归 runWithArgsState；按帧记录 catch_target"
-    status: pending
+    status: completed
   - id: p1-tco
     content: "Phase 1: 实现真 tail_call（复用当前帧），启用 test262 tail-call-optimization 验证"
-    status: pending
+    status: completed
   - id: p1-zero-copy-args
     content: "Phase 1: 零拷贝参数传递，仅 argc<arg_count 时补 undefined"
-    status: pending
+    status: completed
   - id: p1-hot-loop
     content: "Phase 1: 热路径治理：profile scope 改 comptime 门控、惰性 backtrace、stopBeforePc 限 generator 外壳；runWithArgsState 25 参数收敛为 CallEnv"
-    status: pending
+    status: completed
   - id: p2-split-shared
     content: "Phase 2: 拆分 shared.zig(15K) 与 vm_property.zig(13K)，合并 call.zig 重叠逻辑与 popCatchMarker 双实现"
     status: pending

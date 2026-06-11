@@ -90,8 +90,17 @@ stack-map 系统。
 - **热路径门控**：`-Dzjs_enable_opcode_profile=true` 才编译 per-opcode profile scope；
   `stopBeforePc` 仅在 generator resume 外壳生效；backtrace 使用 lazy name 解析。
 
-待完成：L0 真 TCO（帧复用，`test262` `tail-call-optimization` 仍 skip）；`tailCallReuse`
-/`reinitEntry` 已实现但未安全接线。
+- **真 TCO（帧复用）**：`op.tail_call`（及 tail 位置的非 %eval% 直接 eval 调用）在
+  inline 帧（depth>0）上经 `Machine.tailCallReuse` 替换当前帧——call region 先移出垂死
+  帧的 operand stack，`popTeardown` 后用共享的 `pushFrame` 重建，逻辑 call depth 恒定。
+  带 direct-eval 绑定的 callee 也可内联（`pushFrame` 合并 var-ref 视图，镜像
+  `callFunctionBytecodeModeState`）。parser 端 `rewriteTrailingCallAsTailCall` 以
+  Phase 1 线性解码验证指令边界（修复 `push_i32` payload 误判），并覆盖条件分支下推
+  （`?:`）、短路合流（`&&`/`||`/`??`，jump-to-end 路径保留 return 落点）与无 finally
+  catch 体（rethrow marker 前置 drop）。`test262.conf` 已启用 `tail-call-optimization`。
+
+仍走递归慢路径的 tail 目标（深尾递归会增长 native 栈）：L0 帧（generator/eval 外壳）、
+arrow/class-constructor/跨 realm callee、`tail_call_method`。
 
 Opcode family 仍拆到 `src/exec/vm_*.zig`：
 

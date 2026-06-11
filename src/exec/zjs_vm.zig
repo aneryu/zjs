@@ -401,7 +401,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
         if (machine.switched) {
             machine.switched = false;
             if (machine.depth == 0) {
-                function = machine.l0Function(entry_function);
+                function = entry_function;
                 stack = entry_stack;
                 frame = frame_storage;
                 catch_target = loop_state.catch_target_storage;
@@ -426,8 +426,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 catch_target = &entry.catch_target;
                 eval_local_names = &.{};
                 eval_local_slots = &.{};
-                eval_var_ref_names = &.{};
-                eval_var_refs = &.{};
+                eval_var_ref_names = entry.frame.eval_var_ref_names;
+                eval_var_refs = entry.frame.eval_var_refs;
                 eval_with_object = core.JSValue.undefinedValue();
                 eval_global_var_bindings = false;
                 is_eval_code = false;
@@ -754,17 +754,31 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue;
                 }
             },
-            op.tail_call => switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, execCall)) {
+            op.tail_call => switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0, execCall)) {
                 .handled => continue,
                 .return_value => |value| {
                     if (machine.depth == 0) return value;
                     try machine.popReturn(value);
                     continue;
                 },
+                // Proper tail call: replace the current inline frame, keeping
+                // the logical call depth constant. Errors are OOM-class (the
+                // depth slot was just vacated) and propagate via the outer
+                // unwind, like an error thrown by the callee on entry.
+                .tail_inline => |request| {
+                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc);
+                    continue;
+                },
             },
-            op.eval => switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, execDirectEval)) {
+            op.eval => switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, machine.depth > 0, execDirectEval)) {
                 .done => {},
                 .continue_loop => continue,
+                // Non-%eval% callee in tail position: proper tail call via
+                // frame reuse, mirroring the op.tail_call leg.
+                .tail_inline => |request| {
+                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc);
+                    continue;
+                },
             },
             op.apply_eval => switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, execApplyEval)) {
                 .done => {},

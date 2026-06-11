@@ -251,6 +251,33 @@ pub const Frame = struct {
         }
     }
 
+    /// Move already-owned argument values (extracted from a torn-down
+    /// frame's operand stack before a tail-call frame reuse) into frame
+    /// slots without refcount duplication. Entries in `args` transfer to
+    /// the frame and are replaced with undefined as they move; the caller
+    /// stays responsible for freeing whatever is left in `args`.
+    pub fn initArgumentsMoved(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        arena: ?*runtime.VmStackArena,
+        args: []JSValue,
+        use_inline_storage: bool,
+        need_original_snapshot: bool,
+    ) !void {
+        self.actual_arg_count = args.len;
+        const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
+        if (frame_arg_count > 0) {
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
+            @memset(owned_args[args.len..], JSValue.undefinedValue());
+            @memcpy(owned_args[0..args.len], args);
+            @memset(args, JSValue.undefinedValue());
+            self.args = owned_args;
+        }
+        if (args.len > 0 and need_original_snapshot) {
+            try self.initOriginalArgsSnapshot(account, self.args[0..args.len], use_inline_storage, true);
+        }
+    }
+
     fn allocArgsSlice(
         self: *Frame,
         account: *memory.MemoryAccount,

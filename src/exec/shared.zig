@@ -2073,7 +2073,13 @@ pub fn printHostOutputArgs(rt: *core.JSRuntime, output: ?*std.Io.Writer, args: [
     }
 }
 
-pub const ExecEvalResult = enum { done, continue_loop };
+pub const ExecEvalResult = union(enum) {
+    done,
+    continue_loop,
+    /// A direct-eval call whose callee is not %eval% sitting in tail
+    /// position: an ordinary call eligible for tail-call frame reuse.
+    tail_inline: InlineCallRequest,
+};
 
 pub fn execDirectEval(
     ctx: *core.JSContext,
@@ -2086,7 +2092,24 @@ pub fn execDirectEval(
     global: *core.Object,
     eval_in_class_field_initializer: bool,
     eval_in_parameter_initializer: bool,
+    allow_tail_inline: bool,
 ) !ExecEvalResult {
+    // `return eval(...)` lowers to `eval ; return`. When the callee is not
+    // %eval%, the call is an ordinary one (12.3.4.1 step 9 evaluates it
+    // with the tailCall flag); request frame reuse like op.tail_call.
+    if (allow_tail_inline and frame.pc < function.code.len and function.code[frame.pc] == op.@"return") {
+        const total = @as(usize, argc) + 1;
+        if (stack.values.len >= total) {
+            const region_base = stack.values.len - total;
+            const func_borrowed = stack.values[region_base];
+            if (!isContextIntrinsicEval(ctx, func_borrowed)) {
+                if (inline_calls.resolveInlineTarget(global, func_borrowed)) |target| {
+                    return .{ .tail_inline = .{ .target = target, .region_base = region_base, .argc = argc } };
+                }
+            }
+        }
+    }
+
     var args: []core.JSValue = &.{};
     if (argc != 0) args = try ctx.runtime.memory.alloc(core.JSValue, argc);
     defer if (args.len != 0) ctx.runtime.memory.free(core.JSValue, args);

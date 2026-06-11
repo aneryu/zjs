@@ -113,6 +113,7 @@ const ControlFrames = struct {
     label_frames: std.ArrayList(LabelFrame),
     pending_label_atom: ?Atom,
     active_catch_marker_depth: u32,
+    droppable_rethrow_marker_count: u32,
     using_block_frames: std.ArrayList(UsingBlockFrame),
 };
 
@@ -444,6 +445,12 @@ pub const ParseState = struct {
     active_with_func_depth: usize = 0,
     with_scope_id: u32 = 0,
     active_catch_marker_depth: u32 = 0,
+    /// How many of the active catch markers are pure rethrow markers of
+    /// finally-less `catch` bodies. When ALL active markers are such
+    /// markers, a `return <expr>` may drop them before evaluating the
+    /// expression (catch-and-rethrow equals plain propagation), putting a
+    /// trailing call into tail position per HasCallInTailPosition.
+    droppable_rethrow_marker_count: u32 = 0,
     emit_lexical_tdz_at_decl: bool = false,
     break_fixups: std.ArrayList(usize) = .empty,
     break_frame_lens: std.ArrayList(usize) = .empty,
@@ -1055,6 +1062,7 @@ pub const ParseState = struct {
             .label_frames = s.label_frames,
             .pending_label_atom = s.pending_label_atom,
             .active_catch_marker_depth = s.active_catch_marker_depth,
+            .droppable_rethrow_marker_count = s.droppable_rethrow_marker_count,
             .using_block_frames = s.using_block_frames,
         };
         s.break_fixups = .empty;
@@ -1068,6 +1076,7 @@ pub const ParseState = struct {
         s.label_frames = .empty;
         s.pending_label_atom = null;
         s.active_catch_marker_depth = 0;
+        s.droppable_rethrow_marker_count = 0;
         s.using_block_frames = .empty;
         return saved;
     }
@@ -1085,6 +1094,7 @@ pub const ParseState = struct {
         s.label_frames = saved.label_frames;
         s.pending_label_atom = saved.pending_label_atom;
         s.active_catch_marker_depth = saved.active_catch_marker_depth;
+        s.droppable_rethrow_marker_count = saved.droppable_rethrow_marker_count;
         s.using_block_frames = saved.using_block_frames;
     }
 
@@ -3415,6 +3425,19 @@ fn emitWithDeleteVarFallback(s: *ParseState, with_atom: Atom, ident: Atom) Error
     try patchAbsoluteTarget(s, label_offset);
 }
 
+/// Emit the return for one pushed-down `return`-expression branch (see
+/// `parseCondExpr`), folding a trailing call into a tail call when the
+/// branch ends in one. Mirrors the `TOK_RETURN` rewrite conditions.
+fn emitReturnExprBranch(s: *ParseState) Error!void {
+    const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
+        rewriteTrailingCallAsTailCall(s)
+    else
+        TrailingCallRewrite.none;
+    if (tail_rewrite != .rewrote) {
+        try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+    }
+}
+
 /// `js_parse_cond_expr` (`quickjs.c:27282`). `a ? b : c`.
 pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
     const return_cond_depth = s.return_expr_cond_depth;
@@ -3434,13 +3457,13 @@ pub fn parseCondExpr(s: *ParseState, flags: ParseFlags) Error!void {
         const else_jump_offset = try emitForwardJump(s, opcode.op.if_false);
         if (s.return_expr_mode and return_cond_depth == 0 and !hasActiveIteratorCloses(s)) {
             try parseAssignExprWithoutPendingFunctionName(s, then_flags);
-            try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+            try emitReturnExprBranch(s);
             try patchForwardJump(s, else_jump_offset);
             try expectPunct(s, ':');
             // The `parse_flags` propagated to the else-branch must keep
             // `PF_IN_ACCEPTED` per QuickJS (`quickjs.c:27305`).
             try parseAssignExprWithoutPendingFunctionName(s, flags);
-            try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
+            try emitReturnExprBranch(s);
             s.return_expr_emitted_return = true;
             s.last_anonymous_function_expr = false;
             s.last_was_direct_eval_callee = false;
@@ -7558,6 +7581,17 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
             if (try emitCapturedReturnThroughFinally(s, has_expr)) {
                 // return is emitted after the active finally block completes normally.
             } else if (has_expr) {
+                // When every active catch marker is a finally-less rethrow
+                // marker, drop them before evaluating the return expression:
+                // catch-and-rethrow equals plain propagation, and the
+                // trailing call lands in tail position (HasCallInTailPosition
+                // includes finally-less Catch blocks).
+                const dropped_markers_early = !s.in_constructor and !s.in_async and
+                    s.active_catch_marker_depth > 0 and
+                    s.active_catch_marker_depth == s.droppable_rethrow_marker_count and
+                    s.return_finally_frames.items.len == 0 and
+                    !hasActiveIteratorCloses(s);
+                if (dropped_markers_early) try emitCatchMarkerDropsToDepth(s, 0);
                 const saved_return_expr_mode = s.return_expr_mode;
                 const saved_return_expr_emitted = s.return_expr_emitted_return;
                 s.return_expr_mode = true;
@@ -7567,16 +7601,21 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 s.return_expr_mode = saved_return_expr_mode;
                 s.return_expr_emitted_return = saved_return_expr_emitted;
                 if (!emitted_return) {
-                    if (hasActiveIteratorCloses(s) or (s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
+                    if (hasActiveIteratorCloses(s) or (!dropped_markers_early and s.active_catch_marker_depth > 0 and s.return_finally_frames.items.len == 0)) {
                         const return_tmp = try appendTempLocal(s);
                         try s.emitOpU16(opcode.op.put_loc, return_tmp);
                         try emitCatchMarkerDropsToDepth(s, 0);
                         try emitActiveIteratorCloses(s);
                         try s.emitOpU16(opcode.op.get_loc, return_tmp);
                     }
-                    if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s) and rewriteTrailingCallAsTailCall(s)) {
-                        // QuickJS folds `return f(...)` into tail-call opcodes.
-                    } else {
+                    const tail_rewrite = if (!s.in_constructor and !s.in_async and !hasActiveIteratorCloses(s))
+                        rewriteTrailingCallAsTailCall(s)
+                    else
+                        TrailingCallRewrite.none;
+                    if (tail_rewrite != .rewrote) {
+                        // QuickJS folds `return f(...)` into tail-call
+                        // opcodes; short-circuit paths jumping past a
+                        // rewritten call still need the return to land on.
                         try s.emitOp(if (s.in_async) opcode.op.return_async else opcode.op.@"return");
                     }
                 }
@@ -8213,7 +8252,13 @@ pub fn parseStatementOrDecl(s: *ParseState, decl_mask: DeclMask) Error!void {
                 }
                 const rethrow_off = try emitForwardJump(s, opcode.op.@"catch");
                 s.active_catch_marker_depth += 1;
+                // Without a finally, this marker only re-throws: a `return`
+                // in the catch body may drop it up front, putting a trailing
+                // call into tail position (sec-static-semantics-
+                // hascallintailposition lists finally-less Catch blocks).
+                if (!has_finally) s.droppable_rethrow_marker_count += 1;
                 try parseBlock(s);
+                if (!has_finally) s.droppable_rethrow_marker_count -= 1;
                 s.active_catch_marker_depth -= 1;
                 try s.emitOp(opcode.op.drop);
                 const catch_end_off = try emitForwardJump(s, opcode.op.goto);
@@ -11602,7 +11647,7 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     } else {
         // Expression body
         try parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
-        if (!rewriteTrailingCallAsTailCall(s)) {
+        if (rewriteTrailingCallAsTailCall(s) != .rewrote) {
             try s.emitOp(opcode.op.@"return");
         }
     }
@@ -11640,22 +11685,78 @@ fn parseArrowFunction(s: *ParseState, func_kind: ParseFunctionKind, source_start
     }
 }
 
-fn rewriteTrailingCallAsTailCall(s: *ParseState) bool {
-    var code = s.currentCode();
-    if (code.len < 3) return false;
-    if (hasJumpToCurrentEnd(code, true)) return false;
-    const op_index = code.len - 3;
-    switch (code[op_index]) {
-        opcode.op.call => {
-            code[op_index] = opcode.op.tail_call;
-            return true;
-        },
-        opcode.op.call_method => {
-            code[op_index] = opcode.op.tail_call_method;
-            return true;
-        },
-        else => return false,
+const TrailingCallRewrite = enum {
+    /// No rewrite happened; the caller must emit its return opcode.
+    none,
+    /// Trailing call rewritten to a tail call and nothing jumps to the
+    /// current end: the tail call subsumes the return entirely.
+    rewrote,
+    /// Trailing call rewritten to a tail call, but short-circuit paths
+    /// (`&&` / `||` / `??` / optional chains) jump to the current end
+    /// carrying their own result value: the caller must still emit the
+    /// return opcode for those paths to land on.
+    rewrote_jump_target,
+};
+
+const TrailingScan = struct { last_op_index: usize, jump_to_end: bool };
+
+/// Decode the current (Phase 1) code linearly to find the last
+/// instruction boundary and whether any jump targets the current end.
+/// Temp opcodes (`scope_get_var`, `enter_scope`, `label`, ...) overlap
+/// the short-opcode id range, so `opcode.sizeOf` (which favors the
+/// lowered short forms) would desynchronize the walk; only ids whose
+/// Phase 1 encoding is known here are decoded. Returns null when the
+/// stream cannot be decoded, keeping tail-call rewriting disabled.
+fn scanTrailingCode(code: []const u8, include_conditional: bool) ?TrailingScan {
+    var pc: usize = 0;
+    var last_op_index: usize = 0;
+    var jump_to_end = false;
+    while (pc < code.len) {
+        const op_id = code[pc];
+        const size: usize = switch (op_id) {
+            opcode.op.scope_get_var,
+            opcode.op.scope_put_var,
+            opcode.op.scope_get_var_undef,
+            opcode.op.scope_put_var_init,
+            => 7,
+            opcode.op.enter_scope, opcode.op.leave_scope => 3,
+            opcode.op.label => 5,
+            else => blk: {
+                // Remaining ids in the temp/short overlap range (scope
+                // refs, private-field temps) embed label offsets this scan
+                // does not track; bail out rather than misdecode. Short
+                // opcodes sharing these ids only exist after
+                // `resolve_labels`, never in the parser's stream.
+                if (op_id >= 176 and op_id <= 196) return null;
+                break :blk opcode.opcode_size[op_id];
+            },
+        };
+        if (size == 0 or pc + size > code.len) return null;
+        if (op_id == opcode.op.goto or
+            (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
+        {
+            const target = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
+            if (target == code.len) jump_to_end = true;
+        }
+        last_op_index = pc;
+        pc += size;
     }
+    return .{ .last_op_index = last_op_index, .jump_to_end = jump_to_end };
+}
+
+fn rewriteTrailingCallAsTailCall(s: *ParseState) TrailingCallRewrite {
+    var code = s.currentCode();
+    if (code.len < 3) return .none;
+    const scan = scanTrailingCode(code, true) orelse return .none;
+    // The trailing call opcode must be a real instruction boundary; a raw
+    // `code[len - 3]` probe can hit operand payload bytes (e.g. push_i32).
+    if (scan.last_op_index != code.len - 3) return .none;
+    switch (code[scan.last_op_index]) {
+        opcode.op.call => code[scan.last_op_index] = opcode.op.tail_call,
+        opcode.op.call_method => code[scan.last_op_index] = opcode.op.tail_call_method,
+        else => return .none,
+    }
+    return if (scan.jump_to_end) .rewrote_jump_target else .rewrote;
 }
 
 const DestructuringKind = enum { array, object };

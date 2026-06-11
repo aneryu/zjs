@@ -11,6 +11,13 @@ const value_ops = @import("value_ops.zig");
 
 pub const Step = enum { done, continue_loop };
 
+pub const EvalStep = union(enum) {
+    done,
+    continue_loop,
+    /// Non-%eval% callee in tail position; eligible for frame reuse.
+    tail_inline: shared_vm.InlineCallRequest,
+};
+
 pub fn directEval(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -21,8 +28,9 @@ pub fn directEval(
     global: *core.Object,
     class_field_initializer_flag: u16,
     parameter_initializer_flag: u16,
+    allow_tail_inline: bool,
     comptime execDirectEval: anytype,
-) !Step {
+) !EvalStep {
     const eval_operands = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const argc: u16 = @intCast(eval_operands & 0xffff);
@@ -38,9 +46,11 @@ pub fn directEval(
         global,
         (eval_scope & class_field_initializer_flag) != 0,
         (eval_scope & parameter_initializer_flag) != 0,
+        allow_tail_inline,
     )) {
         .done => .done,
         .continue_loop => .continue_loop,
+        .tail_inline => |request| .{ .tail_inline = request },
     };
 }
 
@@ -71,6 +81,8 @@ pub fn applyEval(
     )) {
         .done => .done,
         .continue_loop => .continue_loop,
+        // execApplyEval never requests tail-call inlining.
+        .tail_inline => unreachable,
     };
 }
 

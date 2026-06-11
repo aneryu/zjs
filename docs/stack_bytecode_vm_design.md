@@ -61,6 +61,10 @@ QuickJS-format bytecode，VM loop 逐 opcode dispatch，并把具体 opcode fami
 - shape/version-guarded own/prototype data-property IC in `property_ic.zig`。
 - `core.OpcodeProfile` counters for opcode time/counts, slow paths and IC events。
 - VM opcode-family decomposition under `src/exec/vm_*.zig`。
+- contiguous VM stack arena (`VmStackArena`) for frame locals/args/operand windows。
+- same-loop inline bytecode calls (`src/exec/inline_calls.zig` `Machine`)。
+- proper tail calls via inline-frame reuse (`Machine.tailCallReuse`,
+  `tail-call-optimization` enabled in `test262.conf`)。
 
 These are current facts. They can be referenced as implementation status.
 

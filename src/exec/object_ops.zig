@@ -7439,8 +7439,11 @@ pub fn callProxyApply(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = proxy_value;
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    // Materialize the revoked-proxy TypeError here so it carries the
+    // current realm's constructor (the caller frame's `global`), not the
+    // realm where the error eventually surfaces.
+    const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
+    const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
     const apply_atom = try ctx.runtime.internAtom("apply");
     defer ctx.runtime.atoms.free(apply_atom);
     const trap = try getValueProperty(ctx, output, global, handler_value, apply_atom, caller_function, caller_frame);
@@ -7466,8 +7469,8 @@ pub fn constructProxy(
     new_target_value: core.JSValue,
 ) !core.JSValue {
     if (!proxyTargetIsConstructor(ctx, proxy_value)) return error.TypeError;
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
+    const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
+    const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
     const construct_atom = try ctx.runtime.internAtom("construct");
     defer ctx.runtime.atoms.free(construct_atom);
     const trap = try getValueProperty(ctx, output, global, handler_value, construct_atom, caller_function, caller_frame);

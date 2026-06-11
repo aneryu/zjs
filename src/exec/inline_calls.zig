@@ -39,9 +39,11 @@ pub const InlineTarget = struct {
 
 /// Resolve `func` to an inline-eligible bytecode call target. Mirrors the
 /// plain-call leg of `callValueOrBytecodeClassModeDispatch`; any condition
-/// that path special-cases (class constructors, arrows, eval bindings,
-/// cross-realm calls, simple-numeric/string fusion bodies, async/generator
-/// kinds) disqualifies the target so the slow path keeps handling it.
+/// that path special-cases (class constructors, arrows, cross-realm calls,
+/// simple-numeric/string fusion bodies, async/generator kinds) disqualifies
+/// the target so the slow path keeps handling it. Direct-eval bindings on
+/// the function object are supported: `pushFrame` merges them into the
+/// frame's var-ref view like `callFunctionBytecodeModeState` does.
 pub fn resolveInlineTarget(global: *core.Object, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
@@ -54,8 +56,6 @@ pub fn resolveInlineTarget(global: *core.Object, func: core.JSValue) ?InlineTarg
     // Fusion-recognizable bodies are handled by callSimple*Bytecode in the
     // slow path with broader matching than the pre-call fast checks.
     if (fb.simple_numeric_kind != .none or fb.simple_string_kind != .none) return null;
-    if (function_object.functionEvalLocalNamesSlot().*.len != 0) return null;
-    if (function_object.functionEvalLocalRefsSlot().*.len != 0) return null;
     const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
     if (function_global != global) return null;
     return .{
@@ -78,6 +78,14 @@ pub const Entry = struct {
     catch_target: ?usize,
     arena_mark: core.VmStackArena.Mark,
     profile_guard: vm_call.CallProfileGuard,
+    /// Owned merged slices backing `view.var_ref_names` / the frame's
+    /// var-ref initialization when the callee carries direct-eval bindings
+    /// (mirrors `callFunctionBytecodeModeState`'s combined slices). The
+    /// contents are borrowed (atoms from the function bytecode and the
+    /// function object's eval-binding slots stay alive via the frame's
+    /// `current_function` reference); only the slice storage is owned.
+    merged_var_ref_names: []core.Atom,
+    merged_var_refs: []core.JSValue,
 };
 
 const entries_per_chunk: usize = 16;
@@ -92,9 +100,6 @@ pub const Machine = struct {
     l0_frame: *frame_mod.Frame,
     l0_stack: *stack_mod.Stack,
     l0_catch_target: *?usize,
-    /// Owned bytecode view for level-0 tail-call frame reuse.
-    l0_tail_view: bytecode.Bytecode = undefined,
-    l0_tail_view_active: bool = false,
     /// Chunked entry storage; only the first `chunk_count` slots are valid.
     /// Left undefined so machine construction is O(1) per interpreter entry.
     chunks: [max_chunks]*[entries_per_chunk]Entry = undefined,
@@ -130,15 +135,6 @@ pub const Machine = struct {
             self.ctx.runtime.memory.destroy(@TypeOf(chunk.*), chunk);
         }
         self.chunk_count = 0;
-        if (self.l0_tail_view_active) {
-            self.l0_tail_view.deinit(self.ctx.runtime);
-            self.l0_tail_view_active = false;
-        }
-    }
-
-    pub fn l0Function(self: *const Machine, entry_function: *const bytecode.Bytecode) *const bytecode.Bytecode {
-        if (self.l0_tail_view_active) return &self.l0_tail_view;
-        return entry_function;
     }
 
     pub fn topEntry(self: *Machine) *Entry {
@@ -164,18 +160,26 @@ pub const Machine = struct {
         return self.entryAt(index);
     }
 
-    /// Push an inline call frame for `target` whose `func | args...` region
-    /// starts at `region_base` on `caller_stack`. On success the region has
-    /// been popped from the caller stack and the machine's top entry is the
-    /// new current execution level. On error the caller stack is untouched.
-    pub fn pushCall(
-        self: *Machine,
-        global: *core.Object,
-        caller_stack: *stack_mod.Stack,
-        target: InlineTarget,
-        region_base: usize,
-        argc: u16,
-    ) HostError!void {
+    /// Where the new frame's `func | args...` call region comes from.
+    const ArgsSource = union(enum) {
+        /// Region still live on the caller's operand stack; it is popped
+        /// (func freed, args moved) during frame setup, after the bindings
+        /// have duplicated the callable.
+        stack_region: struct {
+            stack: *stack_mod.Stack,
+            region_base: usize,
+            argc: u16,
+        },
+        /// Region already moved off a torn-down frame's operand stack for
+        /// tail-call frame reuse; slot 0 is the callable, the rest are the
+        /// args. Entries transfer to the new frame and are replaced with
+        /// undefined as they move; the caller frees whatever is left.
+        moved: []core.JSValue,
+    };
+
+    /// Push an inline call frame for `target`. Shared between plain inline
+    /// calls (`pushCall`) and tail-call frame reuse (`tailCallReuse`).
+    fn pushFrame(self: *Machine, global: *core.Object, target: InlineTarget, source: ArgsSource) HostError!void {
         const ctx = self.ctx;
         const rt = ctx.runtime;
 
@@ -185,8 +189,27 @@ pub const Machine = struct {
         const entry = try self.acquireSlot(global);
         entry.view = bytecode.function.asBytecodeView(target.fb, rt);
         entry.catch_target = null;
+        entry.merged_var_ref_names = &.{};
+        entry.merged_var_refs = &.{};
         entry.profile_guard = vm_call.enterCallProfile(rt);
         errdefer entry.profile_guard.deinit();
+
+        const callable = switch (source) {
+            .stack_region => target.callable,
+            .moved => |moved| moved[0],
+        };
+
+        // Direct-eval bindings extend the callee's var-ref view, mirroring
+        // the combined slices `callFunctionBytecodeModeState` builds on the
+        // recursive path. Contents are borrowed; storage is entry-owned.
+        const eval_names = target.function_object.functionEvalLocalNamesSlot().*;
+        const eval_refs = target.function_object.functionEvalLocalRefsSlot().*;
+        var frame_var_refs: []const core.JSValue = target.function_object.functionCapturesSlot().*;
+        if (eval_names.len > 0 and eval_refs.len > 0) {
+            try mergeEvalBindings(rt, entry, frame_var_refs, eval_names, eval_refs);
+            frame_var_refs = entry.merged_var_refs;
+        }
+        errdefer freeMergedSlices(rt, entry);
 
         try ctx.pushBacktraceFrameLazyName(
             entry.view.name,
@@ -195,7 +218,7 @@ pub const Machine = struct {
             entry.view.col_num,
             &entry.view,
             exception_ops.resolveBacktraceLocation,
-            target.callable,
+            callable,
         );
         errdefer ctx.popBacktraceFrame();
 
@@ -217,13 +240,13 @@ pub const Machine = struct {
         const effective_this = if (fb_strict) core.JSValue.undefinedValue() else global.value();
         entry.eval_snapshot = try entry.frame.initCallBindings(rt, .{
             .initial_this_value = effective_this,
-            .current_function_value = target.callable,
+            .current_function_value = callable,
             .new_target_value = core.JSValue.undefinedValue(),
             .constructor_this_value = core.JSValue.undefinedValue(),
             .eval_local_names = &.{},
             .eval_local_slots = &.{},
-            .input_eval_var_ref_names = &.{},
-            .input_eval_var_refs = &.{},
+            .input_eval_var_ref_names = eval_names,
+            .input_eval_var_refs = eval_refs,
             .inherited_eval_local_names = &.{},
             .inherited_eval_local_slots = &.{},
             .inherited_eval_var_ref_names = &.{},
@@ -236,91 +259,89 @@ pub const Machine = struct {
         errdefer entry.frame_roots.deinit();
 
         try vm_call.initFrameLocals(ctx, &entry.view, &entry.frame, &.{}, &.{}, true);
-        popCallFuncFromStack(rt, caller_stack, region_base);
-        try entry.frame.initArgumentsFromStack(
-            &rt.memory,
-            &rt.vm_stack,
-            caller_stack,
-            argc,
-            true,
-            frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
-        );
-        try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, target.function_object.functionCapturesSlot().*, true);
+        switch (source) {
+            .stack_region => |region| {
+                popCallFuncFromStack(rt, region.stack, region.region_base);
+                try entry.frame.initArgumentsFromStack(
+                    &rt.memory,
+                    &rt.vm_stack,
+                    region.stack,
+                    region.argc,
+                    true,
+                    frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
+                );
+            },
+            .moved => |moved| try entry.frame.initArgumentsMoved(
+                &rt.memory,
+                &rt.vm_stack,
+                moved[1..],
+                true,
+                frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
+            ),
+        }
+        try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, frame_var_refs, true);
 
         self.depth += 1;
         self.switched = true;
     }
 
-    fn reinitEntry(
+    /// Build the entry-owned merged `var_ref_names` / var_refs slices for a
+    /// callee with direct-eval bindings. On success ownership of both
+    /// slices is with `entry` (released by `freeMergedSlices`).
+    fn mergeEvalBindings(
+        rt: *core.JSRuntime,
+        entry: *Entry,
+        captures: []const core.JSValue,
+        eval_names: []const core.Atom,
+        eval_refs: []const core.JSValue,
+    ) HostError!void {
+        const add_len = @min(eval_names.len, eval_refs.len);
+        const old_names = entry.view.var_ref_names;
+        const names = try rt.memory.alloc(core.Atom, old_names.len + add_len);
+        errdefer rt.memory.free(core.Atom, names);
+        @memcpy(names[0..old_names.len], old_names);
+        @memcpy(names[old_names.len..], eval_names[0..add_len]);
+        const refs = try rt.memory.alloc(core.JSValue, captures.len + add_len);
+        @memcpy(refs[0..captures.len], captures);
+        @memcpy(refs[captures.len..], eval_refs[0..add_len]);
+        entry.merged_var_ref_names = names;
+        entry.merged_var_refs = refs;
+        entry.view.var_ref_names = names;
+    }
+
+    fn freeMergedSlices(rt: *core.JSRuntime, entry: *Entry) void {
+        if (entry.merged_var_ref_names.len != 0) rt.memory.free(core.Atom, entry.merged_var_ref_names);
+        if (entry.merged_var_refs.len != 0) rt.memory.free(core.JSValue, entry.merged_var_refs);
+        entry.merged_var_ref_names = &.{};
+        entry.merged_var_refs = &.{};
+    }
+
+    /// Push an inline call frame for `target` whose `func | args...` region
+    /// starts at `region_base` on `caller_stack`. On success the region has
+    /// been popped from the caller stack and the machine's top entry is the
+    /// new current execution level.
+    pub fn pushCall(
         self: *Machine,
         global: *core.Object,
-        entry: *Entry,
         caller_stack: *stack_mod.Stack,
         target: InlineTarget,
         region_base: usize,
         argc: u16,
     ) HostError!void {
-        const ctx = self.ctx;
-        const rt = ctx.runtime;
-
-        entry.stack.deinit(rt);
-        entry.eval_snapshot.deinit(rt);
-        entry.frame.deinit(&rt.memory, rt);
-        rt.vm_stack.restore(entry.arena_mark);
-
-        entry.view = bytecode.function.asBytecodeView(target.fb, rt);
-        entry.catch_target = null;
-        entry.arena_mark = rt.vm_stack.mark();
-
-        const operand_window = rt.vm_stack.carve(&rt.memory, @as(usize, entry.view.stack_size) + 1);
-        entry.stack = if (operand_window) |window|
-            stack_mod.Stack.initArenaWindow(&rt.memory, rt.stack_size, window)
-        else
-            stack_mod.Stack.init(&rt.memory, rt.stack_size);
-        errdefer entry.stack.deinit(rt);
-
-        entry.frame = frame_mod.Frame.init(&entry.view);
-        errdefer entry.frame.deinit(&rt.memory, rt);
-        ctx.borrowBacktracePc(&entry.frame.pc);
-
-        const fb_strict = entry.view.flags.is_strict or entry.view.flags.runtime_strict;
-        const effective_this = if (fb_strict) core.JSValue.undefinedValue() else global.value();
-        entry.eval_snapshot = try entry.frame.initCallBindings(rt, .{
-            .initial_this_value = effective_this,
-            .current_function_value = target.callable,
-            .new_target_value = core.JSValue.undefinedValue(),
-            .constructor_this_value = core.JSValue.undefinedValue(),
-            .eval_local_names = &.{},
-            .eval_local_slots = &.{},
-            .input_eval_var_ref_names = &.{},
-            .input_eval_var_refs = &.{},
-            .inherited_eval_local_names = &.{},
-            .inherited_eval_local_slots = &.{},
-            .inherited_eval_var_ref_names = &.{},
-            .inherited_eval_var_refs = &.{},
-        });
-        errdefer entry.eval_snapshot.deinit(rt);
-
-        entry.frame_roots.deinit();
-        entry.frame_roots = .{};
-        entry.frame_roots.init(rt, &entry.stack, &entry.frame, &entry.eval_snapshot);
-
-        try vm_call.initFrameLocals(ctx, &entry.view, &entry.frame, &.{}, &.{}, true);
-        popCallFuncFromStack(rt, caller_stack, region_base);
-        try entry.frame.initArgumentsFromStack(
-            &rt.memory,
-            &rt.vm_stack,
-            caller_stack,
-            argc,
-            true,
-            frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
-        );
-        try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, target.function_object.functionCapturesSlot().*, true);
-        entry.frame.pc = 0;
+        return self.pushFrame(global, target, .{ .stack_region = .{
+            .stack = caller_stack,
+            .region_base = region_base,
+            .argc = argc,
+        } });
     }
 
-    /// Reuse the current inline frame for a tail call instead of growing the
-    /// inline stack. Falls back to `pushCall` when no inline frame is active.
+    /// Proper tail call: replace the top inline frame with a fresh frame
+    /// for `target`, keeping the logical call depth constant. The
+    /// `func | args...` region starting at `region_base` lives on the dying
+    /// frame's own operand stack, so it is moved into a scratch buffer
+    /// before the frame (and the arena window backing its stack) is torn
+    /// down. On error the dying frame is already gone; the error propagates
+    /// as if thrown by the callee before executing any code.
     pub fn tailCallReuse(
         self: *Machine,
         global: *core.Object,
@@ -330,8 +351,23 @@ pub const Machine = struct {
         argc: u16,
     ) HostError!void {
         std.debug.assert(self.depth > 0);
-        try self.reinitEntry(global, self.topEntry(), caller_stack, target, region_base, argc);
-        self.switched = true;
+        const rt = self.ctx.runtime;
+
+        const total = @as(usize, argc) + 1;
+        var inline_buf: [9]core.JSValue = undefined;
+        const moved: []core.JSValue = if (total <= inline_buf.len)
+            inline_buf[0..total]
+        else
+            try rt.memory.alloc(core.JSValue, total);
+        defer if (total > inline_buf.len) rt.memory.free(core.JSValue, moved);
+        @memcpy(moved, caller_stack.values[region_base..][0..total]);
+        caller_stack.values = caller_stack.values.ptr[0..region_base];
+        // `moved` now owns the call region (the callable plus any args not
+        // yet transferred into the new frame).
+        defer for (moved) |value| value.free(rt);
+
+        self.popTeardown();
+        try self.pushFrame(global, target, .{ .moved = moved });
     }
 
     /// Tear down the top inline frame. Mirrors the defer chain of the
@@ -346,6 +382,7 @@ pub const Machine = struct {
         entry.eval_snapshot.deinit(rt);
         entry.frame.deinit(&rt.memory, rt);
         entry.stack.deinit(rt);
+        freeMergedSlices(rt, entry);
         rt.vm_stack.restore(entry.arena_mark);
         ctx.popBacktraceFrame();
         entry.profile_guard.deinit();

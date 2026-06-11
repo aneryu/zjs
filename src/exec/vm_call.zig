@@ -27,7 +27,13 @@ pub const TailCallMethodResult = union(enum) {
     return_value: core.JSValue,
 };
 
-pub const TailCallResult = TailCallMethodResult;
+pub const TailCallResult = union(enum) {
+    handled,
+    return_value: core.JSValue,
+    /// Eligible bytecode target for tail-call frame reuse; the dispatch
+    /// loop replaces the current inline frame instead of recursing.
+    tail_inline: shared_vm.InlineCallRequest,
+};
 
 const PreparedPropertyTarget = union(enum) {
     native: frame_mod.PreparedNativeCallTarget,
@@ -575,14 +581,15 @@ pub fn tailCall(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
+    allow_inline: bool,
     comptime execCall: anytype,
 ) !TailCallResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global, false)) {
+    switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global, allow_inline)) {
         .done => {},
         .continue_loop => return .handled,
-        .inline_call => unreachable,
+        .inline_call => |request| return .{ .tail_inline = request },
     }
     if (stack.peek()) |value| return .{ .return_value = value };
     return .{ .return_value = core.JSValue.undefinedValue() };
