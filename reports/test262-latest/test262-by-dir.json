@@ -35,7 +35,7 @@
   { "dir": "built-ins/Promise", "passed": 677, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/Proxy", "passed": 311, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/Reflect", "passed": 153, "failed": 0, "known_failed": 0 },
-  { "dir": "built-ins/RegExp", "passed": 1812, "failed": 0, "known_failed": 0 },
+  { "dir": "built-ins/RegExp", "passed": 1839, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/RegExpStringIteratorPrototype", "passed": 17, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/Set", "passed": 383, "failed": 0, "known_failed": 0 },
   { "dir": "built-ins/SetIteratorPrototype", "passed": 11, "failed": 0, "known_failed": 0 },

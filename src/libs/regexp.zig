@@ -1640,12 +1640,12 @@ const Compiler = struct {
     fn parseClass(self: *Compiler, start: usize, is_backward_dir: bool) CompileError!Atom {
         self.index += 1;
         if ((self.flags.bits & regex_bytecode.flags.unicode_sets) != 0) {
-            var ranges = try self.parseClassSetBody();
-            defer ranges.deinit();
-            if (is_backward_dir) try self.emitOp(.prev);
-            try self.emitRangeSet(&ranges);
-            if (is_backward_dir) try self.emitOp(.prev);
-            return .{ .start = start, .simple_char_count = if (is_backward_dir) null else 1, .quantifiable = true, .capture_count_before = self.capture_count };
+            var set = try self.parseClassSetBody();
+            defer set.deinit();
+            try self.emitClassSet(&set, is_backward_dir);
+            // String alternatives make the match length variable.
+            const single_char = !is_backward_dir and set.strings.items.len == 0;
+            return .{ .start = start, .simple_char_count = if (single_char) 1 else null, .quantifiable = true, .capture_count_before = self.capture_count };
         }
         var ranges = RangeSet.init(self.allocator);
         defer ranges.deinit();
@@ -1679,30 +1679,104 @@ const Compiler = struct {
             std.mem.eql(u8, self.pattern[self.index..][0..needle.len], needle);
     }
 
+    /// A v-mode class set: code points plus multi-code-point strings
+    /// (from `\q{...}`). Single-code-point string alternatives fold into
+    /// `ranges`; `strings` stays deduplicated and allocator-owned.
+    const ClassSet = struct {
+        ranges: RangeSet,
+        strings: std.ArrayList([]u21) = .empty,
+
+        fn init(allocator: std.mem.Allocator) ClassSet {
+            return .{ .ranges = RangeSet.init(allocator) };
+        }
+
+        fn deinit(self: *ClassSet) void {
+            for (self.strings.items) |s| self.ranges.allocator.free(s);
+            self.strings.deinit(self.ranges.allocator);
+            self.ranges.deinit();
+        }
+
+        fn containsString(self: *const ClassSet, needle: []const u21) bool {
+            for (self.strings.items) |s| {
+                if (std.mem.eql(u21, s, needle)) return true;
+            }
+            return false;
+        }
+
+        /// Takes ownership of `s` (frees it when already present).
+        fn addOwnedString(self: *ClassSet, s: []u21) !void {
+            if (self.containsString(s)) {
+                self.ranges.allocator.free(s);
+                return;
+            }
+            try self.strings.append(self.ranges.allocator, s);
+        }
+
+        fn unionWith(self: *ClassSet, other: *const ClassSet) !void {
+            try self.ranges.addSet(&other.ranges);
+            for (other.strings.items) |s| {
+                if (self.containsString(s)) continue;
+                const copy = try self.ranges.allocator.dupe(u21, s);
+                errdefer self.ranges.allocator.free(copy);
+                try self.strings.append(self.ranges.allocator, copy);
+            }
+        }
+
+        fn intersectWith(self: *ClassSet, other: *ClassSet) !void {
+            try self.ranges.intersectWith(&other.ranges);
+            var write: usize = 0;
+            for (self.strings.items) |s| {
+                if (other.containsString(s)) {
+                    self.strings.items[write] = s;
+                    write += 1;
+                } else {
+                    self.ranges.allocator.free(s);
+                }
+            }
+            self.strings.shrinkRetainingCapacity(write);
+        }
+
+        fn subtract(self: *ClassSet, other: *ClassSet) !void {
+            try other.ranges.invert();
+            try self.ranges.intersectWith(&other.ranges);
+            var write: usize = 0;
+            for (self.strings.items) |s| {
+                if (!other.containsString(s)) {
+                    self.strings.items[write] = s;
+                    write += 1;
+                } else {
+                    self.ranges.allocator.free(s);
+                }
+            }
+            self.strings.shrinkRetainingCapacity(write);
+        }
+    };
+
     /// v-mode ClassSetExpression body. Entered just past the opening `[`
     /// (top-level or nested); consumes through the matching `]`. The
     /// expression is one of ClassUnion, ClassIntersection (`&&`-chain) or
     /// ClassDifference (`--`-chain) — operators must not be mixed at one
-    /// level. Returns the resolved code-point set, case-folded per operand
-    /// when ignoring case and complemented when the class is negated.
-    /// String operands (`\q{...}`, properties of strings) are not
-    /// supported yet and stay rejected.
-    fn parseClassSetBody(self: *Compiler) CompileError!RangeSet {
+    /// level. Returns the resolved class set, case-folded per operand when
+    /// ignoring case and complemented when the class is negated (negation
+    /// of a set that may contain strings is a SyntaxError). Properties of
+    /// strings (`\p{RGI_Emoji}` etc.) are not supported yet and stay
+    /// rejected.
+    fn parseClassSetBody(self: *Compiler) CompileError!ClassSet {
         const invert = if (self.index < self.pattern.len and self.pattern[self.index] == '^') blk: {
             self.index += 1;
             break :blk true;
         } else false;
 
-        var result = RangeSet.init(self.allocator);
+        var result = ClassSet.init(self.allocator);
         errdefer result.deinit();
 
         if (self.index < self.pattern.len and self.pattern[self.index] == ']') {
             self.index += 1;
-            if (invert) try result.invert();
+            if (invert) try result.ranges.invert();
             return result;
         }
 
-        const first = try self.parseClassSetOperandRanges(true);
+        const first = try self.parseClassSetOperand(true);
         result.deinit();
         result = first.set;
 
@@ -1716,10 +1790,9 @@ const Compiler = struct {
                 }
                 if (!self.atMatch("--")) return error.InvalidPattern;
                 self.index += 2;
-                var rhs = try self.parseClassSetOperandRanges(false);
+                var rhs = try self.parseClassSetOperand(false);
                 defer rhs.set.deinit();
-                try rhs.set.invert();
-                try result.intersectWith(&rhs.set);
+                try result.subtract(&rhs.set);
             }
         } else if (self.atMatch("&&")) {
             if (first.was_range) return error.InvalidPattern;
@@ -1730,7 +1803,7 @@ const Compiler = struct {
                 }
                 if (!self.atMatch("&&")) return error.InvalidPattern;
                 self.index += 2;
-                var rhs = try self.parseClassSetOperandRanges(false);
+                var rhs = try self.parseClassSetOperand(false);
                 defer rhs.set.deinit();
                 try result.intersectWith(&rhs.set);
             }
@@ -1743,21 +1816,25 @@ const Compiler = struct {
                 }
                 // Operators must not appear in a union chain.
                 if (self.atMatch("--") or self.atMatch("&&")) return error.InvalidPattern;
-                var rhs = try self.parseClassSetOperandRanges(true);
+                var rhs = try self.parseClassSetOperand(true);
                 defer rhs.set.deinit();
-                try result.addSet(&rhs.set);
+                try result.unionWith(&rhs.set);
             }
         }
-        try result.normalize();
-        if (invert) try result.invert();
+        try result.ranges.normalize();
+        if (invert) {
+            // ClassComplement of a set that may contain strings.
+            if (result.strings.items.len != 0) return error.InvalidPattern;
+            try result.ranges.invert();
+        }
         return result;
     }
 
-    const ClassSetOperandResult = struct { set: RangeSet, was_range: bool };
+    const ClassSetOperandResult = struct { set: ClassSet, was_range: bool };
 
     /// One ClassSetOperand (or, when `allow_range`, a ClassSetRange) of a
     /// v-mode class set expression. The caller owns the returned set.
-    fn parseClassSetOperandRanges(self: *Compiler, allow_range: bool) CompileError!ClassSetOperandResult {
+    fn parseClassSetOperand(self: *Compiler, allow_range: bool) CompileError!ClassSetOperandResult {
         if (self.index >= self.pattern.len) return error.InvalidPattern;
         const raw = self.pattern[self.index];
         if (raw == ']') return error.InvalidPattern;
@@ -1775,12 +1852,11 @@ const Compiler = struct {
                 return error.InvalidPattern;
             }
         } else if (self.index + 1 < self.pattern.len and self.pattern[self.index + 1] == 'q') {
-            // ClassStringDisjunction \q{...}: string sets unimplemented.
-            return error.InvalidPattern;
+            return .{ .set = try self.parseClassStringDisjunction(), .was_range = false };
         }
 
-        var ranges = RangeSet.init(self.allocator);
-        errdefer ranges.deinit();
+        var set = ClassSet.init(self.allocator);
+        errdefer set.deinit();
         var was_range = false;
 
         const first = try self.parseClassAtom();
@@ -1797,14 +1873,126 @@ const Compiler = struct {
                 return error.InvalidPattern;
             }
             if (second.code_point < first.code_point) return error.InvalidPattern;
-            try ranges.addInclusive(first.code_point, second.code_point);
+            try set.ranges.addInclusive(first.code_point, second.code_point);
             was_range = true;
         } else {
-            try ranges.addAtom(first);
+            try set.ranges.addAtom(first);
         }
-        try ranges.normalize();
-        if (self.flags.ignore_case) try ranges.regexpCanonicalize(true);
-        return .{ .set = ranges, .was_range = was_range };
+        try set.ranges.normalize();
+        if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
+        return .{ .set = set, .was_range = was_range };
+    }
+
+    /// `\q{alt|alt|...}`: each alternative is a (possibly empty) sequence
+    /// of ClassSetCharacters. Single-code-point alternatives fold into the
+    /// range set; longer ones (and the empty string) become set strings.
+    fn parseClassStringDisjunction(self: *Compiler) CompileError!ClassSet {
+        std.debug.assert(self.atMatch("\\q"));
+        self.index += 2;
+        if (self.index >= self.pattern.len or self.pattern[self.index] != '{') return error.InvalidPattern;
+        self.index += 1;
+
+        var set = ClassSet.init(self.allocator);
+        errdefer set.deinit();
+        var current = std.ArrayList(u21).empty;
+        defer current.deinit(self.allocator);
+
+        while (true) {
+            if (self.index >= self.pattern.len) return error.InvalidPattern;
+            const byte = self.pattern[self.index];
+            if (byte == '}' or byte == '|') {
+                self.index += 1;
+                if (current.items.len == 1) {
+                    try set.ranges.addInclusive(current.items[0], current.items[0]);
+                } else {
+                    const copy = try self.allocator.dupe(u21, current.items);
+                    errdefer self.allocator.free(copy);
+                    try set.addOwnedString(copy);
+                }
+                current.clearRetainingCapacity();
+                if (byte == '}') break;
+                continue;
+            }
+            var atom = try self.parseClassAtom();
+            if (atom != .code_point) {
+                if (atom == .ranges) atom.ranges.deinit();
+                return error.InvalidPattern;
+            }
+            const cp = if (self.flags.ignore_case) canonicalize(atom.code_point, true) else atom.code_point;
+            try current.append(self.allocator, cp);
+        }
+        try set.ranges.normalize();
+        if (self.flags.ignore_case) try set.ranges.regexpCanonicalize(true);
+        return set;
+    }
+
+    /// Emit the matcher for a v-mode class set. Multi-code-point strings
+    /// are tried first (longest first, per spec ordering), then the
+    /// code-point set, then the empty string when present.
+    fn emitClassSet(self: *Compiler, set: *ClassSet, is_backward_dir: bool) CompileError!void {
+        if (set.strings.items.len == 0) {
+            if (is_backward_dir) try self.emitOp(.prev);
+            try self.emitRangeSet(&set.ranges);
+            if (is_backward_dir) try self.emitOp(.prev);
+            return;
+        }
+
+        // Sort strings by descending length (stable insertion sort; the
+        // list is small). The empty string, if present, lands last.
+        const items = set.strings.items;
+        var i: usize = 1;
+        while (i < items.len) : (i += 1) {
+            const key = items[i];
+            var j = i;
+            while (j > 0 and items[j - 1].len < key.len) : (j -= 1) {
+                items[j] = items[j - 1];
+            }
+            items[j] = key;
+        }
+
+        const has_empty = items.len > 0 and items[items.len - 1].len == 0;
+        const string_count = items.len - @intFromBool(has_empty);
+        const has_ranges = set.ranges.ranges.items.len != 0;
+
+        var end_jumps = std.ArrayList(usize).empty;
+        defer end_jumps.deinit(self.allocator);
+
+        for (items[0..string_count], 0..) |s, string_index| {
+            const is_last_branch = string_index + 1 == string_count and !has_ranges and !has_empty;
+            const split_pos = if (!is_last_branch) try self.emitOpU32At(.split_next_first, 0) else null;
+            if (is_backward_dir) {
+                var k = s.len;
+                while (k > 0) {
+                    k -= 1;
+                    try self.emitCharacterAtom(s[k], true);
+                }
+            } else {
+                for (s) |cp| try self.emitCharacterAtom(cp, false);
+            }
+            if (!is_last_branch) {
+                const goto_pos = try self.emitOpU32At(.goto_, 0);
+                try end_jumps.append(self.allocator, goto_pos);
+            }
+            if (split_pos) |pos| {
+                std.mem.writeInt(u32, self.code.items[pos..][0..4], @intCast(self.code.items.len - (pos + 4)), .little);
+            }
+        }
+
+        if (has_ranges) {
+            const split_pos = if (has_empty) try self.emitOpU32At(.split_next_first, 0) else null;
+            if (is_backward_dir) try self.emitOp(.prev);
+            try self.emitRangeSet(&set.ranges);
+            if (is_backward_dir) try self.emitOp(.prev);
+            if (split_pos) |pos| {
+                // The empty-string branch matches nothing: fall through.
+                std.mem.writeInt(u32, self.code.items[pos..][0..4], @intCast(self.code.items.len - (pos + 4)), .little);
+            }
+        }
+        // has_empty: the empty alternative emits no instructions.
+
+        for (end_jumps.items) |goto_pos| {
+            std.mem.writeInt(u32, self.code.items[goto_pos..][0..4], @intCast(self.code.items.len - (goto_pos + 4)), .little);
+        }
     }
 
     fn parseClassAtomOrRange(self: *Compiler, body_start: usize) CompileError!RangeSet {
