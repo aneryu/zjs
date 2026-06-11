@@ -3305,8 +3305,7 @@ fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
             '[' => in_class = true,
             ']' => in_class = false,
             '/' => if (!in_class) return false,
-            '\n', '\r', 0x2028, 0x2029 => return false,
-            else => {},
+            else => if (unicode.isEcmaLineTerminatorUnit(unit)) return false,
         }
     }
     return true;
@@ -3582,15 +3581,7 @@ fn otherPunctuator(byte: u8) bool {
 }
 
 fn isEscapedWhitespaceOrLineTerminator(unit: u16) bool {
-    return unit == 0x00a0 or
-        unit == 0x1680 or
-        (unit >= 0x2000 and unit <= 0x200a) or
-        unit == 0x2028 or
-        unit == 0x2029 or
-        unit == 0x202f or
-        unit == 0x205f or
-        unit == 0x3000 or
-        unit == 0xfeff;
+    return unit > 0x7f and unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);
 }
 
 fn isHighSurrogate(unit: u16) bool {
