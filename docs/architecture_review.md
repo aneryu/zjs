@@ -117,7 +117,17 @@ Opcode family 仍拆到 `src/exec/vm_*.zig`：
 - opcode profiling helper: `vm_profile.zig`
 
 Shared execution helpers still live in `src/exec/shared.zig`; current perf docs
-track ongoing decomposition work, but `shared.zig` has not disappeared.
+track ongoing decomposition work, but `shared.zig` has not disappeared. Recent
+splits: `regexp_fastpath.zig`（RegExp 快路径，3.1K 行）、`slot_ops.zig`
+（locals/args/var-ref 槽位操作）、`vm_property_private.zig` 与
+`vm_property_ref.zig`（private field / with+ref opcode 处理）。shared.zig
+当前约 12K 行、vm_property.zig 约 12.5K 行，继续按域收敛。
+
+RegExp 语义状态：duplicate named groups（alternation 路径验证 + `\k` 多发射 +
+groups matched 优先）、quantifier 每迭代 capture 清零（对齐 RepeatMatcher，
+超越 QuickJS）、v-flag ClassSetExpression（嵌套类/差集/交集/运算符纪律）与
+`\q{}` 字符串集合均已实现；`test262.conf` 仅余 properties-of-strings 类排除
+（需要 Unicode 序列枚举数据）。
 
 Frame state is in `src/exec/frame.zig` and operand stack state is in
 `src/exec/stack.zig`. `Frame` includes small inline argument buffers
