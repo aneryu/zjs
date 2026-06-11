@@ -911,6 +911,22 @@ test "call subsystem installs and invokes host globals" {
     try std.testing.expectEqualStrings("value", get_text.items);
 }
 
+test "legacy std sprintf parses numeric width and precision" {
+    var js = try engine.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    _ = try engine.exec.qjs_vm.contextGlobal(js.context);
+    try engine.exec.call.installLegacyStdOsGlobals(js.context);
+
+    var output_buffer: [64]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput("print(std.sprintf('%05d %.3s', 7, 'abcdef'));", &output);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("00007 abc\n", output.buffered());
+}
+
 test "native builtin record dispatch is independent from dispatch-name strings" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();

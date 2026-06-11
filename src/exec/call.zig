@@ -12,6 +12,7 @@ const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 const shared_vm = @import("shared.zig");
 const dtoa = @import("../libs/dtoa.zig");
+const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const exceptions = @import("exceptions.zig");
 const HostError = exceptions.HostError;
@@ -6909,7 +6910,7 @@ fn stdUrlGetStatusCode(line: []const u8) ?i32 {
     while (index < line.len and line[index] == ' ') : (index += 1) {}
     var value: i32 = 0;
     var digits: usize = 0;
-    while (index < line.len and std.ascii.isDigit(line[index])) : (index += 1) {
+    while (index < line.len and unicode.isAsciiDigitByte(line[index])) : (index += 1) {
         value = value * 10 + @as(i32, @intCast(line[index] - '0'));
         digits += 1;
     }
@@ -6975,7 +6976,7 @@ fn formatPrintfBytes(call: HostCall) HostError![]u8 {
             fmt_len += width_text.len;
             index += 1;
         } else {
-            while (index < format.len and std.ascii.isDigit(format[index])) : (index += 1) {
+            while (index < format.len and unicode.isAsciiDigitByte(format[index])) : (index += 1) {
                 if (fmt_len >= fmt_buf.len - 1) return printfInvalidFormat(call, active_global);
                 fmt_buf[fmt_len] = format[index];
                 fmt_len += 1;
@@ -6993,7 +6994,7 @@ fn formatPrintfBytes(call: HostCall) HostError![]u8 {
                 fmt_len += precision_text.len;
                 index += 1;
             } else {
-                while (index < format.len and std.ascii.isDigit(format[index])) : (index += 1) {
+                while (index < format.len and unicode.isAsciiDigitByte(format[index])) : (index += 1) {
                     if (fmt_len >= fmt_buf.len - 1) return printfInvalidFormat(call, active_global);
                     fmt_buf[fmt_len] = format[index];
                     fmt_len += 1;
