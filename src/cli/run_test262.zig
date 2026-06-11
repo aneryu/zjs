@@ -3,6 +3,7 @@ const test262_root = @import("zjs");
 const zjs = test262_root.binding_root;
 const runtime_layer = test262_root.runtime;
 const frontend_parser = test262_root.frontend.parser;
+const unicode = test262_root.libs.unicode;
 
 extern "c" fn getpid() c_int;
 
@@ -1585,23 +1586,53 @@ fn lessThanName(_: void, lhs: []const u8, rhs: []const u8) bool {
 fn compareNames(lhs: []const u8, rhs: []const u8) i32 {
     var i: usize = 0;
     var j: usize = 0;
-    while (true) {
-        const lc: u8 = if (i < lhs.len) lhs[i] else 0;
-        const rc: u8 = if (j < rhs.len) rhs[j] else 0;
-        i += @as(usize, if (i < lhs.len) 1 else 0);
-        j += @as(usize, if (j < rhs.len) 1 else 0);
-        if (std.ascii.isDigit(lc) and std.ascii.isDigit(rc)) {
-            var ln: usize = lc - '0';
-            var rn: usize = rc - '0';
-            while (i < lhs.len and std.ascii.isDigit(lhs[i])) : (i += 1) ln = ln * 10 + lhs[i] - '0';
-            while (j < rhs.len and std.ascii.isDigit(rhs[j])) : (j += 1) rn = rn * 10 + rhs[j] - '0';
-            if (ln < rn) return -1;
-            if (ln > rn) return 1;
+    while (i < lhs.len and j < rhs.len) {
+        const lc = lhs[i];
+        const rc = rhs[j];
+        if (unicode.isAsciiDigitByte(lc) and unicode.isAsciiDigitByte(rc)) {
+            const lhs_start = i;
+            const rhs_start = j;
+            i = asciiDigitRunEnd(lhs, lhs_start);
+            j = asciiDigitRunEnd(rhs, rhs_start);
+            const digits_cmp = compareAsciiDigitRuns(lhs[lhs_start..i], rhs[rhs_start..j]);
+            if (digits_cmp != 0) return digits_cmp;
+            continue;
         }
         if (lc < rc) return -1;
         if (lc > rc) return 1;
-        if (lc == 0) return 0;
+        i += 1;
+        j += 1;
     }
+    if (i < lhs.len) return 1;
+    if (j < rhs.len) return -1;
+    return 0;
+}
+
+fn asciiDigitRunEnd(bytes: []const u8, start: usize) usize {
+    var end = start;
+    while (end < bytes.len and unicode.isAsciiDigitByte(bytes[end])) : (end += 1) {}
+    return end;
+}
+
+fn compareAsciiDigitRuns(lhs: []const u8, rhs: []const u8) i32 {
+    const lhs_significant = trimLeadingAsciiZeroes(lhs);
+    const rhs_significant = trimLeadingAsciiZeroes(rhs);
+    if (lhs_significant.len < rhs_significant.len) return -1;
+    if (lhs_significant.len > rhs_significant.len) return 1;
+
+    const significant_order = std.mem.order(u8, lhs_significant, rhs_significant);
+    if (significant_order == .lt) return -1;
+    if (significant_order == .gt) return 1;
+
+    if (lhs.len < rhs.len) return -1;
+    if (lhs.len > rhs.len) return 1;
+    return 0;
+}
+
+fn trimLeadingAsciiZeroes(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < bytes.len and bytes[start] == '0') : (start += 1) {}
+    return bytes[start..];
 }
 
 fn runOneTest(
@@ -3705,6 +3736,25 @@ test "known error renderer emits sorted unique newline-separated entries" {
     const text = try renderKnownErrorsText(std.testing.allocator, failures, "");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("test/a.js\ntest/z.js\n", text);
+}
+
+test "test262 natural name comparison keeps equal numeric values distinct" {
+    try std.testing.expect(compareNames("test/case-2.js", "test/case-10.js") < 0);
+    try std.testing.expect(compareNames("test/case-10.js", "test/case-2.js") > 0);
+    try std.testing.expect(compareNames("test/case-2.js", "test/case-02.js") < 0);
+    try std.testing.expect(compareNames("test/case-02.js", "test/case-002.js") < 0);
+    try std.testing.expectEqual(@as(i32, 0), compareNames("test/case-02.js", "test/case-02.js"));
+
+    var names = NameList.init(std.testing.allocator);
+    defer names.deinit();
+    try names.append("test/case-02.js");
+    try names.append("test/case-2.js");
+    try names.append("test/case-02.js");
+    names.sortAndDedupe();
+
+    try std.testing.expectEqual(@as(usize, 2), names.items.len);
+    try std.testing.expectEqualStrings("test/case-2.js", names.items[0]);
+    try std.testing.expectEqualStrings("test/case-02.js", names.items[1]);
 }
 
 test "test262 failure log renderer emits sorted lines" {
