@@ -528,6 +528,11 @@ fn lookupIcSlotForPc(ic_slots: []const ic.Slot, ic_site_ids: []const usize, ic_s
     return @constCast(&ic_slots[site.slot_index]);
 }
 
+// Note: the reserved slot-form opcodes (`get_field_data_slot`,
+// `get_global_data_slot`, `get_global_lexical_slot`, ids 246-248) are never
+// emitted; the generic forms below already reach their IC slots in O(1) via
+// the dense `site_ids[pc]` index, so the slot forms stay reserved ids only
+// and are intentionally not listed here.
 fn opcodeHasOwnDataIc(op_id: u8) bool {
     return op_id == opcode.op.get_var or
         op_id == opcode.op.get_var_undef or
@@ -535,10 +540,7 @@ fn opcodeHasOwnDataIc(op_id: u8) bool {
         op_id == opcode.op.get_field or
         op_id == opcode.op.get_field2 or
         op_id == opcode.op.prepare_call_prop_atom or
-        op_id == opcode.op.put_field or
-        op_id == opcode.op.get_field_data_slot or
-        op_id == opcode.op.get_global_data_slot or
-        op_id == opcode.op.get_global_lexical_slot;
+        op_id == opcode.op.put_field;
 }
 
 fn bytecodeSkipsPropertyIc(code: []const u8) bool {
