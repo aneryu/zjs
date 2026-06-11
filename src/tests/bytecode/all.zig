@@ -155,7 +155,7 @@ test "constant pool appendOwned retains unique symbol atoms until release" {
     try std.testing.expect(rt.atoms.name(owned_symbol) == null);
 }
 
-test "function bytecode owns code constants scopes module and debug metadata" {
+test "function bytecode owns code constants module and debug metadata" {
     const rt = try core.Runtime.create(std.testing.allocator);
     defer rt.destroy();
 
@@ -175,13 +175,6 @@ test "function bytecode owns code constants scopes module and debug metadata" {
     try std.testing.expectEqual(@as(usize, 3), function_bc.code.len);
     _ = try function_bc.addConstant(core.Value.int32(7));
     try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
-
-    const scope_record = try function_bc.addScope(null);
-    _ = try scope_record.addBinding(local, .let_, true);
-    _ = try scope_record.addClosureVar(local, 0, 0, false);
-    try std.testing.expectEqual(@as(usize, 1), scope_record.bindings.len);
-    try std.testing.expect(scope_record.bindings[0].is_lexical);
-    try std.testing.expectEqual(@as(usize, 1), scope_record.closure_vars.len);
 
     const mod_record = function_bc.ensureModule();
     const req_index = try mod_record.addRequest(dep);

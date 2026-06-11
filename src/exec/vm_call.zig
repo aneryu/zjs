@@ -14,6 +14,14 @@ const op = bytecode.opcode.op;
 
 pub const Step = enum { done, continue_loop };
 
+/// Step result for opcodes that may request an inline bytecode call to be
+/// pushed by the dispatch loop.
+pub const CallStep = union(enum) {
+    done,
+    continue_loop,
+    inline_call: shared_vm.InlineCallRequest,
+};
+
 pub const TailCallMethodResult = union(enum) {
     handled,
     return_value: core.JSValue,
@@ -37,6 +45,7 @@ pub const CallDepthGuard = struct {
 
     pub fn deinit(self: CallDepthGuard) void {
         self.ctx.call_depth -= 1;
+        self.ctx.native_call_depth -= 1;
     }
 };
 
@@ -52,12 +61,22 @@ pub const CallProfileGuard = struct {
 };
 
 pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
-    if (ctx.call_depth >= maxJsCallDepth(ctx)) {
+    if (ctx.native_call_depth >= maxNativeJsCallDepth(ctx) or ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
         _ = shared_vm.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
         return error.RangeError;
     }
     ctx.call_depth += 1;
+    ctx.native_call_depth += 1;
     return .{ .ctx = ctx };
+}
+
+/// Depth accounting for inline (same interpreter loop) call frames.
+pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
+    if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
+        _ = shared_vm.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
+        return error.RangeError;
+    }
+    ctx.call_depth += 1;
 }
 
 pub fn enterCallProfile(rt: *core.JSRuntime) CallProfileGuard {
@@ -94,9 +113,13 @@ pub fn initFrameLocals(
     var storage_transferred = false;
     errdefer if (!storage_transferred) frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
 
-    const locals = if (use_inline_storage and function.var_count <= frame.inline_locals.len)
-        frame.inline_locals[0..function.var_count]
-    else blk: {
+    const locals = blk: {
+        if (use_inline_storage and function.var_count <= frame.inline_locals.len) {
+            break :blk frame.inline_locals[0..function.var_count];
+        }
+        if (use_inline_storage) {
+            if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.var_count)) |window| break :blk window;
+        }
         frame.locals_on_heap = true;
         break :blk try ctx.runtime.memory.alloc(core.JSValue, function.var_count);
     };
@@ -124,6 +147,9 @@ pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *c
         const owned_refs = if (use_inline_storage and var_refs.len <= frame.inline_var_refs.len)
             frame.inline_var_refs[0..var_refs.len]
         else blk: {
+            if (use_inline_storage) {
+                if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, var_refs.len)) |window| break :blk window;
+            }
             frame.var_refs_on_heap = true;
             break :blk try ctx.runtime.memory.alloc(core.JSValue, var_refs.len);
         };
@@ -136,6 +162,9 @@ pub fn initFrameVarRefs(ctx: *core.JSContext, global: *core.Object, function: *c
     const owned_refs = if (use_inline_storage and function.var_ref_names.len <= frame.inline_var_refs.len)
         frame.inline_var_refs[0..function.var_ref_names.len]
     else blk: {
+        if (use_inline_storage) {
+            if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.var_ref_names.len)) |window| break :blk window;
+        }
         frame.var_refs_on_heap = true;
         break :blk try ctx.runtime.memory.alloc(core.JSValue, function.var_ref_names.len);
     };
@@ -337,7 +366,7 @@ pub fn call(
     catch_target: *?usize,
     opc: u8,
     comptime execCall: anytype,
-) !Step {
+) !CallStep {
     const argc = switch (opc) {
         op.call => blk: {
             const value = readInt(u16, function.code[frame.pc..][0..2]);
@@ -353,9 +382,10 @@ pub fn call(
     if (try tryFastMathCall(ctx, stack, argc)) return .done;
     if (try tryFastSimpleStringCall(ctx, stack, argc)) return .done;
     if (try tryFastSimpleNumericCall(ctx, stack, argc)) return .done;
-    return switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global)) {
+    return switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global, true)) {
         .done => .done,
         .continue_loop => .continue_loop,
+        .inline_call => |request| .{ .inline_call = request },
     };
 }
 
@@ -549,9 +579,10 @@ pub fn tailCall(
 ) !TailCallResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global)) {
+    switch (try execCall(ctx, stack, function, frame, catch_target, argc, output, global, false)) {
         .done => {},
         .continue_loop => return .handled,
+        .inline_call => unreachable,
     }
     if (stack.peek()) |value| return .{ .return_value = value };
     return .{ .return_value = core.JSValue.undefinedValue() };
@@ -1469,8 +1500,16 @@ pub fn initCtorVm(
     return .done;
 }
 
-fn maxJsCallDepth(ctx: *const core.JSContext) usize {
+fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
     return @max(@as(usize, 16), ctx.stack_limit / 16384);
+}
+
+fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
+    return ctx.stack_limit;
+}
+
+fn maxJsCallDepth(ctx: *const core.JSContext) usize {
+    return maxNativeJsCallDepth(ctx);
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

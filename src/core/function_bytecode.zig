@@ -160,6 +160,9 @@ pub const FunctionBytecode = struct {
     ic_site_ids: []usize = &.{},
     ic_sites: []ic.Site = &.{},
     call_sites: []CallSite = &.{},
+    /// Per-pc saturating fail counters for the VM fusion matchers (see
+    /// `Bytecode.fusion_cold`). Shared by every view of this function.
+    fusion_cold: []u8 = &.{},
 
     // Note: QuickJS has 'realm' field (JSContext *) here; Zig version
     // tracks this differently via the runtime context.
@@ -248,6 +251,10 @@ pub const FunctionBytecode = struct {
         }
         self.source_len = 0;
         self.deinitIcSlots(&rt.shapes);
+
+        const fusion_cold = self.fusion_cold;
+        self.fusion_cold = &.{};
+        if (fusion_cold.len != 0) self.memory.free(u8, fusion_cold);
 
         self.class_fields_init = null;
         self.cpool = &.{};

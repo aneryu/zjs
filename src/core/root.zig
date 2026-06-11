@@ -40,6 +40,7 @@ pub const ModuleRecord = module.ModuleRecord;
 pub const Object = object.Object;
 pub const Descriptor = descriptor.Descriptor;
 pub const JSRuntime = runtime.JSRuntime;
+pub const VmStackArena = runtime.VmStackArena;
 pub const JSContext = context.JSContext;
 pub const JSValueHandle = runtime.JSValueHandle;
 pub const LocalHandle = runtime.LocalHandle;

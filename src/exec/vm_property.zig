@@ -3138,6 +3138,12 @@ fn tryFuseCheckedLocalEmptyInt32Range(
     return true;
 }
 
+/// Number of failed match attempts at a bytecode site before the fusion
+/// matchers stop being retried there. Shape-driven fusions match on the
+/// first attempt; the slack covers matchers with runtime preconditions
+/// (e.g. dense-array element kinds) that may stabilize after warm-up.
+pub const fusion_cold_threshold: u8 = 16;
+
 pub fn tryFuseCheckedLocalFastPath(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -3154,6 +3160,15 @@ pub fn tryFuseCheckedLocalFastPath(
     comptime setSlotValue: anytype,
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
+    // The matcher chain below is expensive and runs on every executed
+    // get_loc_check. Sites that repeatedly fail to match go cold and are
+    // skipped permanently; sites that fuse always match within the first
+    // few attempts (matching is bytecode-shape driven with only shallow
+    // runtime preconditions).
+    const fusion_cold = function.fusion_cold;
+    const fusion_site = frame.pc;
+    if (fusion_site < fusion_cold.len and fusion_cold[fusion_site] >= fusion_cold_threshold) return false;
+
     if (allow_loop_tail_fusion and
         try tryFuseCheckedLocalEmptyInt32Range(ctx, function, global, frame, idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
 
@@ -3279,6 +3294,7 @@ pub fn tryFuseCheckedLocalFastPath(
         }
     }
 
+    if (fusion_site < fusion_cold.len) fusion_cold[fusion_site] +|= 1;
     return false;
 }
 

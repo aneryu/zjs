@@ -467,6 +467,7 @@ pub const FunctionDef = struct {
         tail[0] = closure_var;
         tail[0].var_name = self.atoms.dup(closure_var.var_name);
         self.closure_var_count = @intCast(self.closure_var.len);
+        self.var_ref_count = @intCast(self.closure_var.len);
         return @intCast(self.closure_var.len - 1);
     }
 

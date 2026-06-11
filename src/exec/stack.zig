@@ -8,22 +8,38 @@ pub const Stack = struct {
     values: []JSValue = &.{},
     capacity: usize = 0,
     limit: usize,
+    /// True while the capacity region is a borrowed VM stack-arena window.
+    /// Windows are never freed or reallocated in place; growth beyond the
+    /// window migrates to an owned heap buffer and clears this flag.
+    arena_window: bool = false,
 
     pub fn init(account: *memory.MemoryAccount, limit: usize) Stack {
         return .{ .memory = account, .limit = limit };
     }
 
+    pub fn initArenaWindow(account: *memory.MemoryAccount, limit: usize, window: []JSValue) Stack {
+        return .{
+            .memory = account,
+            .limit = limit,
+            .values = window[0..0],
+            .capacity = window.len,
+            .arena_window = true,
+        };
+    }
+
     pub fn deinit(self: *Stack, rt: anytype) void {
         const values = self.values;
         const capacity = self.capacity;
+        const arena_window = self.arena_window;
         self.values = &.{};
         self.capacity = 0;
+        self.arena_window = false;
         for (values) |*slot| {
             const value = slot.*;
             slot.* = JSValue.undefinedValue();
             value.free(rt);
         }
-        if (capacity != 0) self.memory.free(JSValue, values.ptr[0..capacity]);
+        if (capacity != 0 and !arena_window) self.memory.free(JSValue, values.ptr[0..capacity]);
     }
 
     pub fn push(self: *Stack, value: JSValue) !void {
@@ -93,9 +109,11 @@ pub const Stack = struct {
         errdefer self.memory.free(JSValue, next);
         const old_values = self.values;
         const old_capacity = self.capacity;
+        const old_arena_window = self.arena_window;
         @memcpy(next[0..old_values.len], old_values);
         self.values = next[0..old_values.len];
         self.capacity = next_capacity;
-        if (old_capacity != 0) self.memory.free(JSValue, old_values.ptr[0..old_capacity]);
+        self.arena_window = false;
+        if (old_capacity != 0 and !old_arena_window) self.memory.free(JSValue, old_values.ptr[0..old_capacity]);
     }
 };

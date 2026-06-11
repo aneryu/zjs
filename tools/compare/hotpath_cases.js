@@ -56,6 +56,51 @@ export const cases = [
         'for (let i = 0; i < 1000000; i++) s += o.a;',
         'print(s);',
     ]),
+    // The cases below intentionally use function bodies that the
+    // simple-numeric bytecode fusion cannot recognize, so they always
+    // exercise the real frame push/pop and call machinery.
+    supported('fib_rec', 'fib_rec', 'function', 'Hotpath recursive fibonacci; deep real call stacks that bypass call fusion.', [
+        'function fib(n) {',
+        '  if (n < 2) return n;',
+        '  const a = fib(n - 1);',
+        '  const b = fib(n - 2);',
+        '  return a + b;',
+        '}',
+        'print(fib(24));',
+    ]),
+    supported('call_body_loop', 'call_body_loop', 'function', 'Hotpath call loop with a multi-statement body and locals that bypass call fusion.', [
+        'function f(a, b) {',
+        '  let t = a + b;',
+        '  t = t * 2;',
+        '  if (t < 0) t = -t;',
+        '  return t - b;',
+        '}',
+        'let s = 0;',
+        'for (let i = 0; i < 300000; i++) s += f(i, 3);',
+        'print(s);',
+    ]),
+    supported('method_call_loop', 'method_call_loop', 'function', 'Hotpath monomorphic method call loop with a non-fusable body.', [
+        'const o = {',
+        '  v: 7,',
+        '  m(x) {',
+        '    let r = this.v + x;',
+        '    if (r > 1000000000) r = 0;',
+        '    return r;',
+        '  },',
+        '};',
+        'let s = 0;',
+        'for (let i = 0; i < 300000; i++) s += o.m(i);',
+        'print(s);',
+    ]),
+    supported('alloc_call_loop', 'alloc_call_loop', 'function', 'Hotpath call loop allocating an object per call to expose frame plus allocation cost.', [
+        'function make(x) {',
+        '  const o = { a: x, b: x + 1 };',
+        '  return o.a + o.b;',
+        '}',
+        'let s = 0;',
+        'for (let i = 0; i < 200000; i++) s += make(i);',
+        'print(s);',
+    ]),
 ];
 
 export function categories() {

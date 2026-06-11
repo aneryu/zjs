@@ -1725,6 +1725,12 @@ pub const ParseState = struct {
     }
 
     fn ensureClosureChain(self: *ParseState, source_index: usize, source: function_def_mod.ClosureVar) Error!void {
+        if (source.closure_type == .local) {
+            const source_fd = self.funcAtVirtualIndex(source_index);
+            if (source.var_idx < source_fd.vars.len) {
+                source_fd.vars[source.var_idx].is_captured = true;
+            }
+        }
         var parent_ref_idx: ?u16 = null;
         var child_index = source_index + 1;
         while (child_index <= self.cur_func_stack.len) : (child_index += 1) {

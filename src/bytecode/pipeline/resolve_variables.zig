@@ -11,7 +11,6 @@ const memory = @import("../../core/memory.zig");
 const bytecode_function = @import("../function.zig");
 const function_def_mod = @import("../function_def.zig");
 const opcode = @import("../opcode.zig");
-const scope = @import("../scope.zig");
 
 // Global variable definition flags (mirrors quickjs.c)
 const DEFINE_GLOBAL_LEX_VAR: u8 = 1 << 7;

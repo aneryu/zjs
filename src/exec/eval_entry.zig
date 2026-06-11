@@ -120,8 +120,7 @@ fn canReturnUndefinedWithoutVm(function: *const bytecode.Bytecode) bool {
         function.var_ref_is_const.len == 0 and
         function.global_var_names.len == 0 and
         function.private_bound_names.len == 0 and
-        function.constants.values.len == 0 and
-        function.scopes.len == 0;
+        function.constants.values.len == 0;
 }
 
 fn runEvalModuleWithVarRefs(

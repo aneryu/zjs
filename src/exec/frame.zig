@@ -118,6 +118,18 @@ pub const CallBindingInputs = struct {
     inherited_eval_var_refs: []const JSValue,
 };
 
+/// `original_args` (a pre-mutation snapshot of the call arguments) is only
+/// observable through the unmapped arguments object and implicit derived
+/// constructor calls. Sloppy simple-parameter functions always use the
+/// mapped arguments object, which reads live `frame.args`, so the snapshot
+/// duplication can be skipped for them.
+pub fn argumentsNeedsOriginalSnapshot(function: *const bytecode.Bytecode) bool {
+    return function.flags.is_derived_class_constructor or
+        function.flags.is_strict or
+        function.flags.runtime_strict or
+        !function.flags.has_simple_parameter_list;
+}
+
 pub const Frame = struct {
     function: *const bytecode.Bytecode,
     pc: usize = 0,
@@ -188,32 +200,90 @@ pub const Frame = struct {
         return snapshot;
     }
 
-    pub fn initArguments(self: *Frame, account: *memory.MemoryAccount, args: []const JSValue, use_inline_storage: bool) !void {
+    pub fn initArguments(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        arena: ?*runtime.VmStackArena,
+        args: []const JSValue,
+        use_inline_storage: bool,
+        need_original_snapshot: bool,
+    ) !void {
         self.actual_arg_count = args.len;
 
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = if (use_inline_storage and frame_arg_count <= self.inline_args.len)
-                self.inline_args[0..frame_arg_count]
-            else blk: {
-                self.args_on_heap = true;
-                break :blk try account.alloc(JSValue, frame_arg_count);
-            };
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
             @memset(owned_args, JSValue.undefinedValue());
             for (args, 0..) |arg, idx| owned_args[idx] = arg.dup();
             self.args = owned_args;
         }
 
-        if (args.len > 0) {
-            const original_args = if (use_inline_storage and args.len <= self.inline_original_args.len)
-                self.inline_original_args[0..args.len]
-            else blk: {
-                self.original_args_on_heap = true;
-                break :blk try account.alloc(JSValue, args.len);
-            };
-            for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
-            self.original_args = original_args;
+        try self.initOriginalArgsSnapshot(account, args, use_inline_storage, need_original_snapshot);
+    }
+
+    /// Move `argc` call arguments from the operand stack into frame slots
+    /// without refcount duplication. Only writes undefined for slots where
+    /// `argc < arg_count`. Mirrors QuickJS `JS_CallInternal` arg setup.
+    pub fn initArgumentsFromStack(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        arena: ?*runtime.VmStackArena,
+        stack: *stack_mod.Stack,
+        argc: usize,
+        use_inline_storage: bool,
+        need_original_snapshot: bool,
+    ) !void {
+        self.actual_arg_count = argc;
+        const frame_arg_count = @max(argc, @as(usize, @intCast(self.function.arg_count)));
+        if (frame_arg_count > 0) {
+            if (stack.values.len < argc) return error.StackUnderflow;
+            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, use_inline_storage);
+            @memset(owned_args, JSValue.undefinedValue());
+            var remaining = argc;
+            while (remaining > 0) {
+                remaining -= 1;
+                owned_args[remaining] = try stack.pop();
+            }
+            self.args = owned_args;
         }
+        if (argc > 0 and need_original_snapshot) {
+            try self.initOriginalArgsSnapshot(account, self.args[0..argc], use_inline_storage, true);
+        }
+    }
+
+    fn allocArgsSlice(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        arena: ?*runtime.VmStackArena,
+        frame_arg_count: usize,
+        use_inline_storage: bool,
+    ) ![]JSValue {
+        if (use_inline_storage and frame_arg_count <= self.inline_args.len) {
+            return self.inline_args[0..frame_arg_count];
+        }
+        if (arena) |stack_arena| {
+            if (stack_arena.carve(account, frame_arg_count)) |window| return window;
+        }
+        self.args_on_heap = true;
+        return try account.alloc(JSValue, frame_arg_count);
+    }
+
+    fn initOriginalArgsSnapshot(
+        self: *Frame,
+        account: *memory.MemoryAccount,
+        args: []const JSValue,
+        use_inline_storage: bool,
+        need_original_snapshot: bool,
+    ) !void {
+        if (args.len == 0 or !need_original_snapshot) return;
+        const original_args = if (use_inline_storage and args.len <= self.inline_original_args.len)
+            self.inline_original_args[0..args.len]
+        else blk: {
+            self.original_args_on_heap = true;
+            break :blk try account.alloc(JSValue, args.len);
+        };
+        for (args, 0..) |arg, idx| original_args[idx] = arg.dup();
+        self.original_args = original_args;
     }
 
     fn releaseCallBindings(self: *Frame, rt: *JSRuntime) void {

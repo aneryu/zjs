@@ -25,6 +25,76 @@ pub const default_gc_threshold = 256 * 1024;
 
 pub const InterruptHandler = *const fn (*JSRuntime, ?*anyopaque) bool;
 
+/// Contiguous VM value-stack arena mirroring QuickJS's `alloca`-based
+/// `JS_CallInternal` frame layout. Call frames carve LIFO windows for
+/// `[args | locals | operand stack]` instead of per-call heap allocations.
+/// Windows are stable for their lifetime (chunks never move); release is a
+/// watermark restore. Values inside windows are owned by the frames using
+/// them and must be released before the watermark is restored.
+pub const VmStackArena = struct {
+    pub const chunk_slots: usize = 32 * 1024;
+    pub const max_chunks: usize = 64;
+
+    pub const Mark = struct {
+        chunk: usize,
+        used: usize,
+    };
+
+    chunks: [max_chunks][]JSValue = @splat(&.{}),
+    used: [max_chunks]usize = @splat(0),
+    chunk_count: usize = 0,
+    active: usize = 0,
+
+    pub fn mark(self: *const VmStackArena) Mark {
+        return .{ .chunk = self.active, .used = if (self.chunk_count == 0) 0 else self.used[self.active] };
+    }
+
+    /// Carve `n` slots from the arena. Returns null when the request cannot
+    /// be served (oversized window or arena exhausted); callers fall back to
+    /// heap storage.
+    pub fn carve(self: *VmStackArena, account: *memory.MemoryAccount, n: usize) ?[]JSValue {
+        if (n == 0) return self.chunks[0][0..0];
+        if (n > chunk_slots) return null;
+        if (self.chunk_count != 0) {
+            const used = self.used[self.active];
+            if (chunk_slots - used >= n) {
+                self.used[self.active] = used + n;
+                return self.chunks[self.active][used .. used + n];
+            }
+        }
+        const next_index = if (self.chunk_count == 0) 0 else self.active + 1;
+        if (next_index >= max_chunks) return null;
+        if (next_index >= self.chunk_count) {
+            const chunk = account.alloc(JSValue, chunk_slots) catch return null;
+            self.chunks[next_index] = chunk;
+            self.chunk_count = next_index + 1;
+        }
+        self.active = next_index;
+        self.used[next_index] = n;
+        return self.chunks[next_index][0..n];
+    }
+
+    /// Restore the watermark taken by `mark`. All values stored in the
+    /// released region must already have been freed by frame/stack teardown.
+    pub fn restore(self: *VmStackArena, m: Mark) void {
+        if (self.chunk_count == 0) return;
+        var index = m.chunk + 1;
+        while (index <= self.active) : (index += 1) self.used[index] = 0;
+        self.active = m.chunk;
+        self.used[m.chunk] = m.used;
+    }
+
+    pub fn deinit(self: *VmStackArena, account: *memory.MemoryAccount) void {
+        for (self.chunks[0..self.chunk_count]) |chunk| {
+            if (chunk.len != 0) account.free(JSValue, chunk);
+        }
+        self.chunks = @splat(&.{});
+        self.used = @splat(0);
+        self.chunk_count = 0;
+        self.active = 0;
+    }
+};
+
 pub const RuntimeOptions = struct {
     trace_writer: ?*std.Io.Writer = null,
     memory_limit: ?usize = null,
@@ -544,6 +614,8 @@ pub const JSRuntime = struct {
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     stack_size: usize = default_stack_size,
+    /// Per-runtime VM value-stack arena for bytecode call frames.
+    vm_stack: VmStackArena = .{},
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
@@ -683,6 +755,7 @@ pub const JSRuntime = struct {
         rt.gc_running = false;
         rt.current_exception = JSValue.uninitialized();
         rt.stack_size = options.stack_size;
+        rt.vm_stack = .{};
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
@@ -713,6 +786,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn deinit(self: *JSRuntime) void {
+        self.vm_stack.deinit(&self.memory);
         const current_exception = self.current_exception;
         self.current_exception = JSValue.uninitialized();
         current_exception.free(self);

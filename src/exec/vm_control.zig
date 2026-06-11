@@ -6,6 +6,8 @@ const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
+const array_ops = @import("array_ops.zig");
+
 const op = bytecode.opcode.op;
 
 pub const ThrowResult = enum {
@@ -117,12 +119,12 @@ pub fn throwTop(
     try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
     try stack.reserveAdditional(1);
     if (catch_target.* == null) {
-        if (try popCatchMarker(ctx.runtime, stack)) |restored| {
+        if (try array_ops.popCatchMarker(ctx.runtime, stack)) |restored| {
             catch_target.* = restored;
         }
     }
     if (catch_target.*) |target| {
-        const restored = (try popCatchMarker(ctx.runtime, stack)) orelse null;
+        const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
         stack.pushOwnedAssumeCapacity(value);
         value_owned = false;
         frame.pc = target;
@@ -246,15 +248,6 @@ fn tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function: *const bytecode.Byt
 
 fn relativePc(operand_pc: usize, diff: anytype) usize {
     return @intCast(@as(i64, @intCast(operand_pc)) + @as(i64, diff));
-}
-
-fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
-    while (stack.peekBorrowed()) |marker| {
-        const popped = try stack.pop();
-        if (marker.isCatchOffset()) return catchTargetFromMarker(popped);
-        popped.free(rt);
-    }
-    return null;
 }
 
 fn catchTargetFromMarker(marker: core.JSValue) ?usize {

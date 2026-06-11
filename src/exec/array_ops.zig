@@ -311,6 +311,7 @@ pub fn buildCallSiteArray(ctx: *core.JSContext, global: *core.Object, skip_name:
     var skipping = skip_name != null;
     while (idx > 0) {
         idx -= 1;
+        _ = exception_ops.resolvedBacktraceFunctionNameAt(ctx, idx);
         if (skipping) {
             if (backtraceFunctionNameEql(ctx, ctx.backtrace_frames[idx], skip_name.?)) skipping = false;
             continue;

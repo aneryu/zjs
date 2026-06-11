@@ -21,6 +21,10 @@ pub const BacktraceFrame = struct {
     pc_source: ?*const usize = null,
     location_data: ?*const anyopaque = null,
     location_resolver: ?BacktraceLocationResolver = null,
+    /// Owned function value used to resolve the display name lazily when a
+    /// backtrace is materialized. Undefined when `function_name` is already
+    /// authoritative. Resolution caches into `function_name` and clears this.
+    function_value: JSValue = JSValue.undefinedValue(),
 
     pub fn location(self: BacktraceFrame) BacktraceLocation {
         const current_pc = if (self.pc_source) |pc_source| pc_source.* -| 1 else self.pc;
@@ -385,7 +389,11 @@ pub const JSContext = struct {
     unhandled_rejection_slot: exception.ExceptionSlot = .{},
     unhandled_rejection_promise_slot: exception.ExceptionSlot = .{},
     stack_limit: usize = 0,
+    /// Logical JS call depth (recursive interpreter entries + inline frames).
     call_depth: usize = 0,
+    /// Native interpreter recursion depth only (excludes inline frames, which
+    /// consume no native stack). Guards against native stack exhaustion.
+    native_call_depth: usize = 0,
     preserve_uncaught_exception: bool = false,
     /// Host-controlled QuickJS-style unhandled rejection tracking. Normal CLI
     /// contexts enable it; validation and embedding-style contexts keep it off.
@@ -591,6 +599,7 @@ pub const JSContext = struct {
         for (backtrace_frames) |frame| {
             rt.atoms.free(frame.function_name);
             rt.atoms.free(frame.filename);
+            frame.function_value.free(rt);
         }
         if (backtrace_capacity != 0) rt.memory.free(BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
         self.deinitClassPrototypeSlots();
@@ -757,6 +766,22 @@ pub const JSContext = struct {
         location_data: ?*const anyopaque,
         location_resolver: ?BacktraceLocationResolver,
     ) !void {
+        try self.pushBacktraceFrameLazyName(function_name, filename, line_num, col_num, location_data, location_resolver, JSValue.undefinedValue());
+    }
+
+    /// Push a backtrace frame whose display name is resolved lazily from
+    /// `function_value` (an object) only when a backtrace is materialized.
+    /// `function_name` stays the fallback for non-object function values.
+    pub fn pushBacktraceFrameLazyName(
+        self: *JSContext,
+        function_name: atom.Atom,
+        filename: atom.Atom,
+        line_num: i32,
+        col_num: i32,
+        location_data: ?*const anyopaque,
+        location_resolver: ?BacktraceLocationResolver,
+        function_value: JSValue,
+    ) !void {
         if (self.backtrace_frames.len == self.backtrace_capacity) {
             var next_capacity: usize = if (self.backtrace_capacity == 0) 16 else self.backtrace_capacity * 2;
             if (next_capacity < self.backtrace_frames.len + 1) next_capacity = self.backtrace_frames.len + 1;
@@ -768,6 +793,7 @@ pub const JSContext = struct {
             self.backtrace_capacity = next_capacity;
             if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
         }
+        const stored_function_value = if (function_value.isObject()) function_value.dup() else JSValue.undefinedValue();
         self.backtrace_frames.ptr[self.backtrace_frames.len] = .{
             .function_name = self.runtime.atoms.dup(function_name),
             .filename = self.runtime.atoms.dup(filename),
@@ -775,6 +801,7 @@ pub const JSContext = struct {
             .col_num = col_num,
             .location_data = location_data,
             .location_resolver = location_resolver,
+            .function_value = stored_function_value,
         };
         self.backtrace_frames = self.backtrace_frames.ptr[0 .. self.backtrace_frames.len + 1];
     }
@@ -786,6 +813,7 @@ pub const JSContext = struct {
         self.backtrace_frames = self.backtrace_frames.ptr[0..idx];
         self.runtime.atoms.free(entry.function_name);
         self.runtime.atoms.free(entry.filename);
+        entry.function_value.free(self.runtime);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {

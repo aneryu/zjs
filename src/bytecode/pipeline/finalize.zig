@@ -170,6 +170,10 @@ pub fn createFunctionBytecode(fd: *function_def_mod.FunctionDef, rt: anytype) Fi
     fb.closure_var_count = @intCast(fd.closure_var_count);
     fb.stack_size = lowered.stack_size;
     try bytecode_function.allocateFunctionBytecodeIcSlots(fb);
+    if (fb.byte_code.len != 0) {
+        fb.fusion_cold = try fd.memory.alloc(u8, fb.byte_code.len);
+        @memset(fb.fusion_cold, 0);
+    }
 
     // Copy source location
     fb.atoms.replace(&fb.filename, fd.filename);
@@ -527,6 +531,7 @@ fn runPhases(
     // Phase 3c: compute_stack_size over resolved QuickJS-format bytecode.
     function.stack_size = try computeStackSizeForCurrentBytecode(function.code);
     try function.allocateIcSlots();
+    try function.allocateFusionCold();
 }
 
 fn computeStackSizeForCurrentBytecode(code: []const u8) !u16 {
@@ -637,7 +642,6 @@ fn writeRelativeDiff(bytes: []u8, width: usize, diff: i64) !void {
 }
 
 fn localIsCapturedByChild(fd: *const function_def_mod.FunctionDef, loc_idx: u16) bool {
-    if (fd.child_list.len != 0) return true;
     if (loc_idx < fd.vars.len and fd.vars[loc_idx].is_captured) return true;
     for (fd.child_list) |child| {
         for (child.closure_var) |cv| {

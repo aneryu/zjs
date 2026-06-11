@@ -65,6 +65,10 @@ pub fn saveGeneratorExecutionState(
     generator: *core.Object,
     pc: usize,
 ) !void {
+    // Generator frames must run on heap-backed stacks: suspension transfers
+    // buffer ownership into the generator object, which is incompatible with
+    // borrowed VM stack-arena windows.
+    std.debug.assert(!stack.arena_window);
     generator.generatorPcSlot().* = pc;
     try generator.writeValueSliceBarrier(ctx.runtime, stack.values);
     try generator.writeValueSliceBarrier(ctx.runtime, frame.locals);
@@ -139,6 +143,9 @@ fn resumeExecutionStateRaw(
         generator.generatorJustYieldedSlot().* = false;
         return .{};
     }
+    // Resume installs generator-owned heap buffers into the stack; the stack
+    // must not be an arena window (its deinit would skip freeing them).
+    std.debug.assert(!stack.arena_window);
 
     const resume_pc = generator.generatorPc();
     const generator_started = generator.generatorStarted();

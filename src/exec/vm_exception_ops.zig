@@ -223,6 +223,23 @@ pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, curr
     return ctx.runtime.atoms.internString(bytes.items);
 }
 
+/// Resolve the display name of a backtrace frame, caching the result in
+/// place. Frames pushed with a lazy function value defer the `name` property
+/// read and atom interning to the first materialization, keeping the per-call
+/// hot path free of property lookups and interning.
+/// Returns a borrowed atom valid while the frame entry is alive.
+pub fn resolvedBacktraceFunctionNameAt(ctx: *core.JSContext, index: usize) core.Atom {
+    const frame = &ctx.backtrace_frames[index];
+    const function_value = frame.function_value;
+    if (function_value.isUndefined()) return frame.function_name;
+    frame.function_value = core.JSValue.undefinedValue();
+    defer function_value.free(ctx.runtime);
+    const resolved = backtraceFunctionNameAtom(ctx, frame.function_name, function_value) catch ctx.runtime.atoms.dup(core.atom.ids.empty_string);
+    ctx.runtime.atoms.free(frame.function_name);
+    frame.function_name = resolved;
+    return frame.function_name;
+}
+
 pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.BacktraceLocation {
     const function: *const bytecode.Bytecode = @ptrCast(@alignCast(data orelse return .{ .line_num = 1, .col_num = 1 }));
     const slots = function.source_loc_slots;

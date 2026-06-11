@@ -25,6 +25,7 @@ const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const iter_vm = @import("iterator_ops.zig");
 const json_vm = @import("json_ops.zig");
+const inline_calls = @import("inline_calls.zig");
 const module_mod = @import("module.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
@@ -1909,7 +1910,14 @@ test "appendFunctionEvalLocal roots new refs while write barrier records slice" 
     try std.testing.expect(owner.functionEvalLocalRefsSlot().*[0].same(child_value));
 }
 
-pub const ExecCallResult = enum { done, continue_loop };
+pub const InlineCallRequest = struct {
+    target: inline_calls.InlineTarget,
+    /// Index of the callable on the caller operand stack; args follow it.
+    region_base: usize,
+    argc: u16,
+};
+
+pub const ExecCallResult = union(enum) { done, continue_loop, inline_call: InlineCallRequest };
 
 pub fn execCall(
     ctx: *core.JSContext,
@@ -1920,52 +1928,30 @@ pub fn execCall(
     argc: u16,
     output: ?*std.Io.Writer,
     global: *core.Object,
+    allow_inline: bool,
 ) !ExecCallResult {
-    var inline_args: [4]core.JSValue = undefined;
-    const args: []core.JSValue = if (argc <= inline_args.len)
-        inline_args[0..argc]
-    else
-        try ctx.runtime.memory.alloc(core.JSValue, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args);
-
-    var filled_start: usize = args.len;
-    errdefer {
-        var i = filled_start;
-        while (i < args.len) : (i += 1) args[i].free(ctx.runtime);
-    }
-    var remaining: usize = argc;
-    while (remaining > 0) {
-        remaining -= 1;
-        args[remaining] = try stack.pop();
-        filled_start = remaining;
-    }
-    filled_start = args.len;
-    defer {
-        for (args) |arg| arg.free(ctx.runtime);
-    }
-
-    var func = try stack.pop();
-    defer func.free(ctx.runtime);
-    var rooted_args = args;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &func },
-    };
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &rooted_args },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = ctx.runtime.active_value_roots,
-        .values = &root_values,
-        .slices = &root_slices,
-    };
-    ctx.runtime.active_value_roots = &root_frame;
-    defer ctx.runtime.active_value_roots = root_frame.previous;
+    // Zero-copy call sequence: borrow `func` and `args` directly from the
+    // operand stack (which is rooted by the caller's FrameRootScope) instead
+    // of popping them into a duplicated, separately rooted staging buffer.
+    // The region is popped and released only after the call completes, so
+    // the values stay rooted for the whole call.
+    const total: usize = @as(usize, argc) + 1;
+    if (stack.values.len < total) return error.StackUnderflow;
+    const region_base = stack.values.len - total;
+    const func = stack.values[region_base];
+    const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
     if (try fastHostOutputCall(ctx.runtime, output, func, args)) {
+        popOwnedStackRegion(ctx.runtime, stack, region_base);
         try stack.pushOwned(core.JSValue.undefinedValue());
         return .done;
     }
     const is_super_constructor = isCurrentSuperConstructor(ctx, frame, func);
+    if (allow_inline and !is_super_constructor) {
+        if (inline_calls.resolveInlineTarget(global, func)) |target| {
+            return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
+        }
+    }
     const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
         currentArrowLexicalSuperThis(ctx.runtime, frame)
     else
@@ -1985,13 +1971,15 @@ pub fn execCall(
         value
     else
         core.JSValue.undefinedValue();
-    const result = callValueOrBytecodeClassMode(ctx, output, global, super_this, func, rooted_args, function, frame, is_super_constructor) catch |err| {
+    const result = callValueOrBytecodeClassModePreRooted(ctx, output, global, super_this, func, args, function, frame, is_super_constructor) catch |err| {
+        popOwnedStackRegion(ctx.runtime, stack, region_base);
         try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
         return err;
     };
+    popOwnedStackRegion(ctx.runtime, stack, region_base);
     if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
         defer result.free(ctx.runtime);
         if (varRefSlotIsUninitialized(frame.this_value)) {
@@ -2037,6 +2025,35 @@ pub fn execCall(
         return err;
     };
     return .done;
+}
+
+/// Remove the callable at `region_base`, leaving its arguments on the operand
+/// stack for `initArgumentsFromStack` to transfer without duplication.
+pub fn popCallFuncFromStack(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_base: usize) void {
+    std.debug.assert(stack.values.len > region_base);
+    const func_val = stack.values[region_base];
+    const argc = stack.values.len - region_base - 1;
+    if (argc > 0) {
+        const src = stack.values.ptr[region_base + 1 .. region_base + 1 + argc];
+        const dest = stack.values.ptr[region_base .. region_base + argc];
+        @memmove(dest, src);
+    }
+    func_val.free(rt);
+    stack.values = stack.values.ptr[0 .. stack.values.len - 1];
+}
+
+/// Pop and release every owned value above `region_base` on the operand
+/// stack. Used by the zero-copy call sequence to drop the borrowed
+/// `func | args...` region once a call completes.
+pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_base: usize) void {
+    var index = stack.values.len;
+    while (index > region_base) {
+        index -= 1;
+        const value = stack.values[index];
+        stack.values[index] = core.JSValue.undefinedValue();
+        value.free(rt);
+    }
+    stack.values = stack.values.ptr[0..region_base];
 }
 
 pub fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
@@ -2271,6 +2288,23 @@ pub fn handleCatchableRuntimeError(
     global: *core.Object,
     err: anytype,
 ) !bool {
+    return tryCatchInFrame(ctx, stack, frame, catch_target, global, err);
+}
+
+/// Attempt to dispatch `err` to the current frame's catch handler. Returns
+/// true when the frame has a catch target: the operand stack is trimmed to
+/// the marker, the exception value is pushed, and `frame.pc` moves to the
+/// handler. Errors with no handler in the current frame propagate out of
+/// the dispatch loop, where the inline-call machine unwinds suspended
+/// frames before the error escapes `runWithArgsState`.
+pub fn tryCatchInFrame(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    frame: *frame_mod.Frame,
+    catch_target: *?usize,
+    global: *core.Object,
+    err: anytype,
+) !bool {
     core.profile.recordSlowPath();
     const is_pending_exception = exception_ops.pendingExceptionMatchesError(ctx, err);
     const error_info = if (is_pending_exception) null else exception_ops.runtimeErrorInfo(err) orelse return false;
@@ -2419,6 +2453,38 @@ pub fn callValueOrBytecodeClassMode(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
+    return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
+}
+
+/// Variant for callers whose `this_value`, `func`, and `args` are already
+/// rooted (e.g. borrowed directly from a frame-rooted operand stack).
+/// Skips the defensive copy and extra value-root frame of
+/// `callValueOrBytecodeClassMode`.
+pub fn callValueOrBytecodeClassModePreRooted(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    allow_class_constructor_call: bool,
+) HostError!core.JSValue {
+    return callValueOrBytecodeClassModeDispatch(ctx, output, global, this_value, func, args, caller_function, caller_frame, allow_class_constructor_call);
+}
+
+fn callValueOrBytecodeClassModeDispatch(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+    allow_class_constructor_call: bool,
+) HostError!core.JSValue {
     if (func.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
         if (allow_class_constructor_call and !fb.is_class_constructor) {
@@ -12414,8 +12480,6 @@ pub fn callFunctionBytecodeModeState(
         refs_transferred = true;
     }
 
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
-    defer nested_stack.deinit(ctx.runtime);
     var boxed_this: ?core.JSValue = null;
     defer if (boxed_this) |value| value.free(ctx.runtime);
     const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
@@ -12431,6 +12495,23 @@ pub fn callFunctionBytecodeModeState(
         return qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs);
     }
     const stop_on_yield = fb.func_kind == .generator or fb.func_kind == .async_generator;
+
+    // Mirror QuickJS JS_CallInternal: non-suspending bytecode frames carve
+    // their operand stack from the contiguous per-runtime VM stack arena
+    // instead of heap-allocating per call. Generator/async resumption swaps
+    // heap buffers in and out of the stack, so those keep heap mode.
+    const arena_mark = ctx.runtime.vm_stack.mark();
+    defer ctx.runtime.vm_stack.restore(arena_mark);
+    const arena_eligible = fb.func_kind == .normal and generator_state == null;
+    const operand_window: ?[]core.JSValue = if (arena_eligible)
+        ctx.runtime.vm_stack.carve(&ctx.runtime.memory, @as(usize, fb.stack_size) + 1)
+    else
+        null;
+    var nested_stack = if (operand_window) |window|
+        stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.stack_size, window)
+    else
+        stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
+    defer nested_stack.deinit(ctx.runtime);
     const result = runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false) catch |err| {
         if (fb.func_kind == .async_generator) {
             return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));

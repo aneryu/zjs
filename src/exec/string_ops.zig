@@ -8,6 +8,7 @@ const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const emoji = @import("../libs/emoji.zig");
 const call_mod = @import("call.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const iter_vm = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
@@ -664,6 +665,7 @@ pub fn buildErrorStackStringValue(ctx: *core.JSContext, global: *core.Object, sk
     var skipping = skip_name != null;
     while (idx > 0) {
         idx -= 1;
+        _ = exception_ops.resolvedBacktraceFunctionNameAt(ctx, idx);
         if (skipping) {
             if (backtraceFunctionNameEql(ctx, ctx.backtrace_frames[idx], skip_name.?)) skipping = false;
             continue;
