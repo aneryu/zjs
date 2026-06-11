@@ -3,6 +3,7 @@ const std = @import("std");
 const atom = @import("../core/atom.zig");
 const JSRuntime = @import("../core/runtime.zig").JSRuntime;
 const bytecode = @import("../bytecode/root.zig");
+const unicode = @import("../libs/unicode.zig");
 const zjs_lexer = @import("zjs_lexer.zig");
 const zjs_parser = @import("zjs_parser.zig");
 const zjs_token = @import("zjs_token.zig");
@@ -230,7 +231,7 @@ fn skipJsTrivia(source: []const u8, start: usize) usize {
     var index = start;
     while (index < source.len) {
         const ch = source[index];
-        if (std.ascii.isWhitespace(ch)) {
+        if (unicode.isAsciiWhitespaceByte(ch)) {
             index += 1;
             continue;
         }

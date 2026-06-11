@@ -136,6 +136,10 @@ pub fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool {
     return isEcmaWhitespaceOrLineTerminatorCodePoint(@intCast(unit));
 }
 
+pub fn isAsciiWhitespaceByte(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r' or byte == 0x0b or byte == 0x0c;
+}
+
 pub fn isAsciiDigitUnit(unit: u16) bool {
     return isAsciiDigitCodePoint(@intCast(unit));
 }
@@ -1717,6 +1721,17 @@ test "unicode ascii identifier byte helpers cover ECMAScript starts and parts" {
     try std.testing.expect(isAsciiIdentifierPartByte('$'));
     try std.testing.expect(!isAsciiIdentifierPartByte('-'));
     try std.testing.expect(!isAsciiIdentifierPartByte(0x80));
+}
+
+test "unicode ascii whitespace byte helper covers source scanners" {
+    try std.testing.expect(isAsciiWhitespaceByte(' '));
+    try std.testing.expect(isAsciiWhitespaceByte('\t'));
+    try std.testing.expect(isAsciiWhitespaceByte('\n'));
+    try std.testing.expect(isAsciiWhitespaceByte('\r'));
+    try std.testing.expect(isAsciiWhitespaceByte(0x0b));
+    try std.testing.expect(isAsciiWhitespaceByte(0x0c));
+    try std.testing.expect(!isAsciiWhitespaceByte('a'));
+    try std.testing.expect(!isAsciiWhitespaceByte(0x85));
 }
 
 test "unicode ascii digit byte helpers cover numeric literal digit sets" {

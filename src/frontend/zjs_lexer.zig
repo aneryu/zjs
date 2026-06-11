@@ -1603,7 +1603,7 @@ fn tsTokenize(allocator: std.mem.Allocator, src: []const u8, tokens: *std.ArrayL
     var prev_sig: ?TSToken = null;
     while (i < src.len) {
         const c = src[i];
-        if (std.ascii.isWhitespace(c)) {
+        if (unicode.isAsciiWhitespaceByte(c)) {
             i += 1;
             continue;
         }

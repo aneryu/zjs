@@ -9920,7 +9920,7 @@ pub fn base64Value(byte: u8, alphabet: Uint8ArrayBase64Alphabet) ?u8 {
 }
 
 pub fn isAsciiWhitespace(byte: u8) bool {
-    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r' or byte == 0x0b or byte == 0x0c;
+    return unicode_lib.isAsciiWhitespaceByte(byte);
 }
 
 pub fn isIteratorIdentityFunction(rt: *core.JSRuntime, function_object: *core.Object) bool {
