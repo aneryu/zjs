@@ -1240,7 +1240,7 @@ pub fn qjsArrayBufferSpeciesConstructor(
     }
     default_constructor.free(ctx.runtime);
     default_owned = false;
-    if (!isConstructorLike(ctx, species_value)) {
+    if (!(try isConstructorLike(ctx, species_value))) {
         species_value.free(ctx.runtime);
         return error.TypeError;
     }

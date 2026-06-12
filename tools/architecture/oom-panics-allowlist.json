@@ -1,0 +1,8 @@
+[
+  {
+    "source": "src/core/string.zig",
+    "pattern": "@panic",
+    "reason": "rope flatten last resort: borrowed-slice readers (resolveData) cannot propagate errors; flattenRopeNode retries after one object-cycle collection and only a second allocation failure aborts (eecf6c8)",
+    "exit_milestone": "make the remaining borrowed-slice readers rope-aware or fallible (String.ensureFlat first) so the infallible flatten backstop can be deleted"
+  }
+]

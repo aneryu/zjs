@@ -1732,6 +1732,15 @@ pub fn qjsPromiseCapability(
     const constructor_global = qjsPromiseConstructorRealmGlobal(constructor_value, global);
     const slot = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     slot_value = slot.value();
+    // Materialize the capability payload now, while an allocation failure
+    // still surfaces as a plain OOM from NewPromiseCapability. The capability
+    // executor runs inside the Promise constructor, where a failing store
+    // would be spec-caught into a rejected promise and resurface as a
+    // misleading "resolve is not callable" TypeError (found by test-oom
+    // injection). With the payload preallocated the executor's stores are
+    // allocation-free, mirroring QuickJS's js_promise_executor.
+    _ = try slot.promiseCapabilityResolveSlot(ctx.runtime);
+    _ = try slot.promiseCapabilityRejectSlot(ctx.runtime);
 
     executor_value = try qjsCreateBuiltinFunction(ctx.runtime, constructor_global, "", 2);
     const executor_object = objectFromValue(executor_value) orelse return error.TypeError;
@@ -2104,7 +2113,7 @@ pub fn qjsPromiseCombinatorCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
-    if (!isConstructorLike(ctx, constructor_value)) return error.TypeError;
+    if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
     var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
 
@@ -2318,7 +2327,7 @@ pub fn qjsPromiseKeyedCombinatorCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
-    if (!isConstructorLike(ctx, constructor_value)) return error.TypeError;
+    if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
     var capability = try qjsPromiseCapability(ctx, output, global, constructor_value, caller_function, caller_frame);
     errdefer capability.deinit(ctx.runtime);
 
@@ -2470,7 +2479,7 @@ pub fn qjsPromiseStaticCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (!constructor_value.isObject()) return error.TypeError;
-    if (!isConstructorLike(ctx, constructor_value)) return error.TypeError;
+    if (!(try isConstructorLike(ctx, constructor_value))) return error.TypeError;
 
     switch (mode) {
         .all => return qjsPromiseCombinatorCall(ctx, output, global, constructor_value, args, .all, caller_function, caller_frame),

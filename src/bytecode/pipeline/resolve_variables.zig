@@ -943,6 +943,10 @@ pub fn run(ctx: *JSContext) !void {
 
     const init_bypassed = if (ctx.function_def) |fd| blk: {
         const bytes = try ctx.memory.alloc(bool, fd.vars.len);
+        // The block below allocates and can fail with InvalidBytecode; the
+        // owning `defer` only binds after `break :blk`, so error exits inside
+        // the block must release `bytes` here (found by test-oom injection).
+        errdefer if (bytes.len != 0) ctx.memory.free(bool, bytes);
         @memset(bytes, false);
 
         // Pre-pass: find init_pc for each var and check if any forward jump bypasses it

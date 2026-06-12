@@ -6774,7 +6774,7 @@ pub fn defineClass(
     var proto_parent: ?*core.Object = objectPrototypeFromGlobal(ctx.runtime, global);
     if (superclass_value_active) {
         if (superclass_value.isObject()) {
-            if (!isConstructorLike(ctx, superclass_value)) {
+            if (!(try isConstructorLike(ctx, superclass_value))) {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
@@ -7323,7 +7323,7 @@ pub fn proxyTargetIsCallable(value: core.JSValue) bool {
     return target.isFunctionBytecode() or functionObjectFromValue(target) != null or callableObjectFromValue(target) != null or proxyTargetIsCallable(target);
 }
 
-pub fn proxyTargetIsConstructor(ctx: *core.JSContext, value: core.JSValue) bool {
+pub fn proxyTargetIsConstructor(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool {
     const object = objectFromValue(value) orelse return false;
     const target = object.proxyTarget() orelse return false;
     return isConstructorLike(ctx, target);
@@ -7370,7 +7370,7 @@ pub fn constructProxy(
     caller_frame: ?*frame_mod.Frame,
     new_target_value: core.JSValue,
 ) !core.JSValue {
-    if (!proxyTargetIsConstructor(ctx, proxy_value)) return error.TypeError;
+    if (!(try proxyTargetIsConstructor(ctx, proxy_value))) return error.TypeError;
     const target_value = proxy.proxyTarget() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
     const handler_value = proxy.proxyHandler() orelse return throwTypeErrorMessage(ctx, global, "revoked proxy");
     const construct_atom = try ctx.runtime.internAtom("construct");

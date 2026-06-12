@@ -10,10 +10,16 @@ pub fn build(b: *std.Build) void {
     // faster startup. The 16-byte representation stays selectable (and
     // guarded by the test-altrepr step) as the reference layout.
     const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse true;
+    // OOM-injection coverage instrumentation (v1): records deduplicated
+    // allocation call sites in core/memory.zig. Default off and comptime
+    // gated, so the default build's allocation hot path is unchanged.
+    // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
+    const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     engine_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    engine_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
 
     const engine_mod = b.addModule("quickjs_zig_engine", .{
         .root_source_file = b.path("src/root.zig"),
@@ -27,6 +33,7 @@ pub fn build(b: *std.Build) void {
     plugin_fixture_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     plugin_fixture_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     plugin_fixture_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    plugin_fixture_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     const plugin_fixture_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -383,6 +390,15 @@ pub fn build(b: *std.Build) void {
         "tools/architecture/check_deps.js",
     });
 
+    // OOM no-panic rule: allocation failures must propagate as errors (the
+    // catchable-OOM contract from eecf6c8); @panic / OutOfMemory-discard
+    // forms in engine sources require an allowlist entry (<=10, currently 1:
+    // the rope-flatten last resort).
+    const run_architecture_oom_panics = b.addSystemCommand(&.{
+        "node",
+        "tools/architecture/check_oom_panics.js",
+    });
+
     const architecture_public_api_mod = b.createModule(.{
         .root_source_file = b.path("tools/architecture/check_public_api.zig"),
         .target = target,
@@ -405,6 +421,7 @@ pub fn build(b: *std.Build) void {
 
     const architecture_check_step = b.step("architecture-check", "Check architecture dependency rules and public API snapshot");
     architecture_check_step.dependOn(&run_architecture_deps.step);
+    architecture_check_step.dependOn(&run_architecture_oom_panics.step);
     architecture_check_step.dependOn(&run_architecture_public_api.step);
 
     const architecture_snapshot_step = b.step("architecture-update-api-snapshot", "Refresh the public API snapshot");
@@ -428,6 +445,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     test_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
     test_options.addOption(bool, "zjs_nan_boxing", zjs_nan_boxing);
+    test_options.addOption(bool, "zjs_oom_coverage", zjs_oom_coverage);
     test_options.addOptionPath("runtime_plugin_fixture_path", runtime_plugin_fixture.getEmittedBin());
     test_options.addOptionPath("runtime_empty_plugin_fixture_path", runtime_empty_plugin_fixture.getEmittedBin());
     test_options.addOption([]const u8, "zjs_executable_path", b.getInstallPath(.bin, "zjs"));
@@ -462,6 +480,63 @@ pub fn build(b: *std.Build) void {
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     smoke_step.dependOn(&run_smoke_tests.step);
 
+    // OOM injection suite (`zig build test-oom`): exhaustive allocation
+    // failure injection (std.testing.checkAllAllocationFailures) over an
+    // embedded JS corpus, plus single-shot fail-at-N recovery canaries.
+    // Cost scales with allocation counts, so this is a phase-gate tier
+    // command rather than part of the per-checkpoint `zig build test`.
+    // The corpus binary compiles only the engine (internal_root), not the
+    // unified test suite.
+    const oom_engine_mod = b.createModule(.{
+        .root_source_file = b.path("src/internal_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    oom_engine_mod.addOptions("build_options", engine_options);
+    const oom_tests = b.addTest(.{
+        .name = "oom-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/oom.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zjs", .module = oom_engine_mod },
+            },
+        }),
+    });
+    oom_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    const run_oom_tests = b.addRunArtifact(oom_tests);
+    if (b.args) |args| run_oom_tests.addArgs(args);
+    const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (phase-gate tier)");
+    test_oom_step.dependOn(&run_oom_tests.step);
+
+    // Focused 8MB-cap OOM behaviour fixture. The same tests run inside the
+    // unified suite (all_tests.zig references src/tests/oom_cap.zig); this
+    // binary makes the production gate's dependency on the cap behaviour
+    // explicit.
+    const oom_cap_tests = b.addTest(.{
+        .name = "oom-cap-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/oom_cap.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zjs", .module = oom_engine_mod },
+            },
+        }),
+    });
+    oom_cap_tests.test_runner = .{
+        .path = b.path("tools/timing_test_runner.zig"),
+        .mode = .simple,
+    };
+    const run_oom_cap_tests = b.addRunArtifact(oom_cap_tests);
+
     // Alternate JSValue representation guard: runs the unified suite in a
     // nested build with the non-default representation (a full second build
     // graph, so the plugin fixtures recompile with a matching ABI
@@ -483,4 +558,5 @@ pub fn build(b: *std.Build) void {
     engine_production_gate_step.dependOn(smoke_step);
     engine_production_gate_step.dependOn(architecture_check_step);
     engine_production_gate_step.dependOn(test262_gate_step);
+    engine_production_gate_step.dependOn(&run_oom_cap_tests.step);
 }

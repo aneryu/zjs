@@ -330,7 +330,10 @@ pub const JSContext = struct {
     }
 
     pub fn isConstructor(self: *JSContext, val: JSValue) bool {
-        return exec.call_runtime.isConstructorLike(&self.core, val);
+        // Public predicate spelling stays infallible; under allocation
+        // failure it degrades to a conservative `false`. Engine-internal
+        // paths use the fallible form and propagate OOM.
+        return exec.call_runtime.isConstructorLike(&self.core, val) catch false;
     }
 
     pub fn functionName(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {

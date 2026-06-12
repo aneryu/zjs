@@ -102,6 +102,7 @@ test {
     // their tests in the suite explicitly.
     std.testing.refAllDecls(libs.emoji);
     std.testing.refAllDecls(@import("tests/engine_production.zig"));
+    std.testing.refAllDecls(@import("tests/oom_cap.zig"));
     std.testing.refAllDecls(@import("tests/embedding_examples.zig"));
     std.testing.refAllDecls(@import("tests/core.zig"));
     std.testing.refAllDecls(@import("tests/bytecode.zig"));

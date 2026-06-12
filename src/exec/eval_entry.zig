@@ -95,6 +95,10 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         if (options.timing) |timing| timing.vm_run_ns += elapsedNanosSince(vm_start);
         break :blk value;
     };
+    // The completion value is owned here while the post-run steps below can
+    // still fail (e.g. OOM while draining promise jobs); release it on every
+    // error exit (found by test-oom injection).
+    errdefer result.free(rt);
 
     const global_object = try zjs_vm.contextGlobal(ctx);
     const jobs_start = monotonicNanos();

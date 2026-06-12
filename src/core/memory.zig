@@ -1,4 +1,63 @@
 const std = @import("std");
+const build_options = @import("build_options");
+
+/// OOM-injection coverage (v1), gated by `-Dzjs_oom_coverage` (default
+/// false; the recording branches below are `comptime`-eliminated so the
+/// default build's allocation hot path is unchanged).
+///
+/// When enabled, every `MemoryAccount` allocation entry point records its
+/// caller via `@returnAddress()` into a process-global deduplicated set.
+/// `zig build test-oom -Dzjs_oom_coverage=true` reports the number of
+/// distinct allocation call sites the OOM corpus reached, giving a
+/// comparable coverage figure across corpus changes.
+///
+/// v1 scope: a raw count of distinct return addresses (no symbolization).
+/// Possible evolution: symbolize sites via std.debug.SelfInfo for a
+/// human-readable report, track per-site hit counts, capture the direct
+/// `MemoryAccount.allocator` container call sites at the backing-allocator
+/// vtable instead, and schedule fail-injection toward not-yet-failed sites.
+pub const oom_coverage_enabled: bool = build_options.zjs_oom_coverage;
+
+const oom_coverage = struct {
+    // Plain atomic spinlock: diagnostic instrumentation must not depend on
+    // an Io handle (std.Io.Mutex) and contention is negligible (worker
+    // threads only).
+    var lock_state: std.atomic.Value(bool) = .init(false);
+    var sites: std.AutoHashMapUnmanaged(usize, void) = .empty;
+
+    fn lock() void {
+        while (lock_state.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+
+    fn unlock() void {
+        lock_state.store(false, .release);
+    }
+
+    fn record(site: usize) void {
+        lock();
+        defer unlock();
+        // Diagnostic-only bookkeeping: the set grows via page_allocator so
+        // it never perturbs engine allocation counts; a failed insert just
+        // drops one sample.
+        sites.put(std.heap.page_allocator, site, {}) catch {};
+    }
+};
+
+/// Number of distinct allocation call sites observed since process start
+/// (or the last `oomCoverageReset`). Always 0 when coverage is disabled.
+pub fn oomCoverageDistinctSiteCount() usize {
+    if (comptime !oom_coverage_enabled) return 0;
+    oom_coverage.lock();
+    defer oom_coverage.unlock();
+    return oom_coverage.sites.count();
+}
+
+pub fn oomCoverageReset() void {
+    if (comptime !oom_coverage_enabled) return;
+    oom_coverage.lock();
+    defer oom_coverage.unlock();
+    oom_coverage.sites.clearRetainingCapacity();
+}
 
 pub const MemoryAccount = struct {
     allocator: std.mem.Allocator,
@@ -28,6 +87,7 @@ pub const MemoryAccount = struct {
 
     /// Returns owned memory. Caller must free it with `free`.
     pub fn alloc(self: *MemoryAccount, comptime T: type, count: usize) ![]T {
+        if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (count == 0) return &.{};
         const bytes = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
         try self.checkAllocation(bytes);
@@ -54,6 +114,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn allocAlignedBytes(self: *MemoryAccount, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
+        if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         if (byte_count == 0) return &.{};
         try self.checkAllocation(byte_count);
         const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, byte_count) catch return error.OutOfMemory;
@@ -79,6 +140,7 @@ pub const MemoryAccount = struct {
 
     /// Returns owned memory. Caller must destroy it with `destroy`.
     pub fn create(self: *MemoryAccount, comptime T: type) !*T {
+        if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const bytes = @sizeOf(T);
         try self.checkAllocation(bytes);
         const next_allocated_bytes = std.math.add(usize, self.allocated_bytes, bytes) catch return error.OutOfMemory;

@@ -529,7 +529,7 @@ fn callValueOrBytecodeClassModeDispatch(
             }
             return this_value.dup();
         }
-        if (allow_class_constructor_call and !isConstructorLike(ctx, func)) return error.TypeError;
+        if (allow_class_constructor_call and !(try isConstructorLike(ctx, func))) return error.TypeError;
         if (std.mem.eql(u8, name, "raw")) {
             return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
         }
@@ -6123,7 +6123,7 @@ pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {
         class_id == core.class.ids.bound_function;
 }
 
-pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
+pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool {
     if (value.isFunctionBytecode()) {
         const fb = functionBytecodeFromValue(value) orelse return false;
         return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
@@ -6144,7 +6144,14 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
         }
         if (function_object.class_id == core.class.ids.c_closure) return true;
-        const name = call_mod.nativeFunctionNameForVm(ctx.runtime, function_object) catch return false;
+        // The native-record name lookup allocates; an allocation failure
+        // must surface as OOM instead of misclassifying a real constructor
+        // as "not a constructor" (found by test-oom injection). Non-OOM
+        // lookup failures keep the conservative `false`.
+        const name = call_mod.nativeFunctionNameForVm(ctx.runtime, function_object) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return false,
+        };
         defer ctx.runtime.memory.allocator.free(name);
         return isBuiltinConstructorName(name);
     }
@@ -6399,9 +6406,9 @@ pub fn qjsReflectConstructCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (args.len < 2 or !isConstructorLike(ctx, args[0])) return error.TypeError;
+    if (args.len < 2 or !(try isConstructorLike(ctx, args[0]))) return error.TypeError;
     const new_target = if (args.len >= 3) args[2] else args[0];
-    if (!isConstructorLike(ctx, new_target)) return error.TypeError;
+    if (!(try isConstructorLike(ctx, new_target))) return error.TypeError;
     var construct_args = try array_ops.argsFromArrayLike(ctx, output, global, args[1], caller_function, caller_frame);
     defer freeArgs(ctx.runtime, construct_args);
     var construct_args_root = array_ops.ValueSliceRoot{};

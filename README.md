@@ -50,8 +50,7 @@ Useful build steps:
 zig build test --summary all
 zig build test -Doptimize=ReleaseSafe --summary all
 zig build smoke --summary all
-# zig build test-oom --summary all (不再执行 / No longer executed)
-# zig build test-oom-exhaustive --summary all (不再执行 / No longer executed)
+zig build test-oom --summary all # OOM 注入门禁（corpus×注入+恢复金丝雀），阶段收口档位执行 / OOM injection gate (corpus x injection + recovery canaries), phase-close tier
 zig build gc-stress --summary all
 zig build perf-self-check --summary all
 zig build engine-production-gate --summary all

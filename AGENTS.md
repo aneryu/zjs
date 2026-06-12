@@ -93,8 +93,7 @@ available only through git history.
   NaN-boxed layout — compute parity, ~10% lower RSS on value-dense heaps —
   and the 16-byte layout stays as the reference representation; neither
   mode may rot.)
-- `zig build test-oom --summary all` (不再执行 / No longer executed)
-- `zig build test-oom-exhaustive --summary all` (不再执行 / No longer executed)
+- `zig build test-oom --summary all` (OOM 注入门禁：corpus×checkAllAllocationFailures 注入 + 同 runtime 恢复金丝雀；阶段收口档位执行，不进日常迭代 / OOM injection gate: corpus x allocation-failure injection plus same-runtime recovery canaries; run at phase-close tier, not per-edit)
 
 - `git diff --check`
 

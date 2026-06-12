@@ -94,7 +94,14 @@ pub fn parse(rt: *JSRuntime, source: []const u8, options: Options) !Result {
                 .arena = undefined,
             };
             function_owned = false;
-            try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
+            // From here `result.function` owns the partial bytecode; if the
+            // guard itself fails (e.g. OOM while rescanning), release it
+            // explicitly - the `function_owned` errdefer no longer covers it
+            // (found by test-oom injection).
+            setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err)) catch |fallback_err| {
+                result.function.deinit(rt);
+                return fallback_err;
+            };
             result.arena = arena;
             return result;
         },
