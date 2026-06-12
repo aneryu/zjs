@@ -469,6 +469,16 @@ pub fn build(b: *std.Build) void {
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     smoke_step.dependOn(&run_smoke_tests.step);
 
+    // NaN-boxed JSValue mode guard: runs the unified suite in a nested build
+    // with -Dzjs_nan_boxing=true (a full second build graph, so the plugin
+    // fixtures recompile with a matching ABI fingerprint). Required for any
+    // change touching core/value.zig or value-representation semantics.
+    const nanbox_tests = b.addSystemCommand(&.{
+        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=true", "--summary", "all",
+    });
+    const nanbox_step = b.step("test-nanbox", "Run the unified tests with the NaN-boxed JSValue representation");
+    nanbox_step.dependOn(&nanbox_tests.step);
+
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
 
