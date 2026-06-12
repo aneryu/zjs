@@ -1,16 +1,5 @@
 const std = @import("std");
 
-fn execShardUsesOomOptions(path: []const u8) bool {
-    return std.mem.eql(u8, path, "src/tests/exec/core_native.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/builtins_async.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/engine_smoke.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/collection_typedarray.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/module_regexp.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/iter_generator.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/vm_control.zig") or
-        std.mem.eql(u8, path, "src/tests/exec/vm_classes.zig");
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

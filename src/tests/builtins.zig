@@ -1744,6 +1744,58 @@ test "Lazy standard native accessors preserve descriptors and receiver markers" 
     try std.testing.expect(result.isUndefined());
 }
 
+test "Map and Set size live on prototype getter rather than instances" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\const mapDescriptor = Object.getOwnPropertyDescriptor(Map.prototype, "size");
+        \\assert.sameValue(typeof mapDescriptor.get, "function");
+        \\assert.sameValue(mapDescriptor.enumerable, false);
+        \\assert.sameValue(mapDescriptor.configurable, true);
+        \\const map = new Map();
+        \\assert.sameValue(Object.hasOwn(map, "size"), false);
+        \\assert.sameValue(map.size, 0);
+        \\map.set("key", "value");
+        \\assert.sameValue(map.size, 1);
+        \\map.delete("key");
+        \\assert.sameValue(map.size, 0);
+        \\Object.defineProperty(map, "size", { value: 99 });
+        \\assert.sameValue(Object.hasOwn(map, "size"), true);
+        \\assert.sameValue(map.size, 99);
+        \\const set = new Set();
+        \\assert.sameValue(Object.hasOwn(set, "size"), false);
+        \\set.add(1);
+        \\assert.sameValue(set.size, 1);
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "typed array instances keep concrete class identity" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var int32 = new Int32Array(new ArrayBuffer(16));
+        \\assert.sameValue(Object.getPrototypeOf(int32), Int32Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(int32), "[object Int32Array]");
+        \\var uint8 = new Uint8Array(4);
+        \\assert.sameValue(Object.getPrototypeOf(uint8), Uint8Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(uint8), "[object Uint8Array]");
+        \\var float64 = new Float64Array([1, 2]);
+        \\assert.sameValue(Object.getPrototypeOf(float64), Float64Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(float64), "[object Float64Array]");
+        \\var big = new BigUint64Array([1n]);
+        \\assert.sameValue(Object.getPrototypeOf(big), BigUint64Array.prototype);
+        \\assert.sameValue(Object.prototype.toString.call(big), "[object BigUint64Array]");
+    );
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+}
+
 test "RegExp lazy native accessors preserve descriptor and mutation semantics" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

@@ -929,6 +929,39 @@ test "closure helper stores closure state outside the VM" {
     try std.testing.expectEqual(@as(?i32, 2), second.asInt32());
 }
 
+test "M1.3: returned closure can update and return captured counter" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
+        \\(function(){
+        \\  function counter() {
+        \\    let n = 0;
+        \\    return function next() { n++; return n; };
+        \\  }
+        \\  var next = counter();
+        \\  return next() * 100 + next() * 10 + next();
+        \\})()
+    );
+    defer result.free(rt);
+    try std.testing.expectEqual(@as(i32, 123), result.asInt32().?);
+}
+
+test "TDZ: closure update and return of captured const throws TypeError" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.TypeError, vm_helpers.parseStmtAndRunWithTopLevelChildren(rt, ctx,
+        \\const k = 11;
+        \\function f() { k++; return k; }
+        \\f();
+    ));
+}
+
 test "test262 helpers own SameValue assertions" {
     const run_test262 = @import("../cli/run_test262.zig");
     const same_nan = try run_test262.assertSameValue(core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)));
@@ -4542,6 +4575,39 @@ test "host commonjs wrapper passes directory dirname" {
     defer result.free(js.runtime);
     try std.testing.expect(result.isUndefined());
     try std.testing.expectEqualStrings("", stream.buffered());
+}
+
+test "import bytes module creates immutable ArrayBuffer backing store" {
+    var js = try engine.harness.Engine.init(std.testing.allocator);
+    defer js.deinit();
+
+    const dir = ".zig-cache/module-import-bytes-immutable-test";
+    const bytes_path = dir ++ "/payload.bin";
+    const main_path = dir ++ "/main.mjs";
+    std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, dir) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, dir);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bytes_path, .data = "ABC" });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = main_path, .data =
+        \\import value from "./payload.bin" with { type: "bytes" };
+        \\print(value instanceof Uint8Array);
+        \\print(value.buffer instanceof ArrayBuffer);
+        \\print(value.length);
+        \\print(value[0]);
+        \\print(value.buffer.immutable);
+        \\print(Object.hasOwn(value.buffer, "immutable"));
+        \\try { value.buffer.resize(0); print("resize-ok"); } catch (e) { print(e.name); }
+        \\try { value.buffer.transfer(); print("transfer-ok"); } catch (e) { print(e.name); }
+    });
+
+    var output_buffer: [128]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, main_path, std.testing.allocator, .limited(2048));
+    defer std.testing.allocator.free(source);
+    const result = try js.evalFileModuleGraphWithOutput(source, &output, main_path, std.testing.io, std.testing.allocator, 2048);
+    defer result.free(js.runtime);
+
+    try std.testing.expectEqualStrings("true\ntrue\n3\n65\ntrue\nfalse\nTypeError\nTypeError\n", output.buffered());
 }
 
 const HostFixtureModule = struct {
