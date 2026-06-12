@@ -10,7 +10,17 @@ const globals_mod = @import("globals.zig");
 const json_vm = @import("json_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const disposable_ops = @import("disposable_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
+const math_ops = @import("math_ops.zig");
+const object_ops = @import("object_ops.zig");
+const promise_ops = @import("promise_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const string_ops = @import("string_ops.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
@@ -462,8 +472,8 @@ pub fn callValueWithThisGlobalsAndGlobal(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     if (thisObject(callee)) |proxy| {
-        if (proxy.proxyTarget() != null and shared_vm.proxyTargetIsCallable(callee)) {
-            return shared_vm.callProxyApply(ctx, output, global orelse return error.TypeError, callee, proxy, this_value, args, null, null);
+        if (proxy.proxyTarget() != null and object_ops.proxyTargetIsCallable(callee)) {
+            return object_ops.callProxyApply(ctx, output, global orelse return error.TypeError, callee, proxy, this_value, args, null, null);
         }
     }
     const object = expectCallableObject(callee) orelse return error.TypeError;
@@ -482,7 +492,7 @@ pub fn callValueWithThisGlobalsAndGlobal(
         object.class_id == core.class.ids.async_function or
         object.class_id == core.class.ids.async_generator_function)
     {
-        return shared_vm.callValueOrBytecode(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
+        return call_runtime.callValueOrBytecode(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
     }
     if (object.class_id == core.class.ids.c_closure) {
         const closure_kind = closure_mod.closureKind(ctx.runtime, callee) catch 0;
@@ -855,7 +865,7 @@ fn throwExternalHostError(call: HostCall, err: anyerror) HostError!core.JSValue 
         call.ctx.global orelse
         return externalHostError(err);
     const error_info = externalHostErrorInfo(err);
-    const error_value = try hostResult(shared_vm.createNamedError(
+    const error_value = try hostResult(exception_ops.createNamedError(
         call.ctx.runtime,
         global,
         error_info.name,
@@ -863,7 +873,7 @@ fn throwExternalHostError(call: HostCall, err: anyerror) HostError!core.JSValue 
     ));
     var error_value_owned = true;
     errdefer if (error_value_owned) error_value.free(call.ctx.runtime);
-    try hostResult(shared_vm.attachStackToErrorValue(call.ctx, global, error_value));
+    try hostResult(call_runtime.attachStackToErrorValue(call.ctx, global, error_value));
     if (call.ctx.hasException()) call.ctx.clearException();
     _ = call.ctx.throwValue(error_value);
     error_value_owned = false;
@@ -1568,7 +1578,7 @@ fn getValueProperty(
                 core.JSValue.undefinedValue()
             else blk: {
                 if (try activeGlobalObject(ctx.runtime, global, globals)) |active_global| {
-                    break :blk try shared_vm.callValueOrBytecode(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
+                    break :blk try call_runtime.callValueOrBytecode(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
                 }
                 break :blk try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver_value, desc.getter, &.{});
             },
@@ -1586,7 +1596,7 @@ fn getValuePropertyProxyAware(
     key: core.Atom,
 ) !core.JSValue {
     if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-        return shared_vm.getValueProperty(ctx, output, global_object, receiver, key, null, null);
+        return object_ops.getValueProperty(ctx, output, global_object, receiver, key, null, null);
     }
     return getValueProperty(ctx, output, global, globals, receiver, key);
 }
@@ -1600,7 +1610,7 @@ fn hasOwnPropertyProxyAware(
     key: core.Atom,
 ) !bool {
     if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-        const desc = try shared_vm.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, object, key, null, null);
+        const desc = try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, object, key, null, null);
         if (desc) |own_desc| {
             own_desc.destroy(ctx.runtime);
             return true;
@@ -2125,7 +2135,7 @@ fn callNativeBuiltin(
             mode == @intFromEnum(builtins.promise.LegacyStaticMethod.any))
         {
             const is_static_builtin = if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object|
-                try shared_vm.qjsPromiseStaticBuiltinCallee(ctx.runtime, global_object, function_object, name)
+                try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global_object, function_object, name)
             else
                 false;
             if (is_static_builtin) {
@@ -2172,8 +2182,8 @@ fn callNativeBuiltin(
         };
     }
     if (std.mem.eql(u8, name, "fromCharCode")) {
-        const global_object = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-        return shared_vm.qjsStringFromCharCode(ctx, output, global_object, args);
+        const global_object = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+        return string_ops.qjsStringFromCharCode(ctx, output, global_object, args);
     }
     if (std.mem.eql(u8, name, "fromCodePoint")) {
         return builtins.string.fromCodePoint(ctx.runtime, args) catch |err| switch (err) {
@@ -2224,7 +2234,7 @@ fn callNativeBuiltin(
     }
     if (try constructorNameEql(ctx.runtime, function_object, "RegExp")) {
         const active_global = global orelse return error.TypeError;
-        return shared_vm.qjsRegExpFunctionCall(ctx, output, active_global, args, null, null);
+        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, args, null, null);
     }
     if (try constructorNameEql(ctx.runtime, function_object, "String")) {
         if (args.len == 0) return value_ops.createStringValue(ctx.runtime, "");
@@ -2249,7 +2259,7 @@ fn callNativeBuiltin(
     }
     if (try constructorNameEql(ctx.runtime, function_object, "DOMException")) {
         const active_global = global orelse function_object.functionRealmGlobalPtr() orelse return error.TypeError;
-        return shared_vm.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
+        return call_runtime.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
     }
     if (try constructorNameEql(ctx.runtime, function_object, "BigInt")) {
         const input = if (args.len >= 1) args[0] else core.JSValue.int32(0);
@@ -2269,39 +2279,39 @@ fn callNativeBuiltin(
     if (std.mem.eql(u8, name, "AggregateError")) {
         if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
             const constructor_global = function_object.functionRealmGlobalPtr() orelse global_object;
-            return shared_vm.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, constructorPrototype(ctx.runtime, function_object), args, null, null);
+            return object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, constructorPrototype(ctx.runtime, function_object), args, null, null);
         }
     }
     if (std.mem.eql(u8, name, "SuppressedError")) {
         if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-            return shared_vm.qjsSuppressedErrorConstructWithPrototype(ctx, output, global_object, constructorPrototype(ctx.runtime, function_object), args, null, null);
+            return object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global_object, constructorPrototype(ctx.runtime, function_object), args, null, null);
         }
     }
     if (construct_mod.isErrorConstructorName(name)) {
         if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-            return shared_vm.qjsErrorConstructWithPrototype(ctx, output, global_object, name, constructorPrototype(ctx.runtime, function_object), args, null, null);
+            return object_ops.qjsErrorConstructWithPrototype(ctx, output, global_object, name, constructorPrototype(ctx.runtime, function_object), args, null, null);
         }
         return construct_mod.constructErrorObject(ctx.runtime, name, function_object.value(), constructorPrototype(ctx.runtime, function_object), args);
     }
     if (std.mem.eql(u8, name, "isError")) return errorIsError(args);
     if (std.mem.eql(u8, name, "revoke")) return revokeProxy(ctx.runtime, function_object);
     if (std.mem.eql(u8, name, "sumPrecise")) {
-        if (global) |global_object| return shared_vm.qjsMathSumPrecise(ctx, output, global_object, args, null, null);
+        if (global) |global_object| return math_ops.qjsMathSumPrecise(ctx, output, global_object, args, null, null);
         return error.TypeError;
     }
     if (builtins.math.methodId(name)) |method| {
-        if (global) |global_object| return shared_vm.qjsMathCall(ctx, output, global_object, method, args);
+        if (global) |global_object| return builtin_glue.qjsMathCall(ctx, output, global_object, method, args);
         const number = builtins.math.call(method, args) catch return error.TypeError;
         return value_ops.numberToValue(number);
     }
     if (std.mem.eql(u8, name, "parseInt")) {
-        if (global) |global_object| return shared_vm.qjsGlobalParseInt(ctx, output, global_object, args, null, null);
+        if (global) |global_object| return builtin_glue.qjsGlobalParseInt(ctx, output, global_object, args, null, null);
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const radix = if (args.len >= 2) args[1] else null;
         return value_ops.numberToValue(try builtins.number.parseIntValue(ctx.runtime, input, radix));
     }
     if (std.mem.eql(u8, name, "parseFloat")) {
-        if (global) |global_object| return shared_vm.qjsGlobalParseFloat(ctx, output, global_object, args, null, null);
+        if (global) |global_object| return builtin_glue.qjsGlobalParseFloat(ctx, output, global_object, args, null, null);
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         return value_ops.numberToValue(try builtins.number.parseFloatValue(ctx.runtime, input));
     }
@@ -2371,7 +2381,7 @@ fn callNativeBuiltin(
     if (std.mem.eql(u8, name, "keyFor")) return symbolKeyFor(ctx.runtime, args);
 
     if (thisObject(this_value)) |receiver| {
-        if (shared_vm.isCallableValue(this_value)) {
+        if (call_runtime.isCallableValue(this_value)) {
             if (std.mem.eql(u8, name, "call")) {
                 if (args.len < 1) return error.TypeError;
                 return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, args[0], this_value, args[1..]);
@@ -2448,8 +2458,8 @@ fn callNativeBuiltin(
             }
             if (try constructorNameEql(ctx.runtime, receiver, "String")) {
                 if (std.mem.eql(u8, name, "fromCharCode")) {
-                    const global_object = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-                    return shared_vm.qjsStringFromCharCode(ctx, output, global_object, args);
+                    const global_object = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+                    return string_ops.qjsStringFromCharCode(ctx, output, global_object, args);
                 }
                 if (std.mem.eql(u8, name, "fromCodePoint")) {
                     return builtins.string.fromCodePoint(ctx.runtime, args) catch |err| switch (err) {
@@ -2465,7 +2475,7 @@ fn callNativeBuiltin(
             if (try constructorNameEql(ctx.runtime, receiver, "Error")) {
                 if (std.mem.eql(u8, name, "captureStackTrace")) {
                     if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-                        return shared_vm.qjsErrorCaptureStackTrace(ctx, output, global_object, args);
+                        return call_runtime.qjsErrorCaptureStackTrace(ctx, output, global_object, args);
                     }
                     return error.TypeError;
                 }
@@ -2479,8 +2489,8 @@ fn callNativeBuiltin(
             return error.TypeError;
         }
 
-        if (shared_vm.isCallSiteObject(ctx.runtime, receiver)) {
-            if (try shared_vm.qjsCallSiteMethod(ctx.runtime, receiver, name)) |value| return value;
+        if (exception_ops.isCallSiteObject(ctx.runtime, receiver)) {
+            if (try exception_ops.qjsCallSiteMethod(ctx.runtime, receiver, name)) |value| return value;
         }
         if (receiver.flags.is_array and isArrayMethodName(name)) {
             return callArrayMethod(ctx.runtime, output, globals, this_value, name, args);
@@ -2645,10 +2655,10 @@ pub fn callNativeFunctionRecord(
     return switch (native_ref.domain) {
         .math => {
             if (native_ref.id == builtins.math.sum_precise_method_id) {
-                if (global) |global_object| return try shared_vm.qjsMathSumPrecise(ctx, output, global_object, args, caller_function, caller_frame);
+                if (global) |global_object| return try math_ops.qjsMathSumPrecise(ctx, output, global_object, args, caller_function, caller_frame);
                 return error.TypeError;
             }
-            if (global) |global_object| return try shared_vm.qjsMathCall(ctx, output, global_object, native_ref.id, args);
+            if (global) |global_object| return try builtin_glue.qjsMathCall(ctx, output, global_object, native_ref.id, args);
             const number = builtins.math.call(native_ref.id, args) catch return error.TypeError;
             return value_ops.numberToValue(number);
         },
@@ -2663,14 +2673,14 @@ pub fn callNativeFunctionRecord(
         .performance => try callPerformanceNativeFunctionRecord(ctx, native_ref.id),
         .json => try callJsonNativeFunctionRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
         .atomics => {
-            if (global) |global_object| return try shared_vm.qjsAtomicsCallForNativeRecord(ctx, output, global_object, native_ref.id, args, caller_function, caller_frame);
+            if (global) |global_object| return try call_runtime.qjsAtomicsCallForNativeRecord(ctx, output, global_object, native_ref.id, args, caller_function, caller_frame);
             return error.TypeError;
         },
         .reflect => try callReflectNativeFunctionRecord(ctx, output, global, globals, native_ref.id, args, caller_function, caller_frame),
         .object => try callObjectNativeFunctionRecord(ctx, output, global, globals, this_value, native_ref.id, args, caller_function, caller_frame),
         .primitive => {
-            const active_global = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            return @as(?core.JSValue, try shared_vm.qjsPrimitivePrototypeMethod(ctx, output, active_global, function_object, this_value, native_ref.id, args, caller_function, caller_frame));
+            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+            return @as(?core.JSValue, try object_ops.qjsPrimitivePrototypeMethod(ctx, output, active_global, function_object, this_value, native_ref.id, args, caller_function, caller_frame));
         },
         .function => try callFunctionNativeFunctionRecord(ctx, this_value, native_ref.id),
         .error_object => try callErrorNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
@@ -2684,7 +2694,7 @@ fn callFunctionNativeFunctionRecord(
     id: u32,
 ) HostError!?core.JSValue {
     return switch (id) {
-        @intFromEnum(builtins.function.PrototypeMethod.to_string) => @as(?core.JSValue, try shared_vm.qjsFunctionToStringCall(ctx, this_value)),
+        @intFromEnum(builtins.function.PrototypeMethod.to_string) => @as(?core.JSValue, try string_ops.qjsFunctionToStringCall(ctx, this_value)),
         else => error.TypeError,
     };
 }
@@ -2702,16 +2712,16 @@ fn callErrorNativeFunctionRecord(
 ) HostError!?core.JSValue {
     return switch (id) {
         @intFromEnum(builtins.error_.PrototypeMethod.to_string) => blk: {
-            const active_global = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            break :blk @as(?core.JSValue, try shared_vm.qjsErrorToStringCall(ctx, output, active_global, this_value, caller_function, caller_frame));
+            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+            break :blk @as(?core.JSValue, try string_ops.qjsErrorToStringCall(ctx, output, active_global, this_value, caller_function, caller_frame));
         },
         @intFromEnum(builtins.error_.PrototypeMethod.stack_getter) => blk: {
-            const active_global = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            break :blk @as(?core.JSValue, try shared_vm.qjsErrorStackGetter(ctx, output, active_global, this_value));
+            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+            break :blk @as(?core.JSValue, try call_runtime.qjsErrorStackGetter(ctx, output, active_global, this_value));
         },
         @intFromEnum(builtins.error_.PrototypeMethod.stack_setter) => blk: {
-            const active_global = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            break :blk @as(?core.JSValue, try shared_vm.qjsErrorStackSetter(ctx, output, active_global, this_value, function_object, args, caller_function, caller_frame));
+            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+            break :blk @as(?core.JSValue, try call_runtime.qjsErrorStackSetter(ctx, output, active_global, this_value, function_object, args, caller_function, caller_frame));
         },
         else => error.TypeError,
     };
@@ -2728,8 +2738,8 @@ fn callIteratorNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    const active_global = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-    if (try shared_vm.qjsIteratorCallForNativeRecord(ctx, output, active_global, this_value, id, args, caller_function, caller_frame)) |value| return value;
+    const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+    if (try call_runtime.qjsIteratorCallForNativeRecord(ctx, output, active_global, this_value, id, args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
 }
 
@@ -2744,7 +2754,7 @@ fn callObjectNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (global) |global_object| return try shared_vm.qjsObjectCallForNativeRecord(ctx, output, global_object, this_value, id, args, caller_function, caller_frame);
+    if (global) |global_object| return try object_ops.qjsObjectCallForNativeRecord(ctx, output, global_object, this_value, id, args, caller_function, caller_frame);
     if (builtins.object.prototypeMethodOrdinal(id)) |method| {
         return objectPrototypeMethodCall(ctx, output, global, globals, method, this_value, args);
     }
@@ -2765,7 +2775,7 @@ fn callReflectNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (global) |global_object| return try shared_vm.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
+    if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
     const reflect_mod = builtins.reflect_proxy;
     return switch (id) {
         @intFromEnum(reflect_mod.StaticMethod.define_property) => try reflectDefineProperty(ctx.runtime, args),
@@ -2844,7 +2854,7 @@ fn callUriNativeFunctionRecord(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (global) |global_object| {
-        return shared_vm.qjsUriCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
+        return builtin_glue.qjsUriCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
     }
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     return builtins.uri.call(ctx.runtime, id, input) catch |err| switch (err) {
@@ -2866,23 +2876,23 @@ fn callNumberNativeFunctionRecord(
     const number_mod = builtins.number;
     return switch (id) {
         @intFromEnum(number_mod.StaticMethod.parse_int) => {
-            if (global) |global_object| return shared_vm.qjsGlobalParseInt(ctx, output, global_object, args, caller_function, caller_frame);
+            if (global) |global_object| return builtin_glue.qjsGlobalParseInt(ctx, output, global_object, args, caller_function, caller_frame);
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             const radix = if (args.len >= 2) args[1] else null;
             return value_ops.numberToValue(try number_mod.parseIntValue(ctx.runtime, input, radix));
         },
         @intFromEnum(number_mod.StaticMethod.parse_float) => {
-            if (global) |global_object| return shared_vm.qjsGlobalParseFloat(ctx, output, global_object, args, caller_function, caller_frame);
+            if (global) |global_object| return builtin_glue.qjsGlobalParseFloat(ctx, output, global_object, args, caller_function, caller_frame);
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
             return value_ops.numberToValue(try number_mod.parseFloatValue(ctx.runtime, input));
         },
         @intFromEnum(number_mod.StaticMethod.is_nan) => {
             const active_global = global orelse return error.TypeError;
-            return shared_vm.qjsGlobalIsNaNOrFinite(ctx, output, active_global, this_value, args, true);
+            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, active_global, this_value, args, true);
         },
         @intFromEnum(number_mod.StaticMethod.is_finite) => {
             const active_global = global orelse return error.TypeError;
-            return shared_vm.qjsGlobalIsNaNOrFinite(ctx, output, active_global, this_value, args, false);
+            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, active_global, this_value, args, false);
         },
         @intFromEnum(number_mod.StaticMethod.is_integer) => {
             const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -2901,7 +2911,7 @@ fn callNumberNativeFunctionRecord(
         @intFromEnum(number_mod.PrototypeMethod.to_precision),
         => {
             const active_global = global orelse return error.TypeError;
-            return shared_vm.qjsNumberPrototypeMethod(ctx, output, active_global, this_value, id, args, null, null);
+            return object_ops.qjsNumberPrototypeMethod(ctx, output, active_global, this_value, id, args, null, null);
         },
         else => error.TypeError,
     };
@@ -2919,12 +2929,12 @@ fn callStringNativeFunctionRecord(
 ) !core.JSValue {
     const active_global = global orelse return error.TypeError;
     return switch (id) {
-        @intFromEnum(builtins.string.ConstructorMethod.call) => shared_vm.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
-        @intFromEnum(builtins.string.StaticMethod.from_char_code) => shared_vm.qjsStringFromCharCode(ctx, output, active_global, args),
-        @intFromEnum(builtins.string.StaticMethod.from_code_point) => shared_vm.qjsStringFromCodePoint(ctx, output, active_global, args),
+        @intFromEnum(builtins.string.ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
+        @intFromEnum(builtins.string.StaticMethod.from_char_code) => string_ops.qjsStringFromCharCode(ctx, output, active_global, args),
+        @intFromEnum(builtins.string.StaticMethod.from_code_point) => string_ops.qjsStringFromCodePoint(ctx, output, active_global, args),
         else => {
             const method_id = builtins.string.decodePrototypeMethodId(id) orelse return error.TypeError;
-            return shared_vm.qjsStringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, null, null);
+            return string_ops.qjsStringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, null, null);
         },
     };
 }
@@ -2944,8 +2954,8 @@ fn callDateNativeFunctionRecord(
         return builtins.date.call(ctx.runtime, args);
     }
     if (id == @intFromEnum(builtins.date.PrototypeMethod.to_primitive)) {
-        const active_global = global orelse shared_vm.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-        return shared_vm.qjsDateToPrimitiveNativeRecord(ctx, output, active_global, this_value, args, caller_function, caller_frame);
+        const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
+        return builtin_glue.qjsDateToPrimitiveNativeRecord(ctx, output, active_global, this_value, args, caller_function, caller_frame);
     }
     if (id == @intFromEnum(builtins.date.StaticMethod.utc)) {
         const active_global = global orelse return error.TypeError;
@@ -2955,7 +2965,7 @@ fn callDateNativeFunctionRecord(
             for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
         }
         while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
-            coerced_args[coerced_len] = try shared_vm.toNumberForDateMethod(ctx, output, active_global, args[coerced_len], null, null);
+            coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, active_global, args[coerced_len], null, null);
         }
         return builtins.date.staticCall(ctx.runtime, id, coerced_args[0..coerced_len]) catch |err| switch (err) {
             error.TypeError => error.TypeError,
@@ -2964,7 +2974,7 @@ fn callDateNativeFunctionRecord(
     }
     if (builtins.date.decodePrototypeMethodId(id)) |method_id| {
         const active_global = global orelse return error.TypeError;
-        return shared_vm.qjsDatePrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+        return object_ops.qjsDatePrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         };
@@ -2988,15 +2998,15 @@ fn callArrayNativeFunctionRecord(
     return switch (id) {
         @intFromEnum(builtins.array.StaticMethod.is_array) => core.JSValue.boolean(args.len >= 1 and try builtins.array.isArrayValue(args[0])),
         @intFromEnum(builtins.array.StaticMethod.from) => {
-            if (try shared_vm.qjsArrayFromCall(ctx, output, active_global, this_value, function_object.value(), args, null, null)) |value| return value;
+            if (try array_ops.qjsArrayFromCall(ctx, output, active_global, this_value, function_object.value(), args, null, null)) |value| return value;
             return error.TypeError;
         },
         @intFromEnum(builtins.array.StaticMethod.of) => {
-            if (try shared_vm.qjsArrayOfCall(ctx, output, active_global, this_value, function_object.value(), args, null, null)) |value| return value;
+            if (try array_ops.qjsArrayOfCall(ctx, output, active_global, this_value, function_object.value(), args, null, null)) |value| return value;
             return error.TypeError;
         },
         else => {
-            if (try shared_vm.qjsArrayPrototypeNativeRecord(ctx, output, active_global, this_value, function_object, id, args, null, null)) |value| return value;
+            if (try array_ops.qjsArrayPrototypeNativeRecord(ctx, output, active_global, this_value, function_object, id, args, null, null)) |value| return value;
             return error.TypeError;
         },
     };
@@ -3013,16 +3023,16 @@ fn callRegExpNativeFunctionRecord(
 ) !core.JSValue {
     if (id == @intFromEnum(builtins.regexp.ConstructorMethod.construct)) {
         const active_global = global orelse return error.TypeError;
-        return shared_vm.qjsRegExpFunctionCall(ctx, output, active_global, args, null, null);
+        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, args, null, null);
     }
     if (id == @intFromEnum(builtins.regexp.StaticMethod.escape)) return builtins.regexp.escape(ctx.runtime, args);
     if (builtins.regexp.legacyAccessorMethodFromId(id)) |method| {
         const active_global = global orelse return error.TypeError;
-        return shared_vm.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, null, null);
+        return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, null, null);
     }
     if (builtins.regexp.accessorNameFromId(id)) |accessor_name| {
         const active_global = global orelse return error.TypeError;
-        if (try shared_vm.qjsRegExpAccessor(ctx, output, active_global, this_value, function_object.value(), accessor_name, null, null)) |value| return value;
+        if (try regexp_fastpath.qjsRegExpAccessor(ctx, output, active_global, this_value, function_object.value(), accessor_name, null, null)) |value| return value;
         return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
@@ -3044,46 +3054,46 @@ fn callRegExpPrototypeNativeFunctionRecord(
     return switch (method_id) {
         1 => {
             const active_global = global orelse return error.TypeError;
-            return shared_vm.qjsRegExpToString(ctx, output, active_global, this_value, null, null);
+            return string_ops.qjsRegExpToString(ctx, output, active_global, this_value, null, null);
         },
         2 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         3 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         4 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpSymbolSearch(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolSearch(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         5 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpSymbolMatch(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolMatch(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         6 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpSymbolMatchAll(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         7 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpSymbolReplace(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolReplace(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         8 => {
             const active_global = global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpSymbolSplit(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolSplit(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         9 => {
             const active_global = function_object.functionRealmGlobalPtr() orelse global orelse return error.TypeError;
-            if (try shared_vm.qjsRegExpCompile(ctx, output, active_global, this_value, args, null, null)) |value| return value;
+            if (try regexp_fastpath.qjsRegExpCompile(ctx, output, active_global, this_value, args, null, null)) |value| return value;
             return error.TypeError;
         },
         else => error.TypeError,
@@ -3106,7 +3116,7 @@ fn callCollectionNativeFunctionRecord(
         return collectionGroupByNativeRecord(ctx, output, global, globals, this_value, args, caller_function, caller_frame);
     }
     const active_global = global orelse return collectionNativeRecordWithoutGlobal(ctx, globals, this_value, function_object, id, args);
-    if (try shared_vm.qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
+    if (try builtin_glue.qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
     return error.TypeError;
 }
 
@@ -3124,7 +3134,7 @@ fn collectionGroupByNativeRecord(
     if (!try constructorNameEql(ctx.runtime, receiver, "Map")) return error.TypeError;
     const prototype = constructorPrototype(ctx.runtime, receiver);
     if (global) |active_global| {
-        if (try shared_vm.qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
+        if (try builtin_glue.qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
         return error.TypeError;
     }
     return builtins.collection.groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
@@ -3181,7 +3191,7 @@ fn callBufferNativeFunctionRecord(
     id: u32,
     args: []const core.JSValue,
 ) !core.JSValue {
-    if (try shared_vm.qjsBufferNativeRecord(ctx, this_value, id, args)) |value| return value;
+    if (try builtin_glue.qjsBufferNativeRecord(ctx, this_value, id, args)) |value| return value;
     return error.TypeError;
 }
 
@@ -3367,14 +3377,14 @@ fn reflectApply(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (args.len < 3) return error.TypeError;
-    if (!shared_vm.isCallableValue(args[0])) return error.TypeError;
+    if (!call_runtime.isCallableValue(args[0])) return error.TypeError;
     var apply_args = ReflectConstructArguments{};
     try apply_args.init(ctx.runtime, args[2]);
     defer apply_args.deinit();
     return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, args[1], args[0], apply_args.values);
 }
 
-const ValueSliceRoot = shared_vm.ValueSliceRoot;
+const ValueSliceRoot = array_ops.ValueSliceRoot;
 
 const ReflectConstructArguments = struct {
     rt: ?*core.JSRuntime = null,
@@ -4196,15 +4206,15 @@ fn proxyReflectHasProperty(
     const trap = try getValueProperty(ctx, output, global, globals, handler_value, has_atom);
     defer trap.free(ctx.runtime);
     if (trap.isUndefined() or trap.isNull()) return reflectHasProperty(ctx, output, global, globals, target, atom_id);
-    const key_value = try shared_vm.proxyTrapKeyValue(ctx.runtime, atom_id);
+    const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, atom_id);
     defer key_value.free(ctx.runtime);
     const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, handler_value, trap, &.{ target_value, key_value });
     defer result.free(ctx.runtime);
-    return try shared_vm.validateProxyHasResult(ctx.runtime, target, atom_id, value_ops.isTruthy(result));
+    return try object_ops.validateProxyHasResult(ctx.runtime, target, atom_id, value_ops.isTruthy(result));
 }
 
 fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
-    switch (try shared_vm.typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
@@ -4252,7 +4262,7 @@ fn reflectSet(
     args: []const core.JSValue,
 ) !core.JSValue {
     if (global) |global_object| {
-        if (try shared_vm.qjsReflectSetCall(ctx, output, global_object, args, null, null)) |value| {
+        if (try call_runtime.qjsReflectSetCall(ctx, output, global_object, args, null, null)) |value| {
             return value;
         }
     }
@@ -4595,7 +4605,7 @@ fn callStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, name: []const u
             else => err,
         };
     }
-    if (shared_vm.primitiveStringMethodId(name)) |method| {
+    if (string_ops.primitiveStringMethodId(name)) |method| {
         return builtins.string.methodCall(rt, receiver, method, args) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
@@ -4951,8 +4961,8 @@ fn callBoundFunction(
 ) HostError!core.JSValue {
     const target = object.boundTarget() orelse return error.TypeError;
     const bound_this = object.boundThis() orelse return error.TypeError;
-    const combined = try shared_vm.boundFunctionArgs(ctx.runtime, object, args);
-    defer shared_vm.freeArgs(ctx.runtime, combined);
+    const combined = try call_runtime.boundFunctionArgs(ctx.runtime, object, args);
+    defer call_runtime.freeArgs(ctx.runtime, combined);
     return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, bound_this, target, combined);
 }
 
@@ -5058,7 +5068,7 @@ fn objectHasOwnProperty(
     const key = try atomFromPropertyKey(rt, key_value);
     defer rt.atoms.free(key);
     const desc = if (global) |global_object|
-        try shared_vm.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, receiver, key, null, null)
+        try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, receiver, key, null, null)
     else
         receiver.getOwnProperty(key);
     if (desc) |own_desc| {
@@ -5080,7 +5090,7 @@ fn objectPropertyIsEnumerable(
     const key = try atomFromPropertyKey(rt, key_value);
     defer rt.atoms.free(key);
     const desc = if (global) |global_object|
-        try shared_vm.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, receiver, key, null, null)
+        try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, receiver, key, null, null)
     else
         receiver.getOwnProperty(key);
     if (desc) |own_desc| {
@@ -5106,7 +5116,7 @@ fn symbolFor(ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Objec
 fn toStringBytesForSymbol(ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, value: core.JSValue) ![]u8 {
     if (value.isSymbol()) return error.TypeError;
     const global_object = global orelse return stringBytes(ctx.runtime, value);
-    const string_value = try shared_vm.toStringForAnnexB(ctx, output, global_object, value, null, null);
+    const string_value = try string_ops.toStringForAnnexB(ctx, output, global_object, value, null, null);
     defer string_value.free(ctx.runtime);
     return stringBytes(ctx.runtime, string_value);
 }
@@ -5269,7 +5279,7 @@ fn nativeFunctionDispatchName(rt: *core.JSRuntime, function_object: *core.Object
 }
 
 fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, prefer_dispatch_name: bool) !core.JSValue {
-    if (prefer_dispatch_name) return shared_vm.nativeFunctionNameValueLocal(rt, function_object);
+    if (prefer_dispatch_name) return call_runtime.nativeFunctionNameValueLocal(rt, function_object);
     const name_value = function_object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) {
         name_value.free(rt);
@@ -5278,7 +5288,7 @@ fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, p
     return name_value;
 }
 
-const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
+const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
 
 fn functionBytecodeToStringValue(
     rt: *core.JSRuntime,
@@ -5332,7 +5342,7 @@ fn nativeFunctionSourceName(name: []const u8) ?[]const u8 {
 }
 
 fn isNativeFunctionPropertyName(name: []const u8) bool {
-    return shared_vm.isSimpleIdentifierName(name) or isNativeFunctionComputedPropertyName(name);
+    return call_runtime.isSimpleIdentifierName(name) or isNativeFunctionComputedPropertyName(name);
 }
 
 fn isNativeFunctionComputedPropertyName(name: []const u8) bool {
@@ -5385,7 +5395,7 @@ fn thisObject(value: core.JSValue) ?*core.Object {
     return @fieldParentPtr("header", header);
 }
 
-const constructorNameEql = shared_vm.constructorNameEqlLocal;
+const constructorNameEql = call_runtime.constructorNameEqlLocal;
 
 fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object {
     const prototype_value = object.getProperty(core.atom.ids.prototype);
@@ -5545,7 +5555,7 @@ fn hostCallStdLoadScript(call: HostCall) HostError!core.JSValue {
         error.FileNotFound => {
             const message = try std.fmt.allocPrint(call.ctx.runtime.memory.allocator, "could not load '{s}'", .{path});
             defer call.ctx.runtime.memory.allocator.free(message);
-            return try hostResult(shared_vm.throwReferenceErrorMessage(call.ctx, active_global, message));
+            return try hostResult(call_runtime.throwReferenceErrorMessage(call.ctx, active_global, message));
         },
         else => |e| return e,
     };
@@ -5559,7 +5569,7 @@ fn hostCallStdOpen(call: HostCall) HostError!core.JSValue {
     defer call.ctx.runtime.memory.allocator.free(path);
     const mode = try hostStringArgOrUndefined(call.ctx.runtime, call.args, 1);
     defer call.ctx.runtime.memory.allocator.free(mode);
-    if (!validStdOpenMode(mode)) return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "invalid file mode"));
+    if (!validStdOpenMode(mode)) return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "invalid file mode"));
     const path_z = try call.ctx.runtime.memory.allocator.dupeZ(u8, path);
     defer call.ctx.runtime.memory.allocator.free(path_z);
     const mode_z = try call.ctx.runtime.memory.allocator.dupeZ(u8, mode);
@@ -5574,7 +5584,7 @@ fn hostCallStdFdopen(call: HostCall) HostError!core.JSValue {
     const fd = try hostInt32Arg(call.ctx.runtime, call.args, 0);
     const mode = try hostStringArgOrUndefined(call.ctx.runtime, call.args, 1);
     defer call.ctx.runtime.memory.allocator.free(mode);
-    if (!validStdFdopenMode(mode)) return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "invalid file mode"));
+    if (!validStdFdopenMode(mode)) return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "invalid file mode"));
     const mode_z = try call.ctx.runtime.memory.allocator.dupeZ(u8, mode);
     defer call.ctx.runtime.memory.allocator.free(mode_z);
     const file = fdopen(fd, mode_z.ptr);
@@ -5595,7 +5605,7 @@ fn hostCallStdPopen(call: HostCall) HostError!core.JSValue {
     defer call.ctx.runtime.memory.allocator.free(command);
     const mode = try hostStringArgOrUndefined(call.ctx.runtime, call.args, 1);
     defer call.ctx.runtime.memory.allocator.free(mode);
-    if (!(std.mem.eql(u8, mode, "r") or std.mem.eql(u8, mode, "w"))) return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "invalid file mode"));
+    if (!(std.mem.eql(u8, mode, "r") or std.mem.eql(u8, mode, "w"))) return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "invalid file mode"));
     const command_z = try call.ctx.runtime.memory.allocator.dupeZ(u8, command);
     defer call.ctx.runtime.memory.allocator.free(command_z);
     const mode_z = try call.ctx.runtime.memory.allocator.dupeZ(u8, mode);
@@ -5656,7 +5666,7 @@ fn hostCallStdUrlGet(call: HostCall) HostError!core.JSValue {
     defer rt.memory.allocator.free(command);
     const read_mode: [:0]const u8 = "r";
     const file = popen(command.ptr, read_mode.ptr) orelse {
-        return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "could not start curl"));
+        return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "could not start curl"));
     };
     defer _ = pclose(file);
 
@@ -5700,7 +5710,7 @@ fn hostCallStdFileClose(call: HostCall) HostError!core.JSValue {
     const file_object = try stdFileObject(call);
     if (file_object.stdFileIsStdio()) {
         const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
-        return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "cannot close stdio"));
+        return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "cannot close stdio"));
     }
     const rc = file_object.closeStdFileWithResult();
     return core.JSValue.int32(rc);
@@ -5824,7 +5834,7 @@ fn hostCallStdFileReadAsArrayBuffer(call: HostCall) HostError!core.JSValue {
     const bytes = try readRemainingFileBytes(call);
     defer call.ctx.runtime.memory.allocator.free(bytes);
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
-    const proto = shared_vm.constructorPrototypeFromGlobal(call.ctx.runtime, active_global, "ArrayBuffer");
+    const proto = object_ops.constructorPrototypeFromGlobal(call.ctx.runtime, active_global, "ArrayBuffer");
     const buffer_value = try builtins.buffer.arrayBufferConstructLength(call.ctx.runtime, bytes.len, null, proto);
     const object = expectObjectArg(buffer_value) catch unreachable;
     @memcpy(object.byteStorageSlot().*[0..bytes.len], bytes);
@@ -5933,7 +5943,7 @@ fn hostCallOsReadWrite(call: HostCall, is_write: bool) HostError!core.JSValue {
     const pos = try hostResult(value_ops.toIndexUsize(call.ctx.runtime, if (call.args.len >= 3) call.args[2] else core.JSValue.undefinedValue()));
     const len = try hostResult(value_ops.toIndexUsize(call.ctx.runtime, if (call.args.len >= 4) call.args[3] else core.JSValue.undefinedValue()));
     if (pos > buffer.len or len > buffer.len - pos) {
-        return try hostResult(shared_vm.throwRangeErrorMessage(call.ctx, active_global, "read/write array buffer overflow"));
+        return try hostResult(call_runtime.throwRangeErrorMessage(call.ctx, active_global, "read/write array buffer overflow"));
     }
     const rc = if (is_write)
         write(fd, buffer.ptr + pos, len)
@@ -6085,18 +6095,18 @@ fn hostCallOsSetInterval(call: HostCall) HostError!core.JSValue {
 fn hostCallOsSetTimer(call: HostCall, repeats: bool) HostError!core.JSValue {
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
     const callback = if (call.args.len >= 1) call.args[0] else core.JSValue.undefinedValue();
-    if (!shared_vm.isCallableValue(callback)) return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "not a function"));
+    if (!call_runtime.isCallableValue(callback)) return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "not a function"));
     var delay = try hostInt64Arg(call.ctx.runtime, call.args, 1);
     if (delay < 1) delay = 1;
     const host_event_loop = call.ctx.hostEventLoop() orelse return error.TypeError;
     const id = host_event_loop.nextTimerId();
-    try hostResult(shared_vm.enqueueOsTimer(call.ctx, id, callback, @intCast(delay), repeats));
+    try hostResult(call_runtime.enqueueOsTimer(call.ctx, id, callback, @intCast(delay), repeats));
     return int64ResultValue(id);
 }
 
 fn hostCallOsClearTimeout(call: HostCall) HostError!core.JSValue {
     const timer_id = try hostInt64Arg(call.ctx.runtime, call.args, 0);
-    shared_vm.clearOsTimer(call.ctx, timer_id);
+    call_runtime.clearOsTimer(call.ctx, timer_id);
     return core.JSValue.undefinedValue();
 }
 
@@ -6315,7 +6325,7 @@ fn hostCallOsSetRwHandler(call: HostCall, write_handler: bool) HostError!core.JS
         clearOsRwHandler(call.ctx, fd, write_handler);
         return core.JSValue.undefinedValue();
     }
-    if (!shared_vm.isCallableValue(callback)) return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "not a function"));
+    if (!call_runtime.isCallableValue(callback)) return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "not a function"));
     try setOsRwHandler(call.ctx, fd, write_handler, callback);
     return core.JSValue.undefinedValue();
 }
@@ -6323,14 +6333,14 @@ fn hostCallOsSetRwHandler(call: HostCall, write_handler: bool) HostError!core.JS
 fn hostCallOsSignal(call: HostCall) HostError!core.JSValue {
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
     const sig: u32 = @bitCast(try hostInt32Arg(call.ctx.runtime, call.args, 0));
-    if (sig >= 64) return try hostResult(shared_vm.throwRangeErrorMessage(call.ctx, active_global, "invalid signal number"));
+    if (sig >= 64) return try hostResult(call_runtime.throwRangeErrorMessage(call.ctx, active_global, "invalid signal number"));
     const callback = if (call.args.len >= 2) call.args[1] else core.JSValue.undefinedValue();
     const host_event_loop = call.ctx.hostEventLoop() orelse return error.TypeError;
     if (callback.isNull() or callback.isUndefined()) {
         host_event_loop.clearSignalHandler(call.ctx, sig, if (callback.isNull()) .default else .ignore);
         return core.JSValue.undefinedValue();
     }
-    if (!shared_vm.isCallableValue(callback)) return try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "not a function"));
+    if (!call_runtime.isCallableValue(callback)) return try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "not a function"));
     try hostResult(host_event_loop.setSignalHandler(call.ctx, sig, callback));
     return core.JSValue.undefinedValue();
 }
@@ -6360,7 +6370,7 @@ fn hostCallOsSleepAsync(call: HostCall) HostError!core.JSValue {
     const delay_ms: u64 = if (delay > 0) @intCast(delay) else 0;
     const promise_value = try builtins.promise.constructWithPrototype(call.ctx.runtime, null);
     errdefer promise_value.free(call.ctx.runtime);
-    try hostResult(shared_vm.enqueueOsTimer(call.ctx, -1, promise_value, delay_ms, false));
+    try hostResult(call_runtime.enqueueOsTimer(call.ctx, -1, promise_value, delay_ms, false));
     return promise_value;
 }
 
@@ -6722,11 +6732,11 @@ pub fn createStdFileValue(rt: *core.JSRuntime, global: ?*core.Object, file: *std
 fn stdFileObject(call: HostCall) HostError!*core.Object {
     const active_global = try activeGlobalObject(call.ctx.runtime, call.global, call.globals) orelse return error.TypeError;
     const object = thisObject(call.this_value) orelse {
-        _ = try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "invalid file handle"));
+        _ = try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "invalid file handle"));
         return error.TypeError;
     };
     if (object.class_id != core.class.ids.std_file or object.stdFile() == null) {
-        _ = try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, active_global, "invalid file handle"));
+        _ = try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, active_global, "invalid file handle"));
         return error.TypeError;
     }
     return object;
@@ -6868,7 +6878,7 @@ fn stdUrlGetReadBody(rt: *core.JSRuntime, file: *std.c.FILE) ![]u8 {
 }
 
 fn stdArrayBufferFromBytes(rt: *core.JSRuntime, global: *core.Object, bytes: []const u8) !core.JSValue {
-    const proto = shared_vm.constructorPrototypeFromGlobal(rt, global, "ArrayBuffer");
+    const proto = object_ops.constructorPrototypeFromGlobal(rt, global, "ArrayBuffer");
     const buffer_value = try builtins.buffer.arrayBufferConstructLength(rt, bytes.len, null, proto);
     const object = expectObjectArg(buffer_value) catch unreachable;
     if (bytes.len != 0) @memcpy(object.byteStorageSlot().*[0..bytes.len], bytes);
@@ -6991,12 +7001,12 @@ fn isPrintfFlag(byte: u8) bool {
 }
 
 fn printfInvalidFormat(call: HostCall, global: *core.Object) HostError {
-    _ = try hostResult(shared_vm.throwTypeErrorMessage(call.ctx, global, "invalid conversion specifier in format string"));
+    _ = try hostResult(call_runtime.throwTypeErrorMessage(call.ctx, global, "invalid conversion specifier in format string"));
     return error.TypeError;
 }
 
 fn printfMissingArgument(call: HostCall, global: *core.Object) HostError {
-    _ = try hostResult(shared_vm.throwReferenceErrorMessage(call.ctx, global, "missing argument for conversion specifier"));
+    _ = try hostResult(call_runtime.throwReferenceErrorMessage(call.ctx, global, "missing argument for conversion specifier"));
     return error.ReferenceError;
 }
 
@@ -7217,7 +7227,7 @@ fn globalBtoa(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JS
         else => |other| return other,
     };
     defer bytes.deinit(ctx.runtime.memory.allocator);
-    var encoded = try hostResult(shared_vm.encodeBase64Bytes(ctx.runtime, bytes.items, .base64, false));
+    var encoded = try hostResult(array_ops.encodeBase64Bytes(ctx.runtime, bytes.items, .base64, false));
     defer encoded.deinit(ctx.runtime.memory.allocator);
     return value_ops.createStringValue(ctx.runtime, encoded.items);
 }
@@ -7231,7 +7241,7 @@ fn globalAtob(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JS
         else => |other| return other,
     };
     defer bytes.deinit(ctx.runtime.memory.allocator);
-    var decoded = shared_vm.decodeBase64Bytes(ctx.runtime, bytes.items, .base64, .loose) catch |err| switch (err) {
+    var decoded = array_ops.decodeBase64Bytes(ctx.runtime, bytes.items, .base64, .loose) catch |err| switch (err) {
         error.SyntaxError => return throwInvalidCharacter(ctx, global, "The string to be decoded is not correctly encoded"),
         else => |other| return other,
     };
@@ -7277,8 +7287,8 @@ fn createDOMExceptionValue(rt: *core.JSRuntime, global: *core.Object, name: []co
     defer rt.atoms.free(ctor_key);
     const ctor_value = global.getProperty(ctor_key);
     defer ctor_value.free(rt);
-    if (!ctor_value.isObject()) return try hostResult(shared_vm.createNamedError(rt, global, name, message));
-    const proto_value = expectObjectArg(ctor_value) catch return try hostResult(shared_vm.createNamedError(rt, global, name, message));
+    if (!ctor_value.isObject()) return try hostResult(exception_ops.createNamedError(rt, global, name, message));
+    const proto_value = expectObjectArg(ctor_value) catch return try hostResult(exception_ops.createNamedError(rt, global, name, message));
     const prototype_value = proto_value.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype = if (prototype_value.isObject()) expectObjectArg(prototype_value) catch null else null;
@@ -7292,8 +7302,8 @@ fn createDOMExceptionValue(rt: *core.JSRuntime, global: *core.Object, name: []co
 fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
     const active_global = global orelse ctx.global orelse return error.TypeError;
     const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!shared_vm.isCallableValue(callback)) return try hostResult(shared_vm.throwTypeErrorMessage(ctx, active_global, "not a function"));
-    try hostResult(shared_vm.enqueuePendingMicrotask(ctx, callback));
+    if (!call_runtime.isCallableValue(callback)) return try hostResult(call_runtime.throwTypeErrorMessage(ctx, active_global, "not a function"));
+    try hostResult(call_runtime.enqueuePendingMicrotask(ctx, callback));
     return core.JSValue.undefinedValue();
 }
 
@@ -7304,72 +7314,72 @@ fn globalGc(ctx: *core.JSContext) core.JSValue {
 
 fn hostCallDstrGet(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsDestructuringGet(call.ctx, call.output, global, call.args));
+    return try hostResult(call_runtime.qjsDestructuringGet(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallDstrElide(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsDestructuringElide(call.ctx, call.output, global, call.args));
+    return try hostResult(call_runtime.qjsDestructuringElide(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallDstrRest(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsDestructuringRest(call.ctx, call.output, global, call.args));
+    return try hostResult(call_runtime.qjsDestructuringRest(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallDstrObjectRest(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsDestructuringObjectRest(call.ctx, call.output, global, call.args));
+    return try hostResult(object_ops.qjsDestructuringObjectRest(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallDstrClose(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsDestructuringClose(call.ctx, call.output, global, call.args));
+    return try hostResult(call_runtime.qjsDestructuringClose(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallDstrRequireIterator(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsDestructuringRequireIterator(call.ctx, call.output, global, call.args));
+    return try hostResult(call_runtime.qjsDestructuringRequireIterator(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingCreateDisposableStack(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingCreateDisposableStack(call.ctx, global));
+    return try hostResult(disposable_ops.qjsUsingCreateDisposableStack(call.ctx, global));
 }
 
 fn hostCallUsingAddSyncResource(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingAddSyncResource(call.ctx, call.output, global, call.args));
+    return try hostResult(disposable_ops.qjsUsingAddSyncResource(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingDisposeSyncStack(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingDisposeSyncStack(call.ctx, call.output, global, call.args));
+    return try hostResult(disposable_ops.qjsUsingDisposeSyncStack(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingDisposeSyncStackForThrow(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingDisposeSyncStackForThrow(call.ctx, call.output, global, call.args));
+    return try hostResult(disposable_ops.qjsUsingDisposeSyncStackForThrow(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingCreateAsyncDisposableStack(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingCreateAsyncDisposableStack(call.ctx, global));
+    return try hostResult(promise_ops.qjsUsingCreateAsyncDisposableStack(call.ctx, global));
 }
 
 fn hostCallUsingAddAsyncResource(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingAddAsyncResource(call.ctx, call.output, global, call.args));
+    return try hostResult(promise_ops.qjsUsingAddAsyncResource(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingDisposeAsyncStack(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingDisposeAsyncStack(call.ctx, call.output, global, call.args));
+    return try hostResult(promise_ops.qjsUsingDisposeAsyncStack(call.ctx, call.output, global, call.args));
 }
 
 fn hostCallUsingDisposeAsyncStackForThrow(call: HostCall) HostError!core.JSValue {
     const global = call.global orelse call.func_obj.functionRealmGlobalPtr() orelse return error.TypeError;
-    return try hostResult(shared_vm.qjsUsingDisposeAsyncStackForThrow(call.ctx, call.output, global, call.args));
+    return try hostResult(promise_ops.qjsUsingDisposeAsyncStackForThrow(call.ctx, call.output, global, call.args));
 }
 
 fn materializeMappedArgumentsDescriptorValue(
@@ -7695,7 +7705,7 @@ pub fn qjsEvalGlobalScriptSource(
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
     return zjs_vm.runWithArgsState(ctx, &nested_stack, &compiled.function, global.value(), &.{}, &.{}, output, global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), false, false, core.JSValue.undefinedValue(), true, false) catch |err| {
-        return shared_vm.normalizeEvalRuntimeError(err);
+        return exception_ops.normalizeEvalRuntimeError(err);
     };
 }
 

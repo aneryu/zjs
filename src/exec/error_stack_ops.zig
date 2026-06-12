@@ -7,16 +7,19 @@ const exception_ops = @import("vm_exception_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const object_ops = @import("object_ops.zig");
+const string_ops = @import("string_ops.zig");
 
-// Helpers that remain in shared.zig (generic runtime utilities outside the
+// Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // error-stack cluster).
-const buildCallSiteArray = shared_vm.buildCallSiteArray;
-const buildErrorStackStringValue = shared_vm.buildErrorStackStringValue;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const defineDataProperty = shared_vm.defineDataProperty;
-const formatCapturedErrorStackStringValue = shared_vm.formatCapturedErrorStackStringValue;
-const isCallableValue = shared_vm.isCallableValue;
+const buildCallSiteArray = array_ops.buildCallSiteArray;
+const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const defineDataProperty = object_ops.defineDataProperty;
+const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
+const isCallableValue = call_runtime.isCallableValue;
 
 pub fn defineErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, instance: *core.Object) !void {
     const stack_value = try buildErrorStackValue(ctx, output, global, instance.value(), null);

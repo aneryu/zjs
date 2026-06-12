@@ -82,3 +82,37 @@ pub fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValu
     if (index_from_top >= stack.values.len) return error.StackUnderflow;
     return stack.values[stack.values.len - 1 - index_from_top].dup();
 }
+
+// Atom-list helpers (moved from the VM call runtime).
+
+pub fn atomListContains(list: []const core.Atom, needle: core.Atom) bool {
+    for (list) |atom_id| {
+        if (atom_id == needle) return true;
+    }
+    return false;
+}
+
+pub fn appendAtom(rt: *core.JSRuntime, list: *[]core.Atom, atom_id: core.Atom) !void {
+    const next = try rt.memory.alloc(core.Atom, list.len + 1);
+    errdefer rt.memory.free(core.Atom, next);
+    @memcpy(next[0..list.len], list.*);
+    next[list.len] = rt.atoms.dup(atom_id);
+    const old = list.*;
+    list.* = next;
+    if (old.len != 0) rt.memory.free(core.Atom, old);
+}
+
+pub fn freeAtomList(rt: *core.JSRuntime, list: []core.Atom) void {
+    for (list) |atom_id| rt.atoms.free(atom_id);
+    if (list.len != 0) rt.memory.free(core.Atom, list);
+}
+
+pub fn appendOwnedAtom(rt: *core.JSRuntime, keys: *[]core.Atom, atom_id: core.Atom) !void {
+    const next = try rt.memory.alloc(core.Atom, keys.*.len + 1);
+    errdefer rt.memory.free(core.Atom, next);
+    @memcpy(next[0..keys.*.len], keys.*);
+    next[keys.*.len] = atom_id;
+    const old = keys.*;
+    keys.* = next;
+    if (old.len != 0) rt.memory.free(core.Atom, old);
+}

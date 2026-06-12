@@ -7,14 +7,15 @@ const property_ops = @import("property_ops.zig");
 const std = @import("std");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
 
-// Helpers that remain in shared.zig (generic utilities outside the coercion
+// Helpers that remain in call_runtime.zig (generic utilities outside the coercion
 // cluster).
-const callObjectToPrimitiveMethod = shared_vm.callObjectToPrimitiveMethod;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const getValueProperty = shared_vm.getValueProperty;
-const isCallableValue = shared_vm.isCallableValue;
+const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const getValueProperty = object_ops.getValueProperty;
+const isCallableValue = call_runtime.isCallableValue;
 
 pub fn toPrimitiveForAddition(
     ctx: *core.JSContext,

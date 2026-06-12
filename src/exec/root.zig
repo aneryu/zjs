@@ -26,8 +26,13 @@ pub const value_ops = @import("value_ops.zig");
 pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
 pub const collection_adapter = @import("collection_adapter.zig");
-pub const shared = @import("shared.zig");
+pub const call_runtime = @import("call_runtime.zig");
 pub const fusion_stats = @import("vm_fusion_stats.zig");
+pub const string_ops = @import("string_ops.zig");
+pub const object_ops = @import("object_ops.zig");
+pub const array_ops = @import("array_ops.zig");
+pub const coercion_ops = @import("coercion_ops.zig");
+pub const promise_ops = @import("promise_ops.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {
     return bytecode.opcode.nameOf(opcode);

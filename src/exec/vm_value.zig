@@ -7,9 +7,9 @@ const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
-const property_vm = @import("vm_property.zig");
+const vm_property_globals = @import("vm_property_globals.zig");
 const regexp_vm = @import("vm_regexp.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -59,7 +59,7 @@ pub fn pushI16OperandVm(
     frame: *frame_mod.Frame,
     fast_paths: GlobalFastPathEnv,
 ) !void {
-    if (fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, property_vm.tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object))) return;
+    if (fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, vm_property_globals.tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object))) return;
     try pushI16Operand(stack, function, frame);
 }
 
@@ -267,7 +267,7 @@ pub fn pushAtomValueVm(
     fast_paths: PushAtomValueFastPaths,
 ) !void {
     const global_env = fast_paths.global_env;
-    if (fusion_stats.counted(.tryFuseAtomPercentHexGlobalStringStore, try property_vm.tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object))) return;
+    if (fusion_stats.counted(.tryFuseAtomPercentHexGlobalStringStore, try vm_property_globals.tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object))) return;
     if (ctx.runtime.opcode_profile == null and try regexp_vm.tryPushLiteralFromAtomPair(ctx, stack, function, frame, fast_paths.regexp_prototype)) return;
     try pushAtomValue(ctx, stack, function, frame);
 }
@@ -347,7 +347,7 @@ pub fn pushThisVm(
 ) !Step {
     pushThis(stack, frame.this_value) catch |err| switch (err) {
         error.ReferenceError => {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         },
         else => return err,
@@ -374,7 +374,7 @@ pub fn toObjectVm(
 ) !Step {
     toObject(ctx, stack) catch |err| switch (err) {
         error.TypeError => {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         },
         else => return err,

@@ -2,6 +2,7 @@
 //! plus collections (Map/Set), weak refs/FinalizationRegistry, Symbol registry and DataView.
 
 const builtins = @import("../builtins/root.zig");
+const call_mod = @import("call.zig");
 const bytecode = @import("../bytecode/root.zig");
 const collection_vm = @import("array_ops.zig");
 const core = @import("../core/root.zig");
@@ -12,32 +13,35 @@ const property_ops = @import("property_ops.zig");
 const std = @import("std");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const object_ops = @import("object_ops.zig");
+const string_ops = @import("string_ops.zig");
 
-// Helpers that remain in shared.zig (generic utilities outside the builtin
+// Helpers that remain in call_runtime.zig (generic utilities outside the builtin
 // glue cluster).
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const constructCollectionWithPrototypeFromVm = shared_vm.constructCollectionWithPrototypeFromVm;
-const constructorNameEqlLocal = shared_vm.constructorNameEqlLocal;
-const constructorPrototypeObject = shared_vm.constructorPrototypeObject;
-const functionPrototypeFromGlobal = shared_vm.functionPrototypeFromGlobal;
-const getIteratorMethod = shared_vm.getIteratorMethod;
-const getValueProperty = shared_vm.getValueProperty;
-const isCallableValue = shared_vm.isCallableValue;
-const iteratorCloseWithCompletionAndPropagate = shared_vm.iteratorCloseWithCompletionAndPropagate;
-const iteratorStepValue = shared_vm.iteratorStepValue;
-const lengthIndexValue = shared_vm.lengthIndexValue;
-const objectFromValue = shared_vm.objectFromValue;
-const qjsArrayBufferAccessor = shared_vm.qjsArrayBufferAccessor;
-const qjsArrayBufferIsView = shared_vm.qjsArrayBufferIsView;
-const qjsArrayBufferPrototypeNativeRecord = shared_vm.qjsArrayBufferPrototypeNativeRecord;
-const qjsSharedArrayBufferAccessor = shared_vm.qjsSharedArrayBufferAccessor;
-const qjsTypedArrayAccessor = shared_vm.qjsTypedArrayAccessor;
-const qjsTypedArrayConstructToIndex = shared_vm.qjsTypedArrayConstructToIndex;
-const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
-const toStringBytesForSymbol = shared_vm.toStringBytesForSymbol;
-const toStringForAnnexB = shared_vm.toStringForAnnexB;
-const toUint32Number = shared_vm.toUint32Number;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
+const constructorNameEqlLocal = call_runtime.constructorNameEqlLocal;
+const constructorPrototypeObject = object_ops.constructorPrototypeObject;
+const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
+const getIteratorMethod = call_runtime.getIteratorMethod;
+const getValueProperty = object_ops.getValueProperty;
+const isCallableValue = call_runtime.isCallableValue;
+const iteratorCloseWithCompletionAndPropagate = call_runtime.iteratorCloseWithCompletionAndPropagate;
+const iteratorStepValue = call_runtime.iteratorStepValue;
+const lengthIndexValue = collection_vm.lengthIndexValue;
+const objectFromValue = object_ops.objectFromValue;
+const qjsArrayBufferAccessor = collection_vm.qjsArrayBufferAccessor;
+const qjsArrayBufferIsView = collection_vm.qjsArrayBufferIsView;
+const qjsArrayBufferPrototypeNativeRecord = collection_vm.qjsArrayBufferPrototypeNativeRecord;
+const qjsSharedArrayBufferAccessor = collection_vm.qjsSharedArrayBufferAccessor;
+const qjsTypedArrayAccessor = collection_vm.qjsTypedArrayAccessor;
+const qjsTypedArrayConstructToIndex = collection_vm.qjsTypedArrayConstructToIndex;
+const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toStringBytesForSymbol = string_ops.toStringBytesForSymbol;
+const toStringForAnnexB = string_ops.toStringForAnnexB;
+const toUint32Number = coercion_ops.toUint32Number;
 
 pub fn qjsNumberFunctionCall(
     ctx: *core.JSContext,
@@ -786,3 +790,62 @@ pub fn callCollectionAdderFromVm(
     const out = try callValueOrBytecode(ctx, output, global, collection_value, adder, args, null, null);
     out.free(ctx.runtime);
 }
+
+// Host output fast-path probes (moved from the VM call runtime).
+
+pub fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
+    const object = object_ops.objectFromValue(func) orelse return false;
+    if (object.hostFunctionKind() != core.host_function.ids.output) return false;
+    try printHostOutputArgs(rt, output, args);
+    return true;
+}
+
+pub fn printHostOutputArgs(rt: *core.JSRuntime, output: ?*std.Io.Writer, args: []const core.JSValue) !void {
+    if (output) |writer| {
+        for (args, 0..) |arg, idx| {
+            if (idx != 0) try writer.writeByte(' ');
+            try call_mod.printValue(rt, writer, arg);
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
+    if (global.exotic != null) return false;
+    for (global.shapeProps(), 0..) |prop, property_index| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
+        if (prop_flags.accessor) return false;
+        return switch (global.properties[property_index].slot) {
+            .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
+                (info.host_function_kind == core.host_function.ids.external_host and
+                    call_mod.isOutputExternalHostFunctionId(rt, info.external_host_function_id)),
+            .data, .accessor, .deleted => false,
+        };
+    }
+    return false;
+}
+
+// Realm slot and native-method helpers (moved from the VM call runtime).
+
+pub fn functionConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
+    if (global.getOwnDataObjectBorrowed(core.atom.ids.Function)) |constructor| return constructor;
+    const function_value = global.getProperty(core.atom.ids.Function);
+    defer function_value.free(rt);
+    return property_ops.expectObject(function_value) catch null;
+}
+
+pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot, value: core.JSValue) !void {
+    const cached = try global.cachedRealmValueSlot(rt, slot);
+    try global.setOptionalValueSlot(rt, cached, value.dup());
+}
+
+pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
+    const atom_id = try rt.internAtom(name);
+    defer rt.atoms.free(atom_id);
+    const method = try builtins.function.nativeFunction(rt, name, length);
+    defer method.free(rt);
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+}
+
+// --- Primitive coercion moved to coercion_ops.zig ---

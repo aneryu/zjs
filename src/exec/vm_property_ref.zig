@@ -9,9 +9,13 @@ const property_ic = @import("property_ic.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 
-const shared_vm = @import("shared.zig");
-const readInt = shared_vm.readInt;
-const varRefCellFromValue = shared_vm.varRefCellFromValue;
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const object_ops = @import("object_ops.zig");
+const slot_ops = @import("slot_ops.zig");
+const utils = @import("vm_utils.zig");
+const readInt = call_runtime.readInt;
+const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const property_vm = @import("vm_property.zig");
@@ -51,13 +55,13 @@ pub fn withGetOrDelete(
         dropped.free(ctx.runtime);
         return .continue_loop;
     };
-    const has_binding = shared_vm.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     const blocked = if (has_binding)
-        shared_vm.isBlockedByUnscopables(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        call_runtime.isBlockedByUnscopables(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }
     else
@@ -70,15 +74,15 @@ pub fn withGetOrDelete(
     const still_has_binding = if (opc == op.with_make_ref)
         true
     else
-        shared_vm.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
     if (opc == op.with_get_var and !still_has_binding) {
         const dropped = try stack.pop();
         dropped.free(ctx.runtime);
         if (function.flags.is_strict) {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
         try stack.pushOwned(core.JSValue.undefinedValue());
@@ -87,7 +91,7 @@ pub fn withGetOrDelete(
     }
     switch (opc) {
         op.with_get_var => {
-            const value = try shared_vm.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
+            const value = try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
             errdefer value.free(ctx.runtime);
             const dropped = try stack.pop();
             dropped.free(ctx.runtime);
@@ -96,7 +100,7 @@ pub fn withGetOrDelete(
         op.with_delete_var => {
             const deleted = object.deleteProperty(ctx.runtime, atom_id);
             if (!deleted and function.flags.is_strict) {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const dropped = try stack.pop();
@@ -104,12 +108,12 @@ pub fn withGetOrDelete(
             try stack.pushOwned(core.JSValue.boolean(deleted));
         },
         op.with_get_ref => {
-            const value = try shared_vm.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
+            const value = try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
             errdefer value.free(ctx.runtime);
             try stack.pushOwned(value);
         },
         op.with_get_ref_undef => {
-            const value = try shared_vm.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
+            const value = try object_ops.getValueProperty(ctx, output, global, obj_value, atom_id, function, frame);
             var value_owned = true;
             errdefer if (value_owned) value.free(ctx.runtime);
             try stack.reserveAdditional(1);
@@ -145,15 +149,15 @@ pub fn makeSlotRef(
         op.make_loc_ref => blk: {
             if (idx >= frame.locals.len) return error.InvalidBytecode;
             const is_lexical = idx < function.var_is_lexical.len and function.var_is_lexical[idx];
-            break :blk try shared_vm.ensureLocalVarRefCell(ctx, frame, idx, is_lexical);
+            break :blk try slot_ops.ensureLocalVarRefCell(ctx, frame, idx, is_lexical);
         },
         op.make_arg_ref => blk: {
             if (idx >= frame.args.len) return error.InvalidBytecode;
-            break :blk try shared_vm.ensureVarRefCell(ctx, &frame.args[idx]);
+            break :blk try slot_ops.ensureVarRefCell(ctx, &frame.args[idx]);
         },
         op.make_var_ref_ref => blk: {
-            try shared_vm.ensureVarRefsCapacity(ctx, frame, idx);
-            break :blk try shared_vm.ensureVarRefCell(ctx, &frame.var_refs[idx]);
+            try utils.ensureVarRefsCapacity(ctx, frame, idx);
+            break :blk try slot_ops.ensureVarRefCell(ctx, &frame.var_refs[idx]);
         },
         else => unreachable,
     };
@@ -214,7 +218,7 @@ pub fn makeVarRef(
     }
     const global_value = global.value();
     const has_global_binding = try hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame);
-    const object_value = if (shared_vm.existingGlobalLexicalEnv(ctx)) |env|
+    const object_value = if (call_runtime.existingGlobalLexicalEnv(ctx)) |env|
         if (env.hasOwnProperty(atom_id))
             env.value()
         else if (has_global_binding)
@@ -245,7 +249,7 @@ pub fn makeVarRefVm(
     eval_var_refs: []const core.JSValue,
 ) !Step {
     makeVarRef(ctx, output, global, stack, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -259,8 +263,8 @@ fn makeEvalBindingRef(
 ) !?core.JSValue {
     for (names, 0..) |name, idx| {
         if (idx >= slots.len) continue;
-        if (!shared_vm.atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
-        return try shared_vm.ensureVarRefCell(ctx, &slots[idx]);
+        if (!call_runtime.atomIdOrNameEql(ctx.runtime, name, atom_id)) continue;
+        return try slot_ops.ensureVarRefCell(ctx, &slots[idx]);
     }
     return null;
 }
@@ -273,7 +277,7 @@ fn makeEvalVarRef(
 ) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (idx >= refs.len) continue;
-        if (!shared_vm.atomIdOrNameEql(rt, name, atom_id)) continue;
+        if (!call_runtime.atomIdOrNameEql(rt, name, atom_id)) continue;
         if (varRefCellFromValue(refs[idx]) == null) return null;
         return refs[idx].dup();
     }
@@ -295,15 +299,15 @@ pub fn getRefValue(
     defer key.free(ctx.runtime);
     if (obj.isUndefined()) return error.ReferenceError;
     if (varRefCellFromValue(obj) != null) {
-        const value = shared_vm.slotValueDup(obj);
+        const value = slot_ops.slotValueDup(obj);
         errdefer value.free(ctx.runtime);
         if (value.isUninitialized()) return error.ReferenceError;
         try stack.pushOwned(value);
         return;
     }
-    const atom_id = try shared_vm.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
-    const value = try shared_vm.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
+    const value = try object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
@@ -318,7 +322,7 @@ pub fn getRefValueVm(
     catch_target: *?usize,
 ) !Step {
     getRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -352,26 +356,26 @@ pub fn putRefValue(
                 value.free(ctx.runtime);
                 return;
             }
-            _ = shared_vm.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+            _ = call_runtime.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
             return error.TypeError;
         }
         if (cell.varRefIsConstSlot().*) {
-            _ = shared_vm.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+            _ = call_runtime.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
             return error.TypeError;
         }
         var ref_slot = obj.dup();
         defer ref_slot.free(ctx.runtime);
-        try shared_vm.setSlotValue(ctx, &ref_slot, value);
+        try slot_ops.setSlotValue(ctx, &ref_slot, value);
         return;
     }
     defer value.free(ctx.runtime);
-    const atom_id = try shared_vm.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
     if (runtime_strict) {
         const object = try property_ops.expectObject(obj);
         if (!try hasObjectBinding(ctx, output, global, obj, object, atom_id, function, frame)) return error.ReferenceError;
     }
-    const result = try shared_vm.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
+    const result = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
     result.free(ctx.runtime);
 }
 
@@ -385,7 +389,7 @@ pub fn putRefValueVm(
     catch_target: *?usize,
 ) !Step {
     putRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -409,12 +413,12 @@ pub fn withPut(
     if (obj.isUndefined()) return .continue_loop;
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    _ = shared_vm.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    _ = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    const result = shared_vm.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    const result = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
@@ -435,7 +439,7 @@ pub fn deleteVar(
 ) !void {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
-    if (shared_vm.deleteEvalBinding(ctx.runtime, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| {
+    if (call_runtime.deleteEvalBinding(ctx.runtime, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, atom_id)) |deleted| {
         try stack.pushOwned(core.JSValue.boolean(deleted));
     } else if (global.hasProperty(atom_id)) {
         try stack.pushOwned(core.JSValue.boolean(global.deleteProperty(ctx.runtime, atom_id)));
@@ -458,7 +462,7 @@ pub fn deletePropertyVm(
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
     if (obj.isNull() or obj.isUndefined()) {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     } else if (!obj.isObject()) {
         try stack.pushOwned(core.JSValue.boolean(true));
@@ -467,20 +471,20 @@ pub fn deletePropertyVm(
         const atom_id = try property_ops.propertyKeyAtom(ctx.runtime, prop);
         defer ctx.runtime.atoms.free(atom_id);
         const deleted = if (object.proxyTarget() != null) blk: {
-            break :blk shared_vm.deleteValueProperty(ctx, output, global, obj, object, atom_id, function, frame) catch |err| {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            break :blk object_ops.deleteValueProperty(ctx, output, global, obj, object, atom_id, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
-        } else if (object == global and shared_vm.functionHasFrameBinding(ctx.runtime, function, frame, atom_id))
+        } else if (object == global and call_runtime.functionHasFrameBinding(ctx.runtime, function, frame, atom_id))
             false
         else if (object.flags.is_array and atom_id == core.atom.ids.length)
             false
-        else if (try shared_vm.typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
+        else if (try array_ops.typedArrayCanonicalDelete(ctx.runtime, object, atom_id)) |typed_deleted|
             typed_deleted
         else
             object.deleteProperty(ctx.runtime, atom_id);
         if (!deleted and function.flags.is_strict) {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         }
         try stack.pushOwned(core.JSValue.boolean(deleted));

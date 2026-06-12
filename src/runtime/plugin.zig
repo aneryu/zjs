@@ -697,13 +697,13 @@ fn throwPluginErrorMessage(host_call: core.host_function.ExternalCall, status: f
     const ctx: *core.JSContext = @ptrCast(@alignCast(host_call.ctx));
     const global = host_call.global orelse host_call.func_obj.functionRealmGlobalPtr() orelse ctx.global orelse try ctx.globalObject();
     const error_name = errorNameFromStatus(status);
-    const error_value = exec.shared.createNamedError(ctx.runtime, global, error_name, message) catch |err| switch (err) {
-        error.InvalidUtf8 => try exec.shared.createNamedError(ctx.runtime, global, error_name, fallbackMessageFromStatus(status)),
+    const error_value = exec.exception_ops.createNamedError(ctx.runtime, global, error_name, message) catch |err| switch (err) {
+        error.InvalidUtf8 => try exec.exception_ops.createNamedError(ctx.runtime, global, error_name, fallbackMessageFromStatus(status)),
         else => return err,
     };
     var error_value_owned = true;
     errdefer if (error_value_owned) error_value.free(ctx.runtime);
-    try exec.shared.attachStackToErrorValue(ctx, global, error_value);
+    try exec.call_runtime.attachStackToErrorValue(ctx, global, error_value);
     if (ctx.hasException()) ctx.clearException();
     _ = ctx.throwValue(error_value);
     error_value_owned = false;

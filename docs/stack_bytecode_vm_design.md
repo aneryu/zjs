@@ -119,7 +119,7 @@ strings, arrays, promises and GC are stable.
 
 Useful near-term work should stay compatible with the current stack bytecode:
 
-- continue shrinking `src/exec/shared.zig` into focused VM/helper modules.
+- continue shrinking `src/exec/call_runtime.zig` (originally `shared.zig`) into focused VM/helper modules.
 - keep property opcode logic concentrated in `vm_property.zig` and
   `property_ic.zig`.
 - improve bytecode validation where `stack_size.zig` is not enough.

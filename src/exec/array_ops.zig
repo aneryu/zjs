@@ -2,6 +2,7 @@ const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
+const unicode_lib = @import("../libs/unicode.zig");
 const core = @import("../core/root.zig");
 const call_mod = @import("call.zig");
 // const collection_vm = merged
@@ -20,98 +21,99 @@ const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 const exception_ops = @import("vm_exception_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;
-const IteratorZipRecord = shared_vm.IteratorZipRecord;
-const RegExpMatch = shared_vm.RegExpMatch;
-const SimpleCaptureSequenceAtom = shared_vm.SimpleCaptureSequenceAtom;
-const SimpleClassPredicate = shared_vm.SimpleClassPredicate;
-const SimpleNumericArg0Bytecode = shared_vm.SimpleNumericArg0Bytecode;
-const SparseIndexKey = shared_vm.SparseIndexKey;
-const WorkerMessage = shared_vm.WorkerMessage;
-const WorkerPostTarget = shared_vm.WorkerPostTarget;
-const appendAtom = shared_vm.appendAtom;
-const atomIdOrNameEql = shared_vm.atomIdOrNameEql;
-const atomListContains = shared_vm.atomListContains;
-const atomicsBufferObject = shared_vm.atomicsBufferObject;
-const backtraceFunctionNameEql = shared_vm.backtraceFunctionNameEql;
-const cacheIteratorNextMethod = shared_vm.cacheIteratorNextMethod;
-const callCollectionAdderFromVm = shared_vm.callCollectionAdderFromVm;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const callableObjectFromValue = shared_vm.callableObjectFromValue;
-const catchTargetFromMarker = shared_vm.catchTargetFromMarker;
-const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const constructorPrototypeFromGlobalAtom = shared_vm.constructorPrototypeFromGlobalAtom;
-const constructorPrototypeObject = shared_vm.constructorPrototypeObject;
-const createBytecodeFunctionObject = shared_vm.createBytecodeFunctionObject;
-const createCallSiteObject = shared_vm.createCallSiteObject;
-const createDataPropertyOrThrow = shared_vm.createDataPropertyOrThrow;
-const createIteratorResult = shared_vm.createIteratorResult;
-const createRegExpIndexPair = shared_vm.createRegExpIndexPair;
-const decodeBase64Bytes = shared_vm.decodeBase64Bytes;
-const decodeBase64Into = shared_vm.decodeBase64Into;
-const decodeHexBytes = shared_vm.decodeHexBytes;
-const decodeHexInto = shared_vm.decodeHexInto;
-const defineNativeDataMethod = shared_vm.defineNativeDataMethod;
-const defineRegExpIndicesGroupsProperty = shared_vm.defineRegExpIndicesGroupsProperty;
-const defineSplitValueElement = shared_vm.defineSplitValueElement;
-const defineValueProperty = shared_vm.defineValueProperty;
-const deleteValuePropertyOrThrow = shared_vm.deleteValuePropertyOrThrow;
-const encodeBase64Bytes = shared_vm.encodeBase64Bytes;
-const encodeHexBytes = shared_vm.encodeHexBytes;
-const errorStackTraceLimit = shared_vm.errorStackTraceLimit;
-const findPropertyDescriptor = shared_vm.findPropertyDescriptor;
-const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
-const functionObjectFromValue = shared_vm.functionObjectFromValue;
-const getIteratorMethod = shared_vm.getIteratorMethod;
-const getStringPrototypeMethodId = shared_vm.getStringPrototypeMethodId;
-const getValueProperty = shared_vm.getValueProperty;
-const globalHostOutputAutoInit = shared_vm.globalHostOutputAutoInit;
-const hasValueProperty = shared_vm.hasValueProperty;
-const isBuiltinConstructorName = shared_vm.isBuiltinConstructorName;
-const isCallableValue = shared_vm.isCallableValue;
-const isConstructorLike = shared_vm.isConstructorLike;
-const isDirectIteratorClass = shared_vm.isDirectIteratorClass;
-const isIteratorLikeValue = shared_vm.isIteratorLikeValue;
-const lengthIndexValue = shared_vm.lengthIndexValue;
-const objectFromValue = shared_vm.objectFromValue;
-const objectPrototypeFromGlobal = shared_vm.objectPrototypeFromGlobal;
-const objectRealmGlobal = shared_vm.objectRealmGlobal;
-const primitiveObjectForAccess = shared_vm.primitiveObjectForAccess;
-const printHostOutputArgs = shared_vm.printHostOutputArgs;
-const propertyAtomFromLengthIndex = shared_vm.propertyAtomFromLengthIndex;
-const propertyIndexFromLengthKey = shared_vm.propertyIndexFromLengthKey;
-const proxyDefineValueForReflectSet = shared_vm.proxyDefineValueForReflectSet;
-const qjsArrayConcatCall = shared_vm.qjsArrayConcatCall;
-const qjsArraySearchCall = shared_vm.qjsArraySearchCall;
-const qjsArrayToLocaleStringCall = shared_vm.qjsArrayToLocaleStringCall;
-const qjsArrayToStringCall = shared_vm.qjsArrayToStringCall;
-const qjsCollectIteratorValues = shared_vm.qjsCollectIteratorValues;
-const qjsGeneratorNext = shared_vm.qjsGeneratorNext;
-const qjsIteratorCallForNativeRecord = shared_vm.qjsIteratorCallForNativeRecord;
-const qjsIteratorClose = shared_vm.qjsIteratorClose;
-const qjsIteratorPrototype = shared_vm.qjsIteratorPrototype;
-const qjsObjectEnumerableOwnPropertiesCall = shared_vm.qjsObjectEnumerableOwnPropertiesCall;
-const qjsWorkerByIdLocked = shared_vm.qjsWorkerByIdLocked;
-const qjsWorkerIo = shared_vm.qjsWorkerIo;
-const readInt = shared_vm.readInt;
-const sameObjectIdentity = shared_vm.sameObjectIdentity;
-const setValueProperty = shared_vm.setValueProperty;
-const simpleClassPredicateMatches = shared_vm.simpleClassPredicateMatches;
-const simpleNumericArg0Callback = shared_vm.simpleNumericArg0Callback;
-const simpleNumericBinary = shared_vm.simpleNumericBinary;
-const slotValueBorrow = shared_vm.slotValueBorrow;
-const stringSliceValue = shared_vm.stringSliceValue;
-const workerPageAllocator = shared_vm.workerPageAllocator;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
-const toLengthIndex = shared_vm.toLengthIndex;
-const toNumberForDateMethod = shared_vm.toNumberForDateMethod;
-const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
-const toStringForAnnexB = shared_vm.toStringForAnnexB;
-const uint8ArrayStringBytes = shared_vm.uint8ArrayStringBytes;
-const valueTruthy = shared_vm.valueTruthy;
-const valuesStrictEqual = shared_vm.valuesStrictEqual;
+const call_runtime = @import("call_runtime.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
+const forof_ops = @import("forof_ops.zig");
+const object_ops = @import("object_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
+const utils = @import("vm_utils.zig");
+const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
+const IteratorZipRecord = iter_vm.IteratorZipRecord;
+const RegExpMatch = string_ops.RegExpMatch;
+const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
+const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
+const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
+const WorkerMessage = call_runtime.WorkerMessage;
+const WorkerPostTarget = call_runtime.WorkerPostTarget;
+const appendAtom = utils.appendAtom;
+const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
+const atomListContains = utils.atomListContains;
+const atomicsBufferObject = object_ops.atomicsBufferObject;
+const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
+const cacheIteratorNextMethod = call_runtime.cacheIteratorNextMethod;
+const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callableObjectFromValue = object_ops.callableObjectFromValue;
+const catchTargetFromMarker = utils.catchTargetFromMarker;
+const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
+const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+const constructorPrototypeFromGlobalAtom = object_ops.constructorPrototypeFromGlobalAtom;
+const constructorPrototypeObject = object_ops.constructorPrototypeObject;
+const createBytecodeFunctionObject = object_ops.createBytecodeFunctionObject;
+const createCallSiteObject = object_ops.createCallSiteObject;
+const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
+const createIteratorResult = call_runtime.createIteratorResult;
+const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
+const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
+const defineRegExpIndicesGroupsProperty = object_ops.defineRegExpIndicesGroupsProperty;
+const defineSplitValueElement = string_ops.defineSplitValueElement;
+const defineValueProperty = object_ops.defineValueProperty;
+const deleteValuePropertyOrThrow = object_ops.deleteValuePropertyOrThrow;
+const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
+const findPropertyDescriptor = object_ops.findPropertyDescriptor;
+const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
+const functionObjectFromValue = object_ops.functionObjectFromValue;
+const getIteratorMethod = call_runtime.getIteratorMethod;
+const getStringPrototypeMethodId = string_ops.getStringPrototypeMethodId;
+const getValueProperty = object_ops.getValueProperty;
+const globalHostOutputAutoInit = builtin_glue.globalHostOutputAutoInit;
+const hasValueProperty = object_ops.hasValueProperty;
+const isBuiltinConstructorName = call_runtime.isBuiltinConstructorName;
+const isCallableValue = call_runtime.isCallableValue;
+const isConstructorLike = call_runtime.isConstructorLike;
+const isDirectIteratorClass = call_runtime.isDirectIteratorClass;
+const isIteratorLikeValue = forof_ops.isIteratorLikeValue;
+const objectFromValue = object_ops.objectFromValue;
+const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
+const objectRealmGlobal = object_ops.objectRealmGlobal;
+const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const printHostOutputArgs = builtin_glue.printHostOutputArgs;
+const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
+const propertyIndexFromLengthKey = object_ops.propertyIndexFromLengthKey;
+const proxyDefineValueForReflectSet = object_ops.proxyDefineValueForReflectSet;
+const qjsArrayConcatCall = string_ops.qjsArrayConcatCall;
+const qjsArraySearchCall = string_ops.qjsArraySearchCall;
+const qjsArrayToLocaleStringCall = string_ops.qjsArrayToLocaleStringCall;
+const qjsArrayToStringCall = string_ops.qjsArrayToStringCall;
+const qjsCollectIteratorValues = call_runtime.qjsCollectIteratorValues;
+const qjsGeneratorNext = call_runtime.qjsGeneratorNext;
+const qjsIteratorCallForNativeRecord = call_runtime.qjsIteratorCallForNativeRecord;
+const qjsIteratorClose = call_runtime.qjsIteratorClose;
+const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
+const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPropertiesCall;
+const qjsWorkerByIdLocked = call_runtime.qjsWorkerByIdLocked;
+const qjsWorkerIo = call_runtime.qjsWorkerIo;
+const readInt = call_runtime.readInt;
+const sameObjectIdentity = object_ops.sameObjectIdentity;
+const setValueProperty = object_ops.setValueProperty;
+const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
+const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
+const simpleNumericBinary = call_runtime.simpleNumericBinary;
+const slotValueBorrow = slot_ops.slotValueBorrow;
+const stringSliceValue = string_ops.stringSliceValue;
+const workerPageAllocator = call_runtime.workerPageAllocator;
+const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const toLengthIndex = coercion_ops.toLengthIndex;
+const toNumberForDateMethod = coercion_ops.toNumberForDateMethod;
+const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toStringForAnnexB = string_ops.toStringForAnnexB;
+const uint8ArrayStringBytes = string_ops.uint8ArrayStringBytes;
+const valueTruthy = coercion_ops.valueTruthy;
+const valuesStrictEqual = value_ops.valuesStrictEqual;
 
 pub fn popCatchMarker(rt: *core.JSRuntime, stack: *stack_mod.Stack) !??usize {
     while (stack.peek()) |marker| {
@@ -4922,8 +4924,8 @@ pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
 pub fn qjsWorkerPopMessage(id: i32, endpoint: WorkerPostTarget) ?WorkerMessage {
     const allocator = workerPageAllocator();
     const io = qjsWorkerIo();
-    shared_vm.qjs_workers.mutex.lockUncancelable(io);
-    defer shared_vm.qjs_workers.mutex.unlock(io);
+    call_runtime.qjs_workers.mutex.lockUncancelable(io);
+    defer call_runtime.qjs_workers.mutex.unlock(io);
     const worker = qjsWorkerByIdLocked(id) orelse return null;
     const queue = switch (endpoint) {
         .worker => &worker.to_worker,
@@ -5865,7 +5867,7 @@ pub fn qjsCollectionIteratorMethodCall(
         9
     else
         return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     return try builtins.collection.methodCallWithGlobal(ctx, global, this_value, method_id, &.{}, &.{});
 }
@@ -5884,9 +5886,9 @@ pub fn qjsCollectionForEachCall(
     if (!std.mem.eql(u8, name, "forEach")) return null;
     const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
     if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
-    if (args.len < 1 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
+    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: usize = 0;
@@ -5897,7 +5899,7 @@ pub fn qjsCollectionForEachCall(
             [_]core.JSValue{ entry.key, entry.key, receiver.value() }
         else
             [_]core.JSValue{ entry.value, entry.key, receiver.value() };
-        const result = try shared_vm.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
+        const result = try call_runtime.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
         result.free(ctx.runtime);
     }
     return core.JSValue.undefinedValue();
@@ -5917,7 +5919,7 @@ pub fn qjsSetMethodCall(
     const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
     if (owner_class != core.class.ids.set) return null;
     const mode = qjsSetMethodMode(name) orelse return null;
-    const receiver = shared_vm.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
+    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
     if (receiver.class_id != core.class.ids.set) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
     const other_value = if (args.len >= 1) args[0] else return error.TypeError;
     var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
@@ -5944,7 +5946,7 @@ pub fn qjsCollectionNativeRecord(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const receiver = shared_vm.objectFromValue(this_value) orelse {
+    const receiver = object_ops.objectFromValue(this_value) orelse {
         if (collectionMethodOwnerClass(function_object)) |owner_class| {
             return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
         }
@@ -6033,7 +6035,7 @@ fn qjsCollectionForEachRecord(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (receiver.class_id != core.class.ids.map and receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, receiver.class_id);
-    if (args.len < 1 or !shared_vm.isCallableValue(args[0])) return error.TypeError;
+    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
     const callback = args[0];
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     var index: usize = 0;
@@ -6044,7 +6046,7 @@ fn qjsCollectionForEachRecord(
             [_]core.JSValue{ entry.key, entry.key, this_value }
         else
             [_]core.JSValue{ entry.value, entry.key, this_value };
-        const result = try shared_vm.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
+        const result = try call_runtime.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
         result.free(ctx.runtime);
     }
     return core.JSValue.undefinedValue();
@@ -6108,7 +6110,7 @@ fn qjsGetSetRecord(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !SetLikeRecordVm {
-    const object = shared_vm.objectFromValue(other_value) orelse return error.TypeError;
+    const object = object_ops.objectFromValue(other_value) orelse return error.TypeError;
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         return .{
             .object_value = other_value.dup(),
@@ -6119,10 +6121,10 @@ fn qjsGetSetRecord(
         };
     }
 
-    const raw_size = try shared_vm.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
+    const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
     defer raw_size.free(ctx.runtime);
     const size_value = if (raw_size.isObject())
-        try shared_vm.toPrimitiveForNumber(ctx, output, global, raw_size)
+        try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
     else
         raw_size.dup();
     defer size_value.free(ctx.runtime);
@@ -6133,15 +6135,15 @@ fn qjsGetSetRecord(
 
     const has_key = try ctx.runtime.internAtom("has");
     defer ctx.runtime.atoms.free(has_key);
-    const has_value = try shared_vm.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
+    const has_value = try object_ops.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
     errdefer has_value.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(has_value)) return error.TypeError;
+    if (!call_runtime.isCallableValue(has_value)) return error.TypeError;
 
     const keys_key = try ctx.runtime.internAtom("keys");
     defer ctx.runtime.atoms.free(keys_key);
-    const keys_value = try shared_vm.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
+    const keys_value = try object_ops.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
     errdefer keys_value.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(keys_value)) return error.TypeError;
+    if (!call_runtime.isCallableValue(keys_value)) return error.TypeError;
 
     return .{
         .object_value = other_value.dup(),
@@ -6161,7 +6163,7 @@ fn qjsSetStrongSize(object: *core.Object) usize {
 }
 
 fn qjsConstructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
-    const set_proto = shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
+    const set_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
     return builtins.collection.constructWithPrototype(ctx.runtime, 2, set_proto);
 }
 
@@ -6178,7 +6180,7 @@ fn qjsSetDeleteValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSV
 fn qjsSetHasValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !bool {
     const out = try builtins.collection.methodCall(rt, set_value, 3, &.{key});
     defer out.free(rt);
-    return shared_vm.valueTruthy(out);
+    return coercion_ops.valueTruthy(out);
 }
 
 fn qjsSetLikeHas(
@@ -6193,11 +6195,11 @@ fn qjsSetLikeHas(
     if (record.native_kind != .none) {
         const out = try builtins.collection.methodCall(ctx.runtime, record.object_value, 3, &.{key});
         defer out.free(ctx.runtime);
-        return shared_vm.valueTruthy(out);
+        return coercion_ops.valueTruthy(out);
     }
-    const out = try shared_vm.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
+    const out = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
     defer out.free(ctx.runtime);
-    return shared_vm.valueTruthy(out);
+    return coercion_ops.valueTruthy(out);
 }
 
 fn qjsSetLikeKeysIterator(
@@ -6211,14 +6213,14 @@ fn qjsSetLikeKeysIterator(
     const source = if (record.native_kind != .none)
         try builtins.collection.methodCall(ctx.runtime, record.object_value, 7, &.{})
     else
-        try shared_vm.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
+        try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
     errdefer source.free(ctx.runtime);
-    const iterator_object = shared_vm.objectFromValue(source) orelse return error.TypeError;
+    const iterator_object = object_ops.objectFromValue(source) orelse return error.TypeError;
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
-    const next_method = try shared_vm.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
-    if (!shared_vm.isCallableValue(next_method)) return error.TypeError;
+    if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
     const cached = iterator_object.cachedIteratorNextSlot();
     try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
     return source;
@@ -6320,8 +6322,8 @@ fn qjsSetDifference(
         defer iterator_value.free(ctx.runtime);
         var iterator_done = false;
         while (true) {
-            const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-                if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+                if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
                 return err;
             };
             defer step.value.free(ctx.runtime);
@@ -6371,8 +6373,8 @@ fn qjsSetIntersection(
         defer iterator_value.free(ctx.runtime);
         var iterator_done = false;
         while (true) {
-            const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-                if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+                if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
                 return err;
             };
             defer step.value.free(ctx.runtime);
@@ -6403,8 +6405,8 @@ fn qjsSetUnion(
     errdefer result_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
@@ -6432,8 +6434,8 @@ fn qjsSetSymmetricDifference(
     errdefer result_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
@@ -6475,8 +6477,8 @@ fn qjsSetIsDisjointFrom(
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
@@ -6485,7 +6487,7 @@ fn qjsSetIsDisjointFrom(
             return core.JSValue.boolean(true);
         }
         if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-            shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             iterator_done = true;
             return core.JSValue.boolean(false);
         }
@@ -6527,8 +6529,8 @@ fn qjsSetIsSupersetOf(
     defer iterator_value.free(ctx.runtime);
     var iterator_done = false;
     while (true) {
-        const step = shared_vm.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
-            if (!iterator_done) shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             return err;
         };
         defer step.value.free(ctx.runtime);
@@ -6537,7 +6539,7 @@ fn qjsSetIsSupersetOf(
             return core.JSValue.boolean(true);
         }
         if (!try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
-            shared_vm.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
             iterator_done = true;
             return core.JSValue.boolean(false);
         }
@@ -6552,7 +6554,7 @@ pub fn qjsMapGroupByCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const map_proto = shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
+    const map_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
     return qjsMapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
 }
 
@@ -6566,28 +6568,28 @@ pub fn qjsMapGroupByRecord(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
-    if (!shared_vm.isCallableValue(args[1])) return error.TypeError;
+    if (!call_runtime.isCallableValue(args[1])) return error.TypeError;
 
     const map_value = try builtins.collection.constructWithPrototype(ctx.runtime, 1, prototype);
     errdefer map_value.free(ctx.runtime);
 
-    const iterator_value = try shared_vm.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const iterator_value = try call_runtime.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
 
     var index: usize = 0;
     while (true) {
         const max_safe_integer: usize = 9007199254740991;
         if (index >= max_safe_integer) {
-            try shared_vm.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return error.TypeError;
         }
 
-        const step = try shared_vm.iteratorStepValue(ctx, output, global, iterator_value);
+        const step = try call_runtime.iteratorStepValue(ctx, output, global, iterator_value);
         defer step.value.free(ctx.runtime);
         if (step.done) return map_value;
 
         const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const key = shared_vm.callValueOrBytecode(
+        const key = call_runtime.callValueOrBytecode(
             ctx,
             output,
             global,
@@ -6597,13 +6599,13 @@ pub fn qjsMapGroupByRecord(
             caller_function,
             caller_frame,
         ) catch |err| {
-            try shared_vm.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
         defer key.free(ctx.runtime);
 
         qjsMapAppendGroupByValue(ctx, global, map_value, key, step.value) catch |err| {
-            try shared_vm.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
             return err;
         };
         index += 1;
@@ -6626,7 +6628,7 @@ pub fn qjsMapGetOrInsertComputed(
         if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
     }
     if (args.len < 2) return error.TypeError;
-    if (!shared_vm.isCallableValue(args[1])) return error.TypeError;
+    if (!call_runtime.isCallableValue(args[1])) return error.TypeError;
 
     const key = if (receiver.class_id == core.class.ids.map)
         canonicalizeMapKey(args[0])
@@ -6634,7 +6636,7 @@ pub fn qjsMapGetOrInsertComputed(
         args[0].dup();
     defer key.free(ctx.runtime);
     if (receiver.class_id == core.class.ids.weakmap and !builtins.symbol.canBeHeldWeakly(ctx.runtime, key)) {
-        return @as(?core.JSValue, try shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
+        return @as(?core.JSValue, try call_runtime.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
     }
 
     const has_value = try builtins.collection.methodCall(ctx.runtime, receiver_value, 3, &.{key});
@@ -6643,7 +6645,7 @@ pub fn qjsMapGetOrInsertComputed(
         return try builtins.collection.methodCall(ctx.runtime, receiver_value, 2, &.{key});
     }
 
-    const computed = try shared_vm.callValueOrBytecode(
+    const computed = try call_runtime.callValueOrBytecode(
         ctx,
         output,
         global,
@@ -6673,7 +6675,7 @@ fn canonicalizeMapKey(key: core.JSValue) core.JSValue {
 }
 
 fn throwCollectionReceiverTypeError(ctx: *core.JSContext, global: *core.Object, owner_class: core.ClassId) !core.JSValue {
-    return shared_vm.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
+    return call_runtime.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
 }
 
 fn throwCollectionMethodTypeError(
@@ -6687,15 +6689,15 @@ fn throwCollectionMethodTypeError(
         (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
         args.len >= 1 and !builtins.symbol.canBeHeldWeakly(ctx.runtime, args[0]))
     {
-        return shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
+        return call_runtime.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
     }
     if (receiver.class_id == core.class.ids.weakset and
         method == .add and
         args.len >= 1 and !builtins.symbol.canBeHeldWeakly(ctx.runtime, args[0]))
     {
-        return shared_vm.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
+        return call_runtime.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
     }
-    return shared_vm.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(receiver.class_id));
+    return call_runtime.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(receiver.class_id));
 }
 
 fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
@@ -6727,7 +6729,7 @@ fn qjsMapAppendGroupByValue(
         return;
     }
 
-    const group = try core.Object.createArray(ctx.runtime, shared_vm.arrayPrototypeFromGlobal(ctx.runtime, global));
+    const group = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, &group.header);
     try group.defineOwnProperty(
         ctx.runtime,
@@ -6738,3 +6740,260 @@ fn qjsMapAppendGroupByValue(
     defer set_result.free(ctx.runtime);
     group.value().free(ctx.runtime);
 }
+
+// Uint8Array hex/base64 codecs (moved from the VM call runtime).
+
+pub fn decodeHexBytes(rt: *core.JSRuntime, source: []const u8, reject_odd: bool) !std.ArrayList(u8) {
+    if (reject_odd and source.len % 2 != 0) return error.SyntaxError;
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
+    var index: usize = 0;
+    while (index + 1 < source.len) : (index += 2) {
+        const hi = hexNibble(source[index]) orelse return error.SyntaxError;
+        const lo = hexNibble(source[index + 1]) orelse return error.SyntaxError;
+        try out.append(rt.memory.allocator, (hi << 4) | lo);
+    }
+    return out;
+}
+
+pub fn decodeHexInto(source: []const u8, target: []u8) !Uint8ArrayCodecProgress {
+    if (source.len % 2 != 0) return error.SyntaxError;
+    var read: usize = 0;
+    var written: usize = 0;
+    while (read < source.len and written < target.len) {
+        const hi = hexNibble(source[read]) orelse return error.SyntaxError;
+        const lo = hexNibble(source[read + 1]) orelse return error.SyntaxError;
+        target[written] = (hi << 4) | lo;
+        read += 2;
+        written += 1;
+    }
+    return .{ .read = read, .written = written };
+}
+
+pub fn encodeHexBytes(rt: *core.JSRuntime, bytes: []const u8) !std.ArrayList(u8) {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
+    for (bytes) |byte| {
+        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte >> 4));
+        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte & 0x0f));
+    }
+    return out;
+}
+
+pub fn hexNibble(byte: u8) ?u8 {
+    return unicode_lib.asciiHexDigitValueByte(byte);
+}
+
+pub const Base64Chunk = struct {
+    bytes: [3]u8 = .{ 0, 0, 0 },
+    len: usize = 0,
+};
+
+pub fn decodeBase64Bytes(
+    rt: *core.JSRuntime,
+    source: []const u8,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+) !std.ArrayList(u8) {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
+    _ = try decodeBase64Internal(rt, source, alphabet, last_chunk_handling, &out, null);
+    return out;
+}
+
+pub fn decodeBase64Into(
+    rt: *core.JSRuntime,
+    source: []const u8,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+    target: []u8,
+) !Uint8ArrayCodecProgress {
+    if (target.len == 0) return .{ .read = 0, .written = 0 };
+    return decodeBase64Internal(rt, source, alphabet, last_chunk_handling, null, target);
+}
+
+pub fn decodeBase64Internal(
+    rt: *core.JSRuntime,
+    source: []const u8,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+    out: ?*std.ArrayList(u8),
+    target: ?[]u8,
+) !Uint8ArrayCodecProgress {
+    var chunk: [4]u8 = .{ 0, 0, 0, 0 };
+    var chunk_len: usize = 0;
+    var read_pos: usize = 0;
+    var last_read: usize = 0;
+    var written: usize = 0;
+    var saw_padded_chunk = false;
+    var pending_padded_chunk: ?Base64Chunk = null;
+    var pending_padded_read: usize = 0;
+
+    for (source, 0..) |byte, index| {
+        if (unicode_lib.isAsciiWhitespaceByte(byte)) continue;
+        read_pos = index + 1;
+        if (saw_padded_chunk) return error.SyntaxError;
+        if (byte != '=' and base64Value(byte, alphabet) == null) return error.SyntaxError;
+        chunk[chunk_len] = byte;
+        chunk_len += 1;
+        if (chunk_len == 4) {
+            const decoded = try decodeBase64Chunk(chunk, 4, alphabet, last_chunk_handling, false);
+            if (chunk[2] == '=' or chunk[3] == '=') {
+                pending_padded_chunk = decoded;
+                pending_padded_read = read_pos;
+                saw_padded_chunk = true;
+                chunk_len = 0;
+                continue;
+            }
+            if (target) |bytes| {
+                if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
+                if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
+            } else if (out) |list| {
+                try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+            }
+            written += decoded.len;
+            last_read = read_pos;
+            chunk_len = 0;
+            if (target) |bytes| {
+                if (written == bytes.len) return .{ .read = last_read, .written = written };
+            }
+        }
+    }
+
+    if (pending_padded_chunk) |decoded| {
+        if (target) |bytes| {
+            if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
+            if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
+        } else if (out) |list| {
+            try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+        }
+        written += decoded.len;
+        return .{ .read = pending_padded_read, .written = written };
+    }
+    if (chunk_len == 0) return .{ .read = last_read, .written = written };
+    const decoded = try decodeBase64Chunk(chunk, chunk_len, alphabet, last_chunk_handling, true);
+    if (decoded.len == 0 and last_chunk_handling == .stop_before_partial) return .{ .read = last_read, .written = written };
+    if (target) |bytes| {
+        if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
+        if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
+    } else if (out) |list| {
+        try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+    }
+    written += decoded.len;
+    return .{ .read = read_pos, .written = written };
+}
+
+pub fn decodeBase64Chunk(
+    chunk: [4]u8,
+    chunk_len: usize,
+    alphabet: Uint8ArrayBase64Alphabet,
+    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
+    is_final: bool,
+) !Base64Chunk {
+    if (chunk_len == 0) return .{};
+    if (chunk_len < 4) {
+        var first_padding: ?usize = null;
+        var i: usize = 0;
+        while (i < chunk_len) : (i += 1) {
+            if (chunk[i] == '=') {
+                if (first_padding == null) first_padding = i;
+            } else if (first_padding != null) {
+                return error.SyntaxError;
+            }
+        }
+        if (first_padding) |padding_index| {
+            if (padding_index < 2) return error.SyntaxError;
+            if (last_chunk_handling == .stop_before_partial and is_final) return .{};
+            return error.SyntaxError;
+        }
+        if (chunk_len == 1) {
+            if (last_chunk_handling == .stop_before_partial and is_final) return .{};
+            return error.SyntaxError;
+        }
+        if (last_chunk_handling == .stop_before_partial and is_final) return .{};
+        if (last_chunk_handling == .strict) return error.SyntaxError;
+        const a = base64Value(chunk[0], alphabet) orelse return error.SyntaxError;
+        const b = base64Value(chunk[1], alphabet) orelse return error.SyntaxError;
+        var result = Base64Chunk{ .bytes = .{ (a << 2) | (b >> 4), 0, 0 }, .len = 1 };
+        if (chunk_len == 3) {
+            const c = base64Value(chunk[2], alphabet) orelse return error.SyntaxError;
+            result.bytes[1] = ((b & 0x0f) << 4) | (c >> 2);
+            result.len = 2;
+        }
+        return result;
+    }
+
+    if (chunk[0] == '=' or chunk[1] == '=') return error.SyntaxError;
+    const a = base64Value(chunk[0], alphabet) orelse return error.SyntaxError;
+    const b = base64Value(chunk[1], alphabet) orelse return error.SyntaxError;
+    if (chunk[2] == '=') {
+        if (chunk[3] != '=') return error.SyntaxError;
+        if (last_chunk_handling == .strict and (b & 0x0f) != 0) return error.SyntaxError;
+        return .{ .bytes = .{ (a << 2) | (b >> 4), 0, 0 }, .len = 1 };
+    }
+    const c = base64Value(chunk[2], alphabet) orelse return error.SyntaxError;
+    if (chunk[3] == '=') {
+        if (last_chunk_handling == .strict and (c & 0x03) != 0) return error.SyntaxError;
+        return .{ .bytes = .{ (a << 2) | (b >> 4), ((b & 0x0f) << 4) | (c >> 2), 0 }, .len = 2 };
+    }
+    const d = base64Value(chunk[3], alphabet) orelse return error.SyntaxError;
+    return .{ .bytes = .{ (a << 2) | (b >> 4), ((b & 0x0f) << 4) | (c >> 2), ((c & 0x03) << 6) | d }, .len = 3 };
+}
+
+pub fn encodeBase64Bytes(rt: *core.JSRuntime, bytes: []const u8, alphabet: Uint8ArrayBase64Alphabet, omit_padding: bool) !std.ArrayList(u8) {
+    const table = if (alphabet == .base64) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" else "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(rt.memory.allocator);
+    var index: usize = 0;
+    while (index < bytes.len) : (index += 3) {
+        const rem = bytes.len - index;
+        const b0 = bytes[index];
+        const b1 = if (rem > 1) bytes[index + 1] else 0;
+        const b2 = if (rem > 2) bytes[index + 2] else 0;
+        try out.append(rt.memory.allocator, table[b0 >> 2]);
+        try out.append(rt.memory.allocator, table[((b0 & 0x03) << 4) | (b1 >> 4)]);
+        if (rem > 1) {
+            try out.append(rt.memory.allocator, table[((b1 & 0x0f) << 2) | (b2 >> 6)]);
+        } else if (!omit_padding) {
+            try out.append(rt.memory.allocator, '=');
+        }
+        if (rem > 2) {
+            try out.append(rt.memory.allocator, table[b2 & 0x3f]);
+        } else if (!omit_padding) {
+            try out.append(rt.memory.allocator, '=');
+        }
+    }
+    return out;
+}
+
+pub fn base64Value(byte: u8, alphabet: Uint8ArrayBase64Alphabet) ?u8 {
+    if (byte >= 'A' and byte <= 'Z') return byte - 'A';
+    if (byte >= 'a' and byte <= 'z') return byte - 'a' + 26;
+    if (byte >= '0' and byte <= '9') return byte - '0' + 52;
+    if (alphabet == .base64 and byte == '+') return 62;
+    if (alphabet == .base64 and byte == '/') return 63;
+    if (alphabet == .base64url and byte == '-') return 62;
+    if (alphabet == .base64url and byte == '_') return 63;
+    return null;
+}
+
+// Array length/index helpers (moved from the VM call runtime).
+
+pub const SparseIndexKey = struct {
+    atom_id: core.Atom,
+    index: usize,
+};
+
+pub fn lengthIndexValue(index: usize) core.JSValue {
+    if (index <= @as(usize, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(index));
+    return core.JSValue.float64(@floatFromInt(index));
+}
+
+pub const LengthIndexAtom = struct {
+    atom: core.Atom,
+    owned: bool,
+
+    pub fn deinit(self: LengthIndexAtom, rt: *core.JSRuntime) void {
+        if (self.owned) rt.atoms.free(self.atom);
+    }
+};

@@ -257,9 +257,9 @@ pub const JSContext = struct {
 
     pub fn getPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.shared.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
-        return exec.shared.getValueProperty(&self.core, options.output, global, val, key, null, null);
+        return exec.object_ops.getValueProperty(&self.core, options.output, global, val, key, null, null);
     }
 
     pub fn deleteProperty(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
@@ -270,7 +270,7 @@ pub const JSContext = struct {
 
     pub fn deletePropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.shared.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
         return self.deletePropertyAtom(val, key, .{ .output = options.output, .realm_global = global });
     }
@@ -283,21 +283,21 @@ pub const JSContext = struct {
 
     pub fn hasOwnPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.shared.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
         return self.hasOwnPropertyAtom(val, key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn ownPropertyDescriptor(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
         const global = options.realm_global orelse try self.globalObject();
-        const key = try exec.shared.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
+        const key = try exec.object_ops.toPropertyKeyAtom(&self.core, options.output, global, property_key, null, null);
         defer self.core.runtime.atoms.free(key);
         return self.ownPropertyDescriptorAtom(val, key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn toString(self: *JSContext, val: JSValue) !JSValue {
         const global = try self.globalObject();
-        return exec.shared.toStringForAnnexB(&self.core, null, global, val, null, null);
+        return exec.string_ops.toStringForAnnexB(&self.core, null, global, val, null, null);
     }
 
     pub fn toOwnedUtf8(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
@@ -309,7 +309,7 @@ pub const JSContext = struct {
 
     pub fn toNumber(self: *JSContext, val: JSValue) !f64 {
         const global = try self.globalObject();
-        const primitive = try exec.shared.toPrimitiveForNumber(&self.core, null, global, val);
+        const primitive = try exec.coercion_ops.toPrimitiveForNumber(&self.core, null, global, val);
         defer primitive.free(self.core.runtime);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try exec.value_ops.toNumberValue(self.core.runtime, primitive);
@@ -326,11 +326,11 @@ pub const JSContext = struct {
 
     pub fn isCallable(self: *JSContext, val: JSValue) bool {
         _ = self;
-        return exec.shared.isCallableValue(val);
+        return exec.call_runtime.isCallableValue(val);
     }
 
     pub fn isConstructor(self: *JSContext, val: JSValue) bool {
-        return exec.shared.isConstructorLike(&self.core, val);
+        return exec.call_runtime.isConstructorLike(&self.core, val);
     }
 
     pub fn functionName(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
@@ -343,14 +343,14 @@ pub const JSContext = struct {
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
         const this_value = options.this_value orelse JSValue.undefinedValue();
-        return exec.shared.callValueOrBytecode(&self.core, options.output, global, this_value, callee, args, null, null);
+        return exec.call_runtime.callValueOrBytecode(&self.core, options.output, global, this_value, callee, args, null, null);
     }
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
-        const error_value = try exec.shared.createNamedError(self.core.runtime, global, name, message);
+        const error_value = try exec.exception_ops.createNamedError(self.core.runtime, global, name, message);
         errdefer error_value.free(self.core.runtime);
-        if (options.capture_stack) try exec.shared.attachStackToErrorValue(&self.core, global, error_value);
+        if (options.capture_stack) try exec.call_runtime.attachStackToErrorValue(&self.core, global, error_value);
         return error_value;
     }
 
@@ -365,7 +365,7 @@ pub const JSContext = struct {
 
     pub fn pendingExceptionMatchesErrorName(self: *JSContext, expected_name: []const u8) !bool {
         if (!self.hasException()) return false;
-        return exec.shared.thrownValueMatchesConstructor(self.core.runtime, self.core.exception_slot.value, expected_name);
+        return exec.string_ops.thrownValueMatchesConstructor(self.core.runtime, self.core.exception_slot.value, expected_name);
     }
 
     pub fn consumePendingExceptionIfErrorName(self: *JSContext, expected_name: []const u8) !bool {
@@ -423,13 +423,13 @@ pub const JSContext = struct {
     fn deletePropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {
         const object = try Object.expect(val);
         const global = options.realm_global orelse try self.globalObject();
-        return exec.shared.deleteValueProperty(&self.core, options.output, global, val, object, property_name, null, null);
+        return exec.object_ops.deleteValueProperty(&self.core, options.output, global, val, object, property_name, null, null);
     }
 
     fn ownPropertyDescriptorAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
         const object = try Object.expect(val);
         const global = options.realm_global orelse try self.globalObject();
-        var desc = try exec.shared.proxyAwareOwnPropertyDescriptor(&self.core, options.output, global, object, property_name, null, null) orelse {
+        var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(&self.core, options.output, global, object, property_name, null, null) orelse {
             if (object.flags.is_global and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
                 return Descriptor.data(object.value().dup(), true, false, true);
             }
@@ -469,7 +469,7 @@ pub const JSContext = struct {
     pub fn functionRealmGlobal(self: *JSContext, function_value: JSValue) !?*Object {
         _ = self;
         const function_object = try Object.expect(function_value);
-        return exec.shared.objectRealmGlobal(function_object);
+        return exec.object_ops.objectRealmGlobal(function_object);
     }
 
     pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {

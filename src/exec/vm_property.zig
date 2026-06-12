@@ -6,7 +6,11 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ic = @import("property_ic.zig");
 const property_ops = @import("property_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const call_mod = @import("call.zig");
+const object_ops = @import("object_ops.zig");
+const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -408,7 +412,7 @@ pub fn bindingStoreWritableForFastPath(
         }
         if (slot.isUninitialized()) return false;
         if (binding.idx < function.var_ref_is_const.len and function.var_ref_is_const[binding.idx]) return false;
-        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and shared_vm.globalLexicalHas(ctx, function.var_ref_names[binding.idx])) return false;
+        if (binding.opc == op.put_var_ref_check and binding.idx < function.var_ref_names.len and call_runtime.globalLexicalHas(ctx, function.var_ref_names[binding.idx])) return false;
         return true;
     }
     if (binding.idx >= frame.locals.len or binding.idx >= frame.locals_uninit.len) return false;
@@ -429,10 +433,10 @@ pub fn storeBindingOwnedValue(
     sync_global_lexical_locals: bool,
 ) !void {
     if (binding.is_var_ref) {
-        try shared_vm.setSlotValue(ctx, &frame.var_refs[binding.idx], value);
+        try slot_ops.setSlotValue(ctx, &frame.var_refs[binding.idx], value);
     } else {
-        try shared_vm.setSlotValue(ctx, &frame.locals[binding.idx], value);
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], value);
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
@@ -446,8 +450,8 @@ pub fn storeLocalCompletionBorrowedValue(
     sync_global_lexical_locals: bool,
 ) !void {
     if (completion_put) |completion| {
-        try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], value.dup());
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], value.dup());
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
     }
 }
 
@@ -457,7 +461,7 @@ fn varRefGlobalLexicalWritable(
     var_ref_idx: u16,
 ) bool {
     if (var_ref_idx >= function.var_ref_names.len) return false;
-    const env = shared_vm.existingGlobalLexicalEnv(ctx) orelse return false;
+    const env = call_runtime.existingGlobalLexicalEnv(ctx) orelse return false;
     const desc = env.getOwnProperty(function.var_ref_names[var_ref_idx]) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
 }
@@ -644,7 +648,7 @@ pub fn varRefStoreWritableForFastPath(
     }
     if (slot.isUninitialized()) return false;
     if (store.opc == op.put_var_ref_check) {
-        if (store.idx < function.var_ref_names.len and shared_vm.globalLexicalHas(ctx, function.var_ref_names[store.idx])) return false;
+        if (store.idx < function.var_ref_names.len and call_runtime.globalLexicalHas(ctx, function.var_ref_names[store.idx])) return false;
         if (store.idx < function.var_ref_is_const.len and function.var_ref_is_const[store.idx]) return false;
     }
     return true;
@@ -652,26 +656,26 @@ pub fn varRefStoreWritableForFastPath(
 
 pub fn simpleNumericFunctionResult(rt: *core.JSRuntime, func: core.JSValue, args: []const core.JSValue) !?core.JSValue {
     if (func.isFunctionBytecode()) {
-        const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
+        const fb = call_runtime.functionBytecodeFromValue(func) orelse return null;
         return try simpleNumericBytecodeResult(rt, fb, args, &.{});
     }
-    const object = shared_vm.functionObjectFromValue(func) orelse return null;
+    const object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = shared_vm.functionBytecodeFromValue(function_value) orelse return null;
+    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     return try simpleNumericBytecodeResult(rt, fb, args, object.functionCapturesSlot().*);
 }
 
 pub fn simpleNumericRangeCallable(func: core.JSValue) ?SimpleNumericRangeCall {
     const callable: SimpleNumericRangeSource = if (func.isFunctionBytecode())
         SimpleNumericRangeSource{
-            .fb = shared_vm.functionBytecodeFromValue(func) orelse return null,
+            .fb = call_runtime.functionBytecodeFromValue(func) orelse return null,
             .captures = @as([]const core.JSValue, &.{}),
         }
     else blk: {
-        const object = shared_vm.functionObjectFromValue(func) orelse return null;
+        const object = object_ops.functionObjectFromValue(func) orelse return null;
         const function_value = object.functionBytecodeSlot().* orelse return null;
         break :blk SimpleNumericRangeSource{
-            .fb = shared_vm.functionBytecodeFromValue(function_value) orelse return null,
+            .fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null,
             .captures = @as([]const core.JSValue, object.functionCapturesSlot().*),
         };
     };
@@ -954,7 +958,7 @@ pub fn fastGlobalDataValueForAtomAtPc(
     eval_with_object: core.JSValue,
 ) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -974,7 +978,7 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
 ) ?core.JSValue {
     if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
     if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
-    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -1132,8 +1136,8 @@ pub fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
         else => unreachable,
     };
 
-    try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = target_pc;
     _ = fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchAtPc, tryFuseLocalInt32LessThanArgFalseBranchAtPc(function, frame, target_pc));
     return true;
@@ -1229,12 +1233,12 @@ pub const UriFourByteRangePlan = struct {
 
 pub fn simpleStringCallableKind(func: core.JSValue) ?bytecode.function.SimpleStringKind {
     if (func.isFunctionBytecode()) {
-        const fb = shared_vm.functionBytecodeFromValue(func) orelse return null;
+        const fb = call_runtime.functionBytecodeFromValue(func) orelse return null;
         return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
     }
-    const object = shared_vm.functionObjectFromValue(func) orelse return null;
+    const object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = object.functionBytecodeSlot().* orelse return null;
-    const fb = shared_vm.functionBytecodeFromValue(function_value) orelse return null;
+    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     return if (fb.simple_string_kind == .none) null else fb.simple_string_kind;
 }
 
@@ -1293,18 +1297,7 @@ pub const UriStrictEqBranch = struct {
 };
 
 // --- With-statement and reference opcode handlers moved to vm_property_ref.zig ---
-pub const vm_property_ref = @import("vm_property_ref.zig");
-pub const withGetOrDelete = vm_property_ref.withGetOrDelete;
-pub const makeSlotRef = vm_property_ref.makeSlotRef;
-pub const makeVarRef = vm_property_ref.makeVarRef;
-pub const makeVarRefVm = vm_property_ref.makeVarRefVm;
-pub const getRefValue = vm_property_ref.getRefValue;
-pub const getRefValueVm = vm_property_ref.getRefValueVm;
-pub const putRefValue = vm_property_ref.putRefValue;
-pub const putRefValueVm = vm_property_ref.putRefValueVm;
-pub const withPut = vm_property_ref.withPut;
-pub const deleteVar = vm_property_ref.deleteVar;
-pub const deletePropertyVm = vm_property_ref.deletePropertyVm;
+const vm_property_ref = @import("vm_property_ref.zig");
 
 pub fn decodeGlobalDataGet(code: []const u8, pc: usize) ?GlobalBindingGet {
     if (pc + 5 > code.len) return null;
@@ -1326,17 +1319,11 @@ pub fn hasObjectBinding(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
 ) !bool {
-    return shared_vm.hasValueProperty(ctx, output, global, receiver, object, atom_id, function, frame);
+    return object_ops.hasValueProperty(ctx, output, global, receiver, object, atom_id, function, frame);
 }
 
 // --- Private-field opcode handlers moved to vm_property_private.zig ---
-pub const vm_property_private = @import("vm_property_private.zig");
-pub const getPrivateField = vm_property_private.getPrivateField;
-pub const getPrivateFieldVm = vm_property_private.getPrivateFieldVm;
-pub const putPrivateField = vm_property_private.putPrivateField;
-pub const putPrivateFieldVm = vm_property_private.putPrivateFieldVm;
-pub const definePrivateField = vm_property_private.definePrivateField;
-pub const definePrivateFieldVm = vm_property_private.definePrivateFieldVm;
+const vm_property_private = @import("vm_property_private.zig");
 
 pub fn tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(
     ctx: *core.JSContext,
@@ -1405,16 +1392,16 @@ pub fn storeStringSliceConstLocal(
     decoded: StringSliceConstLocalStore,
     sync_global_lexical_locals: bool,
 ) !void {
-    const result = try shared_vm.stringSliceValue(ctx.runtime, receiver, decoded.start, decoded.len);
+    const result = try string_ops.stringSliceValue(ctx.runtime, receiver, decoded.start, decoded.len);
     var result_owned = true;
     errdefer if (result_owned) result.free(ctx.runtime);
 
-    try shared_vm.setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
+    try slot_ops.setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
     result_owned = false;
     if (decoded.store.idx < function.var_is_lexical.len and function.var_is_lexical[decoded.store.idx]) {
         frame.clearLocalUninitialized(decoded.store.idx);
     }
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
     frame.pc = decoded.store.operand_pc + decoded.store.consume;
 }
 
@@ -1491,7 +1478,7 @@ pub const NumberStaticLiteralResult = struct {
 pub fn isHostOutputFunctionValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     return object.hostFunctionKindSlot().* == core.host_function.ids.output or
-        shared_vm.isOutputExternalHostFunction(rt, object);
+        call_mod.isOutputExternalHostFunction(rt, object);
 }
 
 pub fn atomAsciiText(rt: *core.JSRuntime, atom_id: core.Atom, buffer: []u8) ?[]const u8 {
@@ -1554,7 +1541,7 @@ pub fn canUseInstalledGlobalDataIc(
 }
 
 pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
-    if (shared_vm.atomIdOrNameEql(rt, function.name, atom_id)) return true;
+    if (call_runtime.atomIdOrNameEql(rt, function.name, atom_id)) return true;
     if (functionHasDynamicScopeBindings(function, frame)) return true;
     if (functionLocalOrArgBindingShadowsGlobal(rt, function, frame, atom_id)) return true;
     if (parentFunctionEvalBindingShadowsGlobal(rt, frame, atom_id)) return true;
@@ -1573,11 +1560,11 @@ fn functionHasDynamicScopeBindings(function: *const bytecode.Bytecode, frame: *c
 fn functionLocalOrArgBindingShadowsGlobal(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
     const arg_count = @min(function.arg_names.len, frame.args.len);
     for (function.arg_names[0..arg_count]) |name| {
-        if (shared_vm.atomIdOrNameEql(rt, name, atom_id)) return true;
+        if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
     }
     const local_count = @min(function.var_names.len, frame.locals.len);
     for (function.var_names[0..local_count]) |name| {
-        if (shared_vm.atomIdOrNameEql(rt, name, atom_id)) return true;
+        if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
     }
     return false;
 }
@@ -1590,7 +1577,7 @@ fn parentFunctionEvalBindingShadowsGlobal(rt: *core.JSRuntime, frame: *const fra
     const refs = parent_object.functionEvalLocalRefsSlot().*;
     const count = @min(names.len, refs.len);
     for (names[0..count]) |name| {
-        if (shared_vm.atomIdOrNameEql(rt, name, atom_id)) return true;
+        if (call_runtime.atomIdOrNameEql(rt, name, atom_id)) return true;
     }
     return false;
 }
@@ -1740,7 +1727,7 @@ pub fn fastStringPrototypeMethodIsDefault(rt: *core.JSRuntime, global: *core.Obj
         else => return false,
     };
     if (!value_ops.atomNameEql(rt, atom_id, expected_name)) return false;
-    const proto = shared_vm.constructorPrototypeFromGlobalAtom(rt, global, atom_string) orelse return false;
+    const proto = object_ops.constructorPrototypeFromGlobalAtom(rt, global, atom_string) orelse return false;
     return ownPrototypeEntryIsNativeBuiltinDefault(proto, atom_id, .string, expected_id);
 }
 
@@ -1803,30 +1790,10 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 }
 
 // --- Global variable read/write/define opcode handlers moved to vm_property_globals.zig ---
-pub const vm_property_globals = @import("vm_property_globals.zig");
-pub const getVar = vm_property_globals.getVar;
-pub const putVar = vm_property_globals.putVar;
-pub const globalDefinition = vm_property_globals.globalDefinition;
-pub const tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch = vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch;
-pub const tryFuseGlobalInt32PrefixTermsStore = vm_property_globals.tryFuseGlobalInt32PrefixTermsStore;
-pub const tryFuseAtomPercentHexGlobalStringStore = vm_property_globals.tryFuseAtomPercentHexGlobalStringStore;
+const vm_property_globals = @import("vm_property_globals.zig");
 
 // --- Local/arg/var-ref slot opcode handlers moved to vm_property_locals.zig ---
-pub const vm_property_locals = @import("vm_property_locals.zig");
-pub const loc = vm_property_locals.loc;
-pub const arg = vm_property_locals.arg;
-pub const checkedLocVm = vm_property_locals.checkedLocVm;
-pub const varRef = vm_property_locals.varRef;
-pub const varRefVm = vm_property_locals.varRefVm;
-pub const closeLoc = vm_property_locals.closeLoc;
+const vm_property_locals = @import("vm_property_locals.zig");
 
 // --- Property field and array-element opcode handlers moved to vm_property_field.zig ---
-pub const vm_property_field = @import("vm_property_field.zig");
-pub const toPropKey = vm_property_field.toPropKey;
-pub const toPropKeyVm = vm_property_field.toPropKeyVm;
-pub const toPropKey2 = vm_property_field.toPropKey2;
-pub const toPropKey2Vm = vm_property_field.toPropKey2Vm;
-pub const setName = vm_property_field.setName;
-pub const field = vm_property_field.field;
-pub const arrayElement = vm_property_field.arrayElement;
-pub const inOrInstanceof = vm_property_field.inOrInstanceof;
+const vm_property_field = @import("vm_property_field.zig");

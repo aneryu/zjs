@@ -5,7 +5,8 @@ const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
 
 const property_vm = @import("vm_property.zig");
@@ -23,9 +24,9 @@ pub fn getPrivateField(
     defer key.free(ctx.runtime);
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
-    const atom_id = try shared_vm.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
-    const value = try shared_vm.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
+    const value = try object_ops.getValueProperty(ctx, output, global, obj, atom_id, function, frame);
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
 }
@@ -40,7 +41,7 @@ pub fn getPrivateFieldVm(
     catch_target: *?usize,
 ) !Step {
     getPrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -60,9 +61,9 @@ pub fn putPrivateField(
     defer value.free(ctx.runtime);
     const obj = try stack.pop();
     defer obj.free(ctx.runtime);
-    const atom_id = try shared_vm.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
-    const result = try shared_vm.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
+    const result = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
     result.free(ctx.runtime);
 }
 
@@ -76,7 +77,7 @@ pub fn putPrivateFieldVm(
     catch_target: *?usize,
 ) !Step {
     putPrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -97,9 +98,9 @@ pub fn definePrivateField(
     const obj = stack.peek() orelse return error.StackUnderflow;
     defer obj.free(ctx.runtime);
     const object = try property_ops.expectObject(obj);
-    const atom_id = try shared_vm.toPropertyKeyAtom(ctx, output, global, key, function, frame);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
     defer ctx.runtime.atoms.free(atom_id);
-    try shared_vm.defineClassFieldDataProperty(ctx.runtime, object, atom_id, value);
+    try object_ops.defineClassFieldDataProperty(ctx.runtime, object, atom_id, value);
 }
 
 pub fn definePrivateFieldVm(
@@ -112,7 +113,7 @@ pub fn definePrivateFieldVm(
     catch_target: *?usize,
 ) !Step {
     definePrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

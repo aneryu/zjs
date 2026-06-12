@@ -6,7 +6,10 @@ const core = @import("../core/root.zig");
 const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const object_ops = @import("object_ops.zig");
+const string_ops = @import("string_ops.zig");
 const HostError = exceptions.HostError;
 
 const JsonSourceCollectError = std.mem.Allocator.Error;
@@ -94,7 +97,7 @@ pub fn qjsJsonParseCall(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    text = try shared_vm.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+    text = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
     defer {
         const owned_text = text;
         text = core.JSValue.undefinedValue();
@@ -106,7 +109,7 @@ pub fn qjsJsonParseCall(
         parsed = core.JSValue.undefinedValue();
         owned_parsed.free(ctx.runtime);
     }
-    if (!shared_vm.isCallableValue(reviver)) return parsed;
+    if (!call_runtime.isCallableValue(reviver)) return parsed;
 
     var text_bytes = std.ArrayList(u8).empty;
     defer text_bytes.deinit(ctx.runtime.memory.allocator);
@@ -115,7 +118,7 @@ pub fn qjsJsonParseCall(
     defer primitive_sources.deinit(ctx.runtime.memory.allocator);
     try qjsJsonCollectPrimitiveSources(ctx.runtime.memory.allocator, text_bytes.items, &primitive_sources);
 
-    const holder = try core.Object.create(ctx.runtime, core.class.ids.object, shared_vm.objectPrototypeFromGlobal(ctx.runtime, global));
+    const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
     defer {
         const owned_holder = holder_value;
@@ -202,18 +205,18 @@ pub fn qjsJsonInternalizeProperty(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    value = try shared_vm.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
+    value = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
     defer {
         const owned_value = value;
         value = core.JSValue.undefinedValue();
         owned_value.free(ctx.runtime);
     }
 
-    if (shared_vm.objectFromValue(value)) |object| {
+    if (object_ops.objectFromValue(value)) |object| {
         if (try builtins.array.isArrayValue(value)) {
-            const length_value = try shared_vm.getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
+            const length_value = try object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
             defer length_value.free(ctx.runtime);
-            const length = try shared_vm.toLengthIndex(ctx, output, global, length_value);
+            const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
             var index: usize = 0;
             var child_infos = std.ArrayList(JsonInternalizeChildInfo).empty;
             defer {
@@ -235,8 +238,8 @@ pub fn qjsJsonInternalizeProperty(
             ctx.runtime.active_value_roots = &child_root_frame;
             defer ctx.runtime.active_value_roots = child_root_frame.previous;
             while (index < length) : (index += 1) {
-                const child_key = try shared_vm.propertyAtomFromLengthIndex(ctx.runtime, index);
-                scratch_value = try shared_vm.getValueProperty(ctx, output, global, value, child_key.atom, caller_function, caller_frame);
+                const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
+                scratch_value = try object_ops.getValueProperty(ctx, output, global, value, child_key.atom, caller_function, caller_frame);
                 const original_index = child_values.items.len;
                 child_values.append(ctx.runtime.memory.allocator, scratch_value) catch |err| {
                     const failed_child = scratch_value;
@@ -264,7 +267,7 @@ pub fn qjsJsonInternalizeProperty(
                 try qjsJsonInternalizeChild(ctx, output, global, value, object, info.key, rooted_reviver, source_cursor, child_values.items[info.original_index], info.source_count, caller_function, caller_frame);
             }
         } else {
-            const keys = try shared_vm.objectRestOwnKeys(ctx, output, global, object);
+            const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
             defer core.Object.freeKeys(ctx.runtime, keys);
             var child_infos = std.ArrayList(JsonInternalizeChildInfo).empty;
             defer {
@@ -287,10 +290,10 @@ pub fn qjsJsonInternalizeProperty(
             defer ctx.runtime.active_value_roots = child_root_frame.previous;
             for (keys) |child_key| {
                 if (ctx.runtime.atoms.kind(child_key) == .symbol) continue;
-                const desc = try shared_vm.objectRestOwnPropertyDescriptor(ctx, output, global, object, child_key) orelse continue;
+                const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, child_key) orelse continue;
                 defer desc.destroy(ctx.runtime);
                 if (desc.enumerable != true) continue;
-                scratch_value = try shared_vm.getValueProperty(ctx, output, global, value, child_key, caller_function, caller_frame);
+                scratch_value = try object_ops.getValueProperty(ctx, output, global, value, child_key, caller_function, caller_frame);
                 const original_index = child_values.items.len;
                 child_values.append(ctx.runtime.memory.allocator, scratch_value) catch |err| {
                     const failed_child = scratch_value;
@@ -327,7 +330,7 @@ pub fn qjsJsonInternalizeProperty(
         context_value = core.JSValue.undefinedValue();
         owned_context.free(ctx.runtime);
     }
-    const result = try shared_vm.callValueOrBytecode(ctx, output, global, rooted_holder_value, rooted_reviver, &.{ key_value, value, context_value }, caller_function, caller_frame);
+    const result = try call_runtime.callValueOrBytecode(ctx, output, global, rooted_holder_value, rooted_reviver, &.{ key_value, value, context_value }, caller_function, caller_frame);
     if (result.same(value) or result.same(key_value) or result.same(rooted_holder_value)) {
         const duplicated = result.dup();
         result.free(ctx.runtime);
@@ -371,7 +374,7 @@ pub fn qjsJsonInternalizeChild(
 
     var child_source_cursor = source_cursor;
     if (source_count != 0) {
-        current = try shared_vm.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
+        current = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
         defer {
             const owned_current = current;
             current = core.JSValue.undefinedValue();
@@ -389,7 +392,7 @@ pub fn qjsJsonInternalizeChild(
         owned_revived.free(ctx.runtime);
     }
     if (revived.isUndefined()) {
-        _ = try shared_vm.deleteValueProperty(ctx, output, global, rooted_holder_value, holder, key, caller_function, caller_frame);
+        _ = try object_ops.deleteValueProperty(ctx, output, global, rooted_holder_value, holder, key, caller_function, caller_frame);
     } else {
         try qjsJsonCreateDataProperty(ctx, output, global, rooted_holder_value, holder, key, revived, caller_function, caller_frame);
     }
@@ -411,14 +414,14 @@ fn qjsJsonReviverContext(rt: *core.JSRuntime, global: *core.Object, value: core.
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.create(rt, core.class.ids.object, shared_vm.objectPrototypeFromGlobal(rt, global));
+    const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
     object_value = object.value();
     errdefer {
         const failed_object = object_value;
         object_value = core.JSValue.undefinedValue();
         failed_object.free(rt);
     }
-    if (shared_vm.objectFromValue(rooted_value) == null) {
+    if (object_ops.objectFromValue(rooted_value) == null) {
         if (source_cursor) |cursor| {
             if (cursor.next()) |source| {
                 source_value = try value_ops.createStringValue(rt, source);
@@ -453,12 +456,12 @@ fn qjsJsonSourceCountForValue(rt: *core.JSRuntime, value: core.JSValue) !usize {
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = shared_vm.objectFromValue(rooted_value) orelse return 1;
+    const object = object_ops.objectFromValue(rooted_value) orelse return 1;
     var count: usize = 0;
     if (object.flags.is_array) {
         var index: usize = 0;
         while (index < object.length) : (index += 1) {
-            const key = try shared_vm.propertyAtomFromLengthIndex(rt, index);
+            const key = try object_ops.propertyAtomFromLengthIndex(rt, index);
             defer deinitLengthIndexAtom(rt, key);
             child = object.getProperty(key.atom);
             defer {
@@ -613,7 +616,7 @@ pub fn qjsJsonCreateDataProperty(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     if (holder.proxyTarget() != null) {
-        shared_vm.createDataPropertyOrThrow(ctx, output, global, rooted_holder_value, holder, key, rooted_value, caller_function, caller_frame) catch |err| switch (err) {
+        object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_holder_value, holder, key, rooted_value, caller_function, caller_frame) catch |err| switch (err) {
             error.TypeError => return,
             else => return err,
         };
@@ -665,7 +668,7 @@ pub fn qjsJsonStringifyCall(
         .gap = gap.items,
     };
 
-    const holder = try core.Object.create(ctx.runtime, core.class.ids.object, shared_vm.objectPrototypeFromGlobal(ctx.runtime, global));
+    const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
     defer {
         const owned_holder = holder_value;
@@ -792,11 +795,11 @@ fn qjsJsonAppendSimpleValue(
     }
     if (value.isBigInt()) return .fallback;
 
-    const object = shared_vm.objectFromValue(value) orelse {
+    const object = object_ops.objectFromValue(value) orelse {
         try buffer.appendSlice(rt.memory.allocator, "null");
         return .appended;
     };
-    if (shared_vm.isCallableValue(value)) return .fallback;
+    if (call_runtime.isCallableValue(value)) return .fallback;
     if (!qjsJsonSimplePrototypeChainHasNoToJSON(object)) return .fallback;
     if (object.flags.is_array) return try qjsJsonAppendSimpleArray(rt, global, buffer, object, stack);
     return try qjsJsonAppendSimpleObject(rt, global, buffer, object, stack);
@@ -940,15 +943,15 @@ pub fn qjsJsonStringifyPropertyList(
         list.deinit(ctx.runtime.memory.allocator);
     }
 
-    const length_value = try shared_vm.getValueProperty(ctx, output, global, rooted_replacer, core.atom.ids.length, caller_function, caller_frame);
+    const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
-    const length = try shared_vm.toLengthIndex(ctx, output, global, length_value);
+    const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
 
     var index: usize = 0;
     while (index < length) : (index += 1) {
-        const index_key = try shared_vm.propertyAtomFromLengthIndex(ctx.runtime, index);
+        const index_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
         defer deinitLengthIndexAtom(ctx.runtime, index_key);
-        item = try shared_vm.getValueProperty(ctx, output, global, rooted_replacer, index_key.atom, caller_function, caller_frame);
+        item = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, index_key.atom, caller_function, caller_frame);
         defer {
             const owned_item = item;
             item = core.JSValue.undefinedValue();
@@ -995,7 +998,7 @@ fn qjsJsonStringifyPropertyListAtom(
         qjsJsonIsStringOrNumberObject(rooted_value);
     if (!needs_string) return null;
 
-    string_value = try shared_vm.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
+    string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
     defer {
         const owned_string = string_value;
         string_value = core.JSValue.undefinedValue();
@@ -1007,7 +1010,7 @@ fn qjsJsonStringifyPropertyListAtom(
 }
 
 fn qjsJsonIsStringOrNumberObject(value: core.JSValue) bool {
-    const object = shared_vm.objectFromValue(value) orelse return false;
+    const object = object_ops.objectFromValue(value) orelse return false;
     return object.class_id == core.class.ids.string or object.class_id == core.class.ids.number;
 }
 
@@ -1045,9 +1048,9 @@ pub fn qjsJsonStringifyGap(
 
     var out = std.ArrayList(u8).empty;
     if (rooted_space.isObject()) {
-        if (shared_vm.objectFromValue(rooted_space)) |object| {
+        if (object_ops.objectFromValue(rooted_space)) |object| {
             if (object.class_id == core.class.ids.number) {
-                primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, rooted_space);
+                primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rooted_space);
                 defer {
                     const owned_primitive = primitive;
                     primitive = core.JSValue.undefinedValue();
@@ -1061,7 +1064,7 @@ pub fn qjsJsonStringifyGap(
                 }
                 return qjsJsonStringifyGap(ctx, output, global, number_value, caller_function, caller_frame);
             } else if (object.class_id == core.class.ids.string) {
-                string_value = try shared_vm.toStringForAnnexB(ctx, output, global, rooted_space, caller_function, caller_frame);
+                string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_space, caller_function, caller_frame);
                 defer {
                     const owned_string = string_value;
                     string_value = core.JSValue.undefinedValue();
@@ -1126,7 +1129,7 @@ pub fn qjsJsonSerializeProperty(
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    value = try shared_vm.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
+    value = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
     defer {
         const owned_value = value;
         value = core.JSValue.undefinedValue();
@@ -1139,23 +1142,23 @@ pub fn qjsJsonSerializeProperty(
         owned_key.free(ctx.runtime);
     }
 
-    if (shared_vm.objectFromValue(value) != null or value.isBigInt()) {
-        to_json = try shared_vm.getValueProperty(ctx, output, global, value, core.atom.ids.toJSON, caller_function, caller_frame);
+    if (object_ops.objectFromValue(value) != null or value.isBigInt()) {
+        to_json = try object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.toJSON, caller_function, caller_frame);
         defer {
             const owned_to_json = to_json;
             to_json = core.JSValue.undefinedValue();
             owned_to_json.free(ctx.runtime);
         }
-        if (shared_vm.isCallableValue(to_json)) {
-            const next = try shared_vm.callValueOrBytecode(ctx, output, global, value, to_json, &.{key_value}, caller_function, caller_frame);
+        if (call_runtime.isCallableValue(to_json)) {
+            const next = try call_runtime.callValueOrBytecode(ctx, output, global, value, to_json, &.{key_value}, caller_function, caller_frame);
             const old_value = value;
             value = next;
             old_value.free(ctx.runtime);
         }
     }
 
-    if (shared_vm.isCallableValue(rooted_replacer)) {
-        const next = try shared_vm.callValueOrBytecode(ctx, output, global, rooted_holder_value, rooted_replacer, &.{ key_value, value }, caller_function, caller_frame);
+    if (call_runtime.isCallableValue(rooted_replacer)) {
+        const next = try call_runtime.callValueOrBytecode(ctx, output, global, rooted_holder_value, rooted_replacer, &.{ key_value, value }, caller_function, caller_frame);
         const old_value = value;
         value = next;
         old_value.free(ctx.runtime);
@@ -1217,7 +1220,7 @@ pub fn qjsJsonAppendValue(
         }
     } else if (rooted_value.isBigInt()) {
         return error.TypeError;
-    } else if (shared_vm.objectFromValue(rooted_value)) |object| {
+    } else if (object_ops.objectFromValue(rooted_value)) |object| {
         if (object.class_id == core.class.ids.raw_json) {
             raw = object.getProperty(core.atom.ids.rawJSON);
             defer {
@@ -1229,10 +1232,10 @@ pub fn qjsJsonAppendValue(
             defer raw_bytes.deinit(ctx.runtime.memory.allocator);
             try value_ops.appendRawString(ctx.runtime, &raw_bytes, raw);
             try buffer.appendSlice(ctx.runtime.memory.allocator, raw_bytes.items);
-        } else if (shared_vm.isCallableValue(rooted_value)) {
+        } else if (call_runtime.isCallableValue(rooted_value)) {
             try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
         } else if (object.class_id == core.class.ids.number) {
-            primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, rooted_value);
+            primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rooted_value);
             defer {
                 const owned_primitive = primitive;
                 primitive = core.JSValue.undefinedValue();
@@ -1246,7 +1249,7 @@ pub fn qjsJsonAppendValue(
             }
             try qjsJsonAppendValue(ctx, output, global, buffer, number_value, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.string) {
-            string_value = try shared_vm.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
+            string_value = try string_ops.toStringForAnnexB(ctx, output, global, rooted_value, caller_function, caller_frame);
             defer {
                 const owned_string = string_value;
                 string_value = core.JSValue.undefinedValue();
@@ -1262,7 +1265,7 @@ pub fn qjsJsonAppendValue(
             }
             try qjsJsonAppendValue(ctx, output, global, buffer, primitive, array_slot, stack, options, depth, caller_function, caller_frame);
         } else if (object.class_id == core.class.ids.big_int) {
-            primitive = shared_vm.primitiveWrapperStoredValue(ctx.runtime, rooted_value) orelse return error.TypeError;
+            primitive = coercion_ops.primitiveWrapperStoredValue(ctx.runtime, rooted_value) orelse return error.TypeError;
             defer {
                 const owned_primitive = primitive;
                 primitive = core.JSValue.undefinedValue();
@@ -1306,9 +1309,9 @@ pub fn qjsJsonAppendArray(
     if (qjsJsonObjectInStack(stack.items, object)) return error.TypeError;
     try stack.append(ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
-    const length_value = try shared_vm.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
+    const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
     defer length_value.free(ctx.runtime);
-    const length = try shared_vm.toLengthIndex(ctx, output, global, length_value);
+    const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
     try buffer.append(ctx.runtime.memory.allocator, '[');
     var index: usize = 0;
     while (index < length) : (index += 1) {
@@ -1317,7 +1320,7 @@ pub fn qjsJsonAppendArray(
             try buffer.append(ctx.runtime.memory.allocator, '\n');
             try qjsJsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
         }
-        const child_key = try shared_vm.propertyAtomFromLengthIndex(ctx.runtime, index);
+        const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
         defer deinitLengthIndexAtom(ctx.runtime, child_key);
         try qjsJsonSerializeProperty(ctx, output, global, buffer, rooted_value, object, child_key.atom, true, stack, options, depth + 1, caller_function, caller_frame);
     }
@@ -1356,14 +1359,14 @@ pub fn qjsJsonAppendObject(
     try stack.append(ctx.runtime.memory.allocator, object);
     defer _ = stack.pop();
     try buffer.append(ctx.runtime.memory.allocator, '{');
-    const owned_keys: []core.Atom = if (!options.has_property_list) try shared_vm.objectRestOwnKeys(ctx, output, global, object) else &.{};
+    const owned_keys: []core.Atom = if (!options.has_property_list) try object_ops.objectRestOwnKeys(ctx, output, global, object) else &.{};
     defer if (!options.has_property_list) core.Object.freeKeys(ctx.runtime, owned_keys);
     var enumerable_keys = std.ArrayList(core.Atom).empty;
     defer enumerable_keys.deinit(ctx.runtime.memory.allocator);
     if (!options.has_property_list) {
         for (owned_keys) |key| {
             if (ctx.runtime.atoms.kind(key) == .symbol) continue;
-            const desc = try shared_vm.objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
+            const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
             defer desc.destroy(ctx.runtime);
             if (desc.enumerable == true) try enumerable_keys.append(ctx.runtime.memory.allocator, key);
         }

@@ -6,21 +6,25 @@ const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
+const object_ops = @import("object_ops.zig");
+const utils = @import("vm_utils.zig");
 
-// Helpers that remain in shared.zig (generic runtime utilities outside the
+// Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // slot-operation cluster).
-const atomIdOrNameEql = shared_vm.atomIdOrNameEql;
-const ensureVarRefsCapacity = shared_vm.ensureVarRefsCapacity;
-const existingGlobalLexicalEnv = shared_vm.existingGlobalLexicalEnv;
-const globalLexicalHas = shared_vm.globalLexicalHas;
-const handleCatchableRuntimeError = shared_vm.handleCatchableRuntimeError;
-const isFunctionLikeClass = shared_vm.isFunctionLikeClass;
-const pushSlotValue = shared_vm.pushSlotValue;
-const sameObjectIdentity = shared_vm.sameObjectIdentity;
-const setGlobalLexicalValue = shared_vm.setGlobalLexicalValue;
-const throwTdzReference = shared_vm.throwTdzReference;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
+const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
+const ensureVarRefsCapacity = utils.ensureVarRefsCapacity;
+const existingGlobalLexicalEnv = call_runtime.existingGlobalLexicalEnv;
+const globalLexicalHas = call_runtime.globalLexicalHas;
+const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
+const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
+const pushSlotValue = array_ops.pushSlotValue;
+const sameObjectIdentity = object_ops.sameObjectIdentity;
+const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
+const throwTdzReference = exception_ops.throwTdzReference;
+const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
 
 const op = bytecode.opcode.op;
 

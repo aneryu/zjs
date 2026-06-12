@@ -202,16 +202,16 @@ pub const EventLoop = struct {
             } else {
                 self.removeTimerAt(ctx, index);
             }
-            if (exec.shared.objectFromValue(callback)) |promise| {
+            if (exec.object_ops.objectFromValue(callback)) |promise| {
                 if (promise.class_id == core.class.ids.promise) {
                     if (promise.promiseResultSlot().* == null) {
                         try promise.setPromiseResult(rt, zjs.JSValue.undefinedValue());
                     }
-                    try exec.shared.settlePendingPromiseReaction(&ctx.core, output, global, promise);
+                    try exec.promise_ops.settlePendingPromiseReaction(&ctx.core, output, global, promise);
                     return true;
                 }
             }
-            const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
+            const call_result = try exec.call_runtime.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
             call_result.free(rt);
             if (repeats and !self.timerExists(timer_id)) return true;
             return true;
@@ -343,14 +343,14 @@ pub const EventLoop = struct {
                 if ((pollfd.revents & (libc.POLLIN | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.read_callback.isNull()) {
                     const callback = handler.read_callback.dup();
                     defer callback.free(rt);
-                    const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
+                    const call_result = try exec.call_runtime.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
                     call_result.free(rt);
                     return true;
                 }
                 if ((pollfd.revents & (libc.POLLOUT | libc.POLLERR | libc.POLLHUP)) != 0 and !handler.write_callback.isNull()) {
                     const callback = handler.write_callback.dup();
                     defer callback.free(rt);
-                    const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
+                    const call_result = try exec.call_runtime.callValueOrBytecode(&ctx.core, output, global, global.value(), callback, &.{}, null, null);
                     call_result.free(rt);
                     return true;
                 }
@@ -431,7 +431,7 @@ pub const EventLoop = struct {
             os_pending_signals &= ~mask;
             const callback = handler.callback.dup();
             defer callback.free(rt);
-            const call_result = try exec.shared.callValueOrBytecode(&ctx.core, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
+            const call_result = try exec.call_runtime.callValueOrBytecode(&ctx.core, output, global, zjs.JSValue.undefinedValue(), callback, &.{}, null, null);
             call_result.free(rt);
             return true;
         }
@@ -683,7 +683,7 @@ test "EventLoop drains queued JS callbacks" {
     , .{});
     defer callback.free(rt);
 
-    try exec.shared.enqueuePendingMicrotask(&ctx.core, callback);
+    try exec.call_runtime.enqueuePendingMicrotask(&ctx.core, callback);
 
     const result = try loop.runUntilIdle();
     try std.testing.expect(!result.hasPendingError());

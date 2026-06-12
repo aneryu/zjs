@@ -6,12 +6,12 @@ pub fn cleanupAtomicsWaitersForContext(ctx: *zjs.JSContext) void {
 }
 
 pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *zjs.JSRuntime) void {
-    const shared = exec.shared;
-    const io = shared.atomicsWaiterIo();
-    shared.atomics_waiter_mutex.lockUncancelable(io);
-    defer shared.atomics_waiter_mutex.unlock(io);
+    const call_runtime = exec.call_runtime;
+    const io = call_runtime.atomicsWaiterIo();
+    call_runtime.atomics_waiter_mutex.lockUncancelable(io);
+    defer call_runtime.atomics_waiter_mutex.unlock(io);
 
-    var cursor = shared.atomics_waiters;
+    var cursor = call_runtime.atomics_waiters;
     while (cursor) |waiter| {
         if (waiter.ctx) |ctx| {
             if (ctx.runtime == primary or runtimeListContains(related, ctx.runtime)) {

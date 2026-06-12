@@ -6,7 +6,9 @@ const call_mod = @import("call.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
-const shared_vm = @import("shared.zig");
+const array_ops = @import("array_ops.zig");
+const object_ops = @import("object_ops.zig");
+const slot_ops = @import("slot_ops.zig");
 const frontend = @import("../frontend/root.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -297,8 +299,8 @@ pub fn initializeModuleFunctionDeclarations(
 
         const value = function.constants.get(constant_index) orelse return error.InvalidBytecode;
         defer value.free(ctx.runtime);
-        const function_value = try shared_vm.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true, &.{}, &.{}, &.{}, &.{}, &.{});
-        try shared_vm.setSlotValue(ctx, &frame.var_refs[ref_idx], function_value);
+        const function_value = try object_ops.createBytecodeFunctionObject(ctx, &frame, function, global, value, function.name, op.fclosure8, true, &.{}, &.{}, &.{}, &.{}, &.{});
+        try slot_ops.setSlotValue(ctx, &frame.var_refs[ref_idx], function_value);
     }
 }
 
@@ -681,7 +683,7 @@ fn atomLessThan(rt: *core.JSRuntime, lhs: core.Atom, rhs: core.Atom) bool {
 }
 
 fn moduleBindingCellValue(cell_value: core.JSValue) core.JSValue {
-    return shared_vm.slotValueDup(cell_value);
+    return slot_ops.slotValueDup(cell_value);
 }
 
 fn moduleExplicitNamespaceExportCell(ctx: *core.JSContext, record: *core.module.ModuleRecord, export_name: core.Atom) ModuleNamespaceError!core.JSValue {
@@ -901,12 +903,12 @@ fn setModuleBinding(ctx: *core.JSContext, record: *core.module.ModuleRecord, nam
 }
 
 fn syntheticBytesModuleValue(ctx: *core.JSContext, global: *core.Object, source_text: []const u8) !core.JSValue {
-    const value = try shared_vm.createUint8ArrayFromBytes(ctx.runtime, global, source_text);
+    const value = try array_ops.createUint8ArrayFromBytes(ctx.runtime, global, source_text);
     errdefer value.free(ctx.runtime);
-    const object = try shared_vm.expectUint8ArrayObject(value);
+    const object = try array_ops.expectUint8ArrayObject(value);
     const buffer_value = object.typedArrayBuffer() orelse return error.TypeError;
     const buffer = try property_ops.expectObject(buffer_value);
-    if (shared_vm.constructorPrototypeFromGlobal(ctx.runtime, global, "ArrayBuffer")) |prototype| {
+    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "ArrayBuffer")) |prototype| {
         try buffer.setPrototype(ctx.runtime, prototype);
     }
     try markImmutableArrayBuffer(ctx.runtime, buffer);
@@ -933,4 +935,21 @@ fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referr
     const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{ base, specifier });
     defer runtime.memory.allocator.free(resolved);
     return runtime.internAtom(resolved);
+}
+
+// import.meta.url synthesis (moved from the VM call runtime).
+
+pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord) !core.JSValue {
+    const name = rt.atoms.name(record.module_name) orelse "";
+    if (std.mem.startsWith(u8, name, "/") or std.mem.indexOfScalar(u8, name, '/') != null) {
+        const path = if (std.mem.startsWith(u8, name, "/"))
+            try rt.memory.allocator.dupe(u8, name)
+        else
+            try std.fs.path.resolve(rt.memory.allocator, &.{name});
+        defer rt.memory.allocator.free(path);
+        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{path});
+        defer rt.memory.allocator.free(url);
+        return value_ops.createStringValue(rt, url);
+    }
+    return value_ops.createStringValue(rt, name);
 }

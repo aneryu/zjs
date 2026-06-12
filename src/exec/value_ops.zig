@@ -1,4 +1,5 @@
 const bytecode = @import("../bytecode/root.zig");
+const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
@@ -1251,4 +1252,31 @@ fn powI32(lhs: i32, rhs: i32) i32 {
     var i: i32 = 0;
     while (i < rhs) : (i += 1) out *= lhs;
     return out;
+}
+
+// Strict equality over runtime values (moved from the VM call runtime).
+
+pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !bool {
+    if (a.isNumber() and b.isNumber()) {
+        const av = numberValue(a) orelse return false;
+        const bv = numberValue(b) orelse return false;
+        if (std.math.isNan(av) or std.math.isNan(bv)) return false;
+        return av == bv;
+    }
+    if (a.asBool()) |ab| {
+        if (b.asBool()) |bb| return ab == bb;
+    }
+    if (a.isNull() or a.isUndefined()) return a.same(b);
+    if (a.isBigInt() and b.isBigInt()) return builtins.object.sameValue(a, b);
+    if (a.isString() and b.isString()) {
+        if (a.same(b)) return true;
+        var a_bytes = std.ArrayList(u8).empty;
+        defer a_bytes.deinit(rt.memory.allocator);
+        var b_bytes = std.ArrayList(u8).empty;
+        defer b_bytes.deinit(rt.memory.allocator);
+        try appendRawString(rt, &a_bytes, a);
+        try appendRawString(rt, &b_bytes, b);
+        return std.mem.eql(u8, a_bytes.items, b_bytes.items);
+    }
+    return a.same(b);
 }

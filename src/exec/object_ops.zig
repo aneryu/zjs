@@ -20,131 +20,143 @@ const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
 const atom_byte_offset = core.atom.predefinedId("byteOffset", .string).?;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("vm_exception_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const module_mod = @import("module.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
+const eval_ops = @import("eval_ops.zig");
+const promise_ops = @import("promise_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const regexp_unicode = @import("../libs/regexp_unicode.zig");
+const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
+const utils = @import("vm_utils.zig");
 
 pub const Step = enum { done, continue_loop };
 
-// --- Dynamically gathered shared_vm aliases (excluding local definitions) ---
-const ActiveRootValueProbe = shared_vm.ActiveRootValueProbe;
-const DataViewConstructorArgs = shared_vm.DataViewConstructorArgs;
-const DynamicFunctionKind = shared_vm.DynamicFunctionKind;
-const IntegrityLevel = shared_vm.IntegrityLevel;
-const LengthIndexAtom = shared_vm.LengthIndexAtom;
-const RegExpMatch = shared_vm.RegExpMatch;
-const ValueSliceRoot = shared_vm.ValueSliceRoot;
-const addCollectionEntriesFromArray = shared_vm.addCollectionEntriesFromArray;
-const addCollectionEntriesFromIterator = shared_vm.addCollectionEntriesFromIterator;
-const aggregateErrorsIterableToArray = shared_vm.aggregateErrorsIterableToArray;
-const anchoredBinaryPropertyMatches = shared_vm.anchoredBinaryPropertyMatches;
-const appendDecodedRegExpGroupName = shared_vm.appendDecodedRegExpGroupName;
-const appendFunctionEvalLocal = shared_vm.appendFunctionEvalLocal;
-const appendOwnedAtom = shared_vm.appendOwnedAtom;
-const appendPrivateBoundName = shared_vm.appendPrivateBoundName;
-const arrayLengthAssignmentValue = shared_vm.arrayLengthAssignmentValue;
-const arrayLengthDefineValue = shared_vm.arrayLengthDefineValue;
-const arrayPrototypeFromGlobal = shared_vm.arrayPrototypeFromGlobal;
-const arrayPrototypeValuesFromGlobal = shared_vm.arrayPrototypeValuesFromGlobal;
-const asyncFunctionPrototypeFromGlobal = shared_vm.asyncFunctionPrototypeFromGlobal;
-const asyncGeneratorFunctionPrototypeFromGlobal = shared_vm.asyncGeneratorFunctionPrototypeFromGlobal;
-const asyncGeneratorPrototypeFromGlobal = shared_vm.asyncGeneratorPrototypeFromGlobal;
-const atomListContains = shared_vm.atomListContains;
-const callAccessorSetter = shared_vm.callAccessorSetter;
-const callSiteFunctionNameValue = shared_vm.callSiteFunctionNameValue;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const captureErrorStack = shared_vm.captureErrorStack;
-const closeIteratorForFromEntriesAbrupt = shared_vm.closeIteratorForFromEntriesAbrupt;
-const coerceOptionalNumberMethodArgument = shared_vm.coerceOptionalNumberMethodArgument;
-const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
-const createArrayFromArgs = shared_vm.createArrayFromArgs;
-const createIteratorResult = shared_vm.createIteratorResult;
-const createRegExpIndexPair = shared_vm.createRegExpIndexPair;
-const createRegExpMatchArrayFromValue = shared_vm.createRegExpMatchArrayFromValue;
-const createStringFromByteUnits = shared_vm.createStringFromByteUnits;
-const currentFrameFunctionIsStrict = shared_vm.currentFrameFunctionIsStrict;
-const defineNativeDataMethod = shared_vm.defineNativeDataMethod;
-const defineStringWrapperIndexProperty = shared_vm.defineStringWrapperIndexProperty;
-const derivedConstructorThisLocalSlot = shared_vm.derivedConstructorThisLocalSlot;
-const ensureLocalVarRefCell = shared_vm.ensureLocalVarRefCell;
-const ensureVarRefCell = shared_vm.ensureVarRefCell;
-const ensureVarRefsCapacity = shared_vm.ensureVarRefsCapacity;
-const evalBytecodeHasVarDeclarations = shared_vm.evalBytecodeHasVarDeclarations;
-const evalLocalSlotIsEvalVarCell = shared_vm.evalLocalSlotIsEvalVarCell;
-const exactScriptExtensionsAliasTarget = shared_vm.exactScriptExtensionsAliasTarget;
-const findPropertyEscapeMatch = shared_vm.findPropertyEscapeMatch;
-const findUnicodePropertyOnlyClassMatch = shared_vm.findUnicodePropertyOnlyClassMatch;
-const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
-const functionBytecodeHasClosureVarName = shared_vm.functionBytecodeHasClosureVarName;
-const functionBytecodeHasDirectEval = shared_vm.functionBytecodeHasDirectEval;
-const functionBytecodeUsesAtom = shared_vm.functionBytecodeUsesAtom;
-const functionBytecodeUsesImportMeta = shared_vm.functionBytecodeUsesImportMeta;
-const functionConstructorFromGlobal = shared_vm.functionConstructorFromGlobal;
-const functionNameValueFromAtom = shared_vm.functionNameValueFromAtom;
-const functionRealmGlobal = shared_vm.functionRealmGlobal;
-const functionRuntimeStrict = shared_vm.functionRuntimeStrict;
-const getFastStringPrimitiveDataProperty = shared_vm.getFastStringPrimitiveDataProperty;
-const getStringIndexValue = shared_vm.getStringIndexValue;
-const importMetaUrlValue = shared_vm.importMetaUrlValue;
-const installLexicalPrivateNameRemap = shared_vm.installLexicalPrivateNameRemap;
-const isBlockedByUnscopables = shared_vm.isBlockedByUnscopables;
-const isCallableValue = shared_vm.isCallableValue;
-const isConstructorLike = shared_vm.isConstructorLike;
-const isFunctionLikeClass = shared_vm.isFunctionLikeClass;
-const isUnknownScriptName = shared_vm.isUnknownScriptName;
-const iteratorForValue = shared_vm.iteratorForValue;
-const iteratorStepValue = shared_vm.iteratorStepValue;
-const lengthIndexValue = shared_vm.lengthIndexValue;
-const lookupFrameFirstEvalBindingValue = shared_vm.lookupFrameFirstEvalBindingValue;
-const lookupNamedSlotValue = shared_vm.lookupNamedSlotValue;
-const lookupNamedVarRef = shared_vm.lookupNamedVarRef;
-const mappedArgumentsValue = shared_vm.mappedArgumentsValue;
-const ordinarySetWithReceiver = shared_vm.ordinarySetWithReceiver;
-const qjsBigIntPrototypeToString = shared_vm.qjsBigIntPrototypeToString;
-const qjsCreateArrayDataOrTypedArrayElement = shared_vm.qjsCreateArrayDataOrTypedArrayElement;
-const qjsDefinePropertiesCall = shared_vm.qjsDefinePropertiesCall;
-const qjsDefinePropertiesOnTarget = shared_vm.qjsDefinePropertiesOnTarget;
-const qjsDefineToStringTag = shared_vm.qjsDefineToStringTag;
-const qjsDestructuringRest = shared_vm.qjsDestructuringRest;
-const qjsIteratorClose = shared_vm.qjsIteratorClose;
-const qjsObjectEntryArrayValue = shared_vm.qjsObjectEntryArrayValue;
-const qjsObjectToLocaleStringCall = shared_vm.qjsObjectToLocaleStringCall;
-const qjsObjectToStringCall = shared_vm.qjsObjectToStringCall;
-const qjsReflectConstructGenericCallable = shared_vm.qjsReflectConstructGenericCallable;
-const qjsRegExpAutoInitBuiltinMatches = shared_vm.qjsRegExpAutoInitBuiltinMatches;
-const qjsRegExpNativeBuiltinMatches = shared_vm.qjsRegExpNativeBuiltinMatches;
-const qjsWorkerNativeFunction = shared_vm.qjsWorkerNativeFunction;
-const readUtf16CodePoint = shared_vm.readUtf16CodePoint;
-const regExpConstructorFromGlobal = shared_vm.regExpConstructorFromGlobal;
-const regExpFlagsContain = shared_vm.regExpFlagsContain;
-const rejectModuleNamespaceSuperSet = shared_vm.rejectModuleNamespaceSuperSet;
-const remapPrivateAtomForOperation = shared_vm.remapPrivateAtomForOperation;
-const runGeneratorParameterInit = shared_vm.runGeneratorParameterInit;
-const setFailureShouldThrow = shared_vm.setFailureShouldThrow;
-const setMappedArgumentsValue = shared_vm.setMappedArgumentsValue;
-const shouldSkipDirectEvalLocalCapture = shared_vm.shouldSkipDirectEvalLocalCapture;
-const shouldSkipDirectEvalScopeCaptureName = shared_vm.shouldSkipDirectEvalScopeCaptureName;
-const slotValueDup = shared_vm.slotValueDup;
-const storeRealmValue = shared_vm.storeRealmValue;
-const stringObjectHasIndexProperty = shared_vm.stringObjectHasIndexProperty;
-const stringSliceValue = shared_vm.stringSliceValue;
-const throwPrivateBrandTypeError = shared_vm.throwPrivateBrandTypeError;
-const throwRangeErrorMessage = shared_vm.throwRangeErrorMessage;
-const throwSetFailureTypeError = shared_vm.throwSetFailureTypeError;
-const throwTypeErrorIntrinsicForGlobal = shared_vm.throwTypeErrorIntrinsicForGlobal;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
-const toLengthIndex = shared_vm.toLengthIndex;
-const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
-const toPrimitiveForString = shared_vm.toPrimitiveForString;
-const toStringForAnnexB = shared_vm.toStringForAnnexB;
-const typedArrayCanonicalGet = shared_vm.typedArrayCanonicalGet;
-const typedArrayCanonicalHas = shared_vm.typedArrayCanonicalHas;
-const typedArrayCanonicalOwnDescriptor = shared_vm.typedArrayCanonicalOwnDescriptor;
-const typedArrayCanonicalSet = shared_vm.typedArrayCanonicalSet;
-const typedArrayDefineOwnPropertyVm = shared_vm.typedArrayDefineOwnPropertyVm;
-const typedArrayOwnKeys = shared_vm.typedArrayOwnKeys;
-const typedArrayPrototypeSet = shared_vm.typedArrayPrototypeSet;
-const unicodePropertyRunCodePointMatches = shared_vm.unicodePropertyRunCodePointMatches;
-const valueTruthy = shared_vm.valueTruthy;
-const varRefCellFromValue = shared_vm.varRefCellFromValue;
+// --- Dynamically gathered call_runtime aliases (excluding local definitions) ---
+const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
+const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
+const DynamicFunctionKind = call_runtime.DynamicFunctionKind;
+const IntegrityLevel = call_runtime.IntegrityLevel;
+const LengthIndexAtom = array_ops.LengthIndexAtom;
+const RegExpMatch = string_ops.RegExpMatch;
+const ValueSliceRoot = array_ops.ValueSliceRoot;
+const addCollectionEntriesFromArray = array_ops.addCollectionEntriesFromArray;
+const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
+const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
+const anchoredBinaryPropertyMatches = string_ops.anchoredBinaryPropertyMatches;
+const appendDecodedRegExpGroupName = regexp_fastpath.appendDecodedRegExpGroupName;
+const appendFunctionEvalLocal = eval_ops.appendFunctionEvalLocal;
+const appendOwnedAtom = utils.appendOwnedAtom;
+const appendPrivateBoundName = call_runtime.appendPrivateBoundName;
+const arrayLengthAssignmentValue = array_ops.arrayLengthAssignmentValue;
+const arrayLengthDefineValue = array_ops.arrayLengthDefineValue;
+const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
+const arrayPrototypeValuesFromGlobal = array_ops.arrayPrototypeValuesFromGlobal;
+const asyncFunctionPrototypeFromGlobal = promise_ops.asyncFunctionPrototypeFromGlobal;
+const asyncGeneratorFunctionPrototypeFromGlobal = promise_ops.asyncGeneratorFunctionPrototypeFromGlobal;
+const asyncGeneratorPrototypeFromGlobal = promise_ops.asyncGeneratorPrototypeFromGlobal;
+const atomListContains = utils.atomListContains;
+const callAccessorSetter = call_runtime.callAccessorSetter;
+const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const captureErrorStack = error_stack_ops.captureErrorStack;
+const closeIteratorForFromEntriesAbrupt = call_runtime.closeIteratorForFromEntriesAbrupt;
+const coerceOptionalNumberMethodArgument = coercion_ops.coerceOptionalNumberMethodArgument;
+const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
+const createArrayFromArgs = array_ops.createArrayFromArgs;
+const createIteratorResult = call_runtime.createIteratorResult;
+const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
+const createRegExpMatchArrayFromValue = string_ops.createRegExpMatchArrayFromValue;
+const createStringFromByteUnits = string_ops.createStringFromByteUnits;
+const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
+const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
+const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
+const derivedConstructorThisLocalSlot = slot_ops.derivedConstructorThisLocalSlot;
+const ensureLocalVarRefCell = slot_ops.ensureLocalVarRefCell;
+const ensureVarRefCell = slot_ops.ensureVarRefCell;
+const ensureVarRefsCapacity = utils.ensureVarRefsCapacity;
+const evalBytecodeHasVarDeclarations = eval_ops.evalBytecodeHasVarDeclarations;
+const evalLocalSlotIsEvalVarCell = slot_ops.evalLocalSlotIsEvalVarCell;
+const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
+const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
+const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
+const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
+const functionBytecodeHasClosureVarName = eval_ops.functionBytecodeHasClosureVarName;
+const functionBytecodeHasDirectEval = eval_ops.functionBytecodeHasDirectEval;
+const functionBytecodeUsesAtom = eval_ops.functionBytecodeUsesAtom;
+const functionBytecodeUsesImportMeta = eval_ops.functionBytecodeUsesImportMeta;
+const functionConstructorFromGlobal = builtin_glue.functionConstructorFromGlobal;
+const functionNameValueFromAtom = call_runtime.functionNameValueFromAtom;
+const functionRealmGlobal = call_runtime.functionRealmGlobal;
+const functionRuntimeStrict = call_runtime.functionRuntimeStrict;
+const getFastStringPrimitiveDataProperty = string_ops.getFastStringPrimitiveDataProperty;
+const getStringIndexValue = string_ops.getStringIndexValue;
+const importMetaUrlValue = module_mod.importMetaUrlValue;
+const installLexicalPrivateNameRemap = call_runtime.installLexicalPrivateNameRemap;
+const isBlockedByUnscopables = call_runtime.isBlockedByUnscopables;
+const isCallableValue = call_runtime.isCallableValue;
+const isConstructorLike = call_runtime.isConstructorLike;
+const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
+const isUnknownScriptName = string_ops.isUnknownScriptName;
+const iteratorForValue = call_runtime.iteratorForValue;
+const iteratorStepValue = call_runtime.iteratorStepValue;
+const lengthIndexValue = array_ops.lengthIndexValue;
+const lookupFrameFirstEvalBindingValue = call_runtime.lookupFrameFirstEvalBindingValue;
+const lookupNamedSlotValue = call_runtime.lookupNamedSlotValue;
+const lookupNamedVarRef = call_runtime.lookupNamedVarRef;
+const mappedArgumentsValue = call_runtime.mappedArgumentsValue;
+const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
+const qjsBigIntPrototypeToString = string_ops.qjsBigIntPrototypeToString;
+const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrTypedArrayElement;
+const qjsDefinePropertiesCall = call_runtime.qjsDefinePropertiesCall;
+const qjsDefinePropertiesOnTarget = call_runtime.qjsDefinePropertiesOnTarget;
+const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
+const qjsDestructuringRest = call_runtime.qjsDestructuringRest;
+const qjsIteratorClose = call_runtime.qjsIteratorClose;
+const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
+const qjsObjectToLocaleStringCall = string_ops.qjsObjectToLocaleStringCall;
+const qjsObjectToStringCall = string_ops.qjsObjectToStringCall;
+const qjsReflectConstructGenericCallable = call_runtime.qjsReflectConstructGenericCallable;
+const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
+const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
+const qjsWorkerNativeFunction = call_runtime.qjsWorkerNativeFunction;
+const readUtf16CodePoint = string_ops.readUtf16CodePoint;
+const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
+const regExpFlagsContain = regexp_fastpath.regExpFlagsContain;
+const rejectModuleNamespaceSuperSet = promise_ops.rejectModuleNamespaceSuperSet;
+const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
+const runGeneratorParameterInit = call_runtime.runGeneratorParameterInit;
+const setFailureShouldThrow = call_runtime.setFailureShouldThrow;
+const setMappedArgumentsValue = call_runtime.setMappedArgumentsValue;
+const shouldSkipDirectEvalLocalCapture = eval_ops.shouldSkipDirectEvalLocalCapture;
+const shouldSkipDirectEvalScopeCaptureName = eval_ops.shouldSkipDirectEvalScopeCaptureName;
+const slotValueDup = slot_ops.slotValueDup;
+const storeRealmValue = builtin_glue.storeRealmValue;
+const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
+const stringSliceValue = string_ops.stringSliceValue;
+const throwPrivateBrandTypeError = call_runtime.throwPrivateBrandTypeError;
+const throwRangeErrorMessage = call_runtime.throwRangeErrorMessage;
+const throwSetFailureTypeError = call_runtime.throwSetFailureTypeError;
+const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
+const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const toLengthIndex = coercion_ops.toLengthIndex;
+const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toPrimitiveForString = string_ops.toPrimitiveForString;
+const toStringForAnnexB = string_ops.toStringForAnnexB;
+const typedArrayCanonicalGet = array_ops.typedArrayCanonicalGet;
+const typedArrayCanonicalHas = array_ops.typedArrayCanonicalHas;
+const typedArrayCanonicalOwnDescriptor = array_ops.typedArrayCanonicalOwnDescriptor;
+const typedArrayCanonicalSet = array_ops.typedArrayCanonicalSet;
+const typedArrayDefineOwnPropertyVm = array_ops.typedArrayDefineOwnPropertyVm;
+const typedArrayOwnKeys = array_ops.typedArrayOwnKeys;
+const typedArrayPrototypeSet = array_ops.typedArrayPrototypeSet;
+const unicodePropertyRunCodePointMatches = string_ops.unicodePropertyRunCodePointMatches;
+const valueTruthy = coercion_ops.valueTruthy;
+const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
     return constructorPrototypeFromGlobalAtom(rt, global, core.atom.ids.Object);
@@ -3803,8 +3815,8 @@ pub fn qjsWorkerObjectId(rt: *core.JSRuntime, value: core.JSValue) !i32 {
 }
 
 pub fn qjsWorkerParentObject(rt: *core.JSRuntime) WorkerObjectInitError!core.JSValue {
-    const worker = shared_vm.current_qjs_worker orelse return core.JSValue.undefinedValue();
-    if (shared_vm.current_qjs_worker_parent) |parent| return parent.dup();
+    const worker = call_runtime.current_qjs_worker orelse return core.JSValue.undefinedValue();
+    if (call_runtime.current_qjs_worker_parent) |parent| return parent.dup();
     const parent = try core.Object.create(rt, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(rt, &parent.header);
     (try parent.workerIdSlot(rt)).* = worker.id;
@@ -3813,7 +3825,7 @@ pub fn qjsWorkerParentObject(rt: *core.JSRuntime) WorkerObjectInitError!core.JSV
     try defineValueProperty(rt, parent, "postMessage", post);
     try defineValueProperty(rt, parent, "onmessage", core.JSValue.nullValue());
     _ = try rt.registerExternalValueSymbolRoot(parent.value());
-    shared_vm.current_qjs_worker_parent = parent.value();
+    call_runtime.current_qjs_worker_parent = parent.value();
     return parent.value().dup();
 }
 pub fn createGeneratorObject(
@@ -6407,17 +6419,17 @@ pub fn getSuperValue(
     defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
-    if (shared_vm.varRefSlotIsUninitialized(receiver)) {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+    if (slot_ops.varRefSlotIsUninitialized(receiver)) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     if (obj.isUndefined() or obj.isNull()) {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
 
@@ -6435,7 +6447,7 @@ pub fn getSuperValue(
         }
     } else |_| {}
     const value = getSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer value.free(ctx.runtime);
@@ -6460,16 +6472,16 @@ pub fn putSuperValue(
     defer obj.free(ctx.runtime);
     const receiver = try stack.pop();
     defer receiver.free(ctx.runtime);
-    if (shared_vm.varRefSlotIsUninitialized(receiver)) {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+    if (slot_ops.varRefSlotIsUninitialized(receiver)) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
         return error.ReferenceError;
     }
     if (obj.isUndefined() or obj.isNull()) {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
     const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
@@ -6479,7 +6491,7 @@ pub fn putSuperValue(
             if (sameObjectIdentity(super_constructor, obj)) {
                 if (function_object.functionHomeObjectSlot().*) |home_object| {
                     prototype = home_object.getPrototype() orelse {
-                        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                         return error.TypeError;
                     };
                 }
@@ -6487,7 +6499,7 @@ pub fn putSuperValue(
         }
     } else |_| {}
     setSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -6538,7 +6550,7 @@ pub fn checkBrandVm(
     global: *core.Object,
 ) !Step {
     checkBrand(ctx, stack) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -6582,7 +6594,7 @@ pub fn addBrandVm(
     global: *core.Object,
 ) !Step {
     addBrand(ctx, stack) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -6625,7 +6637,7 @@ pub fn privateInVm(
     catch_target: *?usize,
 ) !Step {
     privateIn(ctx, output, global, stack, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -6696,7 +6708,7 @@ pub fn defineClass(
             superclass_value = try stack.pop();
         }
         if (!(superclass_value.isObject() or superclass_value.isNull())) {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
             return error.TypeError;
         }
     }
@@ -6705,7 +6717,7 @@ pub fn defineClass(
     if (is_computed_name) {
         computed_key = try stackValueFromTop(stack, 0);
         const name_atom = toPropertyKeyAtom(ctx, output, global, computed_key, function, frame) catch |err| {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         defer ctx.runtime.atoms.free(name_atom);
@@ -6720,20 +6732,20 @@ pub fn defineClass(
     if (superclass_value_active) {
         if (superclass_value.isObject()) {
             if (!isConstructorLike(ctx, superclass_value)) {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
             try ctor_object.setOptionalValueSlot(ctx.runtime, ctor_object.functionSuperConstructorSlot(), superclass_value.dup());
             superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (superclass_proto.isObject()) {
                 proto_parent = try property_ops.expectObject(superclass_proto);
             } else if (!superclass_proto.isNull()) {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
         } else {
@@ -6746,10 +6758,10 @@ pub fn defineClass(
     try ctor_object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(proto_value, false, false, false));
     if (functionBytecodeFromValue(ctor_source)) |ctor_fb| {
         if (ctor_fb.private_bound_names.len != 0 or ctor_fb.class_private_names.len != 0) {
-            shared_vm.clearPrivateNameRemap(ctx.runtime, proto);
+            call_runtime.clearPrivateNameRemap(ctx.runtime, proto);
             try installLexicalPrivateNameRemap(ctx.runtime, proto, frame, ctor_fb.private_bound_names);
-            try shared_vm.installFreshPrivateNameRemap(ctx.runtime, proto, ctor_fb.class_private_names);
-            try shared_vm.copyPrivateNameRemap(ctx.runtime, ctor_object, proto);
+            try call_runtime.installFreshPrivateNameRemap(ctx.runtime, proto, ctor_fb.class_private_names);
+            try call_runtime.copyPrivateNameRemap(ctx.runtime, ctor_object, proto);
         }
     }
     try ctor_object.setFunctionHomeObject(ctx.runtime, proto);
@@ -6779,7 +6791,7 @@ pub fn defineMethod(
     const flags = function.code[frame.pc];
     frame.pc += 1;
     defineObjectMethod(ctx.runtime, stack, atom_id, flags, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -6801,12 +6813,12 @@ pub fn defineMethodComputed(
     const key_value = try stack.pop();
     defer key_value.free(ctx.runtime);
     const atom_id = toPropertyKeyAtom(ctx, output, global, key_value, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     defer ctx.runtime.atoms.free(atom_id);
     defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;

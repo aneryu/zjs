@@ -155,14 +155,15 @@ Opcode family 仍拆到 `src/exec/vm_*.zig`：
 - value operations: `vm_value.zig`
 - opcode profiling helper: `vm_profile.zig`
 
-Shared execution helpers still live in `src/exec/shared.zig`; current perf docs
-track ongoing decomposition work, but `shared.zig` has not disappeared. Splits
+The VM call runtime lives in `src/exec/call_runtime.zig`（原 `shared.zig`，
+已改名并删除其转发别名层；调用点直接引用归属模块）。Splits
 so far: `regexp_fastpath.zig`（RegExp 快路径）、`slot_ops.zig`（槽位操作）、
 `builtin_glue.zig`（Math/Number/URI/JSON/collections/weak/Symbol/DataView
 glue）、`error_stack_ops.zig`、`forof_ops.zig`（迭代器记录与关闭路径）；
 `vm_property.zig` 按 globals/locals/field/ref/private 拆为五个子模块
-（13135 → 2125 行，达成 <3K 目标）。shared.zig 当前约 10.8K 行（自 15.3K），
-剩余大簇为 call runtime 核心与 direct-eval 支撑，继续按域收敛。
+（13135 → 2125 行，达成 <3K 目标）。call_runtime.zig 当前约 8.3K 行（自
+15.3K），剩余大簇为 call runtime 核心、direct-eval 支撑、generator 恢复、
+worker 与 Atomics 等待机制，继续按域收敛。
 
 RegExp 语义状态：duplicate named groups（alternation 路径验证 + `\k` 多发射 +
 groups matched 优先）、quantifier 每迭代 capture 清零（对齐 RepeatMatcher，

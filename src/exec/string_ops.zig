@@ -14,360 +14,356 @@ const iter_vm = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const RegExpCapture = shared_vm.RegExpCapture;
-const SimpleAsciiLiteralClassPlusLiteral = shared_vm.SimpleAsciiLiteralClassPlusLiteral;
-const SimpleCaptureSequenceAtom = shared_vm.SimpleCaptureSequenceAtom;
-const SimpleCaptureSequencePattern = shared_vm.SimpleCaptureSequencePattern;
-const SimpleClassAlternationPattern = shared_vm.SimpleClassAlternationPattern;
-const SimpleClassPredicate = shared_vm.SimpleClassPredicate;
-const SimpleClassSequenceAtom = shared_vm.SimpleClassSequenceAtom;
-const SimpleClassSequencePattern = shared_vm.SimpleClassSequencePattern;
-const UnicodePropertyRunPattern = shared_vm.UnicodePropertyRunPattern;
-const ValueSliceRoot = shared_vm.ValueSliceRoot;
-const anchoredBinaryPropertyName = shared_vm.anchoredBinaryPropertyName;
-const appendAsciiUnits = shared_vm.appendAsciiUnits;
-const appendBacktraceFunctionName = shared_vm.appendBacktraceFunctionName;
-const appendCallSiteFileName = shared_vm.appendCallSiteFileName;
-const appendCallSiteFunctionName = shared_vm.appendCallSiteFunctionName;
-const appendNamedCaptureSubstitution = shared_vm.appendNamedCaptureSubstitution;
-const appendRegExpFlags = shared_vm.appendRegExpFlags;
-const appendRegExpSource = shared_vm.appendRegExpSource;
-const appendRepeatedFillUnits = shared_vm.appendRepeatedFillUnits;
-const arrayFirstIndexStart = shared_vm.arrayFirstIndexStart;
-const arrayLastIndexStart = shared_vm.arrayLastIndexStart;
-const arrayMethodTypedArrayLength = shared_vm.arrayMethodTypedArrayLength;
-const arrayPrototypeFromGlobal = shared_vm.arrayPrototypeFromGlobal;
-const arrayPrototypeRecordId = shared_vm.arrayPrototypeRecordId;
-const arraySpeciesCreate = shared_vm.arraySpeciesCreate;
-const arraySpeciesOriginalIsArray = shared_vm.arraySpeciesOriginalIsArray;
-const atomIdOrNameEql = shared_vm.atomIdOrNameEql;
-const backtraceFunctionNameEql = shared_vm.backtraceFunctionNameEql;
-const bytecodeFunctionObjectTag = shared_vm.bytecodeFunctionObjectTag;
-const callObjectToPrimitiveMethod = shared_vm.callObjectToPrimitiveMethod;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const callableObjectFromValue = shared_vm.callableObjectFromValue;
-const classEscapeIsQuantified = shared_vm.classEscapeIsQuantified;
-const classEscapeKindIndex = shared_vm.classEscapeKindIndex;
-const classEscapeRunLengthLatin1 = shared_vm.classEscapeRunLengthLatin1;
-const classEscapeRunLengthUtf16 = shared_vm.classEscapeRunLengthUtf16;
-const clearRegExpLegacySlot = shared_vm.clearRegExpLegacySlot;
-const constructValueOrBytecode = shared_vm.constructValueOrBytecode;
-const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const createDataPropertyOrThrow = shared_vm.createDataPropertyOrThrow;
-const createIteratorResult = shared_vm.createIteratorResult;
-const createRegExpIndicesArray = shared_vm.createRegExpIndicesArray;
-const defineFreshNonIndexDataProperty = shared_vm.defineFreshNonIndexDataProperty;
-const defineNativeDataMethod = shared_vm.defineNativeDataMethod;
-const defineRegExpGroupsProperty = shared_vm.defineRegExpGroupsProperty;
-const defineRegExpGroupsPropertyFromValue = shared_vm.defineRegExpGroupsPropertyFromValue;
-const errorStackTraceLimit = shared_vm.errorStackTraceLimit;
-const exactScriptExtensionsAliasTarget = shared_vm.exactScriptExtensionsAliasTarget;
-const getIteratorMethod = shared_vm.getIteratorMethod;
-const getValueProperty = shared_vm.getValueProperty;
-const hasValueProperty = shared_vm.hasValueProperty;
-const isAdlamScriptExtensionsName = shared_vm.isAdlamScriptExtensionsName;
-const isArabicScriptExtensionsName = shared_vm.isArabicScriptExtensionsName;
-const isArmenianScriptExtensionsName = shared_vm.isArmenianScriptExtensionsName;
-const isArrayPrototypeRecord = shared_vm.isArrayPrototypeRecord;
-const isAsciiDigitUnit = shared_vm.isAsciiDigitUnit;
-const isAsciiWordUnit = shared_vm.isAsciiWordUnit;
-const isAvestanScriptExtensionsName = shared_vm.isAvestanScriptExtensionsName;
-const isBengaliScriptExtensionsName = shared_vm.isBengaliScriptExtensionsName;
-const isBopomofoScriptExtensionsName = shared_vm.isBopomofoScriptExtensionsName;
-const isBugineseScriptExtensionsName = shared_vm.isBugineseScriptExtensionsName;
-const isCallableValue = shared_vm.isCallableValue;
-const isCarianScriptExtensionsName = shared_vm.isCarianScriptExtensionsName;
-const isCaucasianAlbanianScriptExtensionsName = shared_vm.isCaucasianAlbanianScriptExtensionsName;
-const isChakmaScriptExtensionsName = shared_vm.isChakmaScriptExtensionsName;
-const isCherokeeScriptExtensionsName = shared_vm.isCherokeeScriptExtensionsName;
-const isCommonScriptExtensionsName = shared_vm.isCommonScriptExtensionsName;
-const isControlGeneralCategoryName = shared_vm.isControlGeneralCategoryName;
-const isCopticScriptExtensionsName = shared_vm.isCopticScriptExtensionsName;
-const isCopticScriptName = shared_vm.isCopticScriptName;
-const isCypriotScriptExtensionsName = shared_vm.isCypriotScriptExtensionsName;
-const isCyrillicScriptExtensionsName = shared_vm.isCyrillicScriptExtensionsName;
-const isDecimalNumberGeneralCategoryName = shared_vm.isDecimalNumberGeneralCategoryName;
-const isDevanagariScriptExtensionsName = shared_vm.isDevanagariScriptExtensionsName;
-const isDograScriptExtensionsName = shared_vm.isDograScriptExtensionsName;
-const isDuployanScriptExtensionsName = shared_vm.isDuployanScriptExtensionsName;
-const isEcmaWhitespaceOrLineTerminator = shared_vm.isEcmaWhitespaceOrLineTerminator;
-const isElbasanScriptExtensionsName = shared_vm.isElbasanScriptExtensionsName;
-const isEthiopicScriptExtensionsName = shared_vm.isEthiopicScriptExtensionsName;
-const isGarayScriptExtensionsName = shared_vm.isGarayScriptExtensionsName;
-const isGeorgianScriptExtensionsName = shared_vm.isGeorgianScriptExtensionsName;
-const isGlagoliticScriptExtensionsName = shared_vm.isGlagoliticScriptExtensionsName;
-const isGothicScriptExtensionsName = shared_vm.isGothicScriptExtensionsName;
-const isGranthaScriptExtensionsName = shared_vm.isGranthaScriptExtensionsName;
-const isGraphemeBaseName = shared_vm.isGraphemeBaseName;
-const isGreekScriptExtensionsName = shared_vm.isGreekScriptExtensionsName;
-const isGujaratiScriptExtensionsName = shared_vm.isGujaratiScriptExtensionsName;
-const isGunjalaGondiScriptExtensionsName = shared_vm.isGunjalaGondiScriptExtensionsName;
-const isGurmukhiScriptExtensionsName = shared_vm.isGurmukhiScriptExtensionsName;
-const isHanScriptExtensionsName = shared_vm.isHanScriptExtensionsName;
-const isHanScriptName = shared_vm.isHanScriptName;
-const isHangulScriptExtensionsName = shared_vm.isHangulScriptExtensionsName;
-const isHanifiRohingyaScriptExtensionsName = shared_vm.isHanifiRohingyaScriptExtensionsName;
-const isHanunooScriptExtensionsName = shared_vm.isHanunooScriptExtensionsName;
-const isHebrewScriptExtensionsName = shared_vm.isHebrewScriptExtensionsName;
-const isHighSurrogateUnit = shared_vm.isHighSurrogateUnit;
-const isHiraganaScriptExtensionsName = shared_vm.isHiraganaScriptExtensionsName;
-const isIdContinueName = shared_vm.isIdContinueName;
-const isImperialAramaicScriptExtensionsName = shared_vm.isImperialAramaicScriptExtensionsName;
-const isInheritedScriptExtensionsName = shared_vm.isInheritedScriptExtensionsName;
-const isInheritedScriptName = shared_vm.isInheritedScriptName;
-const isJavaneseScriptExtensionsName = shared_vm.isJavaneseScriptExtensionsName;
-const isKaithiScriptExtensionsName = shared_vm.isKaithiScriptExtensionsName;
-const isKannadaScriptExtensionsName = shared_vm.isKannadaScriptExtensionsName;
-const isKatakanaScriptExtensionsName = shared_vm.isKatakanaScriptExtensionsName;
-const isKawiScriptExtensionsName = shared_vm.isKawiScriptExtensionsName;
-const isKayahLiScriptExtensionsName = shared_vm.isKayahLiScriptExtensionsName;
-const isKhojkiScriptExtensionsName = shared_vm.isKhojkiScriptExtensionsName;
-const isKhudawadiScriptExtensionsName = shared_vm.isKhudawadiScriptExtensionsName;
-const isKiratRaiScriptName = shared_vm.isKiratRaiScriptName;
-const isLaoScriptExtensionsName = shared_vm.isLaoScriptExtensionsName;
-const isLatinScriptExtensionsName = shared_vm.isLatinScriptExtensionsName;
-const isLetterGeneralCategoryName = shared_vm.isLetterGeneralCategoryName;
-const isLimbuScriptExtensionsName = shared_vm.isLimbuScriptExtensionsName;
-const isLineTerminatorUnit = shared_vm.isLineTerminatorUnit;
-const isLinearAScriptExtensionsName = shared_vm.isLinearAScriptExtensionsName;
-const isLinearBScriptExtensionsName = shared_vm.isLinearBScriptExtensionsName;
-const isLisuScriptExtensionsName = shared_vm.isLisuScriptExtensionsName;
-const isLowSurrogateUnit = shared_vm.isLowSurrogateUnit;
-const isLycianScriptExtensionsName = shared_vm.isLycianScriptExtensionsName;
-const isLydianScriptExtensionsName = shared_vm.isLydianScriptExtensionsName;
-const isMahajaniScriptExtensionsName = shared_vm.isMahajaniScriptExtensionsName;
-const isMalayalamScriptExtensionsName = shared_vm.isMalayalamScriptExtensionsName;
-const isMandaicScriptExtensionsName = shared_vm.isMandaicScriptExtensionsName;
-const isManichaeanScriptExtensionsName = shared_vm.isManichaeanScriptExtensionsName;
-const isMarkGeneralCategoryName = shared_vm.isMarkGeneralCategoryName;
-const isMasaramGondiScriptExtensionsName = shared_vm.isMasaramGondiScriptExtensionsName;
-const isMedefaidrinScriptExtensionsName = shared_vm.isMedefaidrinScriptExtensionsName;
-const isMeeteiMayekScriptExtensionsName = shared_vm.isMeeteiMayekScriptExtensionsName;
-const isMendeKikakuiScriptExtensionsName = shared_vm.isMendeKikakuiScriptExtensionsName;
-const isMeroiticCursiveScriptExtensionsName = shared_vm.isMeroiticCursiveScriptExtensionsName;
-const isMeroiticHieroglyphsScriptExtensionsName = shared_vm.isMeroiticHieroglyphsScriptExtensionsName;
-const isMiaoScriptExtensionsName = shared_vm.isMiaoScriptExtensionsName;
-const isMiaoScriptName = shared_vm.isMiaoScriptName;
-const isModiScriptExtensionsName = shared_vm.isModiScriptExtensionsName;
-const isMongolianScriptExtensionsName = shared_vm.isMongolianScriptExtensionsName;
-const isMroScriptExtensionsName = shared_vm.isMroScriptExtensionsName;
-const isMultaniScriptExtensionsName = shared_vm.isMultaniScriptExtensionsName;
-const isMyanmarScriptExtensionsName = shared_vm.isMyanmarScriptExtensionsName;
-const isNabataeanScriptExtensionsName = shared_vm.isNabataeanScriptExtensionsName;
-const isNagMundariScriptExtensionsName = shared_vm.isNagMundariScriptExtensionsName;
-const isNandinagariScriptExtensionsName = shared_vm.isNandinagariScriptExtensionsName;
-const isNandinagariScriptName = shared_vm.isNandinagariScriptName;
-const isNewTaiLueScriptExtensionsName = shared_vm.isNewTaiLueScriptExtensionsName;
-const isNewTaiLueScriptName = shared_vm.isNewTaiLueScriptName;
-const isNewaScriptExtensionsName = shared_vm.isNewaScriptExtensionsName;
-const isNewaScriptName = shared_vm.isNewaScriptName;
-const isNkoScriptExtensionsName = shared_vm.isNkoScriptExtensionsName;
-const isNkoScriptName = shared_vm.isNkoScriptName;
-const isNumberCategoryName = shared_vm.isNumberCategoryName;
-const isNushuScriptExtensionsName = shared_vm.isNushuScriptExtensionsName;
-const isNushuScriptName = shared_vm.isNushuScriptName;
-const isNyiakengPuachueHmongScriptExtensionsName = shared_vm.isNyiakengPuachueHmongScriptExtensionsName;
-const isNyiakengPuachueHmongScriptName = shared_vm.isNyiakengPuachueHmongScriptName;
-const isOghamScriptExtensionsName = shared_vm.isOghamScriptExtensionsName;
-const isOghamScriptName = shared_vm.isOghamScriptName;
-const isOlChikiScriptExtensionsName = shared_vm.isOlChikiScriptExtensionsName;
-const isOlChikiScriptName = shared_vm.isOlChikiScriptName;
-const isOlOnalScriptExtensionsName = shared_vm.isOlOnalScriptExtensionsName;
-const isOlOnalScriptName = shared_vm.isOlOnalScriptName;
-const isOldHungarianScriptExtensionsName = shared_vm.isOldHungarianScriptExtensionsName;
-const isOldHungarianScriptName = shared_vm.isOldHungarianScriptName;
-const isOldItalicScriptExtensionsName = shared_vm.isOldItalicScriptExtensionsName;
-const isOldItalicScriptName = shared_vm.isOldItalicScriptName;
-const isOldNorthArabianScriptExtensionsName = shared_vm.isOldNorthArabianScriptExtensionsName;
-const isOldNorthArabianScriptName = shared_vm.isOldNorthArabianScriptName;
-const isOldPermicScriptExtensionsName = shared_vm.isOldPermicScriptExtensionsName;
-const isOldPermicScriptName = shared_vm.isOldPermicScriptName;
-const isOldPersianScriptExtensionsName = shared_vm.isOldPersianScriptExtensionsName;
-const isOldPersianScriptName = shared_vm.isOldPersianScriptName;
-const isOldSogdianScriptExtensionsName = shared_vm.isOldSogdianScriptExtensionsName;
-const isOldSogdianScriptName = shared_vm.isOldSogdianScriptName;
-const isOldSouthArabianScriptExtensionsName = shared_vm.isOldSouthArabianScriptExtensionsName;
-const isOldSouthArabianScriptName = shared_vm.isOldSouthArabianScriptName;
-const isOldTurkicScriptExtensionsName = shared_vm.isOldTurkicScriptExtensionsName;
-const isOldTurkicScriptName = shared_vm.isOldTurkicScriptName;
-const isOldUyghurScriptExtensionsName = shared_vm.isOldUyghurScriptExtensionsName;
-const isOldUyghurScriptName = shared_vm.isOldUyghurScriptName;
-const isOriyaScriptExtensionsName = shared_vm.isOriyaScriptExtensionsName;
-const isOriyaScriptName = shared_vm.isOriyaScriptName;
-const isOsageScriptExtensionsName = shared_vm.isOsageScriptExtensionsName;
-const isOsageScriptName = shared_vm.isOsageScriptName;
-const isOsmanyaScriptExtensionsName = shared_vm.isOsmanyaScriptExtensionsName;
-const isOsmanyaScriptName = shared_vm.isOsmanyaScriptName;
-const isOtherGeneralCategoryName = shared_vm.isOtherGeneralCategoryName;
-const isOtherLetterGeneralCategoryName = shared_vm.isOtherLetterGeneralCategoryName;
-const isPahawhHmongScriptExtensionsName = shared_vm.isPahawhHmongScriptExtensionsName;
-const isPahawhHmongScriptName = shared_vm.isPahawhHmongScriptName;
-const isPalmyreneScriptExtensionsName = shared_vm.isPalmyreneScriptExtensionsName;
-const isPalmyreneScriptName = shared_vm.isPalmyreneScriptName;
-const isPauCinHauScriptExtensionsName = shared_vm.isPauCinHauScriptExtensionsName;
-const isPauCinHauScriptName = shared_vm.isPauCinHauScriptName;
-const isPhagsPaScriptExtensionsName = shared_vm.isPhagsPaScriptExtensionsName;
-const isPhagsPaScriptName = shared_vm.isPhagsPaScriptName;
-const isPhoenicianScriptExtensionsName = shared_vm.isPhoenicianScriptExtensionsName;
-const isPhoenicianScriptName = shared_vm.isPhoenicianScriptName;
-const isPlainAsciiRegExpLiteral = shared_vm.isPlainAsciiRegExpLiteral;
-const isPsalterPahlaviScriptExtensionsName = shared_vm.isPsalterPahlaviScriptExtensionsName;
-const isPsalterPahlaviScriptName = shared_vm.isPsalterPahlaviScriptName;
-const isPunctuationGeneralCategoryName = shared_vm.isPunctuationGeneralCategoryName;
-const isRegExpLineTerminator = shared_vm.isRegExpLineTerminator;
-const isRegExpObservable = shared_vm.isRegExpObservable;
-const isRejangScriptExtensionsName = shared_vm.isRejangScriptExtensionsName;
-const isRejangScriptName = shared_vm.isRejangScriptName;
-const isRunicScriptExtensionsName = shared_vm.isRunicScriptExtensionsName;
-const isRunicScriptName = shared_vm.isRunicScriptName;
-const isSamaritanScriptExtensionsName = shared_vm.isSamaritanScriptExtensionsName;
-const isSamaritanScriptName = shared_vm.isSamaritanScriptName;
-const isSaurashtraScriptExtensionsName = shared_vm.isSaurashtraScriptExtensionsName;
-const isSaurashtraScriptName = shared_vm.isSaurashtraScriptName;
-const isSharadaScriptExtensionsName = shared_vm.isSharadaScriptExtensionsName;
-const isSharadaScriptName = shared_vm.isSharadaScriptName;
-const isShavianScriptExtensionsName = shared_vm.isShavianScriptExtensionsName;
-const isShavianScriptName = shared_vm.isShavianScriptName;
-const isSiddhamScriptExtensionsName = shared_vm.isSiddhamScriptExtensionsName;
-const isSiddhamScriptName = shared_vm.isSiddhamScriptName;
-const isSideticScriptExtensionsName = shared_vm.isSideticScriptExtensionsName;
-const isSideticScriptName = shared_vm.isSideticScriptName;
-const isSignWritingScriptExtensionsName = shared_vm.isSignWritingScriptExtensionsName;
-const isSignWritingScriptName = shared_vm.isSignWritingScriptName;
-const isSinhalaScriptExtensionsName = shared_vm.isSinhalaScriptExtensionsName;
-const isSinhalaScriptName = shared_vm.isSinhalaScriptName;
-const isSogdianScriptExtensionsName = shared_vm.isSogdianScriptExtensionsName;
-const isSogdianScriptName = shared_vm.isSogdianScriptName;
-const isSoraSompengScriptExtensionsName = shared_vm.isSoraSompengScriptExtensionsName;
-const isSoraSompengScriptName = shared_vm.isSoraSompengScriptName;
-const isSoyomboScriptExtensionsName = shared_vm.isSoyomboScriptExtensionsName;
-const isSoyomboScriptName = shared_vm.isSoyomboScriptName;
-const isSundaneseScriptExtensionsName = shared_vm.isSundaneseScriptExtensionsName;
-const isSundaneseScriptName = shared_vm.isSundaneseScriptName;
-const isSunuwarScriptExtensionsName = shared_vm.isSunuwarScriptExtensionsName;
-const isSunuwarScriptName = shared_vm.isSunuwarScriptName;
-const isSylotiNagriScriptExtensionsName = shared_vm.isSylotiNagriScriptExtensionsName;
-const isSylotiNagriScriptName = shared_vm.isSylotiNagriScriptName;
-const isSymbolGeneralCategoryName = shared_vm.isSymbolGeneralCategoryName;
-const isSyriacScriptExtensionsName = shared_vm.isSyriacScriptExtensionsName;
-const isSyriacScriptName = shared_vm.isSyriacScriptName;
-const isTagalogScriptExtensionsName = shared_vm.isTagalogScriptExtensionsName;
-const isTagalogScriptName = shared_vm.isTagalogScriptName;
-const isTagbanwaScriptExtensionsName = shared_vm.isTagbanwaScriptExtensionsName;
-const isTagbanwaScriptName = shared_vm.isTagbanwaScriptName;
-const isTaiLeScriptExtensionsName = shared_vm.isTaiLeScriptExtensionsName;
-const isTaiLeScriptName = shared_vm.isTaiLeScriptName;
-const isTaiThamScriptExtensionsName = shared_vm.isTaiThamScriptExtensionsName;
-const isTaiThamScriptName = shared_vm.isTaiThamScriptName;
-const isTaiVietScriptExtensionsName = shared_vm.isTaiVietScriptExtensionsName;
-const isTaiVietScriptName = shared_vm.isTaiVietScriptName;
-const isTaiYoScriptExtensionsName = shared_vm.isTaiYoScriptExtensionsName;
-const isTaiYoScriptName = shared_vm.isTaiYoScriptName;
-const isTakriScriptExtensionsName = shared_vm.isTakriScriptExtensionsName;
-const isTakriScriptName = shared_vm.isTakriScriptName;
-const isTamilScriptExtensionsName = shared_vm.isTamilScriptExtensionsName;
-const isTamilScriptName = shared_vm.isTamilScriptName;
-const isTangsaScriptExtensionsName = shared_vm.isTangsaScriptExtensionsName;
-const isTangsaScriptName = shared_vm.isTangsaScriptName;
-const isTangutScriptExtensionsName = shared_vm.isTangutScriptExtensionsName;
-const isTangutScriptName = shared_vm.isTangutScriptName;
-const isTeluguScriptExtensionsName = shared_vm.isTeluguScriptExtensionsName;
-const isTeluguScriptName = shared_vm.isTeluguScriptName;
-const isThaanaScriptExtensionsName = shared_vm.isThaanaScriptExtensionsName;
-const isThaanaScriptName = shared_vm.isThaanaScriptName;
-const isThaiScriptExtensionsName = shared_vm.isThaiScriptExtensionsName;
-const isThaiScriptName = shared_vm.isThaiScriptName;
-const isTibetanScriptExtensionsName = shared_vm.isTibetanScriptExtensionsName;
-const isTibetanScriptName = shared_vm.isTibetanScriptName;
-const isTifinaghScriptExtensionsName = shared_vm.isTifinaghScriptExtensionsName;
-const isTifinaghScriptName = shared_vm.isTifinaghScriptName;
-const isTirhutaScriptExtensionsName = shared_vm.isTirhutaScriptExtensionsName;
-const isTirhutaScriptName = shared_vm.isTirhutaScriptName;
-const isTodhriScriptExtensionsName = shared_vm.isTodhriScriptExtensionsName;
-const isTodhriScriptName = shared_vm.isTodhriScriptName;
-const isTolongSikiScriptExtensionsName = shared_vm.isTolongSikiScriptExtensionsName;
-const isTolongSikiScriptName = shared_vm.isTolongSikiScriptName;
-const isTotoScriptExtensionsName = shared_vm.isTotoScriptExtensionsName;
-const isTotoScriptName = shared_vm.isTotoScriptName;
-const isTuluTigalariScriptExtensionsName = shared_vm.isTuluTigalariScriptExtensionsName;
-const isTuluTigalariScriptName = shared_vm.isTuluTigalariScriptName;
-const isTypedArrayPrototypeMethod = shared_vm.isTypedArrayPrototypeMethod;
-const isUgariticScriptExtensionsName = shared_vm.isUgariticScriptExtensionsName;
-const isUgariticScriptName = shared_vm.isUgariticScriptName;
-const isUnassignedGeneralCategoryName = shared_vm.isUnassignedGeneralCategoryName;
-const isUnknownScriptName = shared_vm.isUnknownScriptName;
-const isUppercaseLetterGeneralCategoryName = shared_vm.isUppercaseLetterGeneralCategoryName;
-const isVaiScriptExtensionsName = shared_vm.isVaiScriptExtensionsName;
-const isVaiScriptName = shared_vm.isVaiScriptName;
-const isVithkuqiScriptExtensionsName = shared_vm.isVithkuqiScriptExtensionsName;
-const isVithkuqiScriptName = shared_vm.isVithkuqiScriptName;
-const isWanchoScriptExtensionsName = shared_vm.isWanchoScriptExtensionsName;
-const isWanchoScriptName = shared_vm.isWanchoScriptName;
-const isWarangCitiScriptExtensionsName = shared_vm.isWarangCitiScriptExtensionsName;
-const isWarangCitiScriptName = shared_vm.isWarangCitiScriptName;
-const isXidContinueName = shared_vm.isXidContinueName;
-const isYezidiScriptExtensionsName = shared_vm.isYezidiScriptExtensionsName;
-const isYezidiScriptName = shared_vm.isYezidiScriptName;
-const isYiScriptExtensionsName = shared_vm.isYiScriptExtensionsName;
-const isYiScriptName = shared_vm.isYiScriptName;
-const isZanabazarSquareScriptExtensionsName = shared_vm.isZanabazarSquareScriptExtensionsName;
-const isZanabazarSquareScriptName = shared_vm.isZanabazarSquareScriptName;
-const leadingAlternationCharacterClassSource = shared_vm.leadingAlternationCharacterClassSource;
-const lengthIndexValue = shared_vm.lengthIndexValue;
-const lowSurrogateLiteralAt = shared_vm.lowSurrogateLiteralAt;
-const normalizedUtf32 = shared_vm.normalizedUtf32;
-const objectFromValue = shared_vm.objectFromValue;
-const ownDataOrAutoInitPropertyValue = shared_vm.ownDataOrAutoInitPropertyValue;
-const parseSimpleClassSequenceSource = shared_vm.parseSimpleClassSequenceSource;
-const parseSimpleUnicodeLiteralSource = shared_vm.parseSimpleUnicodeLiteralSource;
-const parseSurrogatePairClassSource = shared_vm.parseSurrogatePairClassSource;
-const parseUnicodeAstralSpecialSource = shared_vm.parseUnicodeAstralSpecialSource;
-const primitiveObjectForAccess = shared_vm.primitiveObjectForAccess;
-const propertyAtomFromLengthIndex = shared_vm.propertyAtomFromLengthIndex;
-const propertyEscapePattern = shared_vm.propertyEscapePattern;
-const proxyTargetIsCallableObject = shared_vm.proxyTargetIsCallableObject;
-const qjsArrayLastIndexSparseLarge = shared_vm.qjsArrayLastIndexSparseLarge;
-const qjsIteratorPrototype = shared_vm.qjsIteratorPrototype;
-const qjsRegExpConstructCall = shared_vm.qjsRegExpConstructCall;
-const qjsRegExpExecGeneric = shared_vm.qjsRegExpExecGeneric;
-const qjsRegExpExecSimpleUnicodeLiteral = shared_vm.qjsRegExpExecSimpleUnicodeLiteral;
-const qjsRegExpSpeciesConstructor = shared_vm.qjsRegExpSpeciesConstructor;
-const readUnicodePropertyClassEscape = shared_vm.readUnicodePropertyClassEscape;
-const regExpConstructorFromGlobal = shared_vm.regExpConstructorFromGlobal;
-const regExpExecPropertyIsDefault = shared_vm.regExpExecPropertyIsDefault;
-const regExpFlagsAreFullUnicode = shared_vm.regExpFlagsAreFullUnicode;
-const regexpBorrowedLatin1SourceFlags = shared_vm.regexpBorrowedLatin1SourceFlags;
-const regexpInternalFlagsContain = shared_vm.regexpInternalFlagsContain;
-const regexpInternalSimpleQuantifiedClassSource = shared_vm.regexpInternalSimpleQuantifiedClassSource;
-const regexpSimpleCaptureSequencePattern = shared_vm.regexpSimpleCaptureSequencePattern;
-const setRegExpLastIndexZero = shared_vm.setRegExpLastIndexZero;
-const setValueProperty = shared_vm.setValueProperty;
-const setValuePropertyStrict = shared_vm.setValuePropertyStrict;
-const simpleCaptureSequenceAtLatin1 = shared_vm.simpleCaptureSequenceAtLatin1;
-const simpleCaptureSequenceAtUtf16 = shared_vm.simpleCaptureSequenceAtUtf16;
-const simpleClassSequenceAtLatin1 = shared_vm.simpleClassSequenceAtLatin1;
-const simpleClassSequenceAtUtf16 = shared_vm.simpleClassSequenceAtUtf16;
-const simpleUnicodeLiteralAt = shared_vm.simpleUnicodeLiteralAt;
-const singleLowSurrogateLiteralSource = shared_vm.singleLowSurrogateLiteralSource;
-const standaloneCharacterClassSource = shared_vm.standaloneCharacterClassSource;
-const surrogatePairClassAt = shared_vm.surrogatePairClassAt;
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const coercion_ops = @import("coercion_ops.zig");
+const error_stack_ops = @import("error_stack_ops.zig");
+const object_ops = @import("object_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const RegExpCapture = call_runtime.RegExpCapture;
+const SimpleAsciiLiteralClassPlusLiteral = regexp_fastpath.SimpleAsciiLiteralClassPlusLiteral;
+const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
+const SimpleCaptureSequencePattern = regexp_fastpath.SimpleCaptureSequencePattern;
+const SimpleClassAlternationPattern = regexp_fastpath.SimpleClassAlternationPattern;
+const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
+const SimpleClassSequenceAtom = regexp_fastpath.SimpleClassSequenceAtom;
+const SimpleClassSequencePattern = regexp_fastpath.SimpleClassSequencePattern;
+const UnicodePropertyRunPattern = object_ops.UnicodePropertyRunPattern;
+const ValueSliceRoot = array_ops.ValueSliceRoot;
+const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
+const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
+const appendCallSiteFileName = error_stack_ops.appendCallSiteFileName;
+const appendCallSiteFunctionName = error_stack_ops.appendCallSiteFunctionName;
+const appendNamedCaptureSubstitution = regexp_fastpath.appendNamedCaptureSubstitution;
+const appendRegExpFlags = regexp_fastpath.appendRegExpFlags;
+const appendRegExpSource = regexp_fastpath.appendRegExpSource;
+const arrayFirstIndexStart = array_ops.arrayFirstIndexStart;
+const arrayLastIndexStart = array_ops.arrayLastIndexStart;
+const arrayMethodTypedArrayLength = array_ops.arrayMethodTypedArrayLength;
+const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
+const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
+const arraySpeciesCreate = array_ops.arraySpeciesCreate;
+const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
+const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
+const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
+const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
+const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const callableObjectFromValue = object_ops.callableObjectFromValue;
+const classEscapeIsQuantified = regexp_fastpath.classEscapeIsQuantified;
+const classEscapeKindIndex = regexp_fastpath.classEscapeKindIndex;
+const classEscapeRunLengthLatin1 = regexp_fastpath.classEscapeRunLengthLatin1;
+const classEscapeRunLengthUtf16 = regexp_fastpath.classEscapeRunLengthUtf16;
+const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
+const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
+const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
+const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
+const createIteratorResult = call_runtime.createIteratorResult;
+const createRegExpIndicesArray = array_ops.createRegExpIndicesArray;
+const defineFreshNonIndexDataProperty = object_ops.defineFreshNonIndexDataProperty;
+const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
+const defineRegExpGroupsProperty = object_ops.defineRegExpGroupsProperty;
+const defineRegExpGroupsPropertyFromValue = object_ops.defineRegExpGroupsPropertyFromValue;
+const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
+const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
+const getIteratorMethod = call_runtime.getIteratorMethod;
+const getValueProperty = object_ops.getValueProperty;
+const hasValueProperty = object_ops.hasValueProperty;
+const isAdlamScriptExtensionsName = call_runtime.isAdlamScriptExtensionsName;
+const isArabicScriptExtensionsName = call_runtime.isArabicScriptExtensionsName;
+const isArmenianScriptExtensionsName = call_runtime.isArmenianScriptExtensionsName;
+const isArrayPrototypeRecord = array_ops.isArrayPrototypeRecord;
+const isAvestanScriptExtensionsName = call_runtime.isAvestanScriptExtensionsName;
+const isBengaliScriptExtensionsName = call_runtime.isBengaliScriptExtensionsName;
+const isBopomofoScriptExtensionsName = call_runtime.isBopomofoScriptExtensionsName;
+const isBugineseScriptExtensionsName = call_runtime.isBugineseScriptExtensionsName;
+const isCallableValue = call_runtime.isCallableValue;
+const isCarianScriptExtensionsName = call_runtime.isCarianScriptExtensionsName;
+const isCaucasianAlbanianScriptExtensionsName = call_runtime.isCaucasianAlbanianScriptExtensionsName;
+const isChakmaScriptExtensionsName = call_runtime.isChakmaScriptExtensionsName;
+const isCherokeeScriptExtensionsName = call_runtime.isCherokeeScriptExtensionsName;
+const isCommonScriptExtensionsName = call_runtime.isCommonScriptExtensionsName;
+const isControlGeneralCategoryName = call_runtime.isControlGeneralCategoryName;
+const isCopticScriptExtensionsName = call_runtime.isCopticScriptExtensionsName;
+const isCopticScriptName = call_runtime.isCopticScriptName;
+const isCypriotScriptExtensionsName = call_runtime.isCypriotScriptExtensionsName;
+const isCyrillicScriptExtensionsName = call_runtime.isCyrillicScriptExtensionsName;
+const isDecimalNumberGeneralCategoryName = call_runtime.isDecimalNumberGeneralCategoryName;
+const isDevanagariScriptExtensionsName = call_runtime.isDevanagariScriptExtensionsName;
+const isDograScriptExtensionsName = call_runtime.isDograScriptExtensionsName;
+const isDuployanScriptExtensionsName = call_runtime.isDuployanScriptExtensionsName;
+const isElbasanScriptExtensionsName = call_runtime.isElbasanScriptExtensionsName;
+const isEthiopicScriptExtensionsName = call_runtime.isEthiopicScriptExtensionsName;
+const isGarayScriptExtensionsName = call_runtime.isGarayScriptExtensionsName;
+const isGeorgianScriptExtensionsName = call_runtime.isGeorgianScriptExtensionsName;
+const isGlagoliticScriptExtensionsName = call_runtime.isGlagoliticScriptExtensionsName;
+const isGothicScriptExtensionsName = call_runtime.isGothicScriptExtensionsName;
+const isGranthaScriptExtensionsName = call_runtime.isGranthaScriptExtensionsName;
+const isGraphemeBaseName = call_runtime.isGraphemeBaseName;
+const isGreekScriptExtensionsName = call_runtime.isGreekScriptExtensionsName;
+const isGujaratiScriptExtensionsName = call_runtime.isGujaratiScriptExtensionsName;
+const isGunjalaGondiScriptExtensionsName = call_runtime.isGunjalaGondiScriptExtensionsName;
+const isGurmukhiScriptExtensionsName = call_runtime.isGurmukhiScriptExtensionsName;
+const isHanScriptExtensionsName = call_runtime.isHanScriptExtensionsName;
+const isHanScriptName = call_runtime.isHanScriptName;
+const isHangulScriptExtensionsName = call_runtime.isHangulScriptExtensionsName;
+const isHanifiRohingyaScriptExtensionsName = call_runtime.isHanifiRohingyaScriptExtensionsName;
+const isHanunooScriptExtensionsName = call_runtime.isHanunooScriptExtensionsName;
+const isHebrewScriptExtensionsName = call_runtime.isHebrewScriptExtensionsName;
+const isHiraganaScriptExtensionsName = call_runtime.isHiraganaScriptExtensionsName;
+const isIdContinueName = call_runtime.isIdContinueName;
+const isImperialAramaicScriptExtensionsName = call_runtime.isImperialAramaicScriptExtensionsName;
+const isInheritedScriptExtensionsName = call_runtime.isInheritedScriptExtensionsName;
+const isInheritedScriptName = call_runtime.isInheritedScriptName;
+const isJavaneseScriptExtensionsName = call_runtime.isJavaneseScriptExtensionsName;
+const isKaithiScriptExtensionsName = call_runtime.isKaithiScriptExtensionsName;
+const isKannadaScriptExtensionsName = call_runtime.isKannadaScriptExtensionsName;
+const isKatakanaScriptExtensionsName = call_runtime.isKatakanaScriptExtensionsName;
+const isKawiScriptExtensionsName = call_runtime.isKawiScriptExtensionsName;
+const isKayahLiScriptExtensionsName = call_runtime.isKayahLiScriptExtensionsName;
+const isKhojkiScriptExtensionsName = call_runtime.isKhojkiScriptExtensionsName;
+const isKhudawadiScriptExtensionsName = call_runtime.isKhudawadiScriptExtensionsName;
+const isKiratRaiScriptName = call_runtime.isKiratRaiScriptName;
+const isLaoScriptExtensionsName = call_runtime.isLaoScriptExtensionsName;
+const isLatinScriptExtensionsName = call_runtime.isLatinScriptExtensionsName;
+const isLetterGeneralCategoryName = call_runtime.isLetterGeneralCategoryName;
+const isLimbuScriptExtensionsName = call_runtime.isLimbuScriptExtensionsName;
+const isLinearAScriptExtensionsName = call_runtime.isLinearAScriptExtensionsName;
+const isLinearBScriptExtensionsName = call_runtime.isLinearBScriptExtensionsName;
+const isLisuScriptExtensionsName = call_runtime.isLisuScriptExtensionsName;
+const isLycianScriptExtensionsName = call_runtime.isLycianScriptExtensionsName;
+const isLydianScriptExtensionsName = call_runtime.isLydianScriptExtensionsName;
+const isMahajaniScriptExtensionsName = call_runtime.isMahajaniScriptExtensionsName;
+const isMalayalamScriptExtensionsName = call_runtime.isMalayalamScriptExtensionsName;
+const isMandaicScriptExtensionsName = call_runtime.isMandaicScriptExtensionsName;
+const isManichaeanScriptExtensionsName = call_runtime.isManichaeanScriptExtensionsName;
+const isMarkGeneralCategoryName = call_runtime.isMarkGeneralCategoryName;
+const isMasaramGondiScriptExtensionsName = call_runtime.isMasaramGondiScriptExtensionsName;
+const isMedefaidrinScriptExtensionsName = call_runtime.isMedefaidrinScriptExtensionsName;
+const isMeeteiMayekScriptExtensionsName = call_runtime.isMeeteiMayekScriptExtensionsName;
+const isMendeKikakuiScriptExtensionsName = call_runtime.isMendeKikakuiScriptExtensionsName;
+const isMeroiticCursiveScriptExtensionsName = call_runtime.isMeroiticCursiveScriptExtensionsName;
+const isMeroiticHieroglyphsScriptExtensionsName = call_runtime.isMeroiticHieroglyphsScriptExtensionsName;
+const isMiaoScriptExtensionsName = call_runtime.isMiaoScriptExtensionsName;
+const isMiaoScriptName = call_runtime.isMiaoScriptName;
+const isModiScriptExtensionsName = call_runtime.isModiScriptExtensionsName;
+const isMongolianScriptExtensionsName = call_runtime.isMongolianScriptExtensionsName;
+const isMroScriptExtensionsName = call_runtime.isMroScriptExtensionsName;
+const isMultaniScriptExtensionsName = call_runtime.isMultaniScriptExtensionsName;
+const isMyanmarScriptExtensionsName = call_runtime.isMyanmarScriptExtensionsName;
+const isNabataeanScriptExtensionsName = call_runtime.isNabataeanScriptExtensionsName;
+const isNagMundariScriptExtensionsName = call_runtime.isNagMundariScriptExtensionsName;
+const isNandinagariScriptExtensionsName = call_runtime.isNandinagariScriptExtensionsName;
+const isNandinagariScriptName = call_runtime.isNandinagariScriptName;
+const isNewTaiLueScriptExtensionsName = call_runtime.isNewTaiLueScriptExtensionsName;
+const isNewTaiLueScriptName = call_runtime.isNewTaiLueScriptName;
+const isNewaScriptExtensionsName = call_runtime.isNewaScriptExtensionsName;
+const isNewaScriptName = call_runtime.isNewaScriptName;
+const isNkoScriptExtensionsName = call_runtime.isNkoScriptExtensionsName;
+const isNkoScriptName = call_runtime.isNkoScriptName;
+const isNumberCategoryName = call_runtime.isNumberCategoryName;
+const isNushuScriptExtensionsName = call_runtime.isNushuScriptExtensionsName;
+const isNushuScriptName = call_runtime.isNushuScriptName;
+const isNyiakengPuachueHmongScriptExtensionsName = call_runtime.isNyiakengPuachueHmongScriptExtensionsName;
+const isNyiakengPuachueHmongScriptName = call_runtime.isNyiakengPuachueHmongScriptName;
+const isOghamScriptExtensionsName = call_runtime.isOghamScriptExtensionsName;
+const isOghamScriptName = call_runtime.isOghamScriptName;
+const isOlChikiScriptExtensionsName = call_runtime.isOlChikiScriptExtensionsName;
+const isOlChikiScriptName = call_runtime.isOlChikiScriptName;
+const isOlOnalScriptExtensionsName = call_runtime.isOlOnalScriptExtensionsName;
+const isOlOnalScriptName = call_runtime.isOlOnalScriptName;
+const isOldHungarianScriptExtensionsName = call_runtime.isOldHungarianScriptExtensionsName;
+const isOldHungarianScriptName = call_runtime.isOldHungarianScriptName;
+const isOldItalicScriptExtensionsName = call_runtime.isOldItalicScriptExtensionsName;
+const isOldItalicScriptName = call_runtime.isOldItalicScriptName;
+const isOldNorthArabianScriptExtensionsName = call_runtime.isOldNorthArabianScriptExtensionsName;
+const isOldNorthArabianScriptName = call_runtime.isOldNorthArabianScriptName;
+const isOldPermicScriptExtensionsName = call_runtime.isOldPermicScriptExtensionsName;
+const isOldPermicScriptName = call_runtime.isOldPermicScriptName;
+const isOldPersianScriptExtensionsName = call_runtime.isOldPersianScriptExtensionsName;
+const isOldPersianScriptName = call_runtime.isOldPersianScriptName;
+const isOldSogdianScriptExtensionsName = call_runtime.isOldSogdianScriptExtensionsName;
+const isOldSogdianScriptName = call_runtime.isOldSogdianScriptName;
+const isOldSouthArabianScriptExtensionsName = call_runtime.isOldSouthArabianScriptExtensionsName;
+const isOldSouthArabianScriptName = call_runtime.isOldSouthArabianScriptName;
+const isOldTurkicScriptExtensionsName = call_runtime.isOldTurkicScriptExtensionsName;
+const isOldTurkicScriptName = call_runtime.isOldTurkicScriptName;
+const isOldUyghurScriptExtensionsName = call_runtime.isOldUyghurScriptExtensionsName;
+const isOldUyghurScriptName = call_runtime.isOldUyghurScriptName;
+const isOriyaScriptExtensionsName = call_runtime.isOriyaScriptExtensionsName;
+const isOriyaScriptName = call_runtime.isOriyaScriptName;
+const isOsageScriptExtensionsName = call_runtime.isOsageScriptExtensionsName;
+const isOsageScriptName = call_runtime.isOsageScriptName;
+const isOsmanyaScriptExtensionsName = call_runtime.isOsmanyaScriptExtensionsName;
+const isOsmanyaScriptName = call_runtime.isOsmanyaScriptName;
+const isOtherGeneralCategoryName = call_runtime.isOtherGeneralCategoryName;
+const isOtherLetterGeneralCategoryName = call_runtime.isOtherLetterGeneralCategoryName;
+const isPahawhHmongScriptExtensionsName = call_runtime.isPahawhHmongScriptExtensionsName;
+const isPahawhHmongScriptName = call_runtime.isPahawhHmongScriptName;
+const isPalmyreneScriptExtensionsName = call_runtime.isPalmyreneScriptExtensionsName;
+const isPalmyreneScriptName = call_runtime.isPalmyreneScriptName;
+const isPauCinHauScriptExtensionsName = call_runtime.isPauCinHauScriptExtensionsName;
+const isPauCinHauScriptName = call_runtime.isPauCinHauScriptName;
+const isPhagsPaScriptExtensionsName = call_runtime.isPhagsPaScriptExtensionsName;
+const isPhagsPaScriptName = call_runtime.isPhagsPaScriptName;
+const isPhoenicianScriptExtensionsName = call_runtime.isPhoenicianScriptExtensionsName;
+const isPhoenicianScriptName = call_runtime.isPhoenicianScriptName;
+const isPlainAsciiRegExpLiteral = regexp_fastpath.isPlainAsciiRegExpLiteral;
+const isPsalterPahlaviScriptExtensionsName = call_runtime.isPsalterPahlaviScriptExtensionsName;
+const isPsalterPahlaviScriptName = call_runtime.isPsalterPahlaviScriptName;
+const isPunctuationGeneralCategoryName = call_runtime.isPunctuationGeneralCategoryName;
+const isRegExpLineTerminator = regexp_fastpath.isRegExpLineTerminator;
+const isRegExpObservable = regexp_fastpath.isRegExpObservable;
+const isRejangScriptExtensionsName = call_runtime.isRejangScriptExtensionsName;
+const isRejangScriptName = call_runtime.isRejangScriptName;
+const isRunicScriptExtensionsName = call_runtime.isRunicScriptExtensionsName;
+const isRunicScriptName = call_runtime.isRunicScriptName;
+const isSamaritanScriptExtensionsName = call_runtime.isSamaritanScriptExtensionsName;
+const isSamaritanScriptName = call_runtime.isSamaritanScriptName;
+const isSaurashtraScriptExtensionsName = call_runtime.isSaurashtraScriptExtensionsName;
+const isSaurashtraScriptName = call_runtime.isSaurashtraScriptName;
+const isSharadaScriptExtensionsName = call_runtime.isSharadaScriptExtensionsName;
+const isSharadaScriptName = call_runtime.isSharadaScriptName;
+const isShavianScriptExtensionsName = call_runtime.isShavianScriptExtensionsName;
+const isShavianScriptName = call_runtime.isShavianScriptName;
+const isSiddhamScriptExtensionsName = call_runtime.isSiddhamScriptExtensionsName;
+const isSiddhamScriptName = call_runtime.isSiddhamScriptName;
+const isSideticScriptExtensionsName = call_runtime.isSideticScriptExtensionsName;
+const isSideticScriptName = call_runtime.isSideticScriptName;
+const isSignWritingScriptExtensionsName = call_runtime.isSignWritingScriptExtensionsName;
+const isSignWritingScriptName = call_runtime.isSignWritingScriptName;
+const isSinhalaScriptExtensionsName = call_runtime.isSinhalaScriptExtensionsName;
+const isSinhalaScriptName = call_runtime.isSinhalaScriptName;
+const isSogdianScriptExtensionsName = call_runtime.isSogdianScriptExtensionsName;
+const isSogdianScriptName = call_runtime.isSogdianScriptName;
+const isSoraSompengScriptExtensionsName = call_runtime.isSoraSompengScriptExtensionsName;
+const isSoraSompengScriptName = call_runtime.isSoraSompengScriptName;
+const isSoyomboScriptExtensionsName = call_runtime.isSoyomboScriptExtensionsName;
+const isSoyomboScriptName = call_runtime.isSoyomboScriptName;
+const isSundaneseScriptExtensionsName = call_runtime.isSundaneseScriptExtensionsName;
+const isSundaneseScriptName = call_runtime.isSundaneseScriptName;
+const isSunuwarScriptExtensionsName = call_runtime.isSunuwarScriptExtensionsName;
+const isSunuwarScriptName = call_runtime.isSunuwarScriptName;
+const isSylotiNagriScriptExtensionsName = call_runtime.isSylotiNagriScriptExtensionsName;
+const isSylotiNagriScriptName = call_runtime.isSylotiNagriScriptName;
+const isSymbolGeneralCategoryName = call_runtime.isSymbolGeneralCategoryName;
+const isSyriacScriptExtensionsName = call_runtime.isSyriacScriptExtensionsName;
+const isSyriacScriptName = call_runtime.isSyriacScriptName;
+const isTagalogScriptExtensionsName = call_runtime.isTagalogScriptExtensionsName;
+const isTagalogScriptName = call_runtime.isTagalogScriptName;
+const isTagbanwaScriptExtensionsName = call_runtime.isTagbanwaScriptExtensionsName;
+const isTagbanwaScriptName = call_runtime.isTagbanwaScriptName;
+const isTaiLeScriptExtensionsName = call_runtime.isTaiLeScriptExtensionsName;
+const isTaiLeScriptName = call_runtime.isTaiLeScriptName;
+const isTaiThamScriptExtensionsName = call_runtime.isTaiThamScriptExtensionsName;
+const isTaiThamScriptName = call_runtime.isTaiThamScriptName;
+const isTaiVietScriptExtensionsName = call_runtime.isTaiVietScriptExtensionsName;
+const isTaiVietScriptName = call_runtime.isTaiVietScriptName;
+const isTaiYoScriptExtensionsName = call_runtime.isTaiYoScriptExtensionsName;
+const isTaiYoScriptName = call_runtime.isTaiYoScriptName;
+const isTakriScriptExtensionsName = call_runtime.isTakriScriptExtensionsName;
+const isTakriScriptName = call_runtime.isTakriScriptName;
+const isTamilScriptExtensionsName = call_runtime.isTamilScriptExtensionsName;
+const isTamilScriptName = call_runtime.isTamilScriptName;
+const isTangsaScriptExtensionsName = call_runtime.isTangsaScriptExtensionsName;
+const isTangsaScriptName = call_runtime.isTangsaScriptName;
+const isTangutScriptExtensionsName = call_runtime.isTangutScriptExtensionsName;
+const isTangutScriptName = call_runtime.isTangutScriptName;
+const isTeluguScriptExtensionsName = call_runtime.isTeluguScriptExtensionsName;
+const isTeluguScriptName = call_runtime.isTeluguScriptName;
+const isThaanaScriptExtensionsName = call_runtime.isThaanaScriptExtensionsName;
+const isThaanaScriptName = call_runtime.isThaanaScriptName;
+const isThaiScriptExtensionsName = call_runtime.isThaiScriptExtensionsName;
+const isThaiScriptName = call_runtime.isThaiScriptName;
+const isTibetanScriptExtensionsName = call_runtime.isTibetanScriptExtensionsName;
+const isTibetanScriptName = call_runtime.isTibetanScriptName;
+const isTifinaghScriptExtensionsName = call_runtime.isTifinaghScriptExtensionsName;
+const isTifinaghScriptName = call_runtime.isTifinaghScriptName;
+const isTirhutaScriptExtensionsName = call_runtime.isTirhutaScriptExtensionsName;
+const isTirhutaScriptName = call_runtime.isTirhutaScriptName;
+const isTodhriScriptExtensionsName = call_runtime.isTodhriScriptExtensionsName;
+const isTodhriScriptName = call_runtime.isTodhriScriptName;
+const isTolongSikiScriptExtensionsName = call_runtime.isTolongSikiScriptExtensionsName;
+const isTolongSikiScriptName = call_runtime.isTolongSikiScriptName;
+const isTotoScriptExtensionsName = call_runtime.isTotoScriptExtensionsName;
+const isTotoScriptName = call_runtime.isTotoScriptName;
+const isTuluTigalariScriptExtensionsName = call_runtime.isTuluTigalariScriptExtensionsName;
+const isTuluTigalariScriptName = call_runtime.isTuluTigalariScriptName;
+const isTypedArrayPrototypeMethod = array_ops.isTypedArrayPrototypeMethod;
+const isUgariticScriptExtensionsName = call_runtime.isUgariticScriptExtensionsName;
+const isUgariticScriptName = call_runtime.isUgariticScriptName;
+const isUnassignedGeneralCategoryName = call_runtime.isUnassignedGeneralCategoryName;
+const isUppercaseLetterGeneralCategoryName = call_runtime.isUppercaseLetterGeneralCategoryName;
+const isVaiScriptExtensionsName = call_runtime.isVaiScriptExtensionsName;
+const isVaiScriptName = call_runtime.isVaiScriptName;
+const isVithkuqiScriptExtensionsName = call_runtime.isVithkuqiScriptExtensionsName;
+const isVithkuqiScriptName = call_runtime.isVithkuqiScriptName;
+const isWanchoScriptExtensionsName = call_runtime.isWanchoScriptExtensionsName;
+const isWanchoScriptName = call_runtime.isWanchoScriptName;
+const isWarangCitiScriptExtensionsName = call_runtime.isWarangCitiScriptExtensionsName;
+const isWarangCitiScriptName = call_runtime.isWarangCitiScriptName;
+const isXidContinueName = call_runtime.isXidContinueName;
+const isYezidiScriptExtensionsName = call_runtime.isYezidiScriptExtensionsName;
+const isYezidiScriptName = call_runtime.isYezidiScriptName;
+const isYiScriptExtensionsName = call_runtime.isYiScriptExtensionsName;
+const isYiScriptName = call_runtime.isYiScriptName;
+const isZanabazarSquareScriptExtensionsName = call_runtime.isZanabazarSquareScriptExtensionsName;
+const isZanabazarSquareScriptName = call_runtime.isZanabazarSquareScriptName;
+const leadingAlternationCharacterClassSource = regexp_fastpath.leadingAlternationCharacterClassSource;
+const lengthIndexValue = array_ops.lengthIndexValue;
+const lowSurrogateLiteralAt = regexp_fastpath.lowSurrogateLiteralAt;
+const objectFromValue = object_ops.objectFromValue;
+const ownDataOrAutoInitPropertyValue = object_ops.ownDataOrAutoInitPropertyValue;
+const parseSimpleClassSequenceSource = regexp_fastpath.parseSimpleClassSequenceSource;
+const parseSimpleUnicodeLiteralSource = regexp_fastpath.parseSimpleUnicodeLiteralSource;
+const parseSurrogatePairClassSource = regexp_fastpath.parseSurrogatePairClassSource;
+const parseUnicodeAstralSpecialSource = regexp_fastpath.parseUnicodeAstralSpecialSource;
+const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
+const propertyEscapePattern = object_ops.propertyEscapePattern;
+const proxyTargetIsCallableObject = object_ops.proxyTargetIsCallableObject;
+const qjsArrayLastIndexSparseLarge = array_ops.qjsArrayLastIndexSparseLarge;
+const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
+const qjsRegExpConstructCall = regexp_fastpath.qjsRegExpConstructCall;
+const qjsRegExpExecGeneric = regexp_fastpath.qjsRegExpExecGeneric;
+const qjsRegExpExecSimpleUnicodeLiteral = regexp_fastpath.qjsRegExpExecSimpleUnicodeLiteral;
+const qjsRegExpSpeciesConstructor = regexp_fastpath.qjsRegExpSpeciesConstructor;
+const readUnicodePropertyClassEscape = object_ops.readUnicodePropertyClassEscape;
+const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
+const regExpExecPropertyIsDefault = object_ops.regExpExecPropertyIsDefault;
+const regExpFlagsAreFullUnicode = regexp_fastpath.regExpFlagsAreFullUnicode;
+const regexpBorrowedLatin1SourceFlags = regexp_fastpath.regexpBorrowedLatin1SourceFlags;
+const regexpInternalFlagsContain = regexp_fastpath.regexpInternalFlagsContain;
+const regexpInternalSimpleQuantifiedClassSource = regexp_fastpath.regexpInternalSimpleQuantifiedClassSource;
+const regexpSimpleCaptureSequencePattern = regexp_fastpath.regexpSimpleCaptureSequencePattern;
+const setRegExpLastIndexZero = regexp_fastpath.setRegExpLastIndexZero;
+const setValueProperty = object_ops.setValueProperty;
+const setValuePropertyStrict = object_ops.setValuePropertyStrict;
+const simpleCaptureSequenceAtLatin1 = regexp_fastpath.simpleCaptureSequenceAtLatin1;
+const simpleCaptureSequenceAtUtf16 = regexp_fastpath.simpleCaptureSequenceAtUtf16;
+const simpleClassSequenceAtLatin1 = regexp_fastpath.simpleClassSequenceAtLatin1;
+const simpleClassSequenceAtUtf16 = regexp_fastpath.simpleClassSequenceAtUtf16;
+const simpleUnicodeLiteralAt = regexp_fastpath.simpleUnicodeLiteralAt;
+const singleLowSurrogateLiteralSource = regexp_fastpath.singleLowSurrogateLiteralSource;
+const standaloneCharacterClassSource = regexp_fastpath.standaloneCharacterClassSource;
+const surrogatePairClassAt = regexp_fastpath.surrogatePairClassAt;
 
-const throwRangeErrorMessage = shared_vm.throwRangeErrorMessage;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
-const toLengthIndex = shared_vm.toLengthIndex;
-const toLengthNumber = shared_vm.toLengthNumber;
-const toNumberLikeArgument = shared_vm.toNumberLikeArgument;
-const toPrimitiveForNumber = shared_vm.toPrimitiveForNumber;
-const toUint16CodeUnit = shared_vm.toUint16CodeUnit;
-const toUint32Number = shared_vm.toUint32Number;
-const uint32NumberValue = shared_vm.uint32NumberValue;
-const unicodeAstralSpecialAt = shared_vm.unicodeAstralSpecialAt;
-const unicodePropertyOnlyClassBody = shared_vm.unicodePropertyOnlyClassBody;
-const unicodePropertyOnlyClassSource = shared_vm.unicodePropertyOnlyClassSource;
-const updateRegExpLegacyStaticsNoCaptures = shared_vm.updateRegExpLegacyStaticsNoCaptures;
-const valueTruthy = shared_vm.valueTruthy;
-const valuesStrictEqual = shared_vm.valuesStrictEqual;
+const throwRangeErrorMessage = call_runtime.throwRangeErrorMessage;
+const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const toLengthIndex = coercion_ops.toLengthIndex;
+const toLengthNumber = coercion_ops.toLengthNumber;
+const toNumberLikeArgument = builtin_glue.toNumberLikeArgument;
+const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
+const toUint16CodeUnit = coercion_ops.toUint16CodeUnit;
+const toUint32Number = coercion_ops.toUint32Number;
+const uint32NumberValue = coercion_ops.uint32NumberValue;
+const unicodeAstralSpecialAt = regexp_fastpath.unicodeAstralSpecialAt;
+const unicodePropertyOnlyClassBody = object_ops.unicodePropertyOnlyClassBody;
+const unicodePropertyOnlyClassSource = object_ops.unicodePropertyOnlyClassSource;
+const updateRegExpLegacyStaticsNoCaptures = regexp_fastpath.updateRegExpLegacyStaticsNoCaptures;
+const valueTruthy = coercion_ops.valueTruthy;
+const valuesStrictEqual = value_ops.valuesStrictEqual;
 
 pub fn toStringForAnnexB(
     ctx: *core.JSContext,
@@ -3808,7 +3804,7 @@ pub fn anchoredBinaryPropertyMatches(source: []const u8, string_value: core.JSVa
 }
 
 pub fn binaryPropertyCodePointMatches(name: []const u8, code_point: u21) bool {
-    return shared_vm.regexp_unicode.isUnicodePropertyMatches(code_point, name);
+    return regexp_unicode.isUnicodePropertyMatches(code_point, name);
 }
 
 pub fn anchoredCodePointPredicateMatches(
@@ -3820,7 +3816,7 @@ pub fn anchoredCodePointPredicateMatches(
         .latin1 => |bytes| {
             if (bytes.len == 0) return false;
             for (bytes) |byte| {
-                if (shared_vm.regexp_unicode.isUnicodePropertyMatches(byte, name) != positive) return false;
+                if (regexp_unicode.isUnicodePropertyMatches(byte, name) != positive) return false;
             }
             return true;
         },
@@ -3828,7 +3824,7 @@ pub fn anchoredCodePointPredicateMatches(
             if (units.len == 0) return false;
             var index: usize = 0;
             while (index < units.len) {
-                if (shared_vm.regexp_unicode.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
+                if (regexp_unicode.isUnicodePropertyMatches(readUtf16CodePoint(units, &index), name) != positive) return false;
             }
             return true;
         },
@@ -5046,4 +5042,92 @@ pub fn stringObjectHasIndexProperty(rt: *core.JSRuntime, object: *core.Object, a
     const header = string_data.refHeader() orelse return false;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     return index < string_value.len();
+}
+
+// String unit/byte classification helpers (moved from the VM call runtime).
+
+pub fn bytesAreAscii(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (!byteIsAscii(byte)) return false;
+    }
+    return true;
+}
+
+pub fn byteIsAscii(byte: u8) bool {
+    return byte < 0x80;
+}
+
+pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
+    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
+}
+
+pub fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
+    var index: usize = 0;
+    while (index < length) : (index += 1) {
+        try out.append(rt.memory.allocator, fill[index % fill.len]);
+    }
+}
+
+pub const NormalizedUtf32 = struct {
+    allocator: std.mem.Allocator,
+    slice: []u32,
+
+    pub fn deinit(self: NormalizedUtf32) void {
+        self.allocator.free(self.slice);
+    }
+};
+
+pub fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode_lib.NormalizationForm) !NormalizedUtf32 {
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(rt.memory.allocator);
+    try appendUtf32FromStringValue(rt, &input, value);
+    return .{
+        .allocator = rt.memory.allocator,
+        .slice = try unicode_lib.normalizeAlloc(rt.memory.allocator, input.items, form),
+    };
+}
+
+pub fn appendAsciiUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), bytes: []const u8) !void {
+    for (bytes) |byte| try out.append(rt.memory.allocator, byte);
+}
+
+pub fn isLineTerminatorUnit(unit: u16) bool {
+    return unicode_lib.isEcmaLineTerminatorUnit(unit);
+}
+
+// --- Residual RegExp support helpers moved to regexp_fastpath.zig ---
+
+pub fn isEcmaWhitespaceOrLineTerminator(unit: u16) bool {
+    return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
+}
+
+pub fn isUnknownScriptName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "Script=Unknown") or
+        std.mem.eql(u8, name, "Script=Zzzz") or
+        std.mem.eql(u8, name, "sc=Unknown") or
+        std.mem.eql(u8, name, "sc=Zzzz") or
+        std.mem.eql(u8, name, "Script_Extensions=Unknown") or
+        std.mem.eql(u8, name, "Script_Extensions=Zzzz") or
+        std.mem.eql(u8, name, "scx=Unknown") or
+        std.mem.eql(u8, name, "scx=Zzzz");
+}
+
+pub fn isAsciiDigitUnit(unit: u16) bool {
+    return unicode_lib.isAsciiDigitUnit(unit);
+}
+
+pub fn isAsciiDigitByte(byte: u8) bool {
+    return unicode_lib.isAsciiDigitByte(byte);
+}
+
+pub fn isAsciiWordUnit(unit: u16) bool {
+    return unicode_lib.isAsciiWordUnit(unit);
+}
+
+pub fn isHighSurrogateUnit(unit: u16) bool {
+    return unicode_lib.isHighSurrogateUnit(unit);
+}
+
+pub fn isLowSurrogateUnit(unit: u16) bool {
+    return unicode_lib.isLowSurrogateUnit(unit);
 }

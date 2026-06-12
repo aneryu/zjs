@@ -8,23 +8,25 @@ const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 const std = @import("std");
 
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const utils = @import("vm_utils.zig");
+const object_ops = @import("object_ops.zig");
 
-// Helpers that remain in shared.zig (generic utilities outside the for-of
+// Helpers that remain in call_runtime.zig (generic utilities outside the for-of
 // iterator cluster).
-const appendAtom = shared_vm.appendAtom;
-const atomListContains = shared_vm.atomListContains;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const freeAtomList = shared_vm.freeAtomList;
-const getValueProperty = shared_vm.getValueProperty;
-const isCallableValue = shared_vm.isCallableValue;
-const isDestructuringIteratorState = shared_vm.isDestructuringIteratorState;
-const objectFromValue = shared_vm.objectFromValue;
-const objectRestOwnKeys = shared_vm.objectRestOwnKeys;
-const primitiveObjectForAccess = shared_vm.primitiveObjectForAccess;
-const proxyAwareOwnPropertyDescriptor = shared_vm.proxyAwareOwnPropertyDescriptor;
-const qjsObjectGetPrototypeOfStep = shared_vm.qjsObjectGetPrototypeOfStep;
-const sameObjectIdentity = shared_vm.sameObjectIdentity;
+const appendAtom = utils.appendAtom;
+const atomListContains = utils.atomListContains;
+const callValueOrBytecode = call_runtime.callValueOrBytecode;
+const freeAtomList = utils.freeAtomList;
+const getValueProperty = object_ops.getValueProperty;
+const isCallableValue = call_runtime.isCallableValue;
+const isDestructuringIteratorState = call_runtime.isDestructuringIteratorState;
+const objectFromValue = object_ops.objectFromValue;
+const objectRestOwnKeys = object_ops.objectRestOwnKeys;
+const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
+const qjsObjectGetPrototypeOfStep = object_ops.qjsObjectGetPrototypeOfStep;
+const sameObjectIdentity = object_ops.sameObjectIdentity;
 
 pub fn createForInIterator(
     ctx: *core.JSContext,

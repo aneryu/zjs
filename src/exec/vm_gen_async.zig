@@ -3,7 +3,9 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const forof_ops = @import("forof_ops.zig");
+const promise_ops = @import("promise_ops.zig");
 const stack_mod = @import("stack.zig");
 
 pub const Result = union(enum) {
@@ -138,8 +140,8 @@ fn resumeExecutionStateRaw(
 
     const resume_pc = generator.generatorPc();
     const generator_started = generator.generatorStarted();
-    const was_yield_star_suspended = generator_started and shared_vm.generatorYieldStarSuspended(ctx.runtime, generator);
-    const completion_type = if (generator_started) shared_vm.generatorResumeCompletionType(ctx.runtime, generator) else 0;
+    const was_yield_star_suspended = generator_started and call_runtime.generatorYieldStarSuspended(ctx.runtime, generator);
+    const completion_type = if (generator_started) call_runtime.generatorResumeCompletionType(ctx.runtime, generator) else 0;
     const resume_needs_branch_false = generator_started and
         resume_pc > 0 and
         resume_pc <= function.code.len and
@@ -188,20 +190,20 @@ fn resumeExecutionStateRaw(
 
     if (!generator_started) return .{ .catch_target = catch_target };
     if (was_yield_star_suspended) {
-        try shared_vm.setGeneratorYieldStarSuspended(ctx.runtime, generator, false);
-        try shared_vm.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+        try call_runtime.setGeneratorYieldStarSuspended(ctx.runtime, generator, false);
+        try call_runtime.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
         stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
         stack.pushOwnedAssumeCapacity(core.JSValue.int32(completion_type));
     } else {
         if (completion_type == 2) {
-            try shared_vm.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+            try call_runtime.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
             if (resume_needs_branch_false) {
                 stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
             }
             return .{ .throw_on_entry = true, .catch_target = catch_target };
         }
         stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
-        if (completion_type != 0) try shared_vm.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
+        if (completion_type != 0) try call_runtime.setGeneratorResumeCompletionType(ctx.runtime, generator, 0);
     }
     if (resume_needs_branch_false) {
         stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
@@ -224,7 +226,7 @@ pub fn completeResumeState(
     const thrown = resume_value orelse core.JSValue.undefinedValue();
     _ = ctx.throwValue(thrown.dup());
     try closeIteratorForPendingError(ctx, output, global, stack, function, frame);
-    if (!(try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, &catch_target, global, error.JSException))) {
+    if (!(try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, &catch_target, global, error.JSException))) {
         return error.JSException;
     }
     return catch_target;
@@ -241,7 +243,7 @@ fn handleAwaitError(
     err: anyerror,
 ) !bool {
     try closeIteratorForPendingError(ctx, output, global, stack, function, frame);
-    return try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err);
+    return try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err);
 }
 
 pub fn stopBeforePc(
@@ -316,7 +318,7 @@ pub fn yieldStar(
     catch_target: *?usize,
 ) !Result {
     return yieldStarRaw(ctx, output, global, stack, function, frame, generator, stop_on_yield) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
         return err;
@@ -342,7 +344,7 @@ fn yieldStarRaw(
         if (stop_on_yield) {
             if (generator) |generator_object| {
                 try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc);
-                try shared_vm.setGeneratorYieldStarSuspended(ctx.runtime, generator_object, true);
+                try call_runtime.setGeneratorYieldStarSuspended(ctx.runtime, generator_object, true);
                 generator_object.generatorStartedSlot().* = true;
                 generator_object.generatorJustYieldedSlot().* = true;
             } else {
@@ -380,15 +382,15 @@ fn yieldStarRaw(
         } else {
             const iterable = try stack.pop();
             defer iterable.free(ctx.runtime);
-            iterator_value = try shared_vm.iteratorForValue(ctx, output, global, iterable, function, frame);
+            iterator_value = try call_runtime.iteratorForValue(ctx, output, global, iterable, function, frame);
         }
     } else {
         const iterable = try stack.pop();
         defer iterable.free(ctx.runtime);
-        iterator_value = try shared_vm.iteratorForValue(ctx, output, global, iterable, function, frame);
+        iterator_value = try call_runtime.iteratorForValue(ctx, output, global, iterable, function, frame);
     }
     defer iterator_value.free(ctx.runtime);
-    const step = try shared_vm.iteratorStepResult(ctx, output, global, iterator_value, next_arg);
+    const step = try call_runtime.iteratorStepResult(ctx, output, global, iterator_value, next_arg);
     defer step.result.free(ctx.runtime);
     defer step.value.free(ctx.runtime);
     if (step.done) {
@@ -453,7 +455,7 @@ fn awaitValueRaw(
         return .continue_loop;
     }
     const promise = objectFromValue(awaited) orelse {
-        if (try shared_vm.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
+        if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
             if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value)) |result| return result;
             try stack.push(value);
@@ -464,7 +466,7 @@ fn awaitValueRaw(
         return .continue_loop;
     };
     if (promise.class_id != core.class.ids.promise) {
-        if (try shared_vm.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
+        if (try promise_ops.awaitThenableValue(ctx, output, global, awaited, function, frame)) |value| {
             defer value.free(ctx.runtime);
             if (try suspendAwaitValue(ctx, stack, frame, generator, suspend_mode == .settled, value)) |result| return result;
             try stack.push(value);
@@ -474,9 +476,9 @@ fn awaitValueRaw(
         try stack.push(awaited);
         return .continue_loop;
     }
-    try shared_vm.settlePendingPromiseReaction(ctx, output, global, promise);
-    if ((suspend_mode == .settled or suspend_mode == .drain) and promise.promiseResult() == null) try shared_vm.drainPendingPromiseJobs(ctx, output, global);
-    if (promise.promiseResult() == null) try shared_vm.awaitPendingPromise(ctx, output, global, promise);
+    try promise_ops.settlePendingPromiseReaction(ctx, output, global, promise);
+    if ((suspend_mode == .settled or suspend_mode == .drain) and promise.promiseResult() == null) try promise_ops.drainPendingPromiseJobs(ctx, output, global);
+    if (promise.promiseResult() == null) try promise_ops.awaitPendingPromise(ctx, output, global, promise);
     const result = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
     defer result.free(ctx.runtime);
     if (promise.promiseIsRejected()) {
@@ -539,9 +541,9 @@ fn closeIteratorForPendingError(
     frame: *frame_mod.Frame,
 ) !void {
     if (frame.pc < function.code.len and function.code[frame.pc] == bytecode.opcode.op.iterator_get_value_done) {
-        try shared_vm.closeForAwaitIteratorForPendingError(ctx, output, global, stack);
+        try promise_ops.closeForAwaitIteratorForPendingError(ctx, output, global, stack);
     } else {
-        try shared_vm.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+        try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
     }
 }
 

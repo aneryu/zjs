@@ -4,7 +4,7 @@ const bytecode = @import("../bytecode/root.zig");
 const frame_mod = @import("frame.zig");
 const bignum = @import("../libs/bignum.zig");
 const value_ops = @import("value_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
 
 pub fn qjsMathSumPrecise(
     ctx: *core.JSContext,
@@ -15,7 +15,7 @@ pub fn qjsMathSumPrecise(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const iterator_value = try shared_vm.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const iterator_value = try call_runtime.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     defer iterator_value.free(ctx.runtime);
 
     var finite_values = std.ArrayList(f64).empty;
@@ -27,11 +27,11 @@ pub fn qjsMathSumPrecise(
     var saw_negative_zero = false;
 
     while (true) {
-        const step = try shared_vm.iteratorStepValue(ctx, output, global, iterator_value);
+        const step = try call_runtime.iteratorStepValue(ctx, output, global, iterator_value);
         defer step.value.free(ctx.runtime);
         if (step.done) break;
         const number = value_ops.numberValue(step.value) orelse {
-            try shared_vm.qjsIteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame);
+            try call_runtime.qjsIteratorClose(ctx, output, global, iterator_value, caller_function, caller_frame);
             return error.TypeError;
         };
         if (std.math.isNan(number)) {

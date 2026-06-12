@@ -7,7 +7,8 @@ const call = @import("call.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const module_exec = @import("module.zig");
 const property_ops = @import("property_ops.zig");
-const shared = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const zjs_vm = @import("zjs_vm.zig");
 
@@ -20,7 +21,7 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
     if (!source_value.isString()) return error.TypeError;
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
-    try shared.appendSourceStringUtf8(ctx.runtime, &source, source_value);
+    try string_ops.appendSourceStringUtf8(ctx.runtime, &source, source_value);
     return evalScriptSource(ctx, source.items, options);
 }
 
@@ -219,10 +220,10 @@ fn isWhitespaceSeparatedNumericScript(source_text: []const u8) bool {
     var saw_digit = false;
     var saw_space_after_digit = false;
     for (source_text) |ch| {
-        if (shared.isAsciiDigitByte(ch)) {
+        if (string_ops.isAsciiDigitByte(ch)) {
             if (saw_space_after_digit) return true;
             saw_digit = true;
-        } else if (shared.isAsciiWhitespace(ch)) {
+        } else if (call_runtime.isAsciiWhitespace(ch)) {
             if (saw_digit) saw_space_after_digit = true;
         } else {
             return false;

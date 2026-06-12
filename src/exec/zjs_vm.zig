@@ -29,10 +29,17 @@ const inline_calls = @import("inline_calls.zig");
 const iter_vm = @import("iterator_ops.zig");
 const json_vm = @import("json_ops.zig");
 const literal_vm = @import("vm_literal.zig");
-const property_vm = @import("vm_property.zig");
+const vm_property_field = @import("vm_property_field.zig");
+const vm_property_globals = @import("vm_property_globals.zig");
+const vm_property_locals = @import("vm_property_locals.zig");
+const vm_property_private = @import("vm_property_private.zig");
+const vm_property_ref = @import("vm_property_ref.zig");
 const profile_vm = @import("vm_profile.zig");
 const regexp_vm = @import("vm_regexp.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const forof_ops = @import("forof_ops.zig");
+const promise_ops = @import("promise_ops.zig");
 const value_vm = @import("vm_value.zig");
 const HostError = exceptions.HostError;
 
@@ -499,12 +506,12 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             //   - idx ∈ [0, 4)    → 1-byte short form (idx in opcode)
             //   - idx ∈ [4, 256)  → 2-byte u8-form (`get_loc8`, ...)
             //   - idx ∈ [256, 2^16) → 3-byte u16-form
-            op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => try property_vm.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object),
+            op.get_loc, op.put_loc, op.set_loc, op.get_loc8, op.put_loc8, op.set_loc8, op.get_loc0, op.get_loc1, op.get_loc2, op.get_loc3, op.put_loc0, op.put_loc1, op.put_loc2, op.put_loc3, op.set_loc0, op.set_loc1, op.set_loc2, op.set_loc3, op.get_loc0_loc1 => try vm_property_locals.loc(ctx, function, global, frame, stack, opc, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object),
 
-            op.get_arg, op.put_arg, op.set_arg, op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try property_vm.arg(ctx, function, frame, stack, opc),
+            op.get_arg, op.put_arg, op.set_arg, op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try vm_property_locals.arg(ctx, function, frame, stack, opc),
 
             op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
-                switch (try property_vm.varRefVm(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.varRefVm(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -517,7 +524,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             //   put_loc_check: write; throw ReferenceError if in TDZ.
             //   put_loc_check_init: write + clear TDZ flag.
             op.set_loc_uninitialized, op.get_loc_check, op.put_loc_check, op.put_loc_check_init => {
-                switch (try property_vm.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                switch (try vm_property_locals.checkedLocVm(ctx, function, global, frame, stack, opc, catch_target, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -534,15 +541,15 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 });
             },
             op.push_empty_string => try value_vm.pushEmptyString(ctx, stack),
-            op.to_propkey => switch (try property_vm.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
+            op.to_propkey => switch (try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.to_propkey2 => switch (try property_vm.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target)) {
+            op.to_propkey2 => switch (try vm_property_field.toPropKey2Vm(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.set_name, op.set_name_computed => try property_vm.setName(ctx, output, global, stack, function, frame, opc),
+            op.set_name, op.set_name_computed => try vm_property_field.setName(ctx, output, global, stack, function, frame, opc),
 
             // ---- Stack manipulation ----
             op.drop => switch (try value_vm.drop(ctx.runtime, stack)) {
@@ -595,7 +602,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .continue_loop => continue,
                 }
             },
-            op.in, op.instanceof => switch (try property_vm.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
+            op.in, op.instanceof => switch (try vm_property_field.inOrInstanceof(ctx, output, global, stack, function, frame, catch_target, opc)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -629,16 +636,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Control flow ----
             op.goto => {
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump32(function, frame);
             },
             op.goto16 => {
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump16(function, frame);
             },
             op.goto8 => {
                 if (stop_before_pc == null and fusion_stats.counted(.tryFuseGoto8LocalLessThanFalseBranch, control_vm.tryFuseGoto8LocalLessThanFalseBranch(function, frame))) continue;
-                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, vm_property_globals.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump8(function, frame);
             },
             op.if_false => try control_vm.branch32(ctx, stack, function, frame, false),
@@ -649,38 +656,38 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             op.ret => try control_vm.ret(ctx, function, frame, stack),
 
             // ---- Variable access ----
-            op.get_var, op.get_var_undef => switch (try property_vm.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
+            op.get_var, op.get_var_undef => switch (try vm_property_globals.getVar(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => try property_vm.makeSlotRef(ctx, stack, function, frame, opc),
+            op.make_loc_ref, op.make_arg_ref, op.make_var_ref_ref => try vm_property_ref.makeSlotRef(ctx, stack, function, frame, opc),
             op.make_var_ref => {
-                switch (try property_vm.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs)) {
+                switch (try vm_property_ref.makeVarRefVm(ctx, output, global, stack, function, frame, catch_target, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.get_ref_value => {
-                switch (try property_vm.getRefValueVm(ctx, output, global, stack, function, frame, catch_target)) {
+                switch (try vm_property_ref.getRefValueVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.put_ref_value => {
-                switch (try property_vm.putRefValueVm(ctx, output, global, stack, function, frame, catch_target)) {
+                switch (try vm_property_ref.putRefValueVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.put_var => switch (try property_vm.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
+            op.put_var => switch (try vm_property_globals.putVar(ctx, output, global, stack, function, frame, catch_target, strict_unresolved_get_var, eval_global_var_bindings, is_eval_code, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_with_object)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => switch (try property_vm.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc)) {
+            op.with_get_var, op.with_delete_var, op.with_make_ref, op.with_get_ref, op.with_get_ref_undef => switch (try vm_property_ref.withGetOrDelete(ctx, output, global, stack, function, frame, catch_target, opc)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.with_put_var => switch (try property_vm.withPut(ctx, output, global, stack, function, frame, catch_target)) {
+            op.with_put_var => switch (try vm_property_ref.withPut(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -690,31 +697,31 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Object properties ----
-            op.get_field, op.get_field2, op.put_field => switch (try property_vm.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals)) {
+            op.get_field, op.get_field2, op.put_field => switch (try vm_property_field.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals)) {
                 .done => {},
                 .continue_loop => continue,
             },
             op.get_private_field => {
-                switch (try property_vm.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
+                switch (try vm_property_private.getPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.put_private_field => {
-                switch (try property_vm.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
+                switch (try vm_property_private.putPrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.define_private_field => {
-                switch (try property_vm.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
+                switch (try vm_property_private.definePrivateFieldVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
 
             // ---- Array elements ----
-            op.get_array_el, op.get_array_el2, op.put_array_el => switch (try property_vm.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc)) {
+            op.get_array_el, op.get_array_el2, op.put_array_el => switch (try vm_property_field.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -870,7 +877,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Global variable operations ----
-            op.check_define_var, op.define_var, op.define_func, op.put_var_init => switch (try property_vm.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_global_var_bindings, is_eval_code)) {
+            op.check_define_var, op.define_var, op.define_func, op.put_var_init => switch (try vm_property_globals.globalDefinition(ctx, global, stack, function, frame, catch_target, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, eval_global_var_bindings, is_eval_code)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -921,7 +928,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .continue_loop => continue,
                 }
             },
-            op.close_loc => try property_vm.closeLoc(ctx, function, frame),
+            op.close_loc => try vm_property_locals.closeLoc(ctx, function, frame),
 
             // ---- NOP ----
             op.nop => control_vm.nop(),
@@ -933,8 +940,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Delete ----
-            op.delete_var => try property_vm.deleteVar(ctx, global, stack, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs),
-            op.delete => switch (try property_vm.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
+            op.delete_var => try vm_property_ref.deleteVar(ctx, global, stack, function, frame, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs),
+            op.delete => switch (try vm_property_ref.deletePropertyVm(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -1060,17 +1067,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
 // ---- Helpers ----
 // ---- Shared helper aliases ----
-const closeStackTopForOfIteratorForPendingError = shared_vm.closeStackTopForOfIteratorForPendingError;
-const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const handleCatchableRuntimeError = shared_vm.handleCatchableRuntimeError;
-pub const qjsArraySortCall = shared_vm.qjsArraySortCall;
-pub const qjsArrayByCopyCall = shared_vm.qjsArrayByCopyCall;
-const closeFrameDestructuringIteratorsForAbruptCompletion = shared_vm.closeFrameDestructuringIteratorsForAbruptCompletion;
-pub const drainPendingPromiseJobs = shared_vm.drainPendingPromiseJobs;
-pub const cleanupAtomicsWaitersForContext = shared_vm.cleanupAtomicsWaitersForContext;
-pub const cleanupWorkersForRuntime = shared_vm.cleanupWorkersForRuntime;
-const throwTypeErrorIntrinsicForGlobal = shared_vm.throwTypeErrorIntrinsicForGlobal;
-pub const getValueProperty = shared_vm.getValueProperty;
+const closeStackTopForOfIteratorForPendingError = forof_ops.closeStackTopForOfIteratorForPendingError;
+const constructorPrototypeFromGlobal = class_vm.constructorPrototypeFromGlobal;
+const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
+pub const qjsArraySortCall = array_ops.qjsArraySortCall;
+pub const qjsArrayByCopyCall = array_ops.qjsArrayByCopyCall;
+const closeFrameDestructuringIteratorsForAbruptCompletion = call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion;
+pub const drainPendingPromiseJobs = promise_ops.drainPendingPromiseJobs;
+pub const cleanupAtomicsWaitersForContext = call_runtime.cleanupAtomicsWaitersForContext;
+pub const cleanupWorkersForRuntime = call_runtime.cleanupWorkersForRuntime;
+const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
+pub const getValueProperty = class_vm.getValueProperty;
 
 test "engine eval host globals and throw intrinsic tear down cleanly" {
     const exec = @import("root.zig");

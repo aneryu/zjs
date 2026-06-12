@@ -258,7 +258,7 @@ pub const object = struct {
         }
 
         pub fn createUint8ArrayFromBytes(rt: *JSRuntime, global: *Object, bytes: []const u8) !value.Value {
-            return zjs_exec.shared.createUint8ArrayFromBytes(rt, toCore(global), bytes);
+            return zjs_exec.array_ops.createUint8ArrayFromBytes(rt, toCore(global), bytes);
         }
 
         /// Consumes bytes allocated by `rt.memory` on success and failure.

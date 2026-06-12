@@ -20,12 +20,13 @@ const core = @import("../core/root.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const object_ops = @import("object_ops.zig");
-const shared_vm = @import("shared.zig");
+const call_runtime = @import("call_runtime.zig");
+const forof_ops = @import("forof_ops.zig");
 const stack_mod = @import("stack.zig");
 const vm_call = @import("vm_call.zig");
 
 const HostError = @import("exceptions.zig").HostError;
-const popCallFuncFromStack = shared_vm.popCallFuncFromStack;
+const popCallFuncFromStack = call_runtime.popCallFuncFromStack;
 
 /// An eligible bytecode-to-bytecode call target resolved from a callable
 /// value on the operand stack. All values are borrowed from the caller's
@@ -47,7 +48,7 @@ pub const InlineTarget = struct {
 pub fn resolveInlineTarget(global: *core.Object, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
-    const fb = shared_vm.functionBytecodeFromValue(function_value) orelse return null;
+    const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     if (fb.func_kind != .normal) return null;
     if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
     // Arrow functions carry lexical this / new.target plumbing; keep them on
@@ -128,7 +129,7 @@ pub const Machine = struct {
     pub fn deinit(self: *Machine) void {
         while (self.depth > 0) {
             const entry = self.topEntry();
-            shared_vm.closeFrameDestructuringIteratorsForAbruptCompletion(self.ctx, self.output, self.global, &entry.stack, &entry.frame);
+            call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(self.ctx, self.output, self.global, &entry.stack, &entry.frame);
             self.popTeardown();
         }
         for (self.chunks[0..self.chunk_count]) |chunk| {
@@ -150,7 +151,7 @@ pub const Machine = struct {
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
         if (chunk_index >= max_chunks) {
-            _ = shared_vm.throwRangeErrorMessage(self.ctx, global, "Maximum call stack size exceeded") catch |err| return err;
+            _ = call_runtime.throwRangeErrorMessage(self.ctx, global, "Maximum call stack size exceeded") catch |err| return err;
             return error.RangeError;
         }
         if (chunk_index == self.chunk_count) {
@@ -413,15 +414,15 @@ pub const Machine = struct {
         while (self.depth > 0) {
             {
                 const failing = self.topEntry();
-                shared_vm.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, self.output, global, &failing.stack, &failing.frame);
+                call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion(ctx, self.output, global, &failing.stack, &failing.frame);
             }
             self.popTeardown();
 
             const stack = if (self.depth == 0) self.l0_stack else &self.topEntry().stack;
             const frame = if (self.depth == 0) self.l0_frame else &self.topEntry().frame;
             const catch_target = if (self.depth == 0) self.l0_catch_target else &self.topEntry().catch_target;
-            try shared_vm.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, stack);
-            if (try shared_vm.tryCatchInFrame(ctx, stack, frame, catch_target, global, err)) return true;
+            try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, self.output, global, stack);
+            if (try call_runtime.tryCatchInFrame(ctx, stack, frame, catch_target, global, err)) return true;
             if (self.depth == 0) return false;
         }
         return false;

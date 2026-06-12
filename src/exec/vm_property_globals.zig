@@ -13,13 +13,20 @@ const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const objectFromValue = shared_vm.objectFromValue;
-const readInt = shared_vm.readInt;
-const varRefCellFromValue = shared_vm.varRefCellFromValue;
+const call_runtime = @import("call_runtime.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const call_mod = @import("call.zig");
+const eval_ops = @import("eval_ops.zig");
+const object_ops = @import("object_ops.zig");
+const slot_ops = @import("slot_ops.zig");
+const string_ops = @import("string_ops.zig");
+const objectFromValue = object_ops.objectFromValue;
+const readInt = call_runtime.readInt;
+const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const property_vm = @import("vm_property.zig");
+const vm_property_locals = @import("vm_property_locals.zig");
 const CollectionHostOutputKey = property_vm.CollectionHostOutputKey;
 const CollectionHostOutputKeyOperand = property_vm.CollectionHostOutputKeyOperand;
 const DecodedImmediateInt32 = property_vm.DecodedImmediateInt32;
@@ -40,7 +47,7 @@ const UriCall1Argument = property_vm.UriCall1Argument;
 const UriFourByteRangePlan = property_vm.UriFourByteRangePlan;
 const UriStrictEqBranch = property_vm.UriStrictEqBranch;
 const UriStrictEqIntArg = property_vm.UriStrictEqIntArg;
-const arg = property_vm.arg;
+const arg = vm_property_locals.arg;
 const atomAsciiText = property_vm.atomAsciiText;
 const atomStringValueForFastPath = property_vm.atomStringValueForFastPath;
 const backwardGotoTarget = property_vm.backwardGotoTarget;
@@ -226,7 +233,7 @@ pub fn getVar(
     frame.pc += 4;
     if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
     if (atom_id == core.atom.ids.undefined_ and canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
             lex_value.free(ctx.runtime);
         } else {
             try stack.pushOwned(core.JSValue.undefinedValue());
@@ -237,10 +244,10 @@ pub fn getVar(
         return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             errdefer lex_value.free(ctx.runtime);
@@ -254,72 +261,72 @@ pub fn getVar(
     }
     const value = value: {
         const prefer_eval_arguments = atom_id == core.atom.ids.arguments and
-            shared_vm.frameCurrentFunctionIsArrow(frame);
+            call_runtime.frameCurrentFunctionIsArrow(frame);
         if (prefer_eval_arguments) {
-            if (shared_vm.lookupFrameLocalValue(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupFrameLocalValue(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
-            if (shared_vm.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
-            if (shared_vm.lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
         } else {
-            if (shared_vm.withObjectBindingValue(ctx, output, global, eval_with_object, atom_id, function, frame) catch |err| {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (object_ops.withObjectBindingValue(ctx, output, global, eval_with_object, atom_id, function, frame) catch |err| {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }) |with_value| {
                 break :value with_value;
             }
-            if (shared_vm.lookupEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
-            if (shared_vm.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (call_runtime.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
         }
-        if (shared_vm.lookupParentFunctionEvalBindingValue(ctx.runtime, frame, atom_id)) |slot_value| {
+        if (call_runtime.lookupParentFunctionEvalBindingValue(ctx.runtime, frame, atom_id)) |slot_value| {
             if (slot_value.isUninitialized()) {
                 slot_value.free(ctx.runtime);
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             break :value slot_value;
         }
         if (atom_id == core.atom.ids.undefined_) break :value core.JSValue.undefinedValue();
-        if (atom_id == core.atom.ids.arguments and shared_vm.directEvalShouldExposeImplicitArguments(frame)) {
-            break :value try shared_vm.frameArgumentsObject(ctx, global, frame);
+        if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
+            break :value try object_ops.frameArgumentsObject(ctx, global, frame);
         }
-        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             break :value lex_value;
@@ -331,15 +338,15 @@ pub fn getVar(
         defer global_value.free(ctx.runtime);
         if (opc == op.get_var) {
             const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (!has_global_binding) {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
-        break :value try shared_vm.getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
+        break :value try object_ops.getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
     };
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
@@ -386,7 +393,7 @@ fn tryFuseHostOutputAutoInitAtomCall1(
     eval_with_object: core.JSValue,
 ) !bool {
     if (atom_id != atom_print) return false;
-    if (!globalHostOutputAutoInit(ctx.runtime, global, atom_id)) return false;
+    if (!builtin_glue.globalHostOutputAutoInit(ctx.runtime, global, atom_id)) return false;
     return fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object));
 }
 
@@ -462,7 +469,7 @@ fn tryFuseHostOutputStringNumberConstCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_string) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (shared_vm.globalLexicalValue(ctx, callee_atom)) |lex_value| {
+    if (call_runtime.globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -496,7 +503,7 @@ fn tryFuseHostOutputStringLocalNumberCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_string) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (shared_vm.globalLexicalValue(ctx, callee_atom)) |lex_value| {
+    if (call_runtime.globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -532,7 +539,7 @@ fn tryFuseHostOutputNumberStaticLiteralCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_number) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (shared_vm.globalLexicalValue(ctx, callee_atom)) |lex_value| {
+    if (call_runtime.globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -591,7 +598,7 @@ fn tryFuseHostOutputLocalCall1(
     if (local_get.next_pc >= code.len or code[local_get.next_pc] != op.call1) return false;
 
     const value = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{value});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{value});
     try finishUndefinedCallResult(stack, function, frame, local_get.next_pc + 1);
     return true;
 }
@@ -611,7 +618,7 @@ fn tryFuseHostOutputLocalSimpleNumericCall0Call1(
     const result = try simpleNumericFunctionResult(ctx.runtime, callable, &.{}) orelse return false;
     defer result.free(ctx.runtime);
 
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{result});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result});
     try finishUndefinedCallResult(stack, function, frame, local_get.next_pc + 2);
     return true;
 }
@@ -632,7 +639,7 @@ fn tryFuseHostOutputTypeofLocalCall1(
     const value = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
     const type_name = try value_ops.typeOf(ctx.runtime, value);
     defer type_name.free(ctx.runtime);
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{type_name});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{type_name});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
@@ -664,7 +671,7 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
     const call_pc = cmp_pc + 1;
     if (call_pc >= code.len or code[call_pc] != op.call1) return false;
     if (!canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (shared_vm.globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
+    if (call_runtime.globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -672,7 +679,7 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
     const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
     const is_undefined = ordinaryDataPropertyIsUndefinedForFastPath(ctx.runtime, receiver, field_atom) orelse return false;
     const result_value = core.JSValue.boolean(if (cmp_op == op.strict_eq) is_undefined else !is_undefined);
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{result_value});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result_value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
@@ -706,7 +713,7 @@ fn tryFuseHostOutputLocalImmediateCompareCall1(
         else => unreachable,
     };
     const result_value = core.JSValue.boolean(result);
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{result_value});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{result_value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
@@ -726,7 +733,7 @@ fn tryFuseHostOutputLocalLengthCall1(
 
     const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
     const length = fastLengthValue(ctx.runtime, receiver) catch return false;
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{length});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{length});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
@@ -747,7 +754,7 @@ fn tryFuseHostOutputLocalFieldCall1(
 
     const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
     const value = ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, field_atom) orelse return false;
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{value});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
 }
@@ -769,25 +776,9 @@ fn tryFuseHostOutputLocalDenseElementCall1(
     const receiver = localReadableBorrowed(frame, local_get.idx, local_get.checked) orelse return false;
     const value = fastDenseArrayElementValue(receiver, core.JSValue.int32(key_operand.value)) orelse return false;
     defer value.free(ctx.runtime);
-    try shared_vm.printHostOutputArgs(ctx.runtime, output, &.{value});
+    try builtin_glue.printHostOutputArgs(ctx.runtime, output, &.{value});
     try finishUndefinedCallResult(stack, function, frame, call_pc + 1);
     return true;
-}
-
-fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    if (global.exotic != null) return false;
-    for (global.shapeProps(), 0..) |prop, property_index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return false;
-        return switch (global.properties[property_index].slot) {
-            .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
-                (info.host_function_kind == core.host_function.ids.external_host and
-                    shared_vm.isOutputExternalHostFunctionId(rt, info.external_host_function_id)),
-            .data, .accessor, .deleted => false,
-        };
-    }
-    return false;
 }
 
 fn globalDataOrAutoInitValueForReadFastPath(
@@ -1077,7 +1068,7 @@ fn fastGlobalDataValueForAtomAtPcNoProfile(
     eval_with_object: core.JSValue,
 ) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -1142,7 +1133,7 @@ fn tryFuseGlobalUriCall1(
     if (fusion_stats.counted(.tryFuseUriDecodeSingleFourByteStrictEqFromCharCode, try tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(ctx, stack, function, frame, catch_target, global, native_ref.id, call_arg.value, call_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
 
     const result = builtins.uri.call(ctx.runtime, native_ref.id, call_arg.value) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer result.free(ctx.runtime);
@@ -1481,7 +1472,7 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
         (@as(i32, byte2 & 0x3f) * 0x40) +
         (final_b4 & 0x3f);
     if (codepoint < 0x10000 or codepoint > 0x10ffff) return false;
-    const pair = shared_vm.surrogatePairFromCodePoint(@intCast(codepoint));
+    const pair = string_ops.surrogatePairFromCodePoint(@intCast(codepoint));
     const low: i32 = @intCast(pair.low);
     const high: i32 = @intCast(pair.high);
     const final_induction = @addWithOverflow(final_b4, 1);
@@ -1510,20 +1501,20 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
     if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.count_put_pc, plan.count_atom, core.JSValue.int32(count_next))) return false;
     if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.induction_put_pc, plan.induction_atom, core.JSValue.int32(final_induction[0]))) return false;
     if (plan.high_completion_put) |completion_put| {
-        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     if (plan.branch_completion_put) |completion_put| {
-        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     if (plan.count_completion_put) |completion_put| {
-        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(count_next - 1));
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(count_next - 1));
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     if (plan.induction_completion_put) |completion_put| {
-        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(final_b4));
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(final_b4));
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     frame.pc = plan.exit_pc;
     return true;
@@ -1871,7 +1862,7 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     if (code[strict_eq_pc] != op.strict_eq) return null;
 
     const units = builtins.uri.decodeSingleFourByteEscapeUnits(argument) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     } orelse return null;
     const expected_high: u16 = @intCast(@as(u32, @bitCast(high_arg.value)) & 0xffff);
@@ -1995,7 +1986,7 @@ fn uriCall1GlobalStringArgument(
 ) ?UriCall1Argument {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
-    if (shared_vm.globalLexicalValue(ctx, atom_id)) |value| {
+    if (call_runtime.globalLexicalValue(ctx, atom_id)) |value| {
         value.free(ctx.runtime);
         return null;
     }
@@ -2027,7 +2018,7 @@ pub fn putVar(
     const value = try stack.pop();
     const runtime_strict = function.flags.is_strict or function.flags.runtime_strict;
     if (canUseFastGlobalVarWrite(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (shared_vm.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
+        if (call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
             value.free(ctx.runtime);
             return err;
         }) {
@@ -2040,27 +2031,27 @@ pub fn putVar(
             return .continue_loop;
         }
     }
-    if (try shared_vm.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try call_runtime.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
     if (!frame.eval_var_refs_republished) {
-        if (shared_vm.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }) return .continue_loop;
     }
-    if (try shared_vm.setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
-    if (shared_vm.setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    if (try call_runtime.setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
+    if (call_runtime.setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     }) return .continue_loop;
-    if (atom_id == core.atom.ids.arguments and shared_vm.directEvalShouldExposeImplicitArguments(frame)) {
+    if (atom_id == core.atom.ids.arguments and eval_ops.directEvalShouldExposeImplicitArguments(frame)) {
         const old_value = frame.arguments_object;
         frame.arguments_object = value;
         if (old_value) |stored| stored.free(ctx.runtime);
         return .continue_loop;
     }
-    const updated_global_lexical = shared_vm.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+    const updated_global_lexical = call_runtime.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
         value.free(ctx.runtime);
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (updated_global_lexical) {
@@ -2072,12 +2063,12 @@ pub fn putVar(
         defer global_value.free(ctx.runtime);
         const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
             value.free(ctx.runtime);
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_global_binding) {
             value.free(ctx.runtime);
-            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
     }
@@ -2101,8 +2092,8 @@ pub fn putVar(
     defer value.free(ctx.runtime);
     const global_value = global.value().dup();
     defer global_value.free(ctx.runtime);
-    _ = shared_vm.setValueProperty(ctx, output, global, global_value, atom_id, value, function, frame) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    _ = object_ops.setValueProperty(ctx, output, global, global_value, atom_id, value, function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -2264,7 +2255,7 @@ pub fn globalDefinition(
             const is_lexical = (flags & (1 << 7)) != 0;
             const is_function_var = (flags & (1 << 6)) != 0;
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
-            const has_global_lexical = shared_vm.globalLexicalHas(ctx, atom_id);
+            const has_global_lexical = call_runtime.globalLexicalHas(ctx, atom_id);
             var has_own_global_property = false;
             if (global.getOwnProperty(atom_id)) |desc| {
                 has_own_global_property = true;
@@ -2284,7 +2275,7 @@ pub fn globalDefinition(
                 if (define_atom == atom_id and define_flags == flags) {
                     const is_const = (flags & (1 << 4)) != 0;
                     if (is_lexical) {
-                        try shared_vm.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
+                        try call_runtime.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
                     } else if (!has_own_global_property) {
                         const configurable = (flags & (1 << 5)) != 0;
                         const define_desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
@@ -2316,7 +2307,7 @@ pub fn globalDefinition(
             const is_function_var = (flags & (1 << 6)) != 0;
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
             if (is_lexical) {
-                try shared_vm.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
+                try call_runtime.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
             } else if (!global.hasOwnProperty(atom_id)) {
                 const configurable = (flags & (1 << 5)) != 0;
                 const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
@@ -2339,19 +2330,19 @@ pub fn globalDefinition(
             const configurable = (flags & (1 << 5)) != 0;
             const global_function_binding = (flags & (1 << 4)) != 0;
             var local_value = func_val.dup();
-            const updated_frame_local = try shared_vm.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
+            const updated_frame_local = try call_runtime.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
             if (!updated_frame_local) local_value.free(ctx.runtime);
             var frame_ref_value = func_val.dup();
-            if (!try shared_vm.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
+            if (!try call_runtime.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
             var eval_local_value = func_val.dup();
-            const updated_eval_local = try shared_vm.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
+            const updated_eval_local = try call_runtime.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
             if (!updated_eval_local) eval_local_value.free(ctx.runtime);
             var eval_ref_value = func_val.dup();
-            const updated_eval_ref = try shared_vm.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
+            const updated_eval_ref = try call_runtime.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
             if (!updated_eval_ref) eval_ref_value.free(ctx.runtime);
             if (is_eval_code and !eval_global_var_bindings) return .continue_loop;
             if (global_function_binding) {
-                try shared_vm.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, configurable);
+                try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, configurable);
             } else if (global.hasOwnProperty(atom_id)) {
                 global.setProperty(ctx.runtime, atom_id, func_val) catch |err| switch (err) {
                     error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
@@ -2371,16 +2362,16 @@ pub fn globalDefinition(
             var value_owned = true;
             defer if (value_owned) value.free(ctx.runtime);
             if (!function.flags.is_indirect_eval) {
-                const fast_global_lexical = shared_vm.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                const fast_global_lexical = call_runtime.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (fast_global_lexical) {
                     value_owned = false;
                     return .continue_loop;
                 }
-                const updated_global_lexical = shared_vm.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                const updated_global_lexical = call_runtime.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (updated_global_lexical) return .continue_loop;

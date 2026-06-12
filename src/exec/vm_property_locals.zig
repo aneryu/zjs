@@ -11,13 +11,19 @@ const property_ic = @import("property_ic.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
-const shared_vm = @import("shared.zig");
-const objectFromValue = shared_vm.objectFromValue;
-const readInt = shared_vm.readInt;
-const varRefCellFromValue = shared_vm.varRefCellFromValue;
+const call_runtime = @import("call_runtime.zig");
+const array_ops = @import("array_ops.zig");
+const exception_ops = @import("vm_exception_ops.zig");
+const object_ops = @import("object_ops.zig");
+const regexp_fastpath = @import("regexp_fastpath.zig");
+const slot_ops = @import("slot_ops.zig");
+const objectFromValue = object_ops.objectFromValue;
+const readInt = call_runtime.readInt;
+const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const property_vm = @import("vm_property.zig");
+const vm_property_globals = @import("vm_property_globals.zig");
 const BindingGet = property_vm.BindingGet;
 const BindingPut = property_vm.BindingPut;
 const BorrowedCallable = property_vm.BorrowedCallable;
@@ -88,7 +94,7 @@ const stringFromValue = property_vm.stringFromValue;
 const tryFuseDroppedLocalPostUpdateGoto8AtPc = property_vm.tryFuseDroppedLocalPostUpdateGoto8AtPc;
 const tryFuseDroppedLocalPostUpdateGoto8FromGet = property_vm.tryFuseDroppedLocalPostUpdateGoto8FromGet;
 const tryFuseFollowingLocalStringLengthGtConstSliceConstBranch = property_vm.tryFuseFollowingLocalStringLengthGtConstSliceConstBranch;
-const tryFuseGlobalInt32PrefixTermsStore = property_vm.tryFuseGlobalInt32PrefixTermsStore;
+const tryFuseGlobalInt32PrefixTermsStore = vm_property_globals.tryFuseGlobalInt32PrefixTermsStore;
 const tryFuseLocalInt32LessThanArgFalseBranchFromGet = property_vm.tryFuseLocalInt32LessThanArgFalseBranchFromGet;
 const tryFuseLocalStringLengthGtConstSliceConstBranchFromGet = property_vm.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet;
 const varRefReadableBorrowed = property_vm.varRefReadableBorrowed;
@@ -129,10 +135,10 @@ pub fn loc(
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 2, false))) return;
             if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
             if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 2, sync_global_lexical_locals))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, idx, 2, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, idx, 2, opc);
         },
-        op.put_loc => try shared_vm.execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
-        op.set_loc => try shared_vm.execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
+        op.put_loc => try slot_ops.execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
+        op.set_loc => try slot_ops.execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
 
         op.get_loc8 => {
             const idx = function.code[frame.pc];
@@ -140,10 +146,10 @@ pub fn loc(
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 1, false))) return;
             if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
             if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 1, sync_global_lexical_locals))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, idx, 1, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, idx, 1, opc);
         },
-        op.put_loc8 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
-        op.set_loc8 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
+        op.put_loc8 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
+        op.set_loc8 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
 
         op.get_loc0 => {
             if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
@@ -152,7 +158,7 @@ pub fn loc(
             if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
             if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 0, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 0, frame.pc, false))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, 0, 0, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, 0, 0, opc);
         },
         op.get_loc1 => {
             if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
@@ -163,7 +169,7 @@ pub fn loc(
             if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
             if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 1, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 1, frame.pc, false))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, 1, 0, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, 1, 0, opc);
         },
         op.get_loc2 => {
             if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
@@ -173,7 +179,7 @@ pub fn loc(
             if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
             if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 2, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 2, frame.pc, false))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, 2, 0, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, 2, 0, opc);
         },
         op.get_loc3 => {
             if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
@@ -182,20 +188,20 @@ pub fn loc(
             if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
             if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 3, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 3, frame.pc, false))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, 3, 0, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, 3, 0, opc);
         },
-        op.put_loc0 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
-        op.put_loc1 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
-        op.put_loc2 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-        op.put_loc3 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
-        op.set_loc0 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
-        op.set_loc1 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
-        op.set_loc2 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-        op.set_loc3 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+        op.put_loc0 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
+        op.put_loc1 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
+        op.put_loc2 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
+        op.put_loc3 => try slot_ops.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+        op.set_loc0 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
+        op.set_loc1 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
+        op.set_loc2 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
+        op.set_loc3 => try slot_ops.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
         op.get_loc0_loc1 => {
             if (fusion_stats.counted(.tryFuseLocal0Local1DenseArrayIndexedAppend, try tryFuseLocal0Local1DenseArrayIndexedAppend(ctx, function, frame))) return;
-            try shared_vm.execGetLoc(ctx, frame, stack, 0, 0, opc);
-            try shared_vm.execGetLoc(ctx, frame, stack, 1, 0, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, 0, 0, opc);
+            try slot_ops.execGetLoc(ctx, frame, stack, 1, 0, opc);
         },
         else => unreachable,
     }
@@ -209,21 +215,21 @@ pub fn arg(
     opc: u8,
 ) !void {
     switch (opc) {
-        op.get_arg => try shared_vm.execGetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.put_arg => try shared_vm.execPutArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.set_arg => try shared_vm.execSetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.get_arg0 => try shared_vm.execGetArg(ctx, frame, stack, 0, 0, opc),
-        op.get_arg1 => try shared_vm.execGetArg(ctx, frame, stack, 1, 0, opc),
-        op.get_arg2 => try shared_vm.execGetArg(ctx, frame, stack, 2, 0, opc),
-        op.get_arg3 => try shared_vm.execGetArg(ctx, frame, stack, 3, 0, opc),
-        op.put_arg0 => try shared_vm.execPutArg(ctx, frame, stack, 0, 0, opc),
-        op.put_arg1 => try shared_vm.execPutArg(ctx, frame, stack, 1, 0, opc),
-        op.put_arg2 => try shared_vm.execPutArg(ctx, frame, stack, 2, 0, opc),
-        op.put_arg3 => try shared_vm.execPutArg(ctx, frame, stack, 3, 0, opc),
-        op.set_arg0 => try shared_vm.execSetArg(ctx, frame, stack, 0, 0, opc),
-        op.set_arg1 => try shared_vm.execSetArg(ctx, frame, stack, 1, 0, opc),
-        op.set_arg2 => try shared_vm.execSetArg(ctx, frame, stack, 2, 0, opc),
-        op.set_arg3 => try shared_vm.execSetArg(ctx, frame, stack, 3, 0, opc),
+        op.get_arg => try slot_ops.execGetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.put_arg => try slot_ops.execPutArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.set_arg => try slot_ops.execSetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.get_arg0 => try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc),
+        op.get_arg1 => try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc),
+        op.get_arg2 => try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc),
+        op.get_arg3 => try slot_ops.execGetArg(ctx, frame, stack, 3, 0, opc),
+        op.put_arg0 => try slot_ops.execPutArg(ctx, frame, stack, 0, 0, opc),
+        op.put_arg1 => try slot_ops.execPutArg(ctx, frame, stack, 1, 0, opc),
+        op.put_arg2 => try slot_ops.execPutArg(ctx, frame, stack, 2, 0, opc),
+        op.put_arg3 => try slot_ops.execPutArg(ctx, frame, stack, 3, 0, opc),
+        op.set_arg0 => try slot_ops.execSetArg(ctx, frame, stack, 0, 0, opc),
+        op.set_arg1 => try slot_ops.execSetArg(ctx, frame, stack, 1, 0, opc),
+        op.set_arg2 => try slot_ops.execSetArg(ctx, frame, stack, 2, 0, opc),
+        op.set_arg3 => try slot_ops.execSetArg(ctx, frame, stack, 3, 0, opc),
         else => unreachable,
     }
 }
@@ -252,39 +258,39 @@ pub fn checkedLocVm(
         },
         op.get_loc_check => {
             if (frame.localIsUninitialized(idx)) {
-                if (varRefCellFromValue(frame.locals[idx]) != null and !shared_vm.varRefSlotIsUninitialized(frame.locals[idx])) {
+                if (varRefCellFromValue(frame.locals[idx]) != null and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
                     frame.clearLocalUninitialized(idx);
                 } else {
-                    const err = shared_vm.throwTdzReference(ctx);
-                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    const err = exception_ops.throwTdzReference(ctx);
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 }
             }
             if ((frame.pc >= function.code.len or function.code[frame.pc] != op.call0) and
                 fusion_stats.counted(.tryFuseCheckedLocalFastPath, try tryFuseCheckedLocalFastPath(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .continue_loop;
-            try shared_vm.pushSlotValue(stack, frame.locals[idx]);
+            try array_ops.pushSlotValue(stack, frame.locals[idx]);
         },
         op.put_loc_check => {
             if (frame.localIsUninitialized(idx)) {
-                const err = shared_vm.throwTdzReference(ctx);
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                const err = exception_ops.throwTdzReference(ctx);
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = try stack.pop();
             if (idx < function.var_is_const.len and function.var_is_const[idx]) {
                 value.free(ctx.runtime);
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
-            try shared_vm.setSlotValue(ctx, &frame.locals[idx], value);
-            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         op.put_loc_check_init => {
             const is_derived_this = function.flags.is_derived_class_constructor and
                 idx < function.var_names.len and
                 function.var_names[idx] == 8;
-            if (is_derived_this and !shared_vm.varRefSlotIsUninitialized(frame.locals[idx])) {
-                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (is_derived_this and !slot_ops.varRefSlotIsUninitialized(frame.locals[idx])) {
+                if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             const value = try stack.pop();
@@ -293,12 +299,12 @@ pub fn checkedLocVm(
             else
                 core.JSValue.undefinedValue();
             defer constructor_this.free(ctx.runtime);
-            try shared_vm.setSlotValue(ctx, &frame.locals[idx], value);
+            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
             if (!constructor_this.isUndefined()) {
-                try shared_vm.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
+                try slot_ops.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
             }
             frame.clearLocalUninitialized(idx);
-            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         else => unreachable,
     }
@@ -348,45 +354,45 @@ pub fn varRef(
             const next_pc = frame.pc + 2;
             if (!canStartLongVarRefGetFusion(opc, function.code, next_pc) and try tryFastDirectVarRefGet(frame, stack, idx, 2)) return .done;
             if (canStartGlobalCall1(function.code, next_pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, idx, 2, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
-            try shared_vm.execPutVarRef(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, eval_global_var_bindings, is_eval_code);
+            try slot_ops.execPutVarRef(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, eval_global_var_bindings, is_eval_code);
         },
         op.set_var_ref => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
-            try shared_vm.execSetVarRef(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc);
+            try slot_ops.execSetVarRef(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc);
         },
 
         op.get_var_ref0 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 0, 0)) return .done;
             if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 0, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 1, 0)) return .done;
             if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 1, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 2, 0)) return .done;
             if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 2, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 3, 0)) return .done;
             if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 3, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
-            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
+            if (try slot_ops.execGetVarRefMaybeTdz(ctx, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
-        op.put_var_ref0 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref1 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref2 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref3 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.set_var_ref0 => try shared_vm.execSetVarRef(ctx, frame, stack, 0, 0, opc),
-        op.set_var_ref1 => try shared_vm.execSetVarRef(ctx, frame, stack, 1, 0, opc),
-        op.set_var_ref2 => try shared_vm.execSetVarRef(ctx, frame, stack, 2, 0, opc),
-        op.set_var_ref3 => try shared_vm.execSetVarRef(ctx, frame, stack, 3, 0, opc),
+        op.put_var_ref0 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref1 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref2 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref3 => try slot_ops.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.set_var_ref0 => try slot_ops.execSetVarRef(ctx, frame, stack, 0, 0, opc),
+        op.set_var_ref1 => try slot_ops.execSetVarRef(ctx, frame, stack, 1, 0, opc),
+        op.set_var_ref2 => try slot_ops.execSetVarRef(ctx, frame, stack, 2, 0, opc),
+        op.set_var_ref3 => try slot_ops.execSetVarRef(ctx, frame, stack, 3, 0, opc),
         else => unreachable,
     }
     return .done;
@@ -407,7 +413,7 @@ pub fn varRefVm(
     eval_with_object: core.JSValue,
 ) !Step {
     return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
-        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
 }
@@ -578,10 +584,10 @@ fn storeBindingInt32(
     sync_global_lexical_locals: bool,
 ) !void {
     if (binding.is_var_ref) {
-        try shared_vm.setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
+        try slot_ops.setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
     } else {
-        try shared_vm.setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
@@ -633,12 +639,12 @@ fn storeLocalInt32WithCompletion(
     value: i32,
     sync_global_lexical_locals: bool,
 ) !void {
-    try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(value));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(value));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     if (completion_put) |completion| {
         if (completion.idx != idx) {
-            try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], core.JSValue.int32(value));
-            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+            try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], core.JSValue.int32(value));
+            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
         }
     }
 }
@@ -655,15 +661,15 @@ fn storeLocalOwnedValueWithCompletion(
 ) !void {
     if (completion_put) |completion| {
         if (completion.idx != idx) {
-            try shared_vm.setSlotValue(ctx, &frame.locals[idx], value.dup());
-            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
-            try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], value);
-            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+            try slot_ops.setSlotValue(ctx, &frame.locals[idx], value.dup());
+            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], value);
+            try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
             return;
         }
     }
-    try shared_vm.setSlotValue(ctx, &frame.locals[idx], value);
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {
@@ -782,11 +788,11 @@ fn canStartGlobalCall1(code: []const u8, pc: usize) bool {
 
 fn simpleNumericArg0ConstCallable(func: core.JSValue) ?SimpleNumericArg0ConstCall {
     const fb = if (func.isFunctionBytecode())
-        shared_vm.functionBytecodeFromValue(func) orelse return null
+        call_runtime.functionBytecodeFromValue(func) orelse return null
     else blk: {
-        const object = shared_vm.functionObjectFromValue(func) orelse return null;
+        const object = object_ops.functionObjectFromValue(func) orelse return null;
         const function_value = object.functionBytecodeSlot().* orelse return null;
-        break :blk shared_vm.functionBytecodeFromValue(function_value) orelse return null;
+        break :blk call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     };
     if (fb.simple_numeric_kind != .arg0_const) return null;
     return .{ .binop = fb.simple_numeric_op, .rhs = fb.simple_numeric_rhs };
@@ -1084,8 +1090,8 @@ fn tryFuseCheckedLocalEmptyInt32Range(
     if (!decodeEmptyCheckedLocalPostIncLoopTail(function.code, condition.body_pc, condition.false_pc, condition_pc, idx)) return false;
 
     if (current < condition.limit) {
-        try shared_vm.setSlotValue(ctx, &frame.locals[local_idx], core.JSValue.int32(condition.limit));
-        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
+        try slot_ops.setSlotValue(ctx, &frame.locals[local_idx], core.JSValue.int32(condition.limit));
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     }
     frame.pc = condition.false_pc;
     return true;
@@ -1297,7 +1303,7 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     const goto_target = backwardGotoTarget(code, goto_pc + 1, code[goto_pc]) orelse return false;
     if (goto_target != condition_pc) return false;
 
-    const regexp_proto = shared_vm.constructorPrototypeFromGlobalAtom(ctx.runtime, global, atom_regexp) orelse return false;
+    const regexp_proto = object_ops.constructorPrototypeFromGlobalAtom(ctx.runtime, global, atom_regexp) orelse return false;
     if (!ownPrototypeEntryIsNativeBuiltinDefault(regexp_proto, method_atom, .regexp, @intFromEnum(builtins.regexp.PrototypeMethod.test_))) return false;
 
     const source_value = (try stringLiteralRefValueForFastPath(ctx.runtime, source_ref)) orelse return false;
@@ -1309,7 +1315,7 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     const regexp_value = try builtins.regexp.constructPrevalidatedLiteralWithValues(ctx.runtime, source_value, flags_value, regexp_proto);
     defer regexp_value.free(ctx.runtime);
     const regexp_object = objectFromValue(regexp_value) orelse return false;
-    const matched = try shared_vm.qjsRegExpTestFastNoResult(ctx, regexp_object, input_value) orelse return false;
+    const matched = try regexp_fastpath.qjsRegExpTestFastNoResult(ctx, regexp_object, input_value) orelse return false;
 
     if (matched) {
         const final_count_i64 = @as(i64, current_count) + @as(i64, iteration_count);
@@ -1327,8 +1333,8 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     if (matched or false_branch_runs_if_completion) {
         try storeLocalCompletionBorrowedValue(ctx, function, global, frame, if_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals);
     }
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1428,8 +1434,8 @@ fn tryFuseCheckedLocalSimpleNumericCallAddRange(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1506,8 +1512,8 @@ fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
     try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1582,8 +1588,8 @@ fn tryFuseCheckedLocalInductionInt32AddRange(
     const final_accumulator = @as(i128, accumulator) + delta.total;
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1719,8 +1725,8 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
     } else {
         try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals);
     }
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1814,8 +1820,8 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
     const final_accumulator = @as(i128, accumulator) + delta.total;
     if (!core.JSValue.shortBigIntFits(final_accumulator)) return false;
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, completion_put, core.JSValue.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1971,8 +1977,8 @@ fn tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2047,8 +2053,8 @@ fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
     try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2131,8 +2137,8 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2245,8 +2251,8 @@ fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2308,8 +2314,8 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
 
     try builtins.collection.mapSetLatin1PrefixInt32Range(ctx.runtime, map_object, key.prefix, current_i, limit);
     try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, receiver, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2385,8 +2391,8 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
     }
 
     try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(total), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2472,11 +2478,11 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     const goto_target_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
     if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
 
-    const mapped = try shared_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback) orelse return false;
+    const mapped = try array_ops.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback) orelse return false;
     errdefer mapped.free(ctx.runtime);
     try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, result_put, store_tail.completion_put, mapped, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2556,8 +2562,8 @@ fn tryFuseCheckedLocalGlobalDataStoreInductionRange(
     const final_value = core.JSValue.int32(final_global_value[0]);
     if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, final_value)) return false;
     try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, final_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2634,10 +2640,10 @@ fn tryFuseCheckedLocalArrayPushInt32Range(
 
     const start_index = array_object.length;
     if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, start_index, current_i, iteration_count)) return false;
-    const final_length_value = shared_vm.lengthIndexValue(array_object.length);
+    const final_length_value = array_ops.lengthIndexValue(array_object.length);
     try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, final_length_value, sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2692,7 +2698,7 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     if (code[global_pc + 5] != op.add) return false;
     const atom_id = readInt(u32, code[global_pc + 1 ..][0..4]);
     if (ctx.lexicals != null) {
-        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+        if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
             lexical_value.free(ctx.runtime);
             return false;
         }
@@ -2728,8 +2734,8 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     if (target_pc_i64 < 0 or @as(usize, @intCast(target_pc_i64)) != (getConditionPc(function.code, pc, induction_idx) orelse return false)) return false;
 
     try storeLocalInt32WithCompletion(ctx, function, global, frame, accumulator_idx, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2887,10 +2893,10 @@ fn tryFuseShortLocal0Local1Int32ArithmeticStoreRange(
         accumulator = accumulator +% (product ^ logical_shift);
     }
 
-    try shared_vm.setSlotValue(ctx, &frame.locals[0], core.JSValue.int32(accumulator));
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 0, sync_global_lexical_locals);
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[0], core.JSValue.int32(accumulator));
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 0, sync_global_lexical_locals);
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2966,10 +2972,10 @@ fn tryFuseShortLocalObjectFieldUpdateAccumulateRange(
     if (!(try setPlainObjectInt32DataPropertyForFastPath(ctx.runtime, object, pattern.a_atom, a))) return false;
     const accumulator_value = value_ops.numberToValue(@floatFromInt(accumulator));
     errdefer accumulator_value.free(ctx.runtime);
-    try shared_vm.setSlotValue(ctx, &frame.locals[1], accumulator_value);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 1, sync_global_lexical_locals);
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[1], accumulator_value);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 1, sync_global_lexical_locals);
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = pattern.false_pc;
     return true;
 }
@@ -3170,8 +3176,8 @@ fn tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(
     const array_object = objectFromValue(array_slot) orelse return false;
     if (!try array_object.appendDenseArrayInt32MulAndMaskRange(ctx.runtime, @intCast(current_i), @intCast(limit), formula.multiplier, formula.mask)) return false;
 
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3262,10 +3268,10 @@ fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
 
     if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, @intCast(length_value), current_value, count)) return false;
 
-    try shared_vm.setSlotValue(ctx, &frame.locals[length_idx], core.JSValue.int32(@intCast(next_length_i64)));
-    try shared_vm.setSlotValue(ctx, &frame.locals[value_idx], core.JSValue.int32(@intCast(next_value_i64)));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, length_idx, sync_global_lexical_locals);
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, value_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[length_idx], core.JSValue.int32(@intCast(next_length_i64)));
+    try slot_ops.setSlotValue(ctx, &frame.locals[value_idx], core.JSValue.int32(@intCast(next_value_i64)));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, length_idx, sync_global_lexical_locals);
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, value_idx, sync_global_lexical_locals);
     frame.pc = if (hit_chunk) chunk_branch.true_pc else if (capped_for_interrupt) condition_pc else exit_branch.false_pc;
     return true;
 }
@@ -3336,8 +3342,8 @@ fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     if (!try array_object.appendDenseArrayInt32Range(ctx.runtime, start, end)) return false;
 
     try storeLocalCompletionBorrowedValue(ctx, function, global, frame, put_tail.completion_put, core.JSValue.int32(limit - 1), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3437,8 +3443,8 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
     try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
-    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try slot_ops.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3457,7 +3463,7 @@ fn fastGlobalDataValueForRange(
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return null;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return null;
-    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (call_runtime.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -3654,12 +3660,12 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     if (!appended_in_place) {
         const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
         const replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
-        try shared_vm.setSlotValue(ctx, &frame.locals[local_idx], replacement);
+        try slot_ops.setSlotValue(ctx, &frame.locals[local_idx], replacement);
     }
     if (local_idx < function.var_is_lexical.len and function.var_is_lexical[local_idx]) {
         frame.clearLocalUninitialized(local_idx);
     }
-    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
+    try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
     _ = fusion_stats.counted(.tryFuseFollowingLocalStringLengthGtConstSliceConstBranch, try tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(ctx, function, global, frame, local_idx, sync_global_lexical_locals));
     _ = fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8AtPc, try tryFuseDroppedLocalPostUpdateGoto8AtPc(ctx, function, global, frame, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals));
@@ -3738,5 +3744,5 @@ pub fn closeLoc(
 ) !void {
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    try shared_vm.closeLocalVarRef(ctx, frame, idx);
+    try slot_ops.closeLocalVarRef(ctx, frame, idx);
 }

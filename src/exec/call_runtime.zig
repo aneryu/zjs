@@ -1,13 +1,4 @@
-pub const createNamedError = exception_ops.createNamedError;
-
-pub const regexp_unicode = @import("../libs/regexp_unicode.zig");
-pub const createNamedErrorWithConstructor = exception_ops.createNamedErrorWithConstructor;
-pub const normalizeEvalRuntimeError = exception_ops.normalizeEvalRuntimeError;
-pub const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
-pub const throwTdzReference = exception_ops.throwTdzReference;
-pub const isCallSiteObject = exception_ops.isCallSiteObject;
-pub const qjsCallSiteMethod = exception_ops.qjsCallSiteMethod;
-pub const isErrorConstructorName = exception_ops.isErrorConstructorName;
+const regexp_unicode = @import("../libs/regexp_unicode.zig");
 const std = @import("std");
 const utils = @import("vm_utils.zig");
 const bytecode = @import("../bytecode/root.zig");
@@ -24,7 +15,6 @@ const date_vm = @import("date_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const iter_vm = @import("iterator_ops.zig");
-const json_vm = @import("json_ops.zig");
 const inline_calls = @import("inline_calls.zig");
 const module_mod = @import("module.zig");
 const property_ops = @import("property_ops.zig");
@@ -43,923 +33,27 @@ const runWithArgs = zjs_vm.runWithArgs;
 const runWithArgsState = zjs_vm.runWithArgsState;
 const exceptions = @import("exceptions.zig");
 
-pub const string_ops = @import("string_ops.zig");
-pub const FastReplacementPart = string_ops.FastReplacementPart;
-pub const FastReplacementPattern = string_ops.FastReplacementPattern;
-pub const KeywordMatch = string_ops.KeywordMatch;
-pub const RegExpMatch = string_ops.RegExpMatch;
-pub const ReplaceMatch = string_ops.ReplaceMatch;
-pub const advanceStringIndexNumber = string_ops.advanceStringIndexNumber;
-pub const advanceStringIndexStringValue = string_ops.advanceStringIndexStringValue;
-pub const advanceStringIndexUnits = string_ops.advanceStringIndexUnits;
-pub const anchoredBinaryPropertyMatches = string_ops.anchoredBinaryPropertyMatches;
-pub const anchoredCodePointPredicateMatches = string_ops.anchoredCodePointPredicateMatches;
-pub const anchoredComplementClassMatches = string_ops.anchoredComplementClassMatches;
-pub const anchoredSingleNonWhitespaceMatches = string_ops.anchoredSingleNonWhitespaceMatches;
-pub const anchoredWhitespaceMatches = string_ops.anchoredWhitespaceMatches;
-pub const annexBStringMethodId = string_ops.annexBStringMethodId;
-pub const appendCodePointUnits = string_ops.appendCodePointUnits;
-pub const appendCodepointUtf8 = string_ops.appendCodepointUtf8;
-pub const appendFastReplacement = string_ops.appendFastReplacement;
-pub const appendSourceStringUtf8 = string_ops.appendSourceStringUtf8;
-pub const appendStringReplaceAllSubstitution = string_ops.appendStringReplaceAllSubstitution;
-pub const appendStringValueUnits = string_ops.appendStringValueUnits;
-pub const appendUtf16CodePoint = string_ops.appendUtf16CodePoint;
-pub const appendUtf32FromStringValue = string_ops.appendUtf32FromStringValue;
-pub const appendUtf8CodePointForRegExpName = string_ops.appendUtf8CodePointForRegExpName;
-pub const binaryPropertyCodePointMatches = string_ops.binaryPropertyCodePointMatches;
-pub const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
-pub const callReplaceFunction = string_ops.callReplaceFunction;
-pub const callSimpleStringBytecode = string_ops.callSimpleStringBytecode;
-pub const callStringReplaceMethod = string_ops.callStringReplaceMethod;
-pub const callStringWellKnownMethod = string_ops.callStringWellKnownMethod;
-pub const isOutputExternalHostFunction = call_mod.isOutputExternalHostFunction;
-pub const isOutputExternalHostFunctionId = call_mod.isOutputExternalHostFunctionId;
-pub const captureReplaceMatch = string_ops.captureReplaceMatch;
-pub const classEscapeUnitMatches = string_ops.classEscapeUnitMatches;
-pub const codePointFromSurrogatePair = string_ops.codePointFromSurrogatePair;
-pub const combinedSurrogateCodePoint = string_ops.combinedSurrogateCodePoint;
-pub const complementClassUnitMatches = string_ops.complementClassUnitMatches;
-pub const concatAppendValue = string_ops.concatAppendValue;
-pub const concatSpreadLengthValue = string_ops.concatSpreadLengthValue;
-pub const consumePendingExceptionIfMatchesConstructor = string_ops.consumePendingExceptionIfMatchesConstructor;
-pub const createRegExpMatchArray = string_ops.createRegExpMatchArray;
-pub const createRegExpMatchArrayFromStringSliceValue = string_ops.createRegExpMatchArrayFromStringSliceValue;
-pub const createRegExpMatchArrayFromStringValue = string_ops.createRegExpMatchArrayFromStringValue;
-pub const createRegExpMatchArrayFromValue = string_ops.createRegExpMatchArrayFromValue;
-pub const createRegExpMatchArrayNoCapturesFromValue = string_ops.createRegExpMatchArrayNoCapturesFromValue;
-pub const createStartOfLineUnicodeMatchArray = string_ops.createStartOfLineUnicodeMatchArray;
-pub const createStringFromByteUnits = string_ops.createStringFromByteUnits;
-pub const defaultObjectToStringTag = string_ops.defaultObjectToStringTag;
-pub const defineSplitStringElement = string_ops.defineSplitStringElement;
-pub const defineSplitUnitsElement = string_ops.defineSplitUnitsElement;
-pub const defineSplitValueElement = string_ops.defineSplitValueElement;
-pub const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
-pub const fastLatin1Substring = string_ops.fastLatin1Substring;
-pub const findCharacterClassSourceMatch = string_ops.findCharacterClassSourceMatch;
-pub const findLeadingAlternationCharacterClassSingleUnitMatch = string_ops.findLeadingAlternationCharacterClassSingleUnitMatch;
-pub const findPropertyEscapeMatch = string_ops.findPropertyEscapeMatch;
-pub const findStandaloneCharacterClassMatch = string_ops.findStandaloneCharacterClassMatch;
-pub const findStringClassEscapeMatch = string_ops.findStringClassEscapeMatch;
-pub const findStringUnitMatch = string_ops.findStringUnitMatch;
-pub const findUnicodeFoldClassMatch = string_ops.findUnicodeFoldClassMatch;
-pub const findUnicodePropertyOnlyClassMatch = string_ops.findUnicodePropertyOnlyClassMatch;
-pub const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
-pub const freeReplaceMatches = string_ops.freeReplaceMatches;
-pub const genericTrimStringMethodId = string_ops.genericTrimStringMethodId;
-pub const getFastStringPrimitiveDataProperty = string_ops.getFastStringPrimitiveDataProperty;
-pub const getRegExpFlagsString = string_ops.getRegExpFlagsString;
-pub const getRegExpFlagsStringForReplace = string_ops.getRegExpFlagsStringForReplace;
-pub const getStringIndexValue = string_ops.getStringIndexValue;
-pub const getStringPrototypeMethodId = string_ops.getStringPrototypeMethodId;
-pub const getSubstitutionString = string_ops.getSubstitutionString;
-pub const initRegExpMatchArrayDenseElementsFromValue = string_ops.initRegExpMatchArrayDenseElementsFromValue;
-pub const int32OrUndefinedStringIndex = string_ops.int32OrUndefinedStringIndex;
-pub const isConcatSpreadable = string_ops.isConcatSpreadable;
-pub const isEmptyStringValue = string_ops.isEmptyStringValue;
-pub const isHighSurrogateCodePoint = string_ops.isHighSurrogateCodePoint;
-pub const isLowSurrogateCodePoint = string_ops.isLowSurrogateCodePoint;
-pub const isRegExpForStringSearch = string_ops.isRegExpForStringSearch;
-pub const isSimpleStringClassEscapeSource = string_ops.isSimpleStringClassEscapeSource;
-pub const isStandardStringPrototypeMethodAtom = string_ops.isStandardStringPrototypeMethodAtom;
-pub const isStringHighSurrogateAt = string_ops.isStringHighSurrogateAt;
-pub const isStringLineEndPosition = string_ops.isStringLineEndPosition;
-pub const isStringLineStartPosition = string_ops.isStringLineStartPosition;
-pub const isStringMethodReceiver = string_ops.isStringMethodReceiver;
-pub const isUnicodePropertyMatches = regexp_unicode.isUnicodePropertyMatches;
-pub const latin1StringSlice = string_ops.latin1StringSlice;
-pub const nativeFunctionMatcherUnicodeClassAsciiResult = string_ops.nativeFunctionMatcherUnicodeClassAsciiResult;
-pub const objectIsArrayForToString = string_ops.objectIsArrayForToString;
-pub const parseFastReplacementPattern = string_ops.parseFastReplacementPattern;
-pub const privateAtomNamesMatch = string_ops.privateAtomNamesMatch;
-pub const qjsArrayConcatCall = string_ops.qjsArrayConcatCall;
-pub const qjsArraySearchCall = string_ops.qjsArraySearchCall;
-pub const qjsArrayToLocaleStringCall = string_ops.qjsArrayToLocaleStringCall;
-pub const qjsArrayToStringCall = string_ops.qjsArrayToStringCall;
-pub const qjsBigIntPrototypeToString = string_ops.qjsBigIntPrototypeToString;
-pub const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
-pub const qjsErrorToStringCall = string_ops.qjsErrorToStringCall;
-pub const qjsFunctionToStringCall = string_ops.qjsFunctionToStringCall;
-pub const qjsIteratorConcatCall = string_ops.qjsIteratorConcatCall;
-pub const qjsObjectTagString = string_ops.qjsObjectTagString;
-pub const qjsObjectToLocaleStringCall = string_ops.qjsObjectToLocaleStringCall;
-pub const qjsObjectToStringCall = string_ops.qjsObjectToStringCall;
-pub const qjsObjectToStringIntrinsic = string_ops.qjsObjectToStringIntrinsic;
-pub const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
-pub const qjsRegExpMatch = string_ops.qjsRegExpMatch;
-pub const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
-pub const qjsRegExpSearch = string_ops.qjsRegExpSearch;
-pub const qjsRegExpSplit = string_ops.qjsRegExpSplit;
-pub const qjsRegExpSplitFlags = string_ops.qjsRegExpSplitFlags;
-pub const qjsRegExpSplitWholeString = string_ops.qjsRegExpSplitWholeString;
-pub const qjsRegExpStringIteratorNext = string_ops.qjsRegExpStringIteratorNext;
-pub const qjsRegExpStringIteratorPrototype = string_ops.qjsRegExpStringIteratorPrototype;
-pub const qjsRegExpSymbolMatch = string_ops.qjsRegExpSymbolMatch;
-pub const qjsRegExpSymbolMatchAll = string_ops.qjsRegExpSymbolMatchAll;
-pub const qjsRegExpSymbolMatchGeneric = string_ops.qjsRegExpSymbolMatchGeneric;
-pub const qjsRegExpSymbolReplace = string_ops.qjsRegExpSymbolReplace;
-pub const qjsRegExpSymbolReplaceGeneric = string_ops.qjsRegExpSymbolReplaceGeneric;
-pub const qjsRegExpSymbolSearch = string_ops.qjsRegExpSymbolSearch;
-pub const qjsRegExpSymbolSearchGeneric = string_ops.qjsRegExpSymbolSearchGeneric;
-pub const qjsRegExpSymbolSplit = string_ops.qjsRegExpSymbolSplit;
-pub const qjsRegExpSymbolSplitGeneric = string_ops.qjsRegExpSymbolSplitGeneric;
-pub const qjsRegExpToString = string_ops.qjsRegExpToString;
-pub const qjsStringConcat = string_ops.qjsStringConcat;
-pub const qjsStringConstructWithPrototype = string_ops.qjsStringConstructWithPrototype;
-pub const qjsStringCreateHtml = string_ops.qjsStringCreateHtml;
-pub const qjsStringFromCharCode = string_ops.qjsStringFromCharCode;
-pub const qjsStringFromCodePoint = string_ops.qjsStringFromCodePoint;
-pub const qjsStringFromCodePointArray = string_ops.qjsStringFromCodePointArray;
-pub const qjsStringFromCodePointDenseArray = string_ops.qjsStringFromCodePointDenseArray;
-pub const qjsStringFunctionCall = string_ops.qjsStringFunctionCall;
-pub const qjsStringHtmlMethod = string_ops.qjsStringHtmlMethod;
-pub const qjsStringIterator = string_ops.qjsStringIterator;
-pub const qjsStringLocaleCompare = string_ops.qjsStringLocaleCompare;
-pub const qjsStringMatch = string_ops.qjsStringMatch;
-pub const qjsStringMatchAll = string_ops.qjsStringMatchAll;
-pub const qjsStringNormalize = string_ops.qjsStringNormalize;
-pub const qjsStringNumericArgsMethod = string_ops.qjsStringNumericArgsMethod;
-pub const qjsStringPad = string_ops.qjsStringPad;
-pub const qjsStringPrototypeMethod = string_ops.qjsStringPrototypeMethod;
-pub const qjsStringRaw = string_ops.qjsStringRaw;
-pub const qjsStringRegExpCreateAndInvoke = string_ops.qjsStringRegExpCreateAndInvoke;
-pub const qjsStringReplace = string_ops.qjsStringReplace;
-pub const qjsStringReplaceAll = string_ops.qjsStringReplaceAll;
-pub const qjsStringReplaceAllStringSearch = string_ops.qjsStringReplaceAllStringSearch;
-pub const qjsStringReplaceFastRegExp = string_ops.qjsStringReplaceFastRegExp;
-pub const qjsStringSearch = string_ops.qjsStringSearch;
-pub const qjsStringSearchPositionMethod = string_ops.qjsStringSearchPositionMethod;
-pub const qjsStringSplit = string_ops.qjsStringSplit;
-pub const qjsStringSplitBuiltinArray = string_ops.qjsStringSplitBuiltinArray;
-pub const qjsStringSubstr = string_ops.qjsStringSubstr;
-pub const qjsStringTrim = string_ops.qjsStringTrim;
-pub const qjsStringValueContainsByte = string_ops.qjsStringValueContainsByte;
-pub const readUtf16CodePoint = string_ops.readUtf16CodePoint;
-pub const regExpMatchHasNamedCaptures = string_ops.regExpMatchHasNamedCaptures;
-pub const regexpInternalStringValue = string_ops.regexpInternalStringValue;
-pub const replaceFrameVarRefBinding = string_ops.replaceFrameVarRefBinding;
-pub const replaceGlobalSimpleCaptureSequence = string_ops.replaceGlobalSimpleCaptureSequence;
-pub const replaceGlobalSimpleClassEscape = string_ops.replaceGlobalSimpleClassEscape;
-pub const replaceRegExpLegacySlot = string_ops.replaceRegExpLegacySlot;
-pub const replaceSingleUnitGlobalSimpleClassEscape = string_ops.replaceSingleUnitGlobalSimpleClassEscape;
-pub const replacementCaptureUnits = string_ops.replacementCaptureUnits;
-pub const simpleAsciiLiteralClassPlusLiteralMatchBytes = string_ops.simpleAsciiLiteralClassPlusLiteralMatchBytes;
-pub const simpleAsciiLiteralPlusLiteralMatch = string_ops.simpleAsciiLiteralPlusLiteralMatch;
-pub const simpleAsciiLiteralPlusLiteralMatchBytes = string_ops.simpleAsciiLiteralPlusLiteralMatchBytes;
-pub const simpleLatin1LiteralPlusLiteralMatch = string_ops.simpleLatin1LiteralPlusLiteralMatch;
-pub const simpleLatin1LiteralPlusLiteralMatchBytes = string_ops.simpleLatin1LiteralPlusLiteralMatchBytes;
-pub const simpleCaptureSequenceAtomMatches = string_ops.simpleCaptureSequenceAtomMatches;
-pub const simpleCaptureSequenceMatchLatin1 = string_ops.simpleCaptureSequenceMatchLatin1;
-pub const simpleCaptureSequenceMatchPattern = string_ops.simpleCaptureSequenceMatchPattern;
-pub const simpleCaptureSequenceMatchUtf16 = string_ops.simpleCaptureSequenceMatchUtf16;
-pub const simpleClassAlternationMatchLatin1 = string_ops.simpleClassAlternationMatchLatin1;
-pub const simpleClassAlternationMatchPattern = string_ops.simpleClassAlternationMatchPattern;
-pub const simpleClassAlternationMatchUtf16 = string_ops.simpleClassAlternationMatchUtf16;
-pub const simpleClassPredicateMatches = string_ops.simpleClassPredicateMatches;
-pub const simpleClassSequenceAtomMatches = string_ops.simpleClassSequenceAtomMatches;
-pub const simpleClassSequenceMatch = string_ops.simpleClassSequenceMatch;
-pub const simpleClassSequenceMatchLatin1 = string_ops.simpleClassSequenceMatchLatin1;
-pub const simpleClassSequenceMatchPattern = string_ops.simpleClassSequenceMatchPattern;
-pub const simpleClassSequenceMatchUtf16 = string_ops.simpleClassSequenceMatchUtf16;
-pub const simpleEvalStringLiteral = string_ops.simpleEvalStringLiteral;
-pub const simpleUnicodeLiteralMatch = string_ops.simpleUnicodeLiteralMatch;
-pub const singleDotAnchoredMatches = string_ops.singleDotAnchoredMatches;
-pub const standardStringMethodId = string_ops.standardStringMethodId;
-pub const primitiveStringMethodId = string_ops.primitiveStringMethodId;
-pub const stringAtomId = string_ops.stringAtomId;
-pub const stringCodePointAt = string_ops.stringCodePointAt;
-pub const stringIndexOfUnits = string_ops.stringIndexOfUnits;
-pub const stringIteratorPrototypeFromContext = string_ops.stringIteratorPrototypeFromContext;
-pub const stringLengthIndex = string_ops.stringLengthIndex;
-pub const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
-pub const stringSliceValue = string_ops.stringSliceValue;
-pub const stringValueContainsUnitByte = string_ops.stringValueContainsUnitByte;
-pub const stringValueUnits = string_ops.stringValueUnits;
-pub const stringValueUnitsEqualBytes = string_ops.stringValueUnitsEqualBytes;
-pub const surrogatePairFromCodePoint = string_ops.surrogatePairFromCodePoint;
+const string_ops = @import("string_ops.zig");
 
-pub const thrownValueMatchesConstructor = string_ops.thrownValueMatchesConstructor;
-pub const toObjectForStringRaw = string_ops.toObjectForStringRaw;
-pub const toOrdinaryPrimitiveString = string_ops.toOrdinaryPrimitiveString;
-pub const toPrimitiveForString = string_ops.toPrimitiveForString;
-pub const toStringBytesForSymbol = string_ops.toStringBytesForSymbol;
-pub const toStringForAnnexB = string_ops.toStringForAnnexB;
-pub const uint8ArrayStringBytes = string_ops.uint8ArrayStringBytes;
-pub const unicodeAstralSpecialMatch = string_ops.unicodeAstralSpecialMatch;
-pub const unicodeLowSurrogateLiteralMatch = string_ops.unicodeLowSurrogateLiteralMatch;
-pub const unicodePropertyOnlyClassCodePointMatches = string_ops.unicodePropertyOnlyClassCodePointMatches;
-pub const unicodePropertyRunCodePointMatches = string_ops.unicodePropertyRunCodePointMatches;
-pub const unicodeSimpleFoldClassMatches = string_ops.unicodeSimpleFoldClassMatches;
-pub const unicodeSurrogatePairClassMatch = string_ops.unicodeSurrogatePairClassMatch;
-pub const updateRegExpLegacyStaticsForMatch = string_ops.updateRegExpLegacyStaticsForMatch;
-pub const updateRegExpLegacyStaticsForMatchValues = string_ops.updateRegExpLegacyStaticsForMatchValues;
-pub const validStringCodePoint = string_ops.validStringCodePoint;
+const array_ops = @import("array_ops.zig");
 
-pub const array_ops = @import("array_ops.zig");
-pub const ArrayIterationMode = array_ops.ArrayIterationMode;
-pub const ArraySortEntry = array_ops.ArraySortEntry;
-pub const RegExpLegacyNoCaptureSlice = array_ops.RegExpLegacyNoCaptureSlice;
-pub const TypedArrayCanonicalIndex = builtins.buffer.TypedArrayCanonicalIndex;
-pub const TypedArrayLengthPrintLocalGet = array_ops.TypedArrayLengthPrintLocalGet;
-pub const TypedArrayLengthPrintStore = array_ops.TypedArrayLengthPrintStore;
-pub const Uint8ArrayBase64Alphabet = array_ops.Uint8ArrayBase64Alphabet;
-pub const Uint8ArrayBase64LastChunkHandling = array_ops.Uint8ArrayBase64LastChunkHandling;
-pub const Uint8ArrayCodecProgress = array_ops.Uint8ArrayCodecProgress;
-pub const ValueSliceRoot = array_ops.ValueSliceRoot;
-pub const addCollectionEntriesFromArray = array_ops.addCollectionEntriesFromArray;
-pub const aggregateErrorsIterableToArray = array_ops.aggregateErrorsIterableToArray;
-pub const argsFromArray = array_ops.argsFromArray;
-pub const argsFromArrayLike = array_ops.argsFromArrayLike;
-pub const arrayByCopySortCompare = array_ops.arrayByCopySortCompare;
-pub const arrayConstructorFromGlobal = array_ops.arrayConstructorFromGlobal;
-pub const arrayFirstIndexStart = array_ops.arrayFirstIndexStart;
-pub const arrayIteratorPrototypeFromContext = array_ops.arrayIteratorPrototypeFromContext;
-pub const arrayLastIndexStart = array_ops.arrayLastIndexStart;
-pub const arrayLengthAssignmentValue = array_ops.arrayLengthAssignmentValue;
-pub const arrayLengthDefineValue = array_ops.arrayLengthDefineValue;
-pub const arrayMethodTypedArrayLength = array_ops.arrayMethodTypedArrayLength;
-pub const arrayPrototypeChainHasNoIndexedProperties = array_ops.arrayPrototypeChainHasNoIndexedProperties;
-pub const arrayPrototypeFromGlobal = array_ops.arrayPrototypeFromGlobal;
-pub const arrayPrototypeRecordId = array_ops.arrayPrototypeRecordId;
-pub const arrayPrototypeValuesFromGlobal = array_ops.arrayPrototypeValuesFromGlobal;
-pub const arrayRelativeIndex = array_ops.arrayRelativeIndex;
-pub const arrayRelativeIndexFromNumber = array_ops.arrayRelativeIndexFromNumber;
-pub const arraySortCompare = array_ops.arraySortCompare;
-pub const arraySpeciesConstructorIsForeignArray = array_ops.arraySpeciesConstructorIsForeignArray;
-pub const arraySpeciesCreate = array_ops.arraySpeciesCreate;
-pub const arraySpeciesOriginalIsArray = array_ops.arraySpeciesOriginalIsArray;
-pub const arrayUsesDefaultIterator = array_ops.arrayUsesDefaultIterator;
-pub const atomListToMemorySlice = array_ops.atomListToMemorySlice;
-pub const atomSliceContains = array_ops.atomSliceContains;
-pub const atomicsTypedArray = array_ops.atomicsTypedArray;
-pub const atomicsTypedArrayIsBigInt = array_ops.atomicsTypedArrayIsBigInt;
-pub const buildCallSiteArray = array_ops.buildCallSiteArray;
-pub const coerceTypedArrayElementForSet = array_ops.coerceTypedArrayElementForSet;
-pub const coerceTypedArrayElementInput = array_ops.coerceTypedArrayElementInput;
-pub const constructArrayBufferNativeRecord = array_ops.constructArrayBufferNativeRecord;
-pub const createArrayByCopyOutput = array_ops.createArrayByCopyOutput;
-pub const createArrayFromArgs = array_ops.createArrayFromArgs;
-pub const createRegExpIndicesArray = array_ops.createRegExpIndicesArray;
-pub const createUint8ArrayFromBytes = array_ops.createUint8ArrayFromBytes;
-pub const decodeTypedArrayLengthPrintLocalGet = array_ops.decodeTypedArrayLengthPrintLocalGet;
-pub const decodeTypedArrayLengthPrintStore = array_ops.decodeTypedArrayLengthPrintStore;
-pub const defaultArraySpeciesCreate = array_ops.defaultArraySpeciesCreate;
-pub const defineArrayByCopyElement = array_ops.defineArrayByCopyElement;
-pub const ensureLengthWritableForArrayBuiltin = array_ops.ensureLengthWritableForArrayBuiltin;
-pub const ensureSettableForArrayBuiltin = array_ops.ensureSettableForArrayBuiltin;
-pub const expectUint8ArrayObject = array_ops.expectUint8ArrayObject;
-pub const flattenIntoArray = array_ops.flattenIntoArray;
-pub const freeAtomSlice = array_ops.freeAtomSlice;
-pub const freeValueSlice = array_ops.freeValueSlice;
-pub const isArrayMethodReceiver = array_ops.isArrayMethodReceiver;
-pub const isArrayPrototypeRecord = array_ops.isArrayPrototypeRecord;
-pub const isArrayStaticRecord = array_ops.isArrayStaticRecord;
-pub const isConstructorForArrayOf = array_ops.isConstructorForArrayOf;
-pub const isTypedArrayInternalOwnKey = array_ops.isTypedArrayInternalOwnKey;
-pub const isTypedArrayPrototypeMethod = array_ops.isTypedArrayPrototypeMethod;
-pub const iteratorFlattenableForIteratorFrom = array_ops.iteratorFlattenableForIteratorFrom;
-pub const nativeTypedArraySubclassBase = array_ops.nativeTypedArraySubclassBase;
-pub const popCatchMarker = array_ops.popCatchMarker;
-pub const popDuplicateConstructorTarget = array_ops.popDuplicateConstructorTarget;
-pub const pushFunctionClosure = array_ops.pushFunctionClosure;
-pub const pushSlotValue = array_ops.pushSlotValue;
-pub const putDenseArrayElementFast = array_ops.putDenseArrayElementFast;
-pub const qjsArrayAtCall = array_ops.qjsArrayAtCall;
-pub const qjsArrayBufferAccessor = array_ops.qjsArrayBufferAccessor;
-pub const qjsArrayBufferConstructWithPrototype = array_ops.qjsArrayBufferConstructWithPrototype;
-pub const qjsArrayBufferIsView = array_ops.qjsArrayBufferIsView;
-pub const qjsArrayBufferLengthArgument = array_ops.qjsArrayBufferLengthArgument;
-pub const qjsArrayBufferMaxByteLengthOption = array_ops.qjsArrayBufferMaxByteLengthOption;
-pub const qjsArrayBufferPrototypeFromTypedArrayPrototype = array_ops.qjsArrayBufferPrototypeFromTypedArrayPrototype;
-pub const qjsArrayBufferPrototypeNativeRecord = array_ops.qjsArrayBufferPrototypeNativeRecord;
-pub const qjsArrayBufferResize = array_ops.qjsArrayBufferResize;
-pub const qjsArrayBufferSlice = array_ops.qjsArrayBufferSlice;
-pub const qjsArrayBufferSliceToImmutable = array_ops.qjsArrayBufferSliceToImmutable;
-pub const qjsArrayBufferSpeciesConstructor = array_ops.qjsArrayBufferSpeciesConstructor;
-pub const qjsArrayBufferTransfer = array_ops.qjsArrayBufferTransfer;
-pub const qjsArrayBufferTransferToImmutable = array_ops.qjsArrayBufferTransferToImmutable;
-pub const qjsArrayByCopyCall = array_ops.qjsArrayByCopyCall;
-pub const qjsArrayCopyWithinCall = array_ops.qjsArrayCopyWithinCall;
-pub const qjsArrayFillCall = array_ops.qjsArrayFillCall;
-pub const qjsArrayFlatCall = array_ops.qjsArrayFlatCall;
-pub const qjsArrayForEachCall = array_ops.qjsArrayForEachCall;
-pub const qjsArrayFromArrayLike = array_ops.qjsArrayFromArrayLike;
-pub const qjsArrayFromCall = array_ops.qjsArrayFromCall;
-pub const qjsArrayFromIteratorLike = array_ops.qjsArrayFromIteratorLike;
-pub const qjsArrayIterationCall = array_ops.qjsArrayIterationCall;
-pub const qjsArrayIteratorMethod = array_ops.qjsArrayIteratorMethod;
-pub const qjsArrayIteratorMethodRecord = array_ops.qjsArrayIteratorMethodRecord;
-pub const qjsArrayIteratorNext = array_ops.qjsArrayIteratorNext;
-pub const qjsArrayIteratorValue = array_ops.qjsArrayIteratorValue;
-pub const qjsArrayJoinCall = array_ops.qjsArrayJoinCall;
-pub const qjsArrayLastIndexSparseLarge = array_ops.qjsArrayLastIndexSparseLarge;
-pub const qjsArrayMapCall = array_ops.qjsArrayMapCall;
-pub const qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall = array_ops.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall;
-pub const qjsArrayMethodFastCall = array_ops.qjsArrayMethodFastCall;
-pub const qjsArrayOfCall = array_ops.qjsArrayOfCall;
-pub const qjsArrayPopCall = array_ops.qjsArrayPopCall;
-pub const qjsArrayPrototypeNativeRecord = array_ops.qjsArrayPrototypeNativeRecord;
-pub const qjsArrayPushCall = array_ops.qjsArrayPushCall;
-pub const qjsArrayReduceCall = array_ops.qjsArrayReduceCall;
-pub const qjsArrayReduceRightSparseLarge = array_ops.qjsArrayReduceRightSparseLarge;
-pub const qjsArrayReverseCall = array_ops.qjsArrayReverseCall;
-pub const qjsArrayShiftCall = array_ops.qjsArrayShiftCall;
-pub const qjsArraySliceCall = array_ops.qjsArraySliceCall;
-pub const qjsArraySortCall = array_ops.qjsArraySortCall;
-pub const qjsArraySpliceCall = array_ops.qjsArraySpliceCall;
-pub const qjsArrayUnshiftCall = array_ops.qjsArrayUnshiftCall;
-pub const qjsArrayUnshiftSparseLarge = array_ops.qjsArrayUnshiftSparseLarge;
-pub const qjsCanFastJoinPrimitive = array_ops.qjsCanFastJoinPrimitive;
-pub const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrTypedArrayElement;
-pub const qjsDenseArrayMapSimpleNumericArg0 = array_ops.qjsDenseArrayMapSimpleNumericArg0;
-pub const qjsFastDensePrimitiveArrayPop = array_ops.qjsFastDensePrimitiveArrayPop;
-pub const qjsFastDensePrimitiveArrayJoin = array_ops.qjsFastDensePrimitiveArrayJoin;
-pub const qjsGeneratorSlice = array_ops.qjsGeneratorSlice;
-pub const qjsIteratorZipFlattenableRecord = array_ops.qjsIteratorZipFlattenableRecord;
-pub const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
-pub const qjsRelativeSliceIndex = array_ops.qjsRelativeSliceIndex;
-pub const qjsSharedArrayBufferAccessor = array_ops.qjsSharedArrayBufferAccessor;
-pub const qjsSharedArrayBufferGrow = array_ops.qjsSharedArrayBufferGrow;
-pub const qjsTypedArrayAccessor = array_ops.qjsTypedArrayAccessor;
-pub const qjsTypedArrayArrayBufferPrototypeVm = array_ops.qjsTypedArrayArrayBufferPrototypeVm;
-pub const qjsTypedArrayByCopyCall = array_ops.qjsTypedArrayByCopyCall;
-pub const qjsTypedArrayByCopyCoerceValue = array_ops.qjsTypedArrayByCopyCoerceValue;
-pub const qjsTypedArrayConstructArrayLikeOwnDataFast = array_ops.qjsTypedArrayConstructArrayLikeOwnDataFast;
-pub const qjsTypedArrayConstructArrayLikeVm = array_ops.qjsTypedArrayConstructArrayLikeVm;
-pub const qjsTypedArrayConstructBufferVm = array_ops.qjsTypedArrayConstructBufferVm;
-pub const qjsTypedArrayConstructFromIterable = array_ops.qjsTypedArrayConstructFromIterable;
-pub const qjsTypedArrayConstructLengthVm = array_ops.qjsTypedArrayConstructLengthVm;
-pub const qjsTypedArrayConstructToIndex = array_ops.qjsTypedArrayConstructToIndex;
-pub const qjsTypedArrayConstructVm = array_ops.qjsTypedArrayConstructVm;
-pub const qjsTypedArrayConstructorName = array_ops.qjsTypedArrayConstructorName;
-pub const qjsTypedArrayConstructorPrototypeVm = array_ops.qjsTypedArrayConstructorPrototypeVm;
-pub const qjsTypedArrayCreateSameType = array_ops.qjsTypedArrayCreateSameType;
-pub const qjsTypedArrayCreateWithLength = array_ops.qjsTypedArrayCreateWithLength;
-pub const qjsTypedArrayFromArrayLikeSource = array_ops.qjsTypedArrayFromArrayLikeSource;
-pub const qjsTypedArrayFromIteratorValue = array_ops.qjsTypedArrayFromIteratorValue;
-pub const qjsTypedArrayFromStaticCall = array_ops.qjsTypedArrayFromStaticCall;
-pub const qjsTypedArrayMapFilter = array_ops.qjsTypedArrayMapFilter;
-pub const qjsTypedArrayOfStaticCall = array_ops.qjsTypedArrayOfStaticCall;
-pub const qjsTypedArraySetCall = array_ops.qjsTypedArraySetCall;
-pub const qjsTypedArraySetElementValue = array_ops.qjsTypedArraySetElementValue;
-pub const qjsTypedArraySliceSubarrayCall = array_ops.qjsTypedArraySliceSubarrayCall;
-pub const qjsTypedArrayValidateConstructArgsPreAllocate = array_ops.qjsTypedArrayValidateConstructArgsPreAllocate;
-pub const qjsUint8ArrayCodecCall = array_ops.qjsUint8ArrayCodecCall;
-pub const qjsWorkerPopMessage = array_ops.qjsWorkerPopMessage;
-pub const regExpLegacyNoCaptureSliceValue = array_ops.regExpLegacyNoCaptureSliceValue;
-pub const simpleCaptureAtomsKnownDisjoint = array_ops.simpleCaptureAtomsKnownDisjoint;
-pub const simpleClassPredicatesKnownDisjoint = array_ops.simpleClassPredicatesKnownDisjoint;
-pub const stableArraySortEntries = array_ops.stableArraySortEntries;
-pub const stableSortTieBreak = array_ops.stableSortTieBreak;
-pub const throwRegExpAccessorTypeError = array_ops.throwRegExpAccessorTypeError;
-pub const toIntegerOrInfinityForArrayByCopy = array_ops.toIntegerOrInfinityForArrayByCopy;
-pub const toIntegerOrInfinityForArrayMethod = array_ops.toIntegerOrInfinityForArrayMethod;
-pub const tryFuseTypedArrayFromArrayBufferConstructorSequence = array_ops.tryFuseTypedArrayFromArrayBufferConstructorSequence;
-pub const typedArrayArrayLikeOwnDataFastPathUsable = array_ops.typedArrayArrayLikeOwnDataFastPathUsable;
-pub const typedArrayCanonicalDelete = array_ops.typedArrayCanonicalDelete;
-pub const typedArrayCanonicalGet = array_ops.typedArrayCanonicalGet;
-pub const typedArrayCanonicalHas = array_ops.typedArrayCanonicalHas;
-pub const typedArrayCanonicalNumericIndex = builtins.buffer.typedArrayCanonicalNumericIndex;
-pub const typedArrayCanonicalOwnDescriptor = array_ops.typedArrayCanonicalOwnDescriptor;
-pub const typedArrayCanonicalSet = array_ops.typedArrayCanonicalSet;
-pub const typedArrayConstructorForObject = array_ops.typedArrayConstructorForObject;
-pub const typedArrayConstructorObject = array_ops.typedArrayConstructorObject;
-pub const typedArrayDefaultSortCompare = array_ops.typedArrayDefaultSortCompare;
-pub const typedArrayDefineOwnPropertyVm = array_ops.typedArrayDefineOwnPropertyVm;
-pub const typedArrayNameFromKind = array_ops.typedArrayNameFromKind;
-pub const typedArrayOwnKeys = array_ops.typedArrayOwnKeys;
-pub const typedArrayPrototypeSet = array_ops.typedArrayPrototypeSet;
-pub const typedArrayReflectSetReceiverOwn = array_ops.typedArrayReflectSetReceiverOwn;
-pub const typedArraySpeciesConstructorForObject = array_ops.typedArraySpeciesConstructorForObject;
-pub const typedArrayStaticMethodId = array_ops.typedArrayStaticMethodId;
-pub const uint8ArrayBase64Alphabet = array_ops.uint8ArrayBase64Alphabet;
-pub const uint8ArrayBase64LastChunkHandling = array_ops.uint8ArrayBase64LastChunkHandling;
-pub const uint8ArrayCodecResult = array_ops.uint8ArrayCodecResult;
-pub const uint8ArrayConstructorPrototypeObject = array_ops.uint8ArrayConstructorPrototypeObject;
-pub const uint8ArrayOmitPadding = array_ops.uint8ArrayOmitPadding;
-pub const uint8ArrayViewBytes = array_ops.uint8ArrayViewBytes;
-pub const unshiftMoveIndex = array_ops.unshiftMoveIndex;
-pub const verifyArrayLikeLengthSet = array_ops.verifyArrayLikeLengthSet;
-pub const writeUint8ArrayPrefix = array_ops.writeUint8ArrayPrefix;
+const promise_ops = @import("promise_ops.zig");
 
-pub const promise_ops = @import("promise_ops.zig");
-pub const AsyncDisposableStackMethod = promise_ops.AsyncDisposableStackMethod;
-pub const PreparedPromiseReactionJobs = promise_ops.PreparedPromiseReactionJobs;
-pub const PreparedPromiseReactionJobsRoot = promise_ops.PreparedPromiseReactionJobsRoot;
-pub const PromiseCapabilityVm = promise_ops.PromiseCapabilityVm;
-pub const PromiseCombinatorCallbackMode = promise_ops.PromiseCombinatorCallbackMode;
-pub const PromiseCombinatorMode = promise_ops.PromiseCombinatorMode;
-pub const PromiseFinallyCallbackMode = promise_ops.PromiseFinallyCallbackMode;
-pub const PromiseRejectionReason = promise_ops.PromiseRejectionReason;
-pub const PromiseResolvingPairVm = promise_ops.PromiseResolvingPairVm;
-pub const PromiseStaticMode = promise_ops.PromiseStaticMode;
-pub const asyncDisposableStackMethodFromMarker = promise_ops.asyncDisposableStackMethodFromMarker;
-pub const asyncDisposableStackReceiver = promise_ops.asyncDisposableStackReceiver;
-pub const asyncFunctionPrototypeFromGlobal = promise_ops.asyncFunctionPrototypeFromGlobal;
-pub const asyncGeneratorFulfilledIteratorResult = promise_ops.asyncGeneratorFulfilledIteratorResult;
-pub const asyncGeneratorFunctionPrototypeFromGlobal = promise_ops.asyncGeneratorFunctionPrototypeFromGlobal;
-pub const asyncGeneratorIteratorResultFromPromise = promise_ops.asyncGeneratorIteratorResultFromPromise;
-pub const asyncGeneratorPrototypeFromGlobal = promise_ops.asyncGeneratorPrototypeFromGlobal;
-pub const asyncGeneratorRejectedTypeError = promise_ops.asyncGeneratorRejectedTypeError;
-pub const asyncIteratorPrototypeFromGlobal = promise_ops.asyncIteratorPrototypeFromGlobal;
-pub const atomicsDestroyAsyncWaiter = promise_ops.atomicsDestroyAsyncWaiter;
-pub const atomicsLinkAsyncWaiter = promise_ops.atomicsLinkAsyncWaiter;
-pub const atomicsSettleAsyncWaiter = promise_ops.atomicsSettleAsyncWaiter;
-pub const atomicsWaitAsyncResult = promise_ops.atomicsWaitAsyncResult;
-pub const awaitPendingPromise = promise_ops.awaitPendingPromise;
-pub const awaitThenableValue = promise_ops.awaitThenableValue;
-pub const clearHandledRejectionException = promise_ops.clearHandledRejectionException;
-pub const closeForAwaitIteratorForPendingError = promise_ops.closeForAwaitIteratorForPendingError;
-pub const closeForAwaitIteratorFromVm = promise_ops.closeForAwaitIteratorFromVm;
-pub const constructAsyncFunctionFromSource = promise_ops.constructAsyncFunctionFromSource;
-pub const constructAsyncGeneratorFunctionFromSource = promise_ops.constructAsyncGeneratorFunctionFromSource;
-pub const createPromiseResolvingFunction = promise_ops.createPromiseResolvingFunction;
-pub const createPromiseResolvingPair = promise_ops.createPromiseResolvingPair;
-pub const createPromiseResolvingState = promise_ops.createPromiseResolvingState;
-pub const defineAsyncGeneratorDataMethod = promise_ops.defineAsyncGeneratorDataMethod;
-pub const drainPendingPromiseJobs = promise_ops.drainPendingPromiseJobs;
-pub const enqueuePendingPromiseJob = promise_ops.enqueuePendingPromiseJob;
-pub const finishAwaitedPromise = promise_ops.finishAwaitedPromise;
-pub const installAsyncGeneratorPrototypeProperties = promise_ops.installAsyncGeneratorPrototypeProperties;
-pub const isAsyncGeneratorPrototypeMethod = promise_ops.isAsyncGeneratorPrototypeMethod;
-pub const isAsyncGeneratorReceiver = promise_ops.isAsyncGeneratorReceiver;
-pub const parameterSourceContainsAwait = promise_ops.parameterSourceContainsAwait;
-pub const promisePrototypeFromGlobal = promise_ops.promisePrototypeFromGlobal;
-pub const promiseRejectionReason = promise_ops.promiseRejectionReason;
-pub const qjsAppendPromiseReaction = promise_ops.qjsAppendPromiseReaction;
-pub const qjsAsyncDisposableStackAdopt = promise_ops.qjsAsyncDisposableStackAdopt;
-pub const qjsAsyncDisposableStackAwaitValue = promise_ops.qjsAsyncDisposableStackAwaitValue;
-pub const qjsAsyncDisposableStackConstructWithPrototype = promise_ops.qjsAsyncDisposableStackConstructWithPrototype;
-pub const qjsAsyncDisposableStackContinuation = promise_ops.qjsAsyncDisposableStackContinuation;
-pub const qjsAsyncDisposableStackContinuationCall = promise_ops.qjsAsyncDisposableStackContinuationCall;
-pub const qjsAsyncDisposableStackContinue = promise_ops.qjsAsyncDisposableStackContinue;
-pub const qjsAsyncDisposableStackContinueOrReject = promise_ops.qjsAsyncDisposableStackContinueOrReject;
-pub const qjsAsyncDisposableStackDefer = promise_ops.qjsAsyncDisposableStackDefer;
-pub const qjsAsyncDisposableStackDisposeAsync = promise_ops.qjsAsyncDisposableStackDisposeAsync;
-pub const qjsAsyncDisposableStackMethodCall = promise_ops.qjsAsyncDisposableStackMethodCall;
-pub const qjsAsyncDisposableStackMove = promise_ops.qjsAsyncDisposableStackMove;
-pub const qjsAsyncDisposableStackRecordError = promise_ops.qjsAsyncDisposableStackRecordError;
-pub const qjsAsyncDisposableStackRejectStored = promise_ops.qjsAsyncDisposableStackRejectStored;
-pub const qjsAsyncDisposableStackResolveStored = promise_ops.qjsAsyncDisposableStackResolveStored;
-pub const qjsAsyncDisposableStackStoreCapability = promise_ops.qjsAsyncDisposableStackStoreCapability;
-pub const qjsAsyncDisposableStackUse = promise_ops.qjsAsyncDisposableStackUse;
-pub const qjsAsyncDisposeResource = promise_ops.qjsAsyncDisposeResource;
-pub const qjsAsyncFromSyncIteratorContinuation = promise_ops.qjsAsyncFromSyncIteratorContinuation;
-pub const qjsAsyncFromSyncIteratorMethodCall = promise_ops.qjsAsyncFromSyncIteratorMethodCall;
-pub const qjsAsyncFromSyncIteratorNext = promise_ops.qjsAsyncFromSyncIteratorNext;
-pub const qjsAsyncFromSyncIteratorReturn = promise_ops.qjsAsyncFromSyncIteratorReturn;
-pub const qjsAsyncFromSyncIteratorUnwrap = promise_ops.qjsAsyncFromSyncIteratorUnwrap;
-pub const qjsAsyncFromSyncIteratorUnwrapCall = promise_ops.qjsAsyncFromSyncIteratorUnwrapCall;
-pub const qjsAsyncFunctionAwait = promise_ops.qjsAsyncFunctionAwait;
-pub const qjsAsyncFunctionAwaitOrReject = promise_ops.qjsAsyncFunctionAwaitOrReject;
-pub const qjsAsyncFunctionClearPromise = promise_ops.qjsAsyncFunctionClearPromise;
-pub const qjsAsyncFunctionResumeCallback = promise_ops.qjsAsyncFunctionResumeCallback;
-pub const qjsAsyncFunctionResumeCallbackCall = promise_ops.qjsAsyncFunctionResumeCallbackCall;
-pub const qjsAsyncFunctionRunAndSettle = promise_ops.qjsAsyncFunctionRunAndSettle;
-pub const qjsAsyncFunctionRunState = promise_ops.qjsAsyncFunctionRunState;
-pub const qjsAsyncFunctionSettle = promise_ops.qjsAsyncFunctionSettle;
-pub const qjsAsyncFunctionStart = promise_ops.qjsAsyncFunctionStart;
-pub const qjsAsyncIteratorAsyncDispose = promise_ops.qjsAsyncIteratorAsyncDispose;
-pub const qjsAtomicsWaitAsync = promise_ops.qjsAtomicsWaitAsync;
-pub const qjsAtomicsWaitAsyncPromise = promise_ops.qjsAtomicsWaitAsyncPromise;
-pub const qjsDefaultPromiseCapability = promise_ops.qjsDefaultPromiseCapability;
-pub const qjsPerformPromiseThen = promise_ops.qjsPerformPromiseThen;
-pub const qjsPreparePromiseReactionJobs = promise_ops.qjsPreparePromiseReactionJobs;
-pub const qjsPromiseCapability = promise_ops.qjsPromiseCapability;
-pub const qjsPromiseCapabilityExecutorCall = promise_ops.qjsPromiseCapabilityExecutorCall;
-pub const qjsPromiseCatchGeneric = promise_ops.qjsPromiseCatchGeneric;
-pub const qjsPromiseCombinatorCall = promise_ops.qjsPromiseCombinatorCall;
-pub const qjsPromiseCombinatorCallback = promise_ops.qjsPromiseCombinatorCallback;
-pub const qjsPromiseCombinatorElementCall = promise_ops.qjsPromiseCombinatorElementCall;
-pub const qjsPromiseCombinatorState = promise_ops.qjsPromiseCombinatorState;
-pub const qjsPromiseConstruct = promise_ops.qjsPromiseConstruct;
-pub const qjsPromiseConstructWithPrototype = promise_ops.qjsPromiseConstructWithPrototype;
-pub const qjsPromiseConstructorRealmGlobal = promise_ops.qjsPromiseConstructorRealmGlobal;
-pub const qjsPromiseDefaultConstructor = promise_ops.qjsPromiseDefaultConstructor;
-pub const qjsPromiseFinally = promise_ops.qjsPromiseFinally;
-pub const qjsPromiseFinallyCallback = promise_ops.qjsPromiseFinallyCallback;
-pub const qjsPromiseFinallyCallbackCall = promise_ops.qjsPromiseFinallyCallbackCall;
-pub const qjsPromiseKeyedCombinatorCall = promise_ops.qjsPromiseKeyedCombinatorCall;
-pub const qjsPromiseKeyedCombinatorState = promise_ops.qjsPromiseKeyedCombinatorState;
-pub const qjsPromiseKeyedResult = promise_ops.qjsPromiseKeyedResult;
-pub const qjsPromiseReactionJob = promise_ops.qjsPromiseReactionJob;
-pub const qjsPromiseReactionJobCall = promise_ops.qjsPromiseReactionJobCall;
-pub const qjsPromiseReactionRecord = promise_ops.qjsPromiseReactionRecord;
-pub const qjsPromiseRejectCapability = promise_ops.qjsPromiseRejectCapability;
-pub const qjsPromiseRejectCapabilityForError = promise_ops.qjsPromiseRejectCapabilityForError;
-pub const qjsPromiseResolveCapability = promise_ops.qjsPromiseResolveCapability;
-pub const qjsPromiseResolveIdentity = promise_ops.qjsPromiseResolveIdentity;
-pub const qjsPromiseResolvingFunctionCall = promise_ops.qjsPromiseResolvingFunctionCall;
-pub const qjsPromiseSetArrayIndex = promise_ops.qjsPromiseSetArrayIndex;
-pub const qjsPromiseSettleValue = promise_ops.qjsPromiseSettleValue;
-pub const qjsPromiseSettlementRecord = promise_ops.qjsPromiseSettlementRecord;
-pub const qjsPromiseSpeciesConstructor = promise_ops.qjsPromiseSpeciesConstructor;
-pub const qjsPromiseStaticBuiltinCallee = promise_ops.qjsPromiseStaticBuiltinCallee;
-pub const qjsPromiseStaticCall = promise_ops.qjsPromiseStaticCall;
-pub const qjsPromiseStaticMode = promise_ops.qjsPromiseStaticMode;
-pub const qjsPromiseThen = promise_ops.qjsPromiseThen;
-pub const qjsPromiseThenableJob = promise_ops.qjsPromiseThenableJob;
-pub const qjsPromiseThenableJobCall = promise_ops.qjsPromiseThenableJobCall;
-pub const qjsPromiseThenableJobPending = promise_ops.qjsPromiseThenableJobPending;
-pub const qjsQueuePromiseReactions = promise_ops.qjsQueuePromiseReactions;
-pub const qjsReflectConstructResolveBound = promise_ops.qjsReflectConstructResolveBound;
-pub const qjsSettlePendingThenableJobs = promise_ops.qjsSettlePendingThenableJobs;
-pub const qjsUsingAddAsyncResource = promise_ops.qjsUsingAddAsyncResource;
-pub const qjsUsingCreateAsyncDisposableStack = promise_ops.qjsUsingCreateAsyncDisposableStack;
-pub const qjsUsingDisposeAsyncStack = promise_ops.qjsUsingDisposeAsyncStack;
-pub const qjsUsingDisposeAsyncStackForThrow = promise_ops.qjsUsingDisposeAsyncStackForThrow;
-pub const qjsWorkerHasActiveAsyncDependency = promise_ops.qjsWorkerHasActiveAsyncDependency;
-pub const qjsWorkerRecordHasActiveAsyncDependency = promise_ops.qjsWorkerRecordHasActiveAsyncDependency;
-pub const rejectModuleNamespaceSuperSet = promise_ops.rejectModuleNamespaceSuperSet;
-pub const settlePendingPromiseReaction = promise_ops.settlePendingPromiseReaction;
-
-pub const proxy_ops = @import("object_ops.zig");
-pub const callProxyApply = proxy_ops.callProxyApply;
-pub const completeProxyDescriptor = proxy_ops.completeProxyDescriptor;
-pub const constructProxy = proxy_ops.constructProxy;
-pub const firstProxyInPrototypeSetPath = proxy_ops.firstProxyInPrototypeSetPath;
-pub const getProxyProperty = proxy_ops.getProxyProperty;
-pub const isCompatibleProxyDescriptor = proxy_ops.isCompatibleProxyDescriptor;
-pub const isRevokedProxy = proxy_ops.isRevokedProxy;
-pub const proxyAwareIsExtensible = proxy_ops.proxyAwareIsExtensible;
-pub const proxyAwareOwnPropertyDescriptor = proxy_ops.proxyAwareOwnPropertyDescriptor;
-pub const proxyAwarePreventExtensions = proxy_ops.proxyAwarePreventExtensions;
-pub const proxyAwareSetPrototypeOf = proxy_ops.proxyAwareSetPrototypeOf;
-pub const proxyCreateDataPropertyOrThrow = proxy_ops.proxyCreateDataPropertyOrThrow;
-pub const proxyDefineOwnProperty = proxy_ops.proxyDefineOwnProperty;
-pub const proxyDefineValueForReflectSet = proxy_ops.proxyDefineValueForReflectSet;
-pub const proxySetTrapForErrorStackSetter = proxy_ops.proxySetTrapForErrorStackSetter;
-pub const proxySetValueProperty = proxy_ops.proxySetValueProperty;
-pub const proxyTargetIsCallable = proxy_ops.proxyTargetIsCallable;
-pub const proxyTargetIsCallableObject = proxy_ops.proxyTargetIsCallableObject;
-pub const proxyTargetIsConstructor = proxy_ops.proxyTargetIsConstructor;
-pub const proxyTrapKeyValue = proxy_ops.proxyTrapKeyValue;
-pub const validateProxyGetResult = proxy_ops.validateProxyGetResult;
-pub const validateProxyHasResult = proxy_ops.validateProxyHasResult;
-pub const validateProxyOwnKeysResult = proxy_ops.validateProxyOwnKeysResult;
-pub const validateProxySetResult = proxy_ops.validateProxySetResult;
-
-pub const object_ops = @import("object_ops.zig");
-pub const FastUnicodePropertyPredicate = object_ops.FastUnicodePropertyPredicate;
-pub const OwnPropertyKeyFilter = object_ops.OwnPropertyKeyFilter;
-pub const PendingPropertyDescriptor = object_ops.PendingPropertyDescriptor;
-pub const PropertyEscapePattern = object_ops.PropertyEscapePattern;
-pub const UnicodePropertyRunPattern = object_ops.UnicodePropertyRunPattern;
-pub const WorkerObjectInitError = object_ops.WorkerObjectInitError;
-pub const anchoredBinaryPropertyName = object_ops.anchoredBinaryPropertyName;
-pub const appendObjectGroupByValue = object_ops.appendObjectGroupByValue;
-pub const appendPrivateBoundNamesFromObject = object_ops.appendPrivateBoundNamesFromObject;
-pub const atomPropertyName = object_ops.atomPropertyName;
-pub const atomicsBufferObject = object_ops.atomicsBufferObject;
-pub const bytecodeFunctionObjectTag = object_ops.bytecodeFunctionObjectTag;
-pub const cachedRealmObject = object_ops.cachedRealmObject;
-pub const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
-pub const callSitePrototypeFromGlobal = object_ops.callSitePrototypeFromGlobal;
-pub const callableObjectFromValue = object_ops.callableObjectFromValue;
-pub const capturedArgumentsObject = object_ops.capturedArgumentsObject;
-pub const constructCollectionWithPrototypeFromVm = object_ops.constructCollectionWithPrototypeFromVm;
-pub const constructPrimitiveWrapperWithPrototype = object_ops.constructPrimitiveWrapperWithPrototype;
-pub const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
-pub const constructorPrototypeFromGlobalAtom = object_ops.constructorPrototypeFromGlobalAtom;
-pub const constructorPrototypeObject = object_ops.constructorPrototypeObject;
-pub const copyRealmPrototypeKeys = object_ops.copyRealmPrototypeKeys;
-pub const createArgumentsObject = object_ops.createArgumentsObject;
-pub const createBytecodeFunctionObject = object_ops.createBytecodeFunctionObject;
-pub const createCallSiteObject = object_ops.createCallSiteObject;
-pub const createDataPropertyOrThrow = object_ops.createDataPropertyOrThrow;
-pub const createGeneratorObject = object_ops.createGeneratorObject;
-pub const currentArrowFunctionObject = object_ops.currentArrowFunctionObject;
-pub const defineClassFieldDataProperty = object_ops.defineClassFieldDataProperty;
-pub const defineDataProperty = object_ops.defineDataProperty;
-pub const defineErrorStackDataProperty = object_ops.defineErrorStackDataProperty;
-pub const defineFreshNonIndexDataProperty = object_ops.defineFreshNonIndexDataProperty;
-pub const defineFunctionNameProperty = object_ops.defineFunctionNameProperty;
-pub const defineRegExpGroupsProperty = object_ops.defineRegExpGroupsProperty;
-pub const defineRegExpGroupsPropertyFromValue = object_ops.defineRegExpGroupsPropertyFromValue;
-pub const defineRegExpIndicesGroupsProperty = object_ops.defineRegExpIndicesGroupsProperty;
-pub const defineValueProperty = object_ops.defineValueProperty;
-pub const deleteValueProperty = object_ops.deleteValueProperty;
-pub const deleteValuePropertyOrThrow = object_ops.deleteValuePropertyOrThrow;
-pub const descriptorObjectFromDescriptor = object_ops.descriptorObjectFromDescriptor;
-pub const directEvalCallerAllowsSuperProperty = object_ops.directEvalCallerAllowsSuperProperty;
-pub const directEvalWithObject = object_ops.directEvalWithObject;
-pub const dynamicFunctionDefaultPrototype = object_ops.dynamicFunctionDefaultPrototype;
-pub const dynamicFunctionNewTargetPrototype = object_ops.dynamicFunctionNewTargetPrototype;
-pub const fastUnicodePropertyPredicate = object_ops.fastUnicodePropertyPredicate;
-pub const findPropertyDescriptor = object_ops.findPropertyDescriptor;
-pub const frameArgumentsObject = object_ops.frameArgumentsObject;
-pub const frameArgumentsObjectForSpecialObject = object_ops.frameArgumentsObjectForSpecialObject;
-pub const functionBytecodeUsesArgumentsSpecialObject = object_ops.functionBytecodeUsesArgumentsSpecialObject;
-pub const functionCallerArgumentsProperty = object_ops.functionCallerArgumentsProperty;
-pub const functionObjectFromValue = object_ops.functionObjectFromValue;
-pub const functionPrototypeFromGlobal = object_ops.functionPrototypeFromGlobal;
-pub const generatorFunctionPrototypeFromGlobal = object_ops.generatorFunctionPrototypeFromGlobal;
-pub const generatorObjectPrototype = object_ops.generatorObjectPrototype;
-pub const generatorPrototypeFromGlobal = object_ops.generatorPrototypeFromGlobal;
-pub const getAccessorDescriptorValue = object_ops.getAccessorDescriptorValue;
-pub const getFastNumberPrimitiveDataProperty = object_ops.getFastNumberPrimitiveDataProperty;
-pub const getMethodPropertyForOrdinaryToPrimitive = object_ops.getMethodPropertyForOrdinaryToPrimitive;
-pub const getNumberPrototypeMethodId = object_ops.getNumberPrototypeMethodId;
-pub const getPrimitiveProperty = object_ops.getPrimitiveProperty;
-pub const getPrivateValueProperty = object_ops.getPrivateValueProperty;
-pub const getPrototypeMethod = object_ops.getPrototypeMethod;
-pub const getPrototypeMethodWithFallback = object_ops.getPrototypeMethodWithFallback;
-pub const getPrototypePropertyValue = object_ops.getPrototypePropertyValue;
-pub const getSuperPropertyValue = object_ops.getSuperPropertyValue;
-pub const getValueProperty = object_ops.getValueProperty;
-pub const getValuePropertyWithReceiver = object_ops.getValuePropertyWithReceiver;
-pub const hasPropertyForWith = object_ops.hasPropertyForWith;
-pub const hasValueProperty = object_ops.hasValueProperty;
-pub const importMetaObject = object_ops.importMetaObject;
-pub const indexedExoticHasProperty = object_ops.indexedExoticHasProperty;
-pub const installFunctionPrototypeThrowTypeErrorAccessors = object_ops.installFunctionPrototypeThrowTypeErrorAccessors;
-pub const installGeneratorPrototypeProperties = object_ops.installGeneratorPrototypeProperties;
-pub const internalSpecialObjectValue = object_ops.internalSpecialObjectValue;
-pub const isAnchoredBinaryPropertySource = object_ops.isAnchoredBinaryPropertySource;
-pub const isObjectPrototypeNativeRecord = object_ops.isObjectPrototypeNativeRecord;
-pub const isRuntimeSupportedBinaryPropertyName = object_ops.isRuntimeSupportedBinaryPropertyName;
-pub const isSameRealmRegExpPrototypeGetter = object_ops.isSameRealmRegExpPrototypeGetter;
-pub const isStandardNumberPrototypeMethodAtom = object_ops.isStandardNumberPrototypeMethodAtom;
-pub const isThrowTypeErrorIntrinsicObject = object_ops.isThrowTypeErrorIntrinsicObject;
-pub const iteratorIsOnIteratorPrototypeChain = object_ops.iteratorIsOnIteratorPrototypeChain;
-pub const iteratorPrototypeFromGlobal = object_ops.iteratorPrototypeFromGlobal;
-pub const objectFromValue = object_ops.objectFromValue;
-pub const objectHasImmutablePrototype = object_ops.objectHasImmutablePrototype;
-pub const objectHasNonEmptyName = object_ops.objectHasNonEmptyName;
-pub const objectHasRegExpInternalSlots = object_ops.objectHasRegExpInternalSlots;
-pub const objectIsExtensibleForIntegrity = object_ops.objectIsExtensibleForIntegrity;
-pub const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
-pub const objectRealmGlobal = object_ops.objectRealmGlobal;
-pub const objectRestKeyExcluded = object_ops.objectRestKeyExcluded;
-pub const objectRestOwnKeys = object_ops.objectRestOwnKeys;
-pub const objectRestOwnPropertyDescriptor = object_ops.objectRestOwnPropertyDescriptor;
-pub const ordinaryHasValueProperty = object_ops.ordinaryHasValueProperty;
-pub const ownDataOrAutoInitPropertyValue = object_ops.ownDataOrAutoInitPropertyValue;
-pub const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
-pub const primitivePrototypeThisValue = object_ops.primitivePrototypeThisValue;
-pub const propertyAtomFromLengthIndex = object_ops.propertyAtomFromLengthIndex;
-pub const propertyEscapePattern = object_ops.propertyEscapePattern;
-pub const propertyIndexFromLengthKey = object_ops.propertyIndexFromLengthKey;
-pub const qjsAggregateErrorConstructWithPrototype = object_ops.qjsAggregateErrorConstructWithPrototype;
-pub const qjsConstructFinalizationRegistryWithPrototype = object_ops.qjsConstructFinalizationRegistryWithPrototype;
-pub const qjsConstructWeakRefWithPrototype = object_ops.qjsConstructWeakRefWithPrototype;
-pub const qjsDataViewConstructWithPrototype = object_ops.qjsDataViewConstructWithPrototype;
-pub const qjsDatePrototypeMethod = object_ops.qjsDatePrototypeMethod;
-pub const qjsDefinePropertyWithKind = object_ops.qjsDefinePropertyWithKind;
-pub const qjsDescriptorFromObject = object_ops.qjsDescriptorFromObject;
-pub const qjsDestructuringObjectRest = object_ops.qjsDestructuringObjectRest;
-pub const qjsDisposableStackConstructWithPrototype = object_ops.qjsDisposableStackConstructWithPrototype;
-pub const qjsErrorConstructWithPrototype = object_ops.qjsErrorConstructWithPrototype;
-pub const qjsGetOwnPropertyDescriptorCall = object_ops.qjsGetOwnPropertyDescriptorCall;
-pub const qjsGetOwnPropertyDescriptorsCall = object_ops.qjsGetOwnPropertyDescriptorsCall;
-pub const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
-pub const qjsIteratorPrototypeAccessor = object_ops.qjsIteratorPrototypeAccessor;
-pub const qjsIteratorPrototypeAccessorSet = object_ops.qjsIteratorPrototypeAccessorSet;
-pub const qjsIteratorPrototypeMethodCall = object_ops.qjsIteratorPrototypeMethodCall;
-pub const qjsNumberPrototypeMethod = object_ops.qjsNumberPrototypeMethod;
-pub const qjsObjectAssignCall = object_ops.qjsObjectAssignCall;
-pub const qjsObjectAssignKeys = object_ops.qjsObjectAssignKeys;
-pub const qjsObjectCallForNativeRecord = object_ops.qjsObjectCallForNativeRecord;
-pub const qjsObjectCreateCall = object_ops.qjsObjectCreateCall;
-pub const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPropertiesCall;
-pub const qjsObjectFromEntriesCall = object_ops.qjsObjectFromEntriesCall;
-pub const qjsObjectGetPrototypeOfCall = object_ops.qjsObjectGetPrototypeOfCall;
-pub const qjsObjectGetPrototypeOfStep = object_ops.qjsObjectGetPrototypeOfStep;
-pub const qjsObjectGetPrototypeOfValue = object_ops.qjsObjectGetPrototypeOfValue;
-pub const qjsObjectGroupByCall = object_ops.qjsObjectGroupByCall;
-pub const qjsObjectHasOwnCall = object_ops.qjsObjectHasOwnCall;
-pub const qjsObjectIsExtensibleCall = object_ops.qjsObjectIsExtensibleCall;
-pub const qjsObjectIsPrototypeOf = object_ops.qjsObjectIsPrototypeOf;
-pub const qjsObjectOwnPropertyKeysCall = object_ops.qjsObjectOwnPropertyKeysCall;
-pub const qjsObjectPreventExtensionsCall = object_ops.qjsObjectPreventExtensionsCall;
-pub const qjsObjectProtoGetterCall = object_ops.qjsObjectProtoGetterCall;
-pub const qjsObjectProtoSetterCall = object_ops.qjsObjectProtoSetterCall;
-pub const qjsObjectPrototypeDefineAccessorCall = object_ops.qjsObjectPrototypeDefineAccessorCall;
-pub const qjsObjectPrototypeLookupAccessorCall = object_ops.qjsObjectPrototypeLookupAccessorCall;
-pub const qjsObjectPrototypeMethodFunctionPrototype = object_ops.qjsObjectPrototypeMethodFunctionPrototype;
-pub const qjsObjectPrototypeOwnPropertyCall = object_ops.qjsObjectPrototypeOwnPropertyCall;
-pub const qjsObjectSetIntegrityCall = object_ops.qjsObjectSetIntegrityCall;
-pub const qjsObjectSetPrototypeOfCall = object_ops.qjsObjectSetPrototypeOfCall;
-pub const qjsObjectTestIntegrityCall = object_ops.qjsObjectTestIntegrityCall;
-pub const qjsObjectValueOfCall = object_ops.qjsObjectValueOfCall;
-pub const qjsOptionalBoolDescriptorProperty = object_ops.qjsOptionalBoolDescriptorProperty;
-pub const qjsPrimitivePrototypeMethod = object_ops.qjsPrimitivePrototypeMethod;
-pub const qjsReflectDeletePropertyCall = object_ops.qjsReflectDeletePropertyCall;
-pub const qjsReflectGetOwnPropertyDescriptorCall = object_ops.qjsReflectGetOwnPropertyDescriptorCall;
-pub const qjsReflectGetPrototypeOfCall = object_ops.qjsReflectGetPrototypeOfCall;
-pub const qjsReflectSetPrototypeOfCall = object_ops.qjsReflectSetPrototypeOfCall;
-pub const qjsRegExpExecAnchoredPropertyFallback = object_ops.qjsRegExpExecAnchoredPropertyFallback;
-pub const qjsRegExpExecPropertyFallback = object_ops.qjsRegExpExecPropertyFallback;
-pub const qjsRegExpPrototypeMethodIsDefault = object_ops.qjsRegExpPrototypeMethodIsDefault;
-pub const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
-pub const qjsWorkerObjectId = object_ops.qjsWorkerObjectId;
-pub const qjsWorkerParentObject = object_ops.qjsWorkerParentObject;
-pub const readUnicodePropertyClassEscape = object_ops.readUnicodePropertyClassEscape;
-pub const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
-pub const reflectConstructRealmPrototype = object_ops.reflectConstructRealmPrototype;
-pub const regExpExecPropertyIsDefault = object_ops.regExpExecPropertyIsDefault;
-pub const regExpPrototypeFromGlobal = object_ops.regExpPrototypeFromGlobal;
-pub const regexpSourceUsesZigPropertyFallback = object_ops.regexpSourceUsesZigPropertyFallback;
-pub const remapPrivateAtomFromObject = object_ops.remapPrivateAtomFromObject;
-pub const sameObjectIdentity = object_ops.sameObjectIdentity;
-pub const setPrivateValueProperty = object_ops.setPrivateValueProperty;
-pub const setSuperPropertyValue = object_ops.setSuperPropertyValue;
-pub const setValueProperty = object_ops.setValueProperty;
-pub const setValuePropertyStrict = object_ops.setValuePropertyStrict;
-pub const setWithOwnDescriptor = object_ops.setWithOwnDescriptor;
-pub const simpleUnicodePropertyRunTestFast = object_ops.simpleUnicodePropertyRunTestFast;
-pub const tagIteratorWrapPrototypeMethod = object_ops.tagIteratorWrapPrototypeMethod;
-pub const throwNullishComputedPropertyTypeError = object_ops.throwNullishComputedPropertyTypeError;
-pub const throwNullishPropertyTypeError = object_ops.throwNullishPropertyTypeError;
-pub const throwPrimitivePrototypeTypeError = object_ops.throwPrimitivePrototypeTypeError;
-pub const toPropertyKeyAtom = object_ops.toPropertyKeyAtom;
-pub const toPropertyKeyValue = object_ops.toPropertyKeyValue;
-pub const unicodePropertyOnlyClassBody = object_ops.unicodePropertyOnlyClassBody;
-pub const unicodePropertyOnlyClassSource = object_ops.unicodePropertyOnlyClassSource;
-pub const unicodePropertyRunPattern = object_ops.unicodePropertyRunPattern;
-pub const withObjectBindingValue = object_ops.withObjectBindingValue;
-pub const wrapForValidIteratorPrototype = object_ops.wrapForValidIteratorPrototype;
-pub const ensureLocalsCapacity = utils.ensureLocalsCapacity;
-pub const ensureVarRefsCapacity = utils.ensureVarRefsCapacity;
-pub const catchTargetFromMarker = utils.catchTargetFromMarker;
+const object_ops = @import("object_ops.zig");
 
 // --- for-in/for-of iterator helpers moved to forof_ops.zig ---
-pub const forof_ops = @import("forof_ops.zig");
-pub const createForInIterator = forof_ops.createForInIterator;
-pub const createSimpleForInIterator = forof_ops.createSimpleForInIterator;
-pub const simpleForInRootCanUseFastPath = forof_ops.simpleForInRootCanUseFastPath;
-pub const findForOfIteratorIndex = forof_ops.findForOfIteratorIndex;
-pub const isIteratorLikeValue = forof_ops.isIteratorLikeValue;
-pub const closeStackTopForOfIteratorForPendingError = forof_ops.closeStackTopForOfIteratorForPendingError;
-pub const closeStackTopForOfIteratorForPendingErrorWithFrame = forof_ops.closeStackTopForOfIteratorForPendingErrorWithFrame;
-pub const closeStackTopForOfIteratorForPendingErrorInternal = forof_ops.closeStackTopForOfIteratorForPendingErrorInternal;
-pub const findTopClosableForOfRecordIndex = forof_ops.findTopClosableForOfRecordIndex;
-pub const isForOfRecordAt = forof_ops.isForOfRecordAt;
-pub const hasCatchMarkerAboveForOfRecord = forof_ops.hasCatchMarkerAboveForOfRecord;
-pub const activeDestructuringStateTargetsIterator = forof_ops.activeDestructuringStateTargetsIterator;
-pub const destructuringStateTargetsIteratorInValues = forof_ops.destructuringStateTargetsIteratorInValues;
-pub const closeIteratorFromVm = forof_ops.closeIteratorFromVm;
-pub const closeIteratorFromVmImpl = forof_ops.closeIteratorFromVmImpl;
+const forof_ops = @import("forof_ops.zig");
 
-pub fn atomListContains(list: []const core.Atom, needle: core.Atom) bool {
-    for (list) |atom_id| {
-        if (atom_id == needle) return true;
-    }
-    return false;
-}
-
-pub fn appendAtom(rt: *core.JSRuntime, list: *[]core.Atom, atom_id: core.Atom) !void {
-    const next = try rt.memory.alloc(core.Atom, list.len + 1);
-    errdefer rt.memory.free(core.Atom, next);
-    @memcpy(next[0..list.len], list.*);
-    next[list.len] = rt.atoms.dup(atom_id);
-    const old = list.*;
-    list.* = next;
-    if (old.len != 0) rt.memory.free(core.Atom, old);
-}
-
-pub fn freeAtomList(rt: *core.JSRuntime, list: []core.Atom) void {
-    for (list) |atom_id| rt.atoms.free(atom_id);
-    if (list.len != 0) rt.memory.free(core.Atom, list);
-}
-
-pub fn functionConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object {
-    if (global.getOwnDataObjectBorrowed(core.atom.ids.Function)) |constructor| return constructor;
-    const function_value = global.getProperty(core.atom.ids.Function);
-    defer function_value.free(rt);
-    return property_ops.expectObject(function_value) catch null;
-}
-
-pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot, value: core.JSValue) !void {
-    const cached = try global.cachedRealmValueSlot(rt, slot);
-    try global.setOptionalValueSlot(rt, cached, value.dup());
-}
-
-pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
-    const atom_id = try rt.internAtom(name);
-    defer rt.atoms.free(atom_id);
-    const method = try builtins.function.nativeFunction(rt, name, length);
-    defer method.free(rt);
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
-}
-
-pub const stackValueFromTop = utils.stackValueFromTop;
-
-// --- Primitive coercion moved to coercion_ops.zig ---
-pub const coercion_ops = @import("coercion_ops.zig");
-pub const toPrimitiveForAddition = coercion_ops.toPrimitiveForAddition;
-pub const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
-pub const toOrdinaryPrimitive = coercion_ops.toOrdinaryPrimitive;
-pub const toOrdinaryPrimitiveNumber = coercion_ops.toOrdinaryPrimitiveNumber;
-pub const valueTruthy = coercion_ops.valueTruthy;
-pub const toUint16CodeUnit = coercion_ops.toUint16CodeUnit;
-pub const toLengthIndex = coercion_ops.toLengthIndex;
-pub const toLengthNumber = coercion_ops.toLengthNumber;
-pub const fastToLengthIndex = coercion_ops.fastToLengthIndex;
-pub const toUint32Number = coercion_ops.toUint32Number;
-pub const uint32NumberValue = coercion_ops.uint32NumberValue;
-pub const coerceOptionalNumberMethodArgument = coercion_ops.coerceOptionalNumberMethodArgument;
-pub const primitiveWrapperStoredValue = coercion_ops.primitiveWrapperStoredValue;
-pub const toNumberForDateMethod = coercion_ops.toNumberForDateMethod;
+const coercion_ops = @import("coercion_ops.zig");
 
 // --- Builtin glue moved to builtin_glue.zig ---
-pub const builtin_glue = @import("builtin_glue.zig");
-pub const qjsNumberFunctionCall = builtin_glue.qjsNumberFunctionCall;
-pub const qjsBigIntFunctionCall = builtin_glue.qjsBigIntFunctionCall;
-pub const qjsBigIntAsN = builtin_glue.qjsBigIntAsN;
-pub const toBigIntFromPrimitive = builtin_glue.toBigIntFromPrimitive;
-pub const qjsGlobalIsNaNOrFinite = builtin_glue.qjsGlobalIsNaNOrFinite;
-pub const qjsUriCallForNativeRecord = builtin_glue.qjsUriCallForNativeRecord;
-pub const qjsJsonCallForNativeRecord = builtin_glue.qjsJsonCallForNativeRecord;
-pub const qjsDateToPrimitiveNativeRecord = builtin_glue.qjsDateToPrimitiveNativeRecord;
-pub const toNumberLikeArgument = builtin_glue.toNumberLikeArgument;
-pub const qjsGlobalParseInt = builtin_glue.qjsGlobalParseInt;
-pub const qjsGlobalParseFloat = builtin_glue.qjsGlobalParseFloat;
-pub const qjsMathCall = builtin_glue.qjsMathCall;
-pub const mathArg = builtin_glue.mathArg;
-pub const toMathNumber = builtin_glue.toMathNumber;
-pub const qjsMathMinMax = builtin_glue.qjsMathMinMax;
-pub const qjsMathMinMaxPrimitiveFast = builtin_glue.qjsMathMinMaxPrimitiveFast;
-pub const qjsPrimitiveMathNumber = builtin_glue.qjsPrimitiveMathNumber;
-pub const qjsFmin = builtin_glue.qjsFmin;
-pub const qjsFmax = builtin_glue.qjsFmax;
-pub const qjsMathPow = builtin_glue.qjsMathPow;
-pub const qjsMathRound = builtin_glue.qjsMathRound;
-pub const qjsMathHypot = builtin_glue.qjsMathHypot;
-pub const qjsMathImul = builtin_glue.qjsMathImul;
-pub const qjsMathSign = builtin_glue.qjsMathSign;
-pub const qjsCollectionNativeRecord = builtin_glue.qjsCollectionNativeRecord;
-pub const qjsMapGroupByRecord = builtin_glue.qjsMapGroupByRecord;
-pub const qjsBufferNativeRecord = builtin_glue.qjsBufferNativeRecord;
-pub const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
-pub const qjsDataViewConstructorArgs = builtin_glue.qjsDataViewConstructorArgs;
-pub const qjsDataViewAccessor = builtin_glue.qjsDataViewAccessor;
-pub const qjsDataViewGet = builtin_glue.qjsDataViewGet;
-pub const qjsDataViewSet = builtin_glue.qjsDataViewSet;
-pub const qjsDataViewSetCoerceValue = builtin_glue.qjsDataViewSetCoerceValue;
-pub const qjsErrorIsError = builtin_glue.qjsErrorIsError;
-pub const qjsWeakRefDeref = builtin_glue.qjsWeakRefDeref;
-pub const qjsFinalizationRegistryRegister = builtin_glue.qjsFinalizationRegistryRegister;
-pub const qjsFinalizationRegistryUnregister = builtin_glue.qjsFinalizationRegistryUnregister;
-pub const qjsFinalizationRegistryAppendCell = builtin_glue.qjsFinalizationRegistryAppendCell;
-pub const qjsCanBeHeldWeakly = builtin_glue.qjsCanBeHeldWeakly;
-pub const qjsSymbolFor = builtin_glue.qjsSymbolFor;
-pub const qjsSymbolKeyFor = builtin_glue.qjsSymbolKeyFor;
-pub const qjsCreateBuiltinFunction = builtin_glue.qjsCreateBuiltinFunction;
-pub const constructCollectionFromVm = builtin_glue.constructCollectionFromVm;
-pub const addCollectionEntriesFromIterator = builtin_glue.addCollectionEntriesFromIterator;
-pub const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
+const builtin_glue = @import("builtin_glue.zig");
 
 // --- Local/arg/var-ref slot ops moved to slot_ops.zig ---
-pub const slot_ops = @import("slot_ops.zig");
-pub const execGetLoc = slot_ops.execGetLoc;
-pub const execPutLoc = slot_ops.execPutLoc;
-pub const execSetLoc = slot_ops.execSetLoc;
-pub const syncTopLevelGlobalLexicalLocal = slot_ops.syncTopLevelGlobalLexicalLocal;
-pub const ensureGlobalLexicalSyncSlots = slot_ops.ensureGlobalLexicalSyncSlots;
-pub const execGetArg = slot_ops.execGetArg;
-pub const execPutArg = slot_ops.execPutArg;
-pub const execSetArg = slot_ops.execSetArg;
-pub const execGetVarRef = slot_ops.execGetVarRef;
-pub const execGetVarRefMaybeTdz = slot_ops.execGetVarRefMaybeTdz;
-pub const execPutVarRef = slot_ops.execPutVarRef;
-pub const isVarRefInitOpcode = slot_ops.isVarRefInitOpcode;
-pub const constVarRefWriteAllowed = slot_ops.constVarRefWriteAllowed;
-pub const publishTopLevelFunctionVarRef = slot_ops.publishTopLevelFunctionVarRef;
-pub const defineGlobalFunctionBindingValue = slot_ops.defineGlobalFunctionBindingValue;
-pub const execSetVarRef = slot_ops.execSetVarRef;
-pub const slotValueDup = slot_ops.slotValueDup;
-pub const slotValueBorrow = slot_ops.slotValueBorrow;
-pub const varRefSlotIsUninitialized = slot_ops.varRefSlotIsUninitialized;
-pub const varRefSlotIsDeleted = slot_ops.varRefSlotIsDeleted;
-pub const evalLocalSlotIsEvalVarCell = slot_ops.evalLocalSlotIsEvalVarCell;
-pub const setSlotValue = slot_ops.setSlotValue;
-pub const derivedConstructorThisLocalSlot = slot_ops.derivedConstructorThisLocalSlot;
-pub const closeLocalVarRef = slot_ops.closeLocalVarRef;
-pub const ensureVarRefCell = slot_ops.ensureVarRefCell;
-pub const ensureLocalVarRefCell = slot_ops.ensureLocalVarRefCell;
-pub const varRefCellFromValue = slot_ops.varRefCellFromValue;
+const slot_ops = @import("slot_ops.zig");
 
 // --- Direct eval execution moved to eval_ops.zig ---
-pub const eval_ops = @import("eval_ops.zig");
-pub const functionBytecodeHasDirectEval = eval_ops.functionBytecodeHasDirectEval;
-pub const functionBytecodeUsesImportMeta = eval_ops.functionBytecodeUsesImportMeta;
-pub const evalBytecodeHasVarDeclarations = eval_ops.evalBytecodeHasVarDeclarations;
-pub const shouldSkipDirectEvalLocalCapture = eval_ops.shouldSkipDirectEvalLocalCapture;
-pub const functionBytecodeUsesAtom = eval_ops.functionBytecodeUsesAtom;
-pub const functionBytecodeHasClosureVarName = eval_ops.functionBytecodeHasClosureVarName;
-pub const shouldSkipDirectEvalScopeCaptureName = eval_ops.shouldSkipDirectEvalScopeCaptureName;
-pub const appendFunctionEvalLocal = eval_ops.appendFunctionEvalLocal;
-pub const ExecEvalResult = eval_ops.ExecEvalResult;
-pub const execDirectEval = eval_ops.execDirectEval;
-pub const isContextIntrinsicEval = eval_ops.isContextIntrinsicEval;
-pub const execApplyEval = eval_ops.execApplyEval;
-pub const directEval = eval_ops.directEval;
-pub const directEvalThisValue = eval_ops.directEvalThisValue;
-pub const directEvalPrivateBoundNames = eval_ops.directEvalPrivateBoundNames;
-pub const directEvalVisibleBindingExists = eval_ops.directEvalVisibleBindingExists;
-pub const directEvalVisibleLocalNameCount = eval_ops.directEvalVisibleLocalNameCount;
-pub const directEvalShouldExposeImplicitArguments = eval_ops.directEvalShouldExposeImplicitArguments;
+const eval_ops = @import("eval_ops.zig");
 
 pub const InlineCallRequest = struct {
     target: inline_calls.InlineTarget,
@@ -992,24 +86,24 @@ pub fn execCall(
     const func = stack.values[region_base];
     const args: []const core.JSValue = stack.values[region_base + 1 ..][0..argc];
 
-    if (try fastHostOutputCall(ctx.runtime, output, func, args)) {
+    if (try builtin_glue.fastHostOutputCall(ctx.runtime, output, func, args)) {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
         try stack.pushOwned(core.JSValue.undefinedValue());
         return .done;
     }
-    const is_super_constructor = isCurrentSuperConstructor(ctx, frame, func);
+    const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
     if (allow_inline and !is_super_constructor) {
         if (inline_calls.resolveInlineTarget(global, func)) |target| {
             return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
         }
     }
     const arrow_super_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
-        currentArrowLexicalSuperThis(ctx.runtime, frame)
+        class_init_ops.currentArrowLexicalSuperThis(ctx.runtime, frame)
     else
         null;
     defer if (arrow_super_this) |value| value.free(ctx.runtime);
     const arrow_constructor_this = if (is_super_constructor and !frame.function.flags.is_derived_class_constructor)
-        currentArrowConstructorThis(ctx.runtime, frame)
+        class_init_ops.currentArrowConstructorThis(ctx.runtime, frame)
     else
         null;
     defer if (arrow_constructor_this) |value| value.free(ctx.runtime);
@@ -1024,7 +118,7 @@ pub fn execCall(
         core.JSValue.undefinedValue();
     const result = callValueOrBytecodeClassModePreRooted(ctx, output, global, super_this, func, args, function, frame, is_super_constructor) catch |err| {
         popOwnedStackRegion(ctx.runtime, stack, region_base);
-        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+        try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
@@ -1033,10 +127,10 @@ pub fn execCall(
     popOwnedStackRegion(ctx.runtime, stack, region_base);
     if (is_super_constructor and frame.function.flags.is_derived_class_constructor) {
         defer result.free(ctx.runtime);
-        if (varRefSlotIsUninitialized(frame.this_value)) {
+        if (slot_ops.varRefSlotIsUninitialized(frame.this_value)) {
             const next_this = if (result.isObject()) result else frame.constructor_this_value;
-            try setSlotValue(ctx, &frame.this_value, next_this.dup());
-            initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
+            try slot_ops.setSlotValue(ctx, &frame.this_value, next_this.dup());
+            class_init_ops.initializeCurrentConstructorClassInstanceElements(ctx, output, global, function, frame) catch |err| {
                 if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) {
                     return .continue_loop;
                 }
@@ -1048,7 +142,7 @@ pub fn execCall(
             }
             return error.ReferenceError;
         }
-        try pushSlotValue(stack, frame.this_value);
+        try array_ops.pushSlotValue(stack, frame.this_value);
         return .done;
     }
     if (is_arrow_super_constructor) {
@@ -1067,7 +161,7 @@ pub fn execCall(
             value
         else
             result;
-        try setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
+        try class_init_ops.setCurrentArrowLexicalThis(ctx, frame, next_this.dup());
         try stack.push(next_this);
         return .done;
     }
@@ -1107,23 +201,6 @@ pub fn popOwnedStackRegion(rt: *core.JSRuntime, stack: *stack_mod.Stack, region_
     stack.values = stack.values.ptr[0..region_base];
 }
 
-pub fn fastHostOutputCall(rt: *core.JSRuntime, output: ?*std.Io.Writer, func: core.JSValue, args: []const core.JSValue) !bool {
-    const object = objectFromValue(func) orelse return false;
-    if (object.hostFunctionKind() != core.host_function.ids.output) return false;
-    try printHostOutputArgs(rt, output, args);
-    return true;
-}
-
-pub fn printHostOutputArgs(rt: *core.JSRuntime, output: ?*std.Io.Writer, args: []const core.JSValue) !void {
-    if (output) |writer| {
-        for (args, 0..) |arg, idx| {
-            if (idx != 0) try writer.writeByte(' ');
-            try call_mod.printValue(rt, writer, arg);
-        }
-        try writer.writeByte('\n');
-    }
-}
-
 pub fn handleCatchableRuntimeError(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
@@ -1158,7 +235,7 @@ pub fn tryCatchInFrame(
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
     else
-        try createNamedError(ctx.runtime, global, error_info.?.name, error_info.?.message);
+        try exception_ops.createNamedError(ctx.runtime, global, error_info.?.name, error_info.?.message);
     var catch_value_owned = true;
     errdefer if (catch_value_owned) {
         if (is_pending_exception) {
@@ -1168,7 +245,7 @@ pub fn tryCatchInFrame(
         }
     };
     if (!is_pending_exception and ctx.hasException()) ctx.clearException();
-    const restored = (try popCatchMarker(ctx.runtime, stack)) orelse null;
+    const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
     stack.pushOwnedAssumeCapacity(catch_value);
     catch_value_owned = false;
     frame.dropPreparedCallsForCatchDepth(ctx.runtime, stack.values.len);
@@ -1204,24 +281,24 @@ pub fn callNativeBuiltinRecordForVm(
 ) HostError!?core.JSValue {
     switch (native_ref.domain) {
         .math => {
-            if (native_ref.id == builtins.math.sum_precise_method_id) return try qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
-            return try qjsMathCall(ctx, output, global, native_ref.id, args);
+            if (native_ref.id == builtins.math.sum_precise_method_id) return try math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
+            return try builtin_glue.qjsMathCall(ctx, output, global, native_ref.id, args);
         },
         .number => return try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame),
         .collection => return try collection_vm.qjsCollectionNativeRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
-        .regexp => return try qjsRegExpNativeCallById(ctx, output, global, func, this_value, native_ref.id, args, caller_function, caller_frame),
-        .uri => return try qjsUriCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
-        .json => return try qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        .regexp => return try regexp_fastpath.qjsRegExpNativeCallById(ctx, output, global, func, this_value, native_ref.id, args, caller_function, caller_frame),
+        .uri => return try builtin_glue.qjsUriCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        .json => return try builtin_glue.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
         .atomics => return try qjsAtomicsCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
         .reflect => return try qjsReflectCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
-        .object => return try qjsObjectCallForNativeRecord(ctx, output, global, this_value, native_ref.id, args, caller_function, caller_frame),
-        .primitive => return try qjsPrimitivePrototypeMethod(ctx, output, global, function_object, this_value, native_ref.id, args, caller_function, caller_frame),
+        .object => return try object_ops.qjsObjectCallForNativeRecord(ctx, output, global, this_value, native_ref.id, args, caller_function, caller_frame),
+        .primitive => return try object_ops.qjsPrimitivePrototypeMethod(ctx, output, global, function_object, this_value, native_ref.id, args, caller_function, caller_frame),
         .function => switch (native_ref.id) {
-            @intFromEnum(builtins.function.PrototypeMethod.to_string) => return try qjsFunctionToStringCall(ctx, this_value),
+            @intFromEnum(builtins.function.PrototypeMethod.to_string) => return try string_ops.qjsFunctionToStringCall(ctx, this_value),
             else => {},
         },
         .error_object => switch (native_ref.id) {
-            @intFromEnum(builtins.error_.PrototypeMethod.to_string) => return try qjsErrorToStringCall(ctx, output, global, this_value, caller_function, caller_frame),
+            @intFromEnum(builtins.error_.PrototypeMethod.to_string) => return try string_ops.qjsErrorToStringCall(ctx, output, global, this_value, caller_function, caller_frame),
             @intFromEnum(builtins.error_.PrototypeMethod.stack_getter) => return try qjsErrorStackGetter(ctx, output, global, this_value),
             @intFromEnum(builtins.error_.PrototypeMethod.stack_setter) => return try qjsErrorStackSetter(ctx, output, global, this_value, function_object, args, caller_function, caller_frame),
             else => {},
@@ -1229,10 +306,10 @@ pub fn callNativeBuiltinRecordForVm(
         .iterator => return try qjsIteratorCallForNativeRecord(ctx, output, global, this_value, native_ref.id, args, caller_function, caller_frame),
         .string => {
             if (native_ref.id == @intFromEnum(builtins.string.ConstructorMethod.call)) {
-                return try qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+                return try string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
             }
             if (native_ref.id == @intFromEnum(builtins.string.PrototypeMethod.substring)) {
-                return try qjsStringPrototypeMethod(ctx, output, global, this_value, 1, args, caller_function, caller_frame);
+                return try string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, 1, args, caller_function, caller_frame);
             }
         },
         .date => {
@@ -1240,7 +317,7 @@ pub fn callNativeBuiltinRecordForVm(
                 return try builtins.date.staticCall(ctx.runtime, native_ref.id, args);
             }
             if (native_ref.id == @intFromEnum(builtins.date.PrototypeMethod.to_primitive)) {
-                return try qjsDateToPrimitiveNativeRecord(ctx, output, global, this_value, args, caller_function, caller_frame);
+                return try builtin_glue.qjsDateToPrimitiveNativeRecord(ctx, output, global, this_value, args, caller_function, caller_frame);
             }
         },
         else => {},
@@ -1251,7 +328,7 @@ pub fn callNativeBuiltinRecordForVm(
 pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, err: anytype) !void {
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
-    const error_value = try createNamedError(ctx.runtime, global, error_info.name, error_info.message);
+    const error_value = try exception_ops.createNamedError(ctx.runtime, global, error_info.name, error_info.message);
     errdefer error_value.free(ctx.runtime);
     try attachStackToErrorValue(ctx, global, error_value);
     if (ctx.hasException()) ctx.clearException();
@@ -1333,7 +410,7 @@ fn callValueOrBytecodeClassModeDispatch(
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
         if (allow_class_constructor_call and !fb.is_class_constructor) {
             if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
-            const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{}, classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+            const result = try callFunctionBytecodeConstruct(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{}, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             defer result.free(ctx.runtime);
             return if (result.isObject()) result.dup() else this_value.dup();
         }
@@ -1342,23 +419,23 @@ fn callValueOrBytecodeClassModeDispatch(
             const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
             const constructor_this = if (fb.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
             if (!fb.is_derived_class_constructor) {
-                try initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
+                try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, this_value, fb, caller_function, caller_frame);
             }
-            return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, true, null, null, null, classConstructorNewTarget(func, caller_frame), constructor_this);
+            return callFunctionBytecodeModeState(ctx, func, func, initial_this, args, &.{}, output, global, &.{}, &.{}, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
         if (!allow_class_constructor_call) {
-            if (try callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
+            if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
             if (try callSimpleNumericBytecode(ctx.runtime, fb, args, &.{})) |value| return value;
         }
         return callFunctionBytecode(ctx, func, func, this_value, args, &.{}, output, global, &.{}, &.{});
     }
-    if (functionObjectFromValue(func)) |function_object| {
+    if (object_ops.functionObjectFromValue(func)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (allow_class_constructor_call and !fb.is_class_constructor) {
             if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) return error.TypeError;
-            const function_global = objectRealmGlobal(function_object) orelse global;
-            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
+            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+            const result = try callFunctionBytecodeConstruct(ctx, function_value, func, this_value, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, class_init_ops.classConstructorNewTarget(func, caller_frame), core.JSValue.undefinedValue());
             defer result.free(ctx.runtime);
             return if (result.isObject()) result.dup() else this_value.dup();
         }
@@ -1366,14 +443,14 @@ fn callValueOrBytecodeClassModeDispatch(
             if (!allow_class_constructor_call) return throwFunctionRealmTypeError(ctx, global, function_object);
             const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
             const constructor_this = if (fb.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
-            const function_global = objectRealmGlobal(function_object) orelse global;
+            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             if (!fb.is_derived_class_constructor) {
-                try initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
+                try class_init_ops.initializeClassInstanceElements(ctx, output, function_global, func, this_value, fb, caller_function, caller_frame);
             }
-            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, true, null, null, null, classConstructorNewTarget(func, caller_frame), constructor_this);
+            return callFunctionBytecodeModeState(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, true, null, null, null, class_init_ops.classConstructorNewTarget(func, caller_frame), constructor_this);
         }
         if (!allow_class_constructor_call) {
-            if (try callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
+            if (try string_ops.callSimpleStringBytecode(ctx.runtime, fb, args)) |value| return value;
             if (try callSimpleNumericBytecode(ctx.runtime, fb, args, function_object.functionCapturesSlot().*)) |value| return value;
         }
         const effective_this = function_object.functionLexicalThisSlot().* orelse this_value;
@@ -1382,20 +459,20 @@ fn callValueOrBytecodeClassModeDispatch(
             break :blk core.JSValue.undefinedValue();
         } else core.JSValue.undefinedValue();
         defer effective_new_target.free(ctx.runtime);
-        const function_global = objectRealmGlobal(function_object) orelse global;
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         return callFunctionBytecodeModeState(ctx, function_value, func, effective_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, true, null, null, null, effective_new_target, core.JSValue.undefinedValue());
     }
-    if (objectFromValue(func)) |object| {
-        if (object.proxyTarget() != null and proxyTargetIsCallable(func)) {
-            return callProxyApply(ctx, output, global, func, object, this_value, args, caller_function, caller_frame);
+    if (object_ops.objectFromValue(func)) |object| {
+        if (object.proxyTarget() != null and object_ops.proxyTargetIsCallable(func)) {
+            return object_ops.callProxyApply(ctx, output, global, func, object, this_value, args, caller_function, caller_frame);
         }
     }
-    if (callableObjectFromValue(func)) |function_object| {
+    if (object_ops.callableObjectFromValue(func)) |function_object| {
         if (function_object.class_id == core.class.ids.bound_function) {
             return callBoundFunction(ctx, output, global, function_object, args, caller_function, caller_frame);
         }
         if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-            const function_global = objectRealmGlobal(function_object) orelse global;
+            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             const native_result = callNativeBuiltinRecordForVm(ctx, output, function_global, func, this_value, function_object, native_ref, args, caller_function, caller_frame) catch |err| {
                 try throwRuntimeErrorForGlobal(ctx, function_global, err);
                 return err;
@@ -1405,16 +482,16 @@ fn callValueOrBytecodeClassModeDispatch(
             }
         }
         if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
-        if (try qjsPromiseResolvingFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsPromiseThenableJobCall(ctx, output, global, function_object, caller_function, caller_frame)) |value| return value;
-        if (try qjsPromiseReactionJobCall(ctx, output, global, function_object, caller_function, caller_frame)) |value| return value;
-        if (try qjsPromiseCapabilityExecutorCall(ctx, function_object, args)) |value| return value;
-        if (try qjsPromiseCombinatorElementCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsPromiseFinallyCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsAsyncFunctionResumeCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsAsyncFromSyncIteratorUnwrapCall(ctx, global, function_object, args)) |value| return value;
-        if (try qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
-        if (isThrowTypeErrorIntrinsicObject(function_object)) return qjsThrowTypeErrorIntrinsic(ctx, global, function_object);
+        if (try promise_ops.qjsPromiseResolvingFunctionCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try promise_ops.qjsPromiseThenableJobCall(ctx, output, global, function_object, caller_function, caller_frame)) |value| return value;
+        if (try promise_ops.qjsPromiseReactionJobCall(ctx, output, global, function_object, caller_function, caller_frame)) |value| return value;
+        if (try promise_ops.qjsPromiseCapabilityExecutorCall(ctx, function_object, args)) |value| return value;
+        if (try promise_ops.qjsPromiseCombinatorElementCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try promise_ops.qjsPromiseFinallyCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try promise_ops.qjsAsyncFunctionResumeCallbackCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (try promise_ops.qjsAsyncFromSyncIteratorUnwrapCall(ctx, global, function_object, args)) |value| return value;
+        if (try promise_ops.qjsAsyncDisposableStackContinuationCall(ctx, output, global, function_object, args, caller_function, caller_frame)) |value| return value;
+        if (object_ops.isThrowTypeErrorIntrinsicObject(function_object)) return qjsThrowTypeErrorIntrinsic(ctx, global, function_object);
         // Borrow the internal dispatch-name bytes instead of allocating a
         // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
         // times, and the previous round-trip alloc/free showed up clearly
@@ -1439,31 +516,31 @@ fn callValueOrBytecodeClassModeDispatch(
             }
         }
         if (allow_class_constructor_call and isBuiltinConstructorName(name)) {
-            if (try constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, null)) |constructed| {
+            if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, null)) |constructed| {
                 return constructed;
             }
             return this_value.dup();
         }
         if (allow_class_constructor_call and !isConstructorLike(ctx, func)) return error.TypeError;
         if (std.mem.eql(u8, name, "raw")) {
-            return qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+            return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "[Symbol.hasInstance]")) {
             return qjsFunctionHasInstanceCall(ctx, output, global, this_value, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "sumPrecise")) {
-            return qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
+            return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "register")) {
-            return qjsFinalizationRegistryRegister(ctx, this_value, args);
+            return builtin_glue.qjsFinalizationRegistryRegister(ctx, this_value, args);
         }
         if (std.mem.eql(u8, name, "unregister")) {
-            return qjsFinalizationRegistryUnregister(ctx, this_value, args);
+            return builtin_glue.qjsFinalizationRegistryUnregister(ctx, this_value, args);
         }
-        if (try qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
+        if (try disposable_ops.qjsDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
             return value;
         }
-        if (try qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
+        if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
             return value;
         }
         if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
@@ -1476,9 +553,9 @@ fn callValueOrBytecodeClassModeDispatch(
         if (try collection_vm.qjsSetMethodCall(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
             return value;
         }
-        if (qjsPromiseStaticMode(name)) |mode| {
-            if (try qjsPromiseStaticBuiltinCallee(ctx.runtime, global, function_object, name)) {
-                return qjsPromiseStaticCall(ctx, output, global, this_value, args, mode, caller_function, caller_frame);
+        if (promise_ops.qjsPromiseStaticMode(name)) |mode| {
+            if (try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global, function_object, name)) {
+                return promise_ops.qjsPromiseStaticCall(ctx, output, global, this_value, args, mode, caller_function, caller_frame);
             }
         }
         // Hot-path dispatch: a small first-byte switch routes the common
@@ -1489,22 +566,22 @@ fn callValueOrBytecodeClassModeDispatch(
         if (name.len != 0) {
             switch (name[0]) {
                 'A' => if (std.mem.eql(u8, name, "Array")) {
-                    return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, arrayPrototypeFromGlobal(ctx.runtime, global)) catch |err| switch (err) {
+                    return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) catch |err| switch (err) {
                         error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array length"),
                         else => err,
                     };
                 },
                 'B' => if (std.mem.eql(u8, name, "BigInt")) {
-                    return qjsBigIntFunctionCall(ctx, output, global, args);
+                    return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
                 },
                 'N' => if (std.mem.eql(u8, name, "Number")) {
-                    return qjsNumberFunctionCall(ctx, output, global, args);
+                    return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
                 },
                 'O' => if (std.mem.eql(u8, name, "Object")) {
                     return construct_mod.constructValue(ctx.runtime, func, args, &.{});
                 },
                 'S' => if (std.mem.eql(u8, name, "String")) {
-                    return qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+                    return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
                 },
                 'd', 'e' => if (builtins.uri.methodId(name)) |mode| {
                     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -1514,7 +591,7 @@ fn callValueOrBytecodeClassModeDispatch(
                             else => err,
                         };
                     }
-                    const string_value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+                    const string_value = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
                     defer string_value.free(ctx.runtime);
                     return builtins.uri.call(ctx.runtime, mode, string_value) catch |err| switch (err) {
                         error.TypeError, error.URIError => err,
@@ -1527,77 +604,77 @@ fn callValueOrBytecodeClassModeDispatch(
                     // straight to the same handler the slow path uses,
                     // so coercion semantics (e.g. string args, BigInt
                     // rejection) stay identical.
-                    return qjsStringFromCharCode(ctx, output, global, args);
+                    return string_ops.qjsStringFromCharCode(ctx, output, global, args);
                 },
                 'r' => if (std.mem.eql(u8, name, "raw")) {
-                    return qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+                    return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
                 },
                 else => {},
             }
         }
         if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-        if (std.mem.eql(u8, name, "for")) return qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "keyFor")) return qjsSymbolKeyFor(ctx.runtime, args);
+        if (std.mem.eql(u8, name, "for")) return builtin_glue.qjsSymbolFor(ctx, output, global, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "keyFor")) return builtin_glue.qjsSymbolKeyFor(ctx.runtime, args);
         if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncFunction")) return constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Worker")) return qjsWorkerFunctionCall(ctx, output, global, args);
         if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx.runtime, func, args, &.{});
-        if (std.mem.eql(u8, name, "Array")) return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, arrayPrototypeFromGlobal(ctx.runtime, global)) catch |err| switch (err) {
+        if (std.mem.eql(u8, name, "Array")) return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) catch |err| switch (err) {
             error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array length"),
             else => err,
         };
-        if (std.mem.eql(u8, name, "String")) return qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "Number")) return qjsNumberFunctionCall(ctx, output, global, args);
-        if (std.mem.eql(u8, name, "BigInt")) return qjsBigIntFunctionCall(ctx, output, global, args);
-        if (std.mem.eql(u8, name, "parseInt")) return qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "parseFloat")) return qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "isNaN")) return qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
-        if (std.mem.eql(u8, name, "isFinite")) return qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
+        if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "Number")) return builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
+        if (std.mem.eql(u8, name, "BigInt")) return builtin_glue.qjsBigIntFunctionCall(ctx, output, global, args);
+        if (std.mem.eql(u8, name, "parseInt")) return builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "parseFloat")) return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "isNaN")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, true);
+        if (std.mem.eql(u8, name, "isFinite")) return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, global, this_value, args, false);
         if (builtins.bigint.staticUnsignedMode(name)) |unsigned| {
-            return qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
+            return builtin_glue.qjsBigIntAsN(ctx, output, global, args, unsigned, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "RegExp")) return qjsRegExpFunctionCall(ctx, output, global, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "RegExp")) return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, global, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
         if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
         if (std.mem.eql(u8, name, "AggregateError")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, func);
-            const constructor_global = objectRealmGlobal(function_object) orelse global;
-            return try qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+            const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
+            return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "SuppressedError")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, func);
-            return try qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+            return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
         }
-        if (isErrorConstructorName(name)) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, func);
-            return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
+        if (exception_ops.isErrorConstructorName(name)) {
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, func);
+            return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "isError")) return qjsErrorIsError(args);
-        if (std.mem.eql(u8, name, "isView")) return qjsArrayBufferIsView(args);
+        if (std.mem.eql(u8, name, "isError")) return builtin_glue.qjsErrorIsError(args);
+        if (std.mem.eql(u8, name, "isView")) return array_ops.qjsArrayBufferIsView(args);
         if (std.mem.eql(u8, name, "set")) {
-            if (try qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+            if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         }
-        if (try qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsUint8ArrayCodecCall(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         if (std.mem.eql(u8, name, "next")) {
-            if (try qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
             if (try qjsIteratorHelperNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
             if (try qjsIteratorWrapNext(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !isAsyncGeneratorReceiver(this_value)) return asyncGeneratorRejectedTypeError(ctx, global);
+            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
             if (try qjsGeneratorNext(ctx, output, global, this_value, args)) |value| return value;
-            if (isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return asyncGeneratorRejectedTypeError(ctx, global);
-            if (try qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
-            if (try qjsArrayIteratorNext(ctx, output, global, this_value, function_object)) |value| return value;
+            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
+            if (try string_ops.qjsRegExpStringIteratorNext(ctx, output, global, this_value, caller_function, caller_frame)) |value| return value;
+            if (try array_ops.qjsArrayIteratorNext(ctx, output, global, this_value, function_object)) |value| return value;
         }
         if (std.mem.eql(u8, name, "throw")) {
-            if (isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !isAsyncGeneratorReceiver(this_value)) return asyncGeneratorRejectedTypeError(ctx, global);
+            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
             if (try qjsGeneratorThrow(ctx, output, global, this_value, args)) |value| return value;
-            if (isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return asyncGeneratorRejectedTypeError(ctx, global);
+            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
         }
         if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
             if (isIteratorIdentityFunction(ctx.runtime, function_object)) return this_value.dup();
-            if (objectFromValue(this_value)) |this_object| {
+            if (object_ops.objectFromValue(this_value)) |this_object| {
                 if (this_object.class_id == core.class.ids.array_iterator) return this_value.dup();
             }
         }
@@ -1605,27 +682,27 @@ fn callValueOrBytecodeClassModeDispatch(
             return this_value.dup();
         }
         if (std.mem.eql(u8, name, "[Symbol.asyncDispose]")) {
-            if (try qjsAsyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+            if (try promise_ops.qjsAsyncIteratorAsyncDispose(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "return")) {
-            if (try qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+            if (try promise_ops.qjsAsyncFromSyncIteratorMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
             if (try qjsIteratorHelperReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
             if (try qjsIteratorWrapReturn(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
-            if (isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !isAsyncGeneratorReceiver(this_value)) return asyncGeneratorRejectedTypeError(ctx, global);
+            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object) and !promise_ops.isAsyncGeneratorReceiver(this_value)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
             if (try qjsGeneratorReturn(ctx, output, global, this_value, args)) |value| return value;
-            if (isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return asyncGeneratorRejectedTypeError(ctx, global);
+            if (promise_ops.isAsyncGeneratorPrototypeMethod(ctx.runtime, function_object)) return promise_ops.asyncGeneratorRejectedTypeError(ctx, global);
         }
         if (std.mem.eql(u8, name, "fromCharCode")) {
-            return qjsStringFromCharCode(ctx, output, global, args);
+            return string_ops.qjsStringFromCharCode(ctx, output, global, args);
         }
         if (std.mem.eql(u8, name, "fromCodePoint")) {
-            return qjsStringFromCodePoint(ctx, output, global, args);
+            return string_ops.qjsStringFromCodePoint(ctx, output, global, args);
         }
         if (std.mem.eql(u8, name, "raw")) {
-            return qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
+            return string_ops.qjsStringRaw(ctx, output, global, args, caller_function, caller_frame);
         }
         if (builtins.date.staticMethodId(name)) |method_id| {
-            if (objectFromValue(this_value)) |receiver_object| {
+            if (object_ops.objectFromValue(this_value)) |receiver_object| {
                 if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
                     if (try date_vm.qjsDateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
                     return builtins.date.staticCall(ctx.runtime, method_id, args) catch |err| switch (err) {
@@ -1635,7 +712,7 @@ fn callValueOrBytecodeClassModeDispatch(
                 }
             }
         }
-        if (try qjsArrayIteratorMethod(ctx, global, this_value, function_object)) |value| {
+        if (try array_ops.qjsArrayIteratorMethod(ctx, global, this_value, function_object)) |value| {
             return value;
         }
         if (std.mem.eql(u8, name, "apply")) {
@@ -1645,14 +722,14 @@ fn callValueOrBytecodeClassModeDispatch(
                 return callValueOrBytecode(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
             };
             if (!arg_array.isObject()) return throwFunctionRealmTypeError(ctx, global, function_object);
-            if (callableObjectFromValue(this_value)) |target_object| {
+            if (object_ops.callableObjectFromValue(this_value)) |target_object| {
                 const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target_object);
                 defer ctx.runtime.memory.allocator.free(target_name);
-                if (std.mem.eql(u8, target_name, "fromCodePoint")) return qjsStringFromCodePointArray(ctx, output, global, arg_array);
+                if (std.mem.eql(u8, target_name, "fromCodePoint")) return string_ops.qjsStringFromCodePointArray(ctx, output, global, arg_array);
             }
-            var apply_args = try argsFromArrayLike(ctx, output, global, arg_array, caller_function, caller_frame);
+            var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, arg_array, caller_function, caller_frame);
             defer freeArgs(ctx.runtime, apply_args);
-            var apply_args_root = ValueSliceRoot{};
+            var apply_args_root = array_ops.ValueSliceRoot{};
             apply_args_root.init(ctx.runtime, &apply_args);
             defer apply_args_root.deinit();
             return callValueOrBytecode(ctx, output, global, this_arg, this_value, apply_args, caller_function, caller_frame);
@@ -1663,52 +740,52 @@ fn callValueOrBytecodeClassModeDispatch(
             const call_args = if (args.len >= 1) args[1..] else &.{};
             return callValueOrBytecode(ctx, output, global, this_arg, this_value, call_args, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "get __proto__")) return qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "get __proto__")) return object_ops.qjsObjectProtoGetterCall(ctx, output, global, this_value, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "set __proto__")) {
             const proto_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return qjsObjectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
+            return object_ops.qjsObjectProtoSetterCall(ctx, output, global, this_value, proto_arg, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "set")) {
-            if (try qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+            if (try array_ops.qjsTypedArraySetCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "deref")) {
-            return qjsWeakRefDeref(ctx.runtime, this_value);
+            return builtin_glue.qjsWeakRefDeref(ctx.runtime, this_value);
         }
         if (std.mem.eql(u8, name, "join")) {
-            if (try qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
+            if (try array_ops.qjsArrayJoinCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "toString")) {
-            if (try qjsArrayToStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsArrayToStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "toLocaleString")) {
-            if (try qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsArrayToLocaleStringCall(ctx, output, global, this_value, function_object, caller_function, caller_frame)) |value| return value;
         }
-        if (try qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArrayReduceCall(ctx, output, global, this_value, func, args, false)) |value| return value;
-        if (try qjsArrayReduceCall(ctx, output, global, this_value, func, args, true)) |value| return value;
-        if (try qjsArraySearchCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArrayCopyWithinCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArrayFillCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArrayPushCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayPopCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayShiftCall(ctx, output, global, this_value, func)) |value| return value;
-        if (try qjsArrayUnshiftCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArrayReverseCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
-        if (try qjsArraySpliceCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsTypedArraySliceSubarrayCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArraySliceCall(ctx, output, global, this_value, func, args)) |value| return value;
-        if (try qjsArrayFlatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
-        if (try qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayFromCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayOfCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayIterationCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayAtCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, false)) |value| return value;
+        if (try array_ops.qjsArrayReduceCall(ctx, output, global, this_value, func, args, true)) |value| return value;
+        if (try string_ops.qjsArraySearchCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArrayCopyWithinCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArrayFillCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArrayPushCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayPopCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayShiftCall(ctx, output, global, this_value, func)) |value| return value;
+        if (try array_ops.qjsArrayUnshiftCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArrayReverseCall(ctx, output, global, this_value, func, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArraySpliceCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsTypedArraySliceSubarrayCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArraySliceCall(ctx, output, global, this_value, func, args)) |value| return value;
+        if (try array_ops.qjsArrayFlatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArraySortCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try array_ops.qjsArrayByCopyCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
+        if (try string_ops.qjsArrayConcatCall(ctx, output, global, this_value, func, args, caller_function, caller_frame)) |value| return value;
         if (std.mem.eql(u8, name, "slice")) {
-            if (try qjsGeneratorSlice(ctx, output, global, this_value, args)) |value| return value;
+            if (try array_ops.qjsGeneratorSlice(ctx, output, global, this_value, args)) |value| return value;
         }
         if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch") or std.mem.eql(u8, name, "finally")) {
-            if (try qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
+            if (try promise_ops.qjsPromiseThen(ctx, output, global, this_value, name, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "eval")) {
             const eval_global = if (function_object.functionRealmGlobalSlot().*) |realm_value|
@@ -1724,44 +801,44 @@ fn callValueOrBytecodeClassModeDispatch(
         if (std.mem.eql(u8, name, "getOrInsertComputed")) {
             if (try collection_vm.qjsMapGetOrInsertComputed(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         }
-        if (getNumberPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
-            return qjsNumberPrototypeMethod(ctx, output, global, this_value, @intCast(method_id), args, caller_function, caller_frame);
+        if (object_ops.getNumberPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
+            return object_ops.qjsNumberPrototypeMethod(ctx, output, global, this_value, @intCast(method_id), args, caller_function, caller_frame);
         }
-        if (std.mem.eql(u8, name, "concat") and !isArrayMethodReceiver(this_value)) {
-            return qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "concat") and !array_ops.isArrayMethodReceiver(this_value)) {
+            return string_ops.qjsStringConcat(ctx, output, global, this_value, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "replace")) {
-            return qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
+            return string_ops.qjsStringReplace(ctx, output, global, this_value, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "exec")) {
-            if (try qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "test")) {
-            if (try qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "compile")) {
-            const compile_global = objectRealmGlobal(function_object) orelse global;
-            if (try qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) |value| return value;
+            const compile_global = object_ops.objectRealmGlobal(function_object) orelse global;
+            if (try regexp_fastpath.qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "[Symbol.search]")) {
-            if (try qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "[Symbol.match]")) {
-            if (try qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "[Symbol.matchAll]")) {
-            if (try qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "[Symbol.replace]")) {
-            if (try qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "[Symbol.split]")) {
-            if (try qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+            if (try string_ops.qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
         }
         if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
             if (native_ref.domain == .regexp) {
                 if (builtins.regexp.accessorNameFromId(native_ref.id)) |accessor_name| {
-                    if (try qjsRegExpAccessor(ctx, output, global, this_value, func, accessor_name, caller_function, caller_frame)) |value| return value;
+                    if (try regexp_fastpath.qjsRegExpAccessor(ctx, output, global, this_value, func, accessor_name, caller_function, caller_frame)) |value| return value;
                     return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
                         error.TypeError => error.TypeError,
                         else => err,
@@ -1770,21 +847,21 @@ fn callValueOrBytecodeClassModeDispatch(
             }
         }
         if (builtins.regexp.accessorNameFromGetterName(name)) |accessor_name| {
-            if (try qjsRegExpAccessor(ctx, output, global, this_value, func, accessor_name, caller_function, caller_frame)) |value| return value;
+            if (try regexp_fastpath.qjsRegExpAccessor(ctx, output, global, this_value, func, accessor_name, caller_function, caller_frame)) |value| return value;
             return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 else => err,
             };
         }
         if (builtins.buffer.dataViewGetMethodId(name)) |method_id| {
-            return qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
+            return builtin_glue.qjsDataViewGet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 error.RangeError => error.RangeError,
                 else => err,
             };
         }
         if (builtins.buffer.dataViewSetMethodId(name)) |method_id| {
-            return qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
+            return builtin_glue.qjsDataViewSet(ctx, output, global, this_value, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 error.RangeError => error.RangeError,
                 else => err,
@@ -1798,31 +875,31 @@ fn callValueOrBytecodeClassModeDispatch(
             };
         }
         if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-            return qjsStringIterator(ctx, output, global, this_value, caller_function, caller_frame);
+            return string_ops.qjsStringIterator(ctx, output, global, this_value, caller_function, caller_frame);
         }
-        if (getStringPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
-            return qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+        if (string_ops.getStringPrototypeMethodId(ctx.runtime, function_object)) |method_id| {
+            return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 else => err,
             };
         }
-        if (isStringMethodReceiver(this_value)) {
-            if (standardStringMethodId(name)) |method_id| {
+        if (string_ops.isStringMethodReceiver(this_value)) {
+            if (string_ops.standardStringMethodId(name)) |method_id| {
                 return builtins.string.methodCall(ctx.runtime, this_value, method_id, args) catch |err| switch (err) {
                     error.TypeError => error.TypeError,
                     else => err,
                 };
             }
         }
-        if (annexBStringMethodId(name)) |method_id| {
-            return qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+        if (string_ops.annexBStringMethodId(name)) |method_id| {
+            return string_ops.qjsStringPrototypeMethod(ctx, output, global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 else => err,
             };
         }
         if (builtins.uri.methodId(name)) |mode| {
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const string_value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+            const string_value = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
             defer string_value.free(ctx.runtime);
             return builtins.uri.call(ctx.runtime, mode, string_value) catch |err| switch (err) {
                 error.TypeError, error.URIError => err,
@@ -1831,13 +908,13 @@ fn callValueOrBytecodeClassModeDispatch(
         }
         if (std.mem.eql(u8, name, "escape")) {
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const string_value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+            const string_value = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
             defer string_value.free(ctx.runtime);
             return builtins.uri.escape(ctx.runtime, string_value);
         }
         if (std.mem.eql(u8, name, "unescape")) {
             const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const string_value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+            const string_value = try string_ops.toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
             defer string_value.free(ctx.runtime);
             return builtins.uri.unescape(ctx.runtime, string_value);
         }
@@ -1968,7 +1045,7 @@ pub fn callSimpleNumericBytecode(
         },
         .capture0_arg0 => {
             if (args.len == 0 or !args[0].isNumber() or captures.len == 0) return null;
-            const captured = slotValueBorrow(captures[0]);
+            const captured = slot_ops.slotValueBorrow(captures[0]);
             if (!captured.isNumber()) return null;
             return try simpleNumericBinary(rt, fb.simple_numeric_op, captured, args[0]);
         },
@@ -1980,7 +1057,7 @@ pub fn callSimpleNumericBytecode(
 
 fn callSimpleCapture0PostIncReturn(rt: *core.JSRuntime, captures: []const core.JSValue) !?core.JSValue {
     if (captures.len == 0) return null;
-    const cell = varRefCellFromValue(captures[0]) orelse return null;
+    const cell = slot_ops.varRefCellFromValue(captures[0]) orelse return null;
     if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return null;
     const slot = cell.varRefValueSlot();
     const current_value = slot.* orelse return null;
@@ -2116,292 +1193,15 @@ pub fn simpleInt32Mul(lhs: i32, rhs: i32) core.JSValue {
 }
 
 // --- Class instance initialization moved to class_init_ops.zig ---
-pub const class_init_ops = @import("class_init_ops.zig");
-pub const classConstructorNewTarget = class_init_ops.classConstructorNewTarget;
-pub const constructBuiltinSuperConstructor = class_init_ops.constructBuiltinSuperConstructor;
-pub const currentArrowLexicalSuperThis = class_init_ops.currentArrowLexicalSuperThis;
-pub const currentArrowConstructorThis = class_init_ops.currentArrowConstructorThis;
-pub const setCurrentArrowLexicalThis = class_init_ops.setCurrentArrowLexicalThis;
-pub const isCurrentSuperConstructor = class_init_ops.isCurrentSuperConstructor;
-pub const initializeClassInstanceElements = class_init_ops.initializeClassInstanceElements;
-pub const initializeCurrentConstructorClassInstanceElements = class_init_ops.initializeCurrentConstructorClassInstanceElements;
-pub const initializeClassPrivateMethods = class_init_ops.initializeClassPrivateMethods;
-pub const initializeClassInstanceFields = class_init_ops.initializeClassInstanceFields;
+const class_init_ops = @import("class_init_ops.zig");
 
-pub const disposable_ops = @import("disposable_ops.zig");
-pub const DisposableStackMethod = disposable_ops.DisposableStackMethod;
-pub const disposableStackMethodFromMarker = disposable_ops.disposableStackMethodFromMarker;
-pub const disposableStackReceiver = disposable_ops.disposableStackReceiver;
-pub const parserDisposableStackReceiver = disposable_ops.parserDisposableStackReceiver;
-pub const qjsDisposableStackMethodCall = disposable_ops.qjsDisposableStackMethodCall;
-pub const qjsDisposableStackUse = disposable_ops.qjsDisposableStackUse;
-pub const qjsDisposableStackAdopt = disposable_ops.qjsDisposableStackAdopt;
-pub const qjsDisposableStackDefer = disposable_ops.qjsDisposableStackDefer;
-pub const qjsDisposableStackDispose = disposable_ops.qjsDisposableStackDispose;
-pub const qjsDisposableStackRecordDisposeError = disposable_ops.qjsDisposableStackRecordDisposeError;
-pub const qjsDisposeDisposableStackResources = disposable_ops.qjsDisposeDisposableStackResources;
-pub const qjsUsingCreateDisposableStack = disposable_ops.qjsUsingCreateDisposableStack;
-pub const qjsUsingAddSyncResource = disposable_ops.qjsUsingAddSyncResource;
-pub const qjsUsingDisposeSyncStack = disposable_ops.qjsUsingDisposeSyncStack;
-pub const qjsUsingDisposeSyncStackForThrow = disposable_ops.qjsUsingDisposeSyncStackForThrow;
-pub const qjsDisposeResource = disposable_ops.qjsDisposeResource;
-pub const runtimeErrorValueForDisposableDispose = disposable_ops.runtimeErrorValueForDisposableDispose;
-pub const qjsSuppressedErrorForDispose = disposable_ops.qjsSuppressedErrorForDispose;
-pub const qjsDisposableStackMove = disposable_ops.qjsDisposableStackMove;
+const disposable_ops = @import("disposable_ops.zig");
 
 // --- Error stack ops moved to error_stack_ops.zig ---
-pub const error_stack_ops = @import("error_stack_ops.zig");
-pub const defineErrorStack = error_stack_ops.defineErrorStack;
-pub const captureErrorStack = error_stack_ops.captureErrorStack;
-pub const buildErrorStackValue = error_stack_ops.buildErrorStackValue;
-pub const formatCapturedErrorStackValue = error_stack_ops.formatCapturedErrorStackValue;
-pub const errorPrepareStackTrace = error_stack_ops.errorPrepareStackTrace;
-pub const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
-pub const callSiteFunctionName = error_stack_ops.callSiteFunctionName;
-pub const callSiteFunctionNameValue = error_stack_ops.callSiteFunctionNameValue;
-pub const errorStackTraceLimit = error_stack_ops.errorStackTraceLimit;
-pub const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
-pub const appendCallSiteFunctionName = error_stack_ops.appendCallSiteFunctionName;
-pub const appendCallSiteFileName = error_stack_ops.appendCallSiteFileName;
+const error_stack_ops = @import("error_stack_ops.zig");
 
 // --- RegExp fast paths moved to regexp_fastpath.zig ---
-pub const regexp_fastpath = @import("regexp_fastpath.zig");
-pub const qjsRegExpFunctionCall = regexp_fastpath.qjsRegExpFunctionCall;
-pub const qjsRegExpConstructCall = regexp_fastpath.qjsRegExpConstructCall;
-pub const qjsRegExpExecMethod = regexp_fastpath.qjsRegExpExecMethod;
-pub const qjsRegExpTestMethod = regexp_fastpath.qjsRegExpTestMethod;
-pub const qjsRegExpNativeCallById = regexp_fastpath.qjsRegExpNativeCallById;
-pub const RegExpBorrowedSourceFlags = regexp_fastpath.RegExpBorrowedSourceFlags;
-pub const qjsRegExpTestFastNoResult = regexp_fastpath.qjsRegExpTestFastNoResult;
-pub const simpleClassEscapeTestFast = regexp_fastpath.simpleClassEscapeTestFast;
-pub const simpleAsciiLiteralTestFast = regexp_fastpath.simpleAsciiLiteralTestFast;
-pub const SimpleAsciiLiteralClassPlusLiteral = regexp_fastpath.SimpleAsciiLiteralClassPlusLiteral;
-pub const simpleAsciiLiteralClassPlusLiteralTestFast = regexp_fastpath.simpleAsciiLiteralClassPlusLiteralTestFast;
-pub const parseSimpleAsciiLiteralClassPlusLiteral = regexp_fastpath.parseSimpleAsciiLiteralClassPlusLiteral;
-pub const isPlainAsciiRegExpLiteral = regexp_fastpath.isPlainAsciiRegExpLiteral;
-pub const regexpBorrowedLatin1SourceFlags = regexp_fastpath.regexpBorrowedLatin1SourceFlags;
-pub const canConstructRegExpFromBorrowedLatin1 = regexp_fastpath.canConstructRegExpFromBorrowedLatin1;
-pub const regExpLastIndexCanSkipCoercion = regexp_fastpath.regExpLastIndexCanSkipCoercion;
-pub const qjsRegExpCompile = regexp_fastpath.qjsRegExpCompile;
-pub const qjsRegExpSpeciesConstructor = regexp_fastpath.qjsRegExpSpeciesConstructor;
-pub const isDefaultRegExpConstructor = regexp_fastpath.isDefaultRegExpConstructor;
-pub const regExpFlagsAreFullUnicode = regexp_fastpath.regExpFlagsAreFullUnicode;
-pub const qjsRegExpExecSimpleUnicodeLiteral = regexp_fastpath.qjsRegExpExecSimpleUnicodeLiteral;
-pub const regexpInternalFlagsContain = regexp_fastpath.regexpInternalFlagsContain;
-pub const regexpInternalSimpleQuantifiedClassSource = regexp_fastpath.regexpInternalSimpleQuantifiedClassSource;
-pub const simpleQuantifiedClassSourceFromValue = regexp_fastpath.simpleQuantifiedClassSourceFromValue;
-pub const setRegExpLastIndexZero = regexp_fastpath.setRegExpLastIndexZero;
-pub const appendNamedCaptureSubstitution = regexp_fastpath.appendNamedCaptureSubstitution;
-pub const qjsRegExpExecGeneric = regexp_fastpath.qjsRegExpExecGeneric;
-pub const qjsRegExpAccessor = regexp_fastpath.qjsRegExpAccessor;
-pub const qjsRegExpLegacyAccessor = regexp_fastpath.qjsRegExpLegacyAccessor;
-pub const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
-pub const regExpLegacySlotValue = regexp_fastpath.regExpLegacySlotValue;
-pub const materializeRegExpLegacyNoCaptureSlots = regexp_fastpath.materializeRegExpLegacyNoCaptureSlots;
-pub const clearRegExpLegacySlot = regexp_fastpath.clearRegExpLegacySlot;
-pub const getRegExpLastIndexLength = regexp_fastpath.getRegExpLastIndexLength;
-pub const setRegExpLastIndexStrict = regexp_fastpath.setRegExpLastIndexStrict;
-pub const qjsRegExpExecResult = regexp_fastpath.qjsRegExpExecResult;
-pub const qjsRegExpExecCompiledResult = regexp_fastpath.qjsRegExpExecCompiledResult;
-pub const FastRegExpExecResult = regexp_fastpath.FastRegExpExecResult;
-pub const RegExpNoCaptureLengthResult = regexp_fastpath.RegExpNoCaptureLengthResult;
-pub const RegExpNoCaptureLengthLoopAllResult = regexp_fastpath.RegExpNoCaptureLengthLoopAllResult;
-pub const RegExpCountLoopAllResult = regexp_fastpath.RegExpCountLoopAllResult;
-pub const qjsRegExpLiteralNoCaptureLengthLoopAll = regexp_fastpath.qjsRegExpLiteralNoCaptureLengthLoopAll;
-pub const RegExpCaptureLengthSumResult = regexp_fastpath.RegExpCaptureLengthSumResult;
-pub const RegExpCaptureLengthLoopAllResult = regexp_fastpath.RegExpCaptureLengthLoopAllResult;
-pub const qjsRegExpExecNoCaptureLengthForLoop = regexp_fastpath.qjsRegExpExecNoCaptureLengthForLoop;
-pub const qjsRegExpExecNoCaptureLengthLoopAll = regexp_fastpath.qjsRegExpExecNoCaptureLengthLoopAll;
-pub const qjsRegExpExecNoCaptureCountLoopAll = regexp_fastpath.qjsRegExpExecNoCaptureCountLoopAll;
-pub const qjsRegExpExecCaptureLengthSumLoopAll = regexp_fastpath.qjsRegExpExecCaptureLengthSumLoopAll;
-pub const qjsRegExpExecCaptureLengthSumForLoop = regexp_fastpath.qjsRegExpExecCaptureLengthSumForLoop;
-pub const captureLengthSum = regexp_fastpath.captureLengthSum;
-pub const qjsRegExpExecSimpleCaptureSequenceResult = regexp_fastpath.qjsRegExpExecSimpleCaptureSequenceResult;
-pub const regexpSimpleCaptureSequencePattern = regexp_fastpath.regexpSimpleCaptureSequencePattern;
-pub const qjsRegExpExecSimpleClassAlternationResult = regexp_fastpath.qjsRegExpExecSimpleClassAlternationResult;
-pub const regexpSimpleClassAlternationPattern = regexp_fastpath.regexpSimpleClassAlternationPattern;
-pub const regExpFlagsContain = regexp_fastpath.regExpFlagsContain;
-pub const isRegExpValue = regexp_fastpath.isRegExpValue;
-pub const isRegExpObservable = regexp_fastpath.isRegExpObservable;
-pub const appendRegExpSource = regexp_fastpath.appendRegExpSource;
-pub const appendRegExpFlags = regexp_fastpath.appendRegExpFlags;
-pub const appendRegExpInputUnits = regexp_fastpath.appendRegExpInputUnits;
-pub const singleUnicodeEscapeUnit = regexp_fastpath.singleUnicodeEscapeUnit;
-pub const singleLowSurrogateLiteralSource = regexp_fastpath.singleLowSurrogateLiteralSource;
-pub const lowSurrogateLiteralAt = regexp_fastpath.lowSurrogateLiteralAt;
-pub const singleUnicodeClassEscapeUnit = regexp_fastpath.singleUnicodeClassEscapeUnit;
-pub const findCharacterClassEnd = regexp_fastpath.findCharacterClassEnd;
-pub const standaloneCharacterClassSource = regexp_fastpath.standaloneCharacterClassSource;
-pub const leadingAlternationCharacterClassSource = regexp_fastpath.leadingAlternationCharacterClassSource;
-pub const SimpleUnicodeLiteralPattern = regexp_fastpath.SimpleUnicodeLiteralPattern;
-pub const SimpleClassSequenceAtom = regexp_fastpath.SimpleClassSequenceAtom;
-pub const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
-pub const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
-pub const SimpleCaptureSequencePattern = regexp_fastpath.SimpleCaptureSequencePattern;
-pub const SimpleClassSequencePattern = regexp_fastpath.SimpleClassSequencePattern;
-pub const SimpleClassAlternationPattern = regexp_fastpath.SimpleClassAlternationPattern;
-pub const isSimpleUnicodeLiteralSource = regexp_fastpath.isSimpleUnicodeLiteralSource;
-pub const isSimpleClassSequenceSource = regexp_fastpath.isSimpleClassSequenceSource;
-pub const parseSimpleCaptureSequenceSource = regexp_fastpath.parseSimpleCaptureSequenceSource;
-pub const parseSimpleCaptureSequenceAtom = regexp_fastpath.parseSimpleCaptureSequenceAtom;
-pub const parseSimpleCaptureSequenceAtomQuantifier = regexp_fastpath.parseSimpleCaptureSequenceAtomQuantifier;
-pub const SimpleClassSequenceLengthLoopResult = regexp_fastpath.SimpleClassSequenceLengthLoopResult;
-pub const SimpleClassAlternationLengthLoopResult = regexp_fastpath.SimpleClassAlternationLengthLoopResult;
-pub const simpleClassSequenceSingleUnitLengthLoop = regexp_fastpath.simpleClassSequenceSingleUnitLengthLoop;
-pub const simpleClassAlternationSingleAtomRunLengthLoop = regexp_fastpath.simpleClassAlternationSingleAtomRunLengthLoop;
-pub const simpleClassAlternationLengthLoop = regexp_fastpath.simpleClassAlternationLengthLoop;
-pub const SimpleCaptureLengthSumLoopResult = regexp_fastpath.SimpleCaptureLengthSumLoopResult;
-pub const simpleCaptureSequenceLengthSumLoop = regexp_fastpath.simpleCaptureSequenceLengthSumLoop;
-pub const simpleClassAlternationSingleAtomRunLengthLoopLatin1 = regexp_fastpath.simpleClassAlternationSingleAtomRunLengthLoopLatin1;
-pub const simpleClassAlternationSingleAtomRunLengthLoopUtf16 = regexp_fastpath.simpleClassAlternationSingleAtomRunLengthLoopUtf16;
-pub const simpleClassAlternationLengthLoopLatin1 = regexp_fastpath.simpleClassAlternationLengthLoopLatin1;
-pub const simpleClassAlternationLengthLoopUtf16 = regexp_fastpath.simpleClassAlternationLengthLoopUtf16;
-pub const simpleClassAlternationLiteralLengthLoopLatin1 = regexp_fastpath.simpleClassAlternationLiteralLengthLoopLatin1;
-pub const simpleClassAlternationLiteralLengthLoopUtf16 = regexp_fastpath.simpleClassAlternationLiteralLengthLoopUtf16;
-pub const simpleClassAlternationAllUnitLiterals = regexp_fastpath.simpleClassAlternationAllUnitLiterals;
-pub const simpleCaptureSequenceTwoRunLengthSumLoopLatin1 = regexp_fastpath.simpleCaptureSequenceTwoRunLengthSumLoopLatin1;
-pub const simpleCaptureSequenceLengthSumLoopLatin1 = regexp_fastpath.simpleCaptureSequenceLengthSumLoopLatin1;
-pub const simpleCaptureSequenceLengthSumLoopUtf16 = regexp_fastpath.simpleCaptureSequenceLengthSumLoopUtf16;
-pub const simpleClassSequenceSingleUnitLengthLoopLatin1 = regexp_fastpath.simpleClassSequenceSingleUnitLengthLoopLatin1;
-pub const simpleClassSequenceSingleUnitLengthLoopUtf16 = regexp_fastpath.simpleClassSequenceSingleUnitLengthLoopUtf16;
-pub const parseSimpleUnicodeLiteralSource = regexp_fastpath.parseSimpleUnicodeLiteralSource;
-pub const parseSimpleClassSequenceSource = regexp_fastpath.parseSimpleClassSequenceSource;
-pub const parseSimpleClassSequenceLatin1Source = regexp_fastpath.parseSimpleClassSequenceLatin1Source;
-pub const parseSimpleClassAlternationSource = regexp_fastpath.parseSimpleClassAlternationSource;
-pub const addSimpleClassAlternationPart = regexp_fastpath.addSimpleClassAlternationPart;
-pub const isSimpleClassEscapeByte = regexp_fastpath.isSimpleClassEscapeByte;
-pub const simpleUnicodeLiteralAt = regexp_fastpath.simpleUnicodeLiteralAt;
-pub const simpleClassSequenceAtLatin1 = regexp_fastpath.simpleClassSequenceAtLatin1;
-pub const simpleCaptureSequenceAtLatin1 = regexp_fastpath.simpleCaptureSequenceAtLatin1;
-pub const simpleClassSequenceAtUtf16 = regexp_fastpath.simpleClassSequenceAtUtf16;
-pub const simpleCaptureSequenceAtUtf16 = regexp_fastpath.simpleCaptureSequenceAtUtf16;
-pub const simpleClassSequenceBacktrackLatin1 = regexp_fastpath.simpleClassSequenceBacktrackLatin1;
-pub const simpleCaptureSequenceBacktrackLatin1 = regexp_fastpath.simpleCaptureSequenceBacktrackLatin1;
-pub const simpleClassSequenceBacktrackUtf16 = regexp_fastpath.simpleClassSequenceBacktrackUtf16;
-pub const simpleCaptureSequenceBacktrackUtf16 = regexp_fastpath.simpleCaptureSequenceBacktrackUtf16;
-pub const simpleClassPredicateFromSource = regexp_fastpath.simpleClassPredicateFromSource;
-pub const initFastCaptures = regexp_fastpath.initFastCaptures;
-pub const parseSimpleClassSequenceLiteral = regexp_fastpath.parseSimpleClassSequenceLiteral;
-pub const parseSimpleClassSequenceLatin1Literal = regexp_fastpath.parseSimpleClassSequenceLatin1Literal;
-pub const parseSimpleClassSequenceEscapedLiteral = regexp_fastpath.parseSimpleClassSequenceEscapedLiteral;
-pub const isBytesLineStartPosition = regexp_fastpath.isBytesLineStartPosition;
-pub const isBytesLineEndPosition = regexp_fastpath.isBytesLineEndPosition;
-pub const isUnitsLineStartPosition = regexp_fastpath.isUnitsLineStartPosition;
-pub const isUnitsLineEndPosition = regexp_fastpath.isUnitsLineEndPosition;
-pub const SurrogatePairClassPattern = regexp_fastpath.SurrogatePairClassPattern;
-pub const parseSurrogatePairClassSource = regexp_fastpath.parseSurrogatePairClassSource;
-pub const readFixedUnicodeEscapeUnit = regexp_fastpath.readFixedUnicodeEscapeUnit;
-pub const surrogatePairClassAt = regexp_fastpath.surrogatePairClassAt;
-pub const UnicodeAstralSpecialPattern = regexp_fastpath.UnicodeAstralSpecialPattern;
-pub const parseUnicodeAstralSpecialSource = regexp_fastpath.parseUnicodeAstralSpecialSource;
-pub const parseUnicodeAstralClassSpecialSource = regexp_fastpath.parseUnicodeAstralClassSpecialSource;
-pub const AstralAtom = regexp_fastpath.AstralAtom;
-pub const readAstralAtom = regexp_fastpath.readAstralAtom;
-pub const readSurrogatePairEscape = regexp_fastpath.readSurrogatePairEscape;
-pub const unicodeAstralSpecialAt = regexp_fastpath.unicodeAstralSpecialAt;
-pub const repeatedSurrogatePairAt = regexp_fastpath.repeatedSurrogatePairAt;
-pub const exactSurrogatePairClassAt = regexp_fastpath.exactSurrogatePairClassAt;
-pub const astralRangeAt = regexp_fastpath.astralRangeAt;
-pub const negatedSurrogatePairClassAt = regexp_fastpath.negatedSurrogatePairClassAt;
-
-pub fn bytesAreAscii(bytes: []const u8) bool {
-    for (bytes) |byte| {
-        if (!byteIsAscii(byte)) return false;
-    }
-    return true;
-}
-
-pub fn byteIsAscii(byte: u8) bool {
-    return byte < 0x80;
-}
-
-pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
-}
-
-pub fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
-        try out.append(rt.memory.allocator, fill[index % fill.len]);
-    }
-}
-
-pub const NormalizedUtf32 = struct {
-    allocator: std.mem.Allocator,
-    slice: []u32,
-
-    pub fn deinit(self: NormalizedUtf32) void {
-        self.allocator.free(self.slice);
-    }
-};
-
-pub fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode_lib.NormalizationForm) !NormalizedUtf32 {
-    var input = std.ArrayList(u32).empty;
-    defer input.deinit(rt.memory.allocator);
-    try appendUtf32FromStringValue(rt, &input, value);
-    return .{
-        .allocator = rt.memory.allocator,
-        .slice = try unicode_lib.normalizeAlloc(rt.memory.allocator, input.items, form),
-    };
-}
-
-pub fn appendAsciiUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), bytes: []const u8) !void {
-    for (bytes) |byte| try out.append(rt.memory.allocator, byte);
-}
-
-pub fn isLineTerminatorUnit(unit: u16) bool {
-    return unicode_lib.isEcmaLineTerminatorUnit(unit);
-}
-
-// --- Residual RegExp support helpers moved to regexp_fastpath.zig ---
-pub const isRegExpLineTerminator = regexp_fastpath.isRegExpLineTerminator;
-pub const classEscapeRunLengthLatin1 = regexp_fastpath.classEscapeRunLengthLatin1;
-pub const classEscapeRunLengthUtf16 = regexp_fastpath.classEscapeRunLengthUtf16;
-pub const classEscapeIsQuantified = regexp_fastpath.classEscapeIsQuantified;
-pub const classEscapeKindIndex = regexp_fastpath.classEscapeKindIndex;
-pub const isRegExpSyntaxByte = regexp_fastpath.isRegExpSyntaxByte;
-pub const hasFlag = regexp_fastpath.hasFlag;
-pub const regexpLastIndex = regexp_fastpath.regexpLastIndex;
-pub const setRegExpLastIndex = regexp_fastpath.setRegExpLastIndex;
-pub const updateRegExpLegacyStaticsNoCaptures = regexp_fastpath.updateRegExpLegacyStaticsNoCaptures;
-pub const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
-pub const appendDecodedRegExpGroupName = regexp_fastpath.appendDecodedRegExpGroupName;
-pub const readRegExpGroupNameEscape = regexp_fastpath.readRegExpGroupNameEscape;
-
-pub fn isEcmaWhitespaceOrLineTerminator(unit: u16) bool {
-    return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
-}
-pub fn isUnknownScriptName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Script=Unknown") or
-        std.mem.eql(u8, name, "Script=Zzzz") or
-        std.mem.eql(u8, name, "sc=Unknown") or
-        std.mem.eql(u8, name, "sc=Zzzz") or
-        std.mem.eql(u8, name, "Script_Extensions=Unknown") or
-        std.mem.eql(u8, name, "Script_Extensions=Zzzz") or
-        std.mem.eql(u8, name, "scx=Unknown") or
-        std.mem.eql(u8, name, "scx=Zzzz");
-}
-pub const exactScriptExtensionsAliasTarget = regexp_unicode.exactScriptExtensionsAliasTarget;
-
-pub fn isAsciiDigitUnit(unit: u16) bool {
-    return unicode_lib.isAsciiDigitUnit(unit);
-}
-
-pub fn isAsciiDigitByte(byte: u8) bool {
-    return unicode_lib.isAsciiDigitByte(byte);
-}
-
-pub fn isAsciiWordUnit(unit: u16) bool {
-    return unicode_lib.isAsciiWordUnit(unit);
-}
-
-pub fn isHighSurrogateUnit(unit: u16) bool {
-    return unicode_lib.isHighSurrogateUnit(unit);
-}
-
-pub fn isLowSurrogateUnit(unit: u16) bool {
-    return unicode_lib.isLowSurrogateUnit(unit);
-}
+const regexp_fastpath = @import("regexp_fastpath.zig");
 
 pub const RegExpCapture = struct {
     start: usize,
@@ -2433,20 +1233,20 @@ pub fn ordinaryHasInstance(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (!isCallableValue(constructor_value)) return false;
-    if (objectFromValue(constructor_value)) |constructor_object| {
+    if (object_ops.objectFromValue(constructor_value)) |constructor_object| {
         if (constructor_object.class_id == core.class.ids.bound_function) {
             const target = constructor_object.boundTarget() orelse return error.TypeError;
             return ordinaryHasInstance(ctx, output, global, target, value, caller_function, caller_frame);
         }
     }
-    const object = objectFromValue(value) orelse return false;
-    const proto_value = try getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
+    const object = object_ops.objectFromValue(value) orelse return false;
+    const proto_value = try object_ops.getValueProperty(ctx, output, global, constructor_value, core.atom.ids.prototype, caller_function, caller_frame);
     defer proto_value.free(ctx.runtime);
-    const prototype = objectFromValue(proto_value) orelse return error.TypeError;
-    var current = try qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
+    const prototype = object_ops.objectFromValue(proto_value) orelse return error.TypeError;
+    var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
     while (current) |candidate| {
         if (candidate == prototype) return true;
-        current = try qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
+        current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
     }
     return false;
 }
@@ -2457,16 +1257,16 @@ pub fn qjsErrorStackGetter(
     global: *core.Object,
     this_value: core.JSValue,
 ) !core.JSValue {
-    const object = objectFromValue(this_value) orelse return error.TypeError;
+    const object = object_ops.objectFromValue(this_value) orelse return error.TypeError;
     if (object.class_id != core.class.ids.error_) return core.JSValue.undefinedValue();
     if (object.errorStack()) |stack| return stack.dup();
     if (object.errorStackSites()) |sites| {
-        const stack = try formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount());
+        const stack = try error_stack_ops.formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount());
         errdefer stack.free(ctx.runtime);
         try object.setErrorStack(ctx.runtime, stack);
         return stack;
     }
-    return buildErrorStackValue(ctx, output, global, this_value, null);
+    return error_stack_ops.buildErrorStackValue(ctx, output, global, this_value, null);
 }
 
 pub fn qjsErrorStackSetter(
@@ -2479,24 +1279,24 @@ pub fn qjsErrorStackSetter(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const receiver = objectFromValue(this_value) orelse return error.TypeError;
+    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!value.isString()) return error.TypeError;
 
-    const home_global = objectRealmGlobal(function_object) orelse global;
-    if (constructorPrototypeFromGlobal(ctx.runtime, home_global, "Error")) |error_proto| {
-        if (sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
+    const home_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    if (object_ops.constructorPrototypeFromGlobal(ctx.runtime, home_global, "Error")) |error_proto| {
+        if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
     }
 
     const stack_key = try ctx.runtime.internAtom("stack");
     defer ctx.runtime.atoms.free(stack_key);
-    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, stack_key, caller_function, caller_frame);
+    const desc = try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, stack_key, caller_function, caller_frame);
     defer if (desc) |item| item.destroy(ctx.runtime);
 
     if (desc == null) {
         const create_desc = core.Descriptor.data(value, true, true, true);
         const ok = if (receiver.proxyTarget() != null)
-            try proxyDefineOwnProperty(ctx, output, global, receiver, stack_key, create_desc, caller_function, caller_frame)
+            try object_ops.proxyDefineOwnProperty(ctx, output, global, receiver, stack_key, create_desc, caller_function, caller_frame)
         else blk: {
             receiver.defineOwnProperty(ctx.runtime, stack_key, create_desc) catch |err| switch (err) {
                 error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => break :blk false,
@@ -2510,16 +1310,16 @@ pub fn qjsErrorStackSetter(
     }
 
     const own_desc = desc.?;
-    if (own_desc.kind == .accessor and sameObjectIdentity(own_desc.setter, function_object.value()) and isErrorStackSetterValue(own_desc.setter)) {
-        if (try proxySetTrapForErrorStackSetter(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame)) {
+    if (own_desc.kind == .accessor and object_ops.sameObjectIdentity(own_desc.setter, function_object.value()) and isErrorStackSetterValue(own_desc.setter)) {
+        if (try object_ops.proxySetTrapForErrorStackSetter(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame)) {
             return core.JSValue.undefinedValue();
         }
-        try defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, true, true, true), caller_function, caller_frame);
+        try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, true, true, true), caller_function, caller_frame);
         return core.JSValue.undefinedValue();
     }
 
     if (receiver.proxyTarget() != null) {
-        const ok = try proxySetValueProperty(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame);
+        const ok = try object_ops.proxySetValueProperty(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame);
         if (!ok) return error.TypeError;
         return core.JSValue.undefinedValue();
     }
@@ -2533,21 +1333,21 @@ pub fn qjsErrorStackSetter(
         },
         .data, .generic => {
             if (own_desc.kind == .data and own_desc.writable == false) return error.TypeError;
-            try defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor{ .kind = .data, .value = value, .value_present = true }, caller_function, caller_frame);
+            try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor{ .kind = .data, .value = value, .value_present = true }, caller_function, caller_frame);
             return core.JSValue.undefinedValue();
         },
     }
 }
 
 pub fn isErrorStackSetterValue(value: core.JSValue) bool {
-    const object = objectFromValue(value) orelse return false;
+    const object = object_ops.objectFromValue(value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
     return native_ref.domain == .error_object and native_ref.id == @intFromEnum(builtins.error_.PrototypeMethod.stack_setter);
 }
 
 pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
-    const error_global = objectRealmGlobal(function_object) orelse global;
-    const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "not a function");
+    const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    const error_value = try exception_ops.createNamedError(ctx.runtime, error_global, "TypeError", "not a function");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -2574,17 +1374,17 @@ pub fn constructValueOrBytecodeWithNewTarget(
     caller_frame: ?*frame_mod.Frame,
     new_target: core.JSValue,
 ) HostError!core.JSValue {
-    if (objectFromValue(func)) |object| {
+    if (object_ops.objectFromValue(func)) |object| {
         if (object.proxyTarget() != null) {
-            return constructProxy(ctx, output, global, func, object, args, caller_function, caller_frame, new_target);
+            return object_ops.constructProxy(ctx, output, global, func, object, args, caller_function, caller_frame, new_target);
         }
     }
-    if (callableObjectFromValue(func)) |function_object| {
+    if (object_ops.callableObjectFromValue(func)) |function_object| {
         if (function_object.class_id == core.class.ids.bound_function) {
             const target = function_object.boundTarget() orelse return error.TypeError;
             var combined = try boundFunctionArgs(ctx.runtime, function_object, args);
             defer freeArgs(ctx.runtime, combined);
-            var combined_root = ValueSliceRoot{};
+            var combined_root = array_ops.ValueSliceRoot{};
             combined_root.init(ctx.runtime, &combined);
             defer combined_root.deinit();
             const next_new_target = if (builtins.object.sameValue(func, new_target)) target else new_target;
@@ -2594,21 +1394,21 @@ pub fn constructValueOrBytecodeWithNewTarget(
             if (!builtins.object.sameValue(new_target, func)) {
                 const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
                 defer ctx.runtime.memory.allocator.free(name);
-                if (try constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
+                if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                     return constructed;
                 }
             }
-            if (qjsTypedArrayConstructVm(ctx, output, global, func, function_object, args, caller_function, caller_frame) catch |err| switch (err) {
+            if (array_ops.qjsTypedArrayConstructVm(ctx, output, global, func, function_object, args, caller_function, caller_frame) catch |err| switch (err) {
                 error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array index"),
                 else => return err,
             }) |value| return value;
             return construct_mod.constructValue(ctx.runtime, func, args, &.{});
         }
         if (builtins.date.isConstructorRecord(function_object)) {
-            const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
+            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
             return date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, args);
         }
-        if (try constructArrayBufferNativeRecord(ctx, output, global, func, function_object, args, new_target)) |constructed| {
+        if (try array_ops.constructArrayBufferNativeRecord(ctx, output, global, func, function_object, args, new_target)) |constructed| {
             return constructed;
         }
         const dispatch_name = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object);
@@ -2622,40 +1422,40 @@ pub fn constructValueOrBytecodeWithNewTarget(
             break :blk owned_name.?;
         };
         if (isBuiltinConstructorName(name) and !builtins.object.sameValue(new_target, func)) {
-            if (try constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
+            if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                 return constructed;
             }
         }
         if (std.mem.eql(u8, name, "Function")) return constructFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncFunction")) return constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "AsyncFunction")) return promise_ops.constructAsyncFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "GeneratorFunction")) return constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
-        if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Worker")) return qjsWorkerFunctionCall(ctx, output, global, args);
-        if (qjsTypedArrayConstructorName(name)) {
-            if (try qjsTypedArrayConstructFromIterable(ctx, output, global, func, args, caller_function, caller_frame)) |value| return value;
+        if (array_ops.qjsTypedArrayConstructorName(name)) {
+            if (try array_ops.qjsTypedArrayConstructFromIterable(ctx, output, global, func, args, caller_function, caller_frame)) |value| return value;
         }
         if (std.mem.eql(u8, name, "Number")) {
-            const primitive = try qjsNumberFunctionCall(ctx, output, global, args);
+            const primitive = try builtin_glue.qjsNumberFunctionCall(ctx, output, global, args);
             defer primitive.free(ctx.runtime);
             return construct_mod.constructValue(ctx.runtime, func, &.{primitive}, &.{});
         }
         if (std.mem.eql(u8, name, "String")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
-            return qjsStringConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            return string_ops.qjsStringConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "Date")) {
-            const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
+            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
             if (args.len == 0) return date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, args);
 
             if (args.len == 1) {
-                if (objectFromValue(args[0])) |object| {
+                if (object_ops.objectFromValue(args[0])) |object| {
                     if (object.class_id == core.class.ids.date) {
                         const time_value = try builtins.date.methodCall(ctx.runtime, args[0], 1);
                         defer time_value.free(ctx.runtime);
                         return date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, &.{time_value});
                     }
 
-                    const primitive = try toPrimitiveForAddition(ctx, output, global, args[0]);
+                    const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
                     defer primitive.free(ctx.runtime);
                     if (primitive.isString()) return date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, &.{primitive});
                     const number = try value_ops.toNumberValue(ctx.runtime, primitive);
@@ -2675,53 +1475,53 @@ pub fn constructValueOrBytecodeWithNewTarget(
                 for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
             }
             while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
-                coerced_args[coerced_len] = try toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
+                coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
             }
             return date_vm.qjsDateConstructWithPrototype(ctx, output, global, prototype, coerced_args[0..coerced_len]);
         }
         if (std.mem.eql(u8, name, "Array")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
             return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, prototype) catch |err| switch (err) {
                 error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array length"),
                 else => err,
             };
         }
-        if (std.mem.eql(u8, name, "Promise")) return qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame);
+        if (std.mem.eql(u8, name, "Promise")) return promise_ops.qjsPromiseConstruct(ctx, output, global, new_target, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "DisposableStack")) {
-            const prototype = try reflectConstructPrototypeVm(ctx, output, global, "DisposableStack", new_target, caller_function, caller_frame);
-            return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
+            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "DisposableStack", new_target, caller_function, caller_frame);
+            return try object_ops.qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
         }
         if (std.mem.eql(u8, name, "AsyncDisposableStack")) {
-            const prototype = try reflectConstructPrototypeVm(ctx, output, global, "AsyncDisposableStack", new_target, caller_function, caller_frame);
-            return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
+            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "AsyncDisposableStack", new_target, caller_function, caller_frame);
+            return try promise_ops.qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
         }
-        if (std.mem.eql(u8, name, "RegExp")) return qjsRegExpConstructCall(ctx, output, global, new_target, args, caller_function, caller_frame);
-        if (builtins.collection.constructorId(name)) |kind| return constructCollectionFromVm(ctx, output, global, func, kind, args);
+        if (std.mem.eql(u8, name, "RegExp")) return regexp_fastpath.qjsRegExpConstructCall(ctx, output, global, new_target, args, caller_function, caller_frame);
+        if (builtins.collection.constructorId(name)) |kind| return builtin_glue.constructCollectionFromVm(ctx, output, global, func, kind, args);
         if (std.mem.eql(u8, name, "ArrayBuffer") or std.mem.eql(u8, name, "SharedArrayBuffer")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
-            return qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype, std.mem.eql(u8, name, "SharedArrayBuffer"));
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            return array_ops.qjsArrayBufferConstructWithPrototype(ctx, output, global, args, prototype, std.mem.eql(u8, name, "SharedArrayBuffer"));
         }
         if (std.mem.eql(u8, name, "DataView")) {
-            const coerced = try qjsDataViewConstructorArgs(ctx, output, global, args);
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
-            return try qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype);
+            const coerced = try builtin_glue.qjsDataViewConstructorArgs(ctx, output, global, args);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            return try object_ops.qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype);
         }
         if (std.mem.eql(u8, name, "DOMException")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
             return try construct_mod.constructDOMExceptionObject(ctx.runtime, prototype, args);
         }
         if (std.mem.eql(u8, name, "AggregateError")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
-            const constructor_global = objectRealmGlobal(function_object) orelse global;
-            return try qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            const constructor_global = object_ops.objectRealmGlobal(function_object) orelse global;
+            return try object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, prototype, args, caller_function, caller_frame);
         }
         if (std.mem.eql(u8, name, "SuppressedError")) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
-            return try qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            return try object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global, prototype, args, caller_function, caller_frame);
         }
-        if (isErrorConstructorName(name)) {
-            const prototype = try constructorPrototypeObject(ctx.runtime, new_target);
-            return try qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
+        if (exception_ops.isErrorConstructorName(name)) {
+            const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
+            return try object_ops.qjsErrorConstructWithPrototype(ctx, output, global, name, prototype, args, caller_function, caller_frame);
         }
         if (function_object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
             return constructExternalHostFunction(ctx, output, global, function_object, args, caller_function, caller_frame, new_target);
@@ -2734,7 +1534,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
         if (!fb.is_derived_class_constructor) {
-            try initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
+            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
         }
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
@@ -2746,7 +1546,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         }
         return instance;
     }
-    if (functionObjectFromValue(func)) |function_object| {
+    if (object_ops.functionObjectFromValue(func)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (fb.is_class_constructor) {
@@ -2757,9 +1557,9 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
             errdefer instance.free(ctx.runtime);
             if (!fb.is_derived_class_constructor) {
-                try initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
+                try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
             }
-            const function_global = objectRealmGlobal(function_object) orelse global;
+            const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
             const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
             const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
             const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, new_target, constructor_this);
@@ -2774,9 +1574,9 @@ pub fn constructValueOrBytecodeWithNewTarget(
         const instance = try createConstructorInstance(ctx, output, global, new_target, caller_function, caller_frame);
         errdefer instance.free(ctx.runtime);
         if (!fb.is_derived_class_constructor) {
-            try initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
+            try class_init_ops.initializeClassInstanceElements(ctx, output, global, func, instance, fb, caller_function, caller_frame);
         }
-        const function_global = objectRealmGlobal(function_object) orelse global;
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, function_value, func, initial_this, args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, new_target, constructor_this);
@@ -2787,7 +1587,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         }
         return instance;
     }
-    if (objectFromValue(func)) |object| {
+    if (object_ops.objectFromValue(func)) |object| {
         if (object.class_id == core.class.ids.object and object.proxyTarget() == null) {
             return throwTypeErrorMessage(ctx, global, "not a constructor");
         }
@@ -2821,22 +1621,6 @@ fn constructExternalHostFunction(
     return instance;
 }
 
-pub fn globalHostOutputAutoInit(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom) bool {
-    if (global.exotic != null) return false;
-    for (global.shapeProps(), 0..) |prop, property_index| {
-        const prop_flags = core.property.Flags.fromBits(prop.flags);
-        if (prop_flags.deleted or prop.atom_id != atom_id) continue;
-        if (prop_flags.accessor) return false;
-        return switch (global.properties[property_index].slot) {
-            .auto_init => |info| info.host_function_kind == core.host_function.ids.output or
-                (info.host_function_kind == core.host_function.ids.external_host and
-                    call_mod.isOutputExternalHostFunctionId(rt, info.external_host_function_id)),
-            .data, .accessor, .deleted => false,
-        };
-    }
-    return false;
-}
-
 test "qjsConstructWeakRefWithPrototype roots direct symbol target while creating weak ref" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -2846,10 +1630,10 @@ test "qjsConstructWeakRefWithPrototype roots direct symbol target while creating
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const weak_ref_value = try qjsConstructWeakRefWithPrototype(rt, core.JSValue.symbol(symbol_atom), null);
+    const weak_ref_value = try object_ops.qjsConstructWeakRefWithPrototype(rt, core.JSValue.symbol(symbol_atom), null);
     var weak_ref_alive = true;
     defer if (weak_ref_alive) weak_ref_value.free(rt);
-    const weak_ref = objectFromValue(weak_ref_value) orelse return error.TypeError;
+    const weak_ref = object_ops.objectFromValue(weak_ref_value) orelse return error.TypeError;
 
     const live = weak_ref.weakRefDeref(rt);
     try std.testing.expect(live.same(core.JSValue.symbol(symbol_atom)));
@@ -2886,10 +1670,10 @@ test "qjsConstructFinalizationRegistryWithPrototype roots function bytecode clea
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const registry_value = try qjsConstructFinalizationRegistryWithPrototype(rt, cleanup_callback, null);
+    const registry_value = try object_ops.qjsConstructFinalizationRegistryWithPrototype(rt, cleanup_callback, null);
     var registry_alive = true;
     defer if (registry_alive) registry_value.free(rt);
-    const registry = objectFromValue(registry_value) orelse return error.TypeError;
+    const registry = object_ops.objectFromValue(registry_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = registry.finalizationRegistryCleanupCallback() orelse return error.TypeError;
@@ -2917,7 +1701,7 @@ test "qjsFinalizationRegistryAppendCell roots direct symbol fields while allocat
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    try qjsFinalizationRegistryAppendCell(
+    try builtin_glue.qjsFinalizationRegistryAppendCell(
         rt,
         registry,
         core.JSValue.symbol(target_atom),
@@ -2982,7 +1766,7 @@ pub fn createConstructorInstance(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Object", new_target, caller_function, caller_frame);
+    const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", new_target, caller_function, caller_frame);
     const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &instance.header);
     return instance.value();
@@ -3046,16 +1830,16 @@ pub fn constructDynamicFunctionFromSource(
     if (args.len > 0) {
         for (args[0 .. args.len - 1], 0..) |arg, idx| {
             if (idx != 0) try params.append(ctx.runtime.memory.allocator, ',');
-            const string_value = try toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
+            const string_value = try string_ops.toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
             defer string_value.free(ctx.runtime);
-            try appendSourceStringUtf8(ctx.runtime, &params, string_value);
+            try string_ops.appendSourceStringUtf8(ctx.runtime, &params, string_value);
         }
-        const body_value = try toStringForAnnexB(ctx, output, global, args[args.len - 1], caller_function, caller_frame);
+        const body_value = try string_ops.toStringForAnnexB(ctx, output, global, args[args.len - 1], caller_function, caller_frame);
         defer body_value.free(ctx.runtime);
-        try appendSourceStringUtf8(ctx.runtime, &body, body_value);
+        try string_ops.appendSourceStringUtf8(ctx.runtime, &body, body_value);
     }
     const function_global = dynamicFunctionRealmGlobal(constructor) orelse global;
-    if ((kind == .async_function or kind == .async_generator) and try parameterSourceContainsAwait(ctx.runtime, params.items)) {
+    if ((kind == .async_function or kind == .async_generator) and try promise_ops.parameterSourceContainsAwait(ctx.runtime, params.items)) {
         return throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
     }
 
@@ -3070,7 +1854,7 @@ pub fn constructDynamicFunctionFromSource(
     try source.appendSlice(ctx.runtime.memory.allocator, prefix);
     try source.appendSlice(ctx.runtime.memory.allocator, params.items);
     try source.appendSlice(ctx.runtime.memory.allocator, "\n) {\n");
-    if (if (kind == .normal) nativeTypedArraySubclassBase(body.items) else null) |base_name| {
+    if (if (kind == .normal) array_ops.nativeTypedArraySubclassBase(body.items) else null) |base_name| {
         try source.appendSlice(ctx.runtime.memory.allocator, "return ");
         try source.appendSlice(ctx.runtime.memory.allocator, base_name);
         try source.append(ctx.runtime.memory.allocator, ';');
@@ -3092,11 +1876,11 @@ pub fn constructDynamicFunctionFromSource(
     defer nested_stack.deinit(ctx.runtime);
     const result = try runWithArgs(ctx, &nested_stack, &compiled.function, function_global.value(), &.{}, &.{}, output, function_global, true, false, false, &.{}, &.{}, &.{}, &.{});
     errdefer result.free(ctx.runtime);
-    if (functionObjectFromValue(result)) |function_object| {
-        const prototype = try dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
+    if (object_ops.functionObjectFromValue(result)) |function_object| {
+        const prototype = try object_ops.dynamicFunctionNewTargetPrototype(ctx, output, global, new_target, kind, caller_function, caller_frame);
         try function_object.setPrototype(ctx.runtime, prototype);
         clearFunctionEvalCaptures(ctx.runtime, function_object);
-        try copyRealmPrototypeKeys(ctx.runtime, constructor, function_object);
+        try object_ops.copyRealmPrototypeKeys(ctx.runtime, constructor, function_object);
         if (function_global != global) {
             try function_object.setOptionalValueSlot(ctx.runtime, function_object.functionRealmGlobalSlot(), function_global.value().dup());
         }
@@ -3106,15 +1890,15 @@ pub fn constructDynamicFunctionFromSource(
 
 pub fn dynamicFunctionRealmGlobal(constructor: core.JSValue) ?*core.Object {
     const constructor_object = property_ops.expectObject(constructor) catch return null;
-    return objectRealmGlobal(constructor_object);
+    return object_ops.objectRealmGlobal(constructor_object);
 }
 
 pub fn functionRealmGlobal(object: *core.Object) ?*core.Object {
     if (object.proxyTarget()) |target_value| {
-        const target_object = objectFromValue(target_value) orelse return null;
+        const target_object = object_ops.objectFromValue(target_value) orelse return null;
         return functionRealmGlobal(target_object);
     }
-    return objectRealmGlobal(object);
+    return object_ops.objectRealmGlobal(object);
 }
 
 pub fn clearFunctionEvalCaptures(rt: *core.JSRuntime, function_object: *core.Object) void {
@@ -3124,7 +1908,7 @@ pub fn clearFunctionEvalCaptures(rt: *core.JSRuntime, function_object: *core.Obj
     function_object.functionEvalLocalRefsSlot().* = &.{};
     for (old_names) |atom_id| rt.atoms.free(atom_id);
     if (old_names.len != 0) rt.memory.free(core.Atom, old_names);
-    freeValueSlice(rt, old_refs);
+    array_ops.freeValueSlice(rt, old_refs);
 }
 
 pub fn qjsAssertThrows(
@@ -3141,7 +1925,7 @@ pub fn qjsAssertThrows(
     defer ctx.runtime.memory.allocator.free(expected_name);
     const result = callAssertThrowsCallback(ctx, output, global, args[1], caller_function, caller_frame) catch |err| {
         if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
-            if (try consumePendingExceptionIfMatchesConstructor(ctx, expected_name)) {
+            if (try string_ops.consumePendingExceptionIfMatchesConstructor(ctx, expected_name)) {
                 return core.JSValue.undefinedValue();
             }
             return error.JSException;
@@ -3166,7 +1950,7 @@ pub fn callAssertThrowsCallback(
 ) !core.JSValue {
     const caller = caller_function orelse return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
     const frame = caller_frame orelse return callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, caller_function, caller_frame);
-    if (functionObjectFromValue(callback)) |function_object| {
+    if (object_ops.functionObjectFromValue(callback)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         var extra_names: []core.Atom = &.{};
         var extra_refs: []core.JSValue = &.{};
@@ -3200,7 +1984,7 @@ pub fn collectCallerEvalRefs(
     errdefer ctx.runtime.memory.free(core.Atom, names);
     const refs = try ctx.runtime.memory.alloc(core.JSValue, total);
     var rooted_refs: []core.JSValue = refs[0..0];
-    var refs_root = ValueSliceRoot{};
+    var refs_root = array_ops.ValueSliceRoot{};
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
     var initialized: usize = 0;
@@ -3221,7 +2005,7 @@ pub fn collectCallerEvalRefs(
     }
     for (caller.var_names[0..local_count], 0..) |atom_id, idx| {
         names[initialized] = atom_id;
-        refs[initialized] = try ensureVarRefCell(ctx, &frame.locals[idx]);
+        refs[initialized] = try slot_ops.ensureVarRefCell(ctx, &frame.locals[idx]);
         initialized += 1;
         rooted_refs = refs[0..initialized];
     }
@@ -3235,56 +2019,12 @@ pub fn simpleNumericArg0Callback(callback: core.JSValue) ?SimpleNumericArg0Bytec
         const fb = functionBytecodeFromValue(callback) orelse return null;
         return cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb);
     }
-    const function_object = functionObjectFromValue(callback) orelse return null;
+    const function_object = object_ops.functionObjectFromValue(callback) orelse return null;
     if (function_object.functionCapturesSlot().*.len != 0) return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
     const fb = functionBytecodeFromValue(function_value) orelse return null;
     return cachedSimpleNumericArg0Bytecode(fb) orelse simpleNumericArg0Bytecode(fb);
 }
-
-pub const SparseIndexKey = struct {
-    atom_id: core.Atom,
-    index: usize,
-};
-
-pub fn lengthIndexValue(index: usize) core.JSValue {
-    if (index <= @as(usize, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(index));
-    return core.JSValue.float64(@floatFromInt(index));
-}
-
-pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !bool {
-    if (a.isNumber() and b.isNumber()) {
-        const av = value_ops.numberValue(a) orelse return false;
-        const bv = value_ops.numberValue(b) orelse return false;
-        if (std.math.isNan(av) or std.math.isNan(bv)) return false;
-        return av == bv;
-    }
-    if (a.asBool()) |ab| {
-        if (b.asBool()) |bb| return ab == bb;
-    }
-    if (a.isNull() or a.isUndefined()) return a.same(b);
-    if (a.isBigInt() and b.isBigInt()) return builtins.object.sameValue(a, b);
-    if (a.isString() and b.isString()) {
-        if (a.same(b)) return true;
-        var a_bytes = std.ArrayList(u8).empty;
-        defer a_bytes.deinit(rt.memory.allocator);
-        var b_bytes = std.ArrayList(u8).empty;
-        defer b_bytes.deinit(rt.memory.allocator);
-        try value_ops.appendRawString(rt, &a_bytes, a);
-        try value_ops.appendRawString(rt, &b_bytes, b);
-        return std.mem.eql(u8, a_bytes.items, b_bytes.items);
-    }
-    return a.same(b);
-}
-
-pub const LengthIndexAtom = struct {
-    atom: core.Atom,
-    owned: bool,
-
-    pub fn deinit(self: LengthIndexAtom, rt: *core.JSRuntime) void {
-        if (self.owned) rt.atoms.free(self.atom);
-    }
-};
 
 pub fn qjsCollectIteratorValues(
     ctx: *core.JSContext,
@@ -3294,13 +2034,13 @@ pub fn qjsCollectIteratorValues(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const iterator = objectFromValue(iterator_value) orelse return error.TypeError;
-    const values = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
+    const iterator = object_ops.objectFromValue(iterator_value) orelse return error.TypeError;
+    const values = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     const values_value = values.value();
     errdefer values_value.free(ctx.runtime);
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
-    const next_method = try getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
 
@@ -3311,17 +2051,17 @@ pub fn qjsCollectIteratorValues(
             return err;
         };
         defer next.free(ctx.runtime);
-        const next_object = objectFromValue(next) orelse {
+        const next_object = object_ops.objectFromValue(next) orelse {
             try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return error.TypeError;
         };
-        const done = getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
+        const done = object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
             try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
         defer done.free(ctx.runtime);
         if (done.asBool() == true) break;
-        const item = getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
+        const item = object_ops.getValueProperty(ctx, output, global, next_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
             try qjsIteratorClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -3345,7 +2085,7 @@ pub fn qjsIteratorClose(
 ) !void {
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
@@ -3423,11 +2163,11 @@ pub fn qjsDestructuringGet(
     }
     if (args[0].isString()) {
         const atom_id = core.atom.atomFromUInt32(target_index);
-        if (try getStringIndexValue(ctx.runtime, args[0], atom_id)) |value| return value;
+        if (try string_ops.getStringIndexValue(ctx.runtime, args[0], atom_id)) |value| return value;
         return core.JSValue.undefinedValue();
     }
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
+    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
         return object.getProperty(core.atom.atomFromUInt32(target_index));
     }
 
@@ -3458,7 +2198,7 @@ pub fn qjsDestructuringElide(
     }
     if (args[0].isString()) return core.JSValue.undefinedValue();
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try arrayUsesDefaultIterator(ctx, output, global, args[0], object)) return core.JSValue.undefinedValue();
+    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) return core.JSValue.undefinedValue();
 
     return error.TypeError;
 }
@@ -3519,7 +2259,7 @@ pub fn qjsDestructuringRest(
         return out_value;
     }
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    if (try arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
+    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], object)) {
         const out = try core.Object.createArray(ctx.runtime, null);
         errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
         var out_value = out.value();
@@ -3548,16 +2288,6 @@ pub fn qjsDestructuringRest(
     return error.TypeError;
 }
 
-pub fn appendOwnedAtom(rt: *core.JSRuntime, keys: *[]core.Atom, atom_id: core.Atom) !void {
-    const next = try rt.memory.alloc(core.Atom, keys.*.len + 1);
-    errdefer rt.memory.free(core.Atom, next);
-    @memcpy(next[0..keys.*.len], keys.*);
-    next[keys.*.len] = atom_id;
-    const old = keys.*;
-    keys.* = next;
-    if (old.len != 0) rt.memory.free(core.Atom, old);
-}
-
 pub fn qjsDestructuringClose(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -3577,7 +2307,7 @@ pub fn qjsDestructuringClose(
     setDestructuringIteratorStateDone(state);
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator.value(), return_key, null, null);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), return_key, null, null);
     defer return_method.free(ctx.runtime);
     if (!isCallableValue(return_method)) {
         try clearDestructuringIteratorState(ctx.runtime, state);
@@ -3624,7 +2354,7 @@ pub fn qjsDestructuringRequireIterator(
         const state = try createDestructuringIteratorState(ctx.runtime, iterator_value.dup());
         return state.value();
     };
-    if (try arrayUsesDefaultIterator(ctx, output, global, args[0], source)) return args[0].dup();
+    if (try array_ops.arrayUsesDefaultIterator(ctx, output, global, args[0], source)) return args[0].dup();
     if (source.class_id == core.class.ids.generator or source.class_id == core.class.ids.async_generator) {
         try cacheDestructuringIteratorNextMethod(ctx, output, global, source.value());
         const state = try createDestructuringIteratorState(ctx.runtime, source.value().dup());
@@ -3647,7 +2377,7 @@ pub fn getIteratorMethod(
     source_value: core.JSValue,
 ) !core.JSValue {
     const symbol_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    return getValueProperty(ctx, output, global, source_value, symbol_key, null, null);
+    return object_ops.getValueProperty(ctx, output, global, source_value, symbol_key, null, null);
 }
 
 pub fn iteratorForValue(
@@ -3707,7 +2437,7 @@ pub fn cacheIteratorNextMethodMode(
     const iterator = try property_ops.expectObject(iterator_value);
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
-    const next_method = try getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     defer next_method.free(ctx.runtime);
     if (require_callable and !isCallableValue(next_method)) return error.TypeError;
     const cached = iterator.cachedIteratorNextSlot();
@@ -3737,13 +2467,13 @@ pub fn destructuringIteratorStep(
     const next_method = if (iterator.cachedIteratorNext()) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
-        break :blk try getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
     var next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, null, null);
     defer next_result_value.free(ctx.runtime);
-    if (objectFromValue(next_result_value)) |promise| {
+    if (object_ops.objectFromValue(next_result_value)) |promise| {
         if (promise.class_id == core.class.ids.promise) {
             if (promise.promiseIsRejected()) {
                 const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
@@ -3760,14 +2490,14 @@ pub fn destructuringIteratorStep(
         return .{ .value = core.JSValue.undefinedValue(), .done = false };
     }
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
     defer done.free(ctx.runtime);
     if (value_ops.isTruthy(done)) {
         setDestructuringIteratorStateDone(state);
         return .{ .value = core.JSValue.undefinedValue(), .done = true };
     }
     const value_key = core.atom.predefinedId("value", .string).?;
-    return .{ .value = try getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
+    return .{ .value = try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
 }
 
 pub fn appendIteratorValues(
@@ -3814,13 +2544,13 @@ pub fn iteratorStepValue(
     const next_method = if (iterator.cachedIteratorNext()) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
-        break :blk try getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
     var next_result_value = try callValueOrBytecode(ctx, output, global, iterator_value, next_method, &.{}, null, null);
     defer next_result_value.free(ctx.runtime);
-    if (objectFromValue(next_result_value)) |promise| {
+    if (object_ops.objectFromValue(next_result_value)) |promise| {
         if (promise.class_id == core.class.ids.promise) {
             if (promise.promiseIsRejected()) {
                 const reason = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
@@ -3837,11 +2567,11 @@ pub fn iteratorStepValue(
         return .{ .value = core.JSValue.undefinedValue(), .done = false };
     }
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
     defer done.free(ctx.runtime);
     if (value_ops.isTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
     const value_key = core.atom.predefinedId("value", .string).?;
-    return .{ .value = try getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
+    return .{ .value = try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
 }
 
 pub fn iteratorStepResult(
@@ -3855,7 +2585,7 @@ pub fn iteratorStepResult(
     const next_method = if (iterator.cachedIteratorNext()) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
-        break :blk try getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
     };
     defer next_method.free(ctx.runtime);
     if (!isCallableValue(next_method)) return error.TypeError;
@@ -3863,12 +2593,12 @@ pub fn iteratorStepResult(
     errdefer next_result_value.free(ctx.runtime);
     const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
     defer done.free(ctx.runtime);
-    const is_done = valueTruthy(done);
+    const is_done = coercion_ops.valueTruthy(done);
     const value = if (is_done) blk: {
         const value_key = core.atom.predefinedId("value", .string).?;
-        break :blk try getValueProperty(ctx, output, global, next_result.value(), value_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null);
     } else core.JSValue.undefinedValue();
     errdefer value.free(ctx.runtime);
     return .{ .result = next_result_value, .value = value, .done = is_done };
@@ -3882,7 +2612,7 @@ pub fn clearDestructuringIteratorState(rt: *core.JSRuntime, state: *core.Object)
 }
 
 pub fn isCallableValue(value: core.JSValue) bool {
-    return value.isFunctionBytecode() or functionObjectFromValue(value) != null or callableObjectFromValue(value) != null or proxyTargetIsCallable(value);
+    return value.isFunctionBytecode() or object_ops.functionObjectFromValue(value) != null or object_ops.callableObjectFromValue(value) != null or object_ops.proxyTargetIsCallable(value);
 }
 
 pub fn qjsReflectCallForNativeRecord(
@@ -3896,13 +2626,13 @@ pub fn qjsReflectCallForNativeRecord(
 ) !core.JSValue {
     const reflect_mod = builtins.reflect_proxy;
     return switch (id) {
-        @intFromEnum(reflect_mod.StaticMethod.define_property) => (try qjsDefinePropertyWithKind(ctx, output, global, args, 2, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(reflect_mod.StaticMethod.get_own_property_descriptor) => (try qjsReflectGetOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(reflect_mod.StaticMethod.delete_property) => (try qjsReflectDeletePropertyCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.define_property) => (try object_ops.qjsDefinePropertyWithKind(ctx, output, global, args, 2, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.get_own_property_descriptor) => (try object_ops.qjsReflectGetOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.delete_property) => (try object_ops.qjsReflectDeletePropertyCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(reflect_mod.StaticMethod.get) => (try qjsReflectGetCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(reflect_mod.StaticMethod.get_prototype_of) => (try qjsReflectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.get_prototype_of) => (try object_ops.qjsReflectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(reflect_mod.StaticMethod.set) => (try qjsReflectSetCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(reflect_mod.StaticMethod.set_prototype_of) => (try qjsReflectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
+        @intFromEnum(reflect_mod.StaticMethod.set_prototype_of) => (try object_ops.qjsReflectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(reflect_mod.StaticMethod.is_extensible) => (try qjsReflectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(reflect_mod.StaticMethod.prevent_extensions) => (try qjsReflectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
         @intFromEnum(reflect_mod.StaticMethod.has) => (try qjsReflectHasCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
@@ -3958,7 +2688,7 @@ pub fn qjsAtomicsCallForNativeRecord(
         @intFromEnum(atomics_mod.StaticMethod.pause) => try qjsAtomicsPause(ctx, output, global, args, caller_function, caller_frame),
         @intFromEnum(atomics_mod.StaticMethod.notify) => try qjsAtomicsNotify(ctx, output, global, args, caller_function, caller_frame),
         @intFromEnum(atomics_mod.StaticMethod.wait) => try qjsAtomicsWait(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.wait_async) => try qjsAtomicsWaitAsync(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(atomics_mod.StaticMethod.wait_async) => try promise_ops.qjsAtomicsWaitAsync(ctx, output, global, args, caller_function, caller_frame),
         @intFromEnum(atomics_mod.StaticMethod.store) => try qjsAtomicsStore(ctx, output, global, args, caller_function, caller_frame),
         @intFromEnum(atomics_mod.StaticMethod.load) => try qjsAtomicsReadModifyWrite(ctx, output, global, args, .load, caller_function, caller_frame),
         @intFromEnum(atomics_mod.StaticMethod.add) => try qjsAtomicsReadModifyWrite(ctx, output, global, args, .add, caller_function, caller_frame),
@@ -4016,13 +2746,13 @@ pub fn qjsAtomicsReadModifyWrite(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try atomicsTypedArray(view_value, false);
+    const view = try array_ops.atomicsTypedArray(view_value, false);
     if (atomic_op != .load) try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, view);
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
     try atomicsValidateIndex(ctx.runtime, view, index);
 
-    const is_bigint = atomicsTypedArrayIsBigInt(view);
+    const is_bigint = array_ops.atomicsTypedArrayIsBigInt(view);
     const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     const replacement_arg = if (args.len >= 4) args[3] else core.JSValue.undefinedValue();
     const operand = if (atomic_op == .load) @as(u64, 0) else if (is_bigint)
@@ -4062,14 +2792,14 @@ pub fn qjsAtomicsStore(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try atomicsTypedArray(view_value, false);
+    const view = try array_ops.atomicsTypedArray(view_value, false);
     try builtins.buffer.typedArrayRejectImmutableBuffer(ctx.runtime, view);
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const index = try toIndexForAtomics(ctx, output, global, index_value, caller_function, caller_frame);
     try atomicsValidateIndex(ctx.runtime, view, index);
 
     const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const is_bigint = atomicsTypedArrayIsBigInt(view);
+    const is_bigint = array_ops.atomicsTypedArrayIsBigInt(view);
     const stored_value = if (is_bigint)
         try toBigIntValueForAtomics(ctx, output, global, value_arg, caller_function, caller_frame)
     else
@@ -4094,8 +2824,8 @@ pub fn qjsAtomicsNotify(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try atomicsTypedArray(view_value, true);
-    const buffer = try atomicsBufferObject(view);
+    const view = try array_ops.atomicsTypedArray(view_value, true);
+    const buffer = try object_ops.atomicsBufferObject(view);
     if (buffer.class_id != core.class.ids.shared_array_buffer and buffer.arrayBufferDetached()) return error.TypeError;
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
@@ -4116,12 +2846,12 @@ pub fn qjsAtomicsWait(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try atomicsTypedArray(view_value, true);
-    if ((try atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
+    const view = try array_ops.atomicsTypedArray(view_value, true);
+    if ((try object_ops.atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
     const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
     const expected_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const expected = if (atomicsTypedArrayIsBigInt(view))
+    const expected = if (array_ops.atomicsTypedArrayIsBigInt(view))
         try toBigIntBitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame)
     else
         try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
@@ -4162,7 +2892,7 @@ pub fn atomicsWaitTimeoutMilliseconds(timeout: f64) ?i64 {
 }
 
 pub fn atomicsWaiterKey(view: *core.Object, bytes: []const u8) !AtomicsWaiterKey {
-    const buffer = try atomicsBufferObject(view);
+    const buffer = try object_ops.atomicsBufferObject(view);
     if (buffer.class_id == core.class.ids.shared_array_buffer) {
         if (buffer.sharedByteStorageStore()) |store| {
             const base = @intFromPtr(buffer.byteStorage().ptr);
@@ -4205,7 +2935,7 @@ pub fn atomicsWakeWaiters(key: AtomicsWaiterKey, count: usize) usize {
         }
         waiter.notified = true;
         if (waiter.promise) |promise| {
-            atomicsSettleAsyncWaiter(waiter, promise, "ok") catch {};
+            promise_ops.atomicsSettleAsyncWaiter(waiter, promise, "ok") catch {};
             if (previous) |prev| {
                 prev.next = next;
             } else {
@@ -4213,7 +2943,7 @@ pub fn atomicsWakeWaiters(key: AtomicsWaiterKey, count: usize) usize {
             }
             waiter.linked = false;
             waiter.next = null;
-            atomicsDestroyAsyncWaiter(waiter);
+            promise_ops.atomicsDestroyAsyncWaiter(waiter);
         } else {
             waiter.cond.signal(io);
             previous = waiter;
@@ -4241,7 +2971,7 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
             cursor = next;
             continue;
         }
-        try atomicsSettleAsyncWaiter(waiter, waiter.promise.?, "timed-out");
+        try promise_ops.atomicsSettleAsyncWaiter(waiter, waiter.promise.?, "timed-out");
         if (previous) |prev| {
             prev.next = next;
         } else {
@@ -4249,7 +2979,7 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
         }
         waiter.linked = false;
         waiter.next = null;
-        atomicsDestroyAsyncWaiter(waiter);
+        promise_ops.atomicsDestroyAsyncWaiter(waiter);
         cursor = next;
     }
 }
@@ -4275,7 +3005,7 @@ pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
         }
         waiter.linked = false;
         waiter.next = null;
-        atomicsDestroyAsyncWaiter(waiter);
+        promise_ops.atomicsDestroyAsyncWaiter(waiter);
         cursor = next;
     }
 }
@@ -4365,7 +3095,7 @@ pub fn atomicsValidateIndex(rt: *core.JSRuntime, object: *core.Object, index: us
 }
 
 pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
-    const buffer = try atomicsBufferObject(object);
+    const buffer = try object_ops.atomicsBufferObject(object);
     if (buffer.arrayBufferDetached()) return error.TypeError;
     const offset = object.typedArrayByteOffset() + index * object.typedArrayElementSize();
     if (offset + object.typedArrayElementSize() > buffer.byteStorage().len) return error.RangeError;
@@ -4441,7 +3171,7 @@ pub fn toNumberForAtomics(
 ) !f64 {
     _ = caller_function;
     _ = caller_frame;
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
     defer primitive.free(ctx.runtime);
     if (primitive.isBigInt()) return error.TypeError;
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
@@ -4523,7 +3253,7 @@ pub fn toBigIntValueForAtomics(
 ) !core.JSValue {
     _ = caller_function;
     _ = caller_frame;
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
     defer primitive.free(ctx.runtime);
     var big = try value_ops.toBigIntValue(ctx.runtime, primitive);
     defer big.deinit();
@@ -4559,240 +3289,6 @@ pub fn bigintBitsForAtomics(rt: *core.JSRuntime, value: core.JSValue) !u64 {
     return if (big.negative) 0 -% low else low;
 }
 
-pub fn decodeHexBytes(rt: *core.JSRuntime, source: []const u8, reject_odd: bool) !std.ArrayList(u8) {
-    if (reject_odd and source.len % 2 != 0) return error.SyntaxError;
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
-    var index: usize = 0;
-    while (index + 1 < source.len) : (index += 2) {
-        const hi = hexNibble(source[index]) orelse return error.SyntaxError;
-        const lo = hexNibble(source[index + 1]) orelse return error.SyntaxError;
-        try out.append(rt.memory.allocator, (hi << 4) | lo);
-    }
-    return out;
-}
-
-pub fn decodeHexInto(source: []const u8, target: []u8) !Uint8ArrayCodecProgress {
-    if (source.len % 2 != 0) return error.SyntaxError;
-    var read: usize = 0;
-    var written: usize = 0;
-    while (read < source.len and written < target.len) {
-        const hi = hexNibble(source[read]) orelse return error.SyntaxError;
-        const lo = hexNibble(source[read + 1]) orelse return error.SyntaxError;
-        target[written] = (hi << 4) | lo;
-        read += 2;
-        written += 1;
-    }
-    return .{ .read = read, .written = written };
-}
-
-pub fn encodeHexBytes(rt: *core.JSRuntime, bytes: []const u8) !std.ArrayList(u8) {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
-    for (bytes) |byte| {
-        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte >> 4));
-        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte & 0x0f));
-    }
-    return out;
-}
-
-pub fn hexNibble(byte: u8) ?u8 {
-    return unicode_lib.asciiHexDigitValueByte(byte);
-}
-
-pub const Base64Chunk = struct {
-    bytes: [3]u8 = .{ 0, 0, 0 },
-    len: usize = 0,
-};
-
-pub fn decodeBase64Bytes(
-    rt: *core.JSRuntime,
-    source: []const u8,
-    alphabet: Uint8ArrayBase64Alphabet,
-    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
-) !std.ArrayList(u8) {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
-    _ = try decodeBase64Internal(rt, source, alphabet, last_chunk_handling, &out, null);
-    return out;
-}
-
-pub fn decodeBase64Into(
-    rt: *core.JSRuntime,
-    source: []const u8,
-    alphabet: Uint8ArrayBase64Alphabet,
-    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
-    target: []u8,
-) !Uint8ArrayCodecProgress {
-    if (target.len == 0) return .{ .read = 0, .written = 0 };
-    return decodeBase64Internal(rt, source, alphabet, last_chunk_handling, null, target);
-}
-
-pub fn decodeBase64Internal(
-    rt: *core.JSRuntime,
-    source: []const u8,
-    alphabet: Uint8ArrayBase64Alphabet,
-    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
-    out: ?*std.ArrayList(u8),
-    target: ?[]u8,
-) !Uint8ArrayCodecProgress {
-    var chunk: [4]u8 = .{ 0, 0, 0, 0 };
-    var chunk_len: usize = 0;
-    var read_pos: usize = 0;
-    var last_read: usize = 0;
-    var written: usize = 0;
-    var saw_padded_chunk = false;
-    var pending_padded_chunk: ?Base64Chunk = null;
-    var pending_padded_read: usize = 0;
-
-    for (source, 0..) |byte, index| {
-        if (isAsciiWhitespace(byte)) continue;
-        read_pos = index + 1;
-        if (saw_padded_chunk) return error.SyntaxError;
-        if (byte != '=' and base64Value(byte, alphabet) == null) return error.SyntaxError;
-        chunk[chunk_len] = byte;
-        chunk_len += 1;
-        if (chunk_len == 4) {
-            const decoded = try decodeBase64Chunk(chunk, 4, alphabet, last_chunk_handling, false);
-            if (chunk[2] == '=' or chunk[3] == '=') {
-                pending_padded_chunk = decoded;
-                pending_padded_read = read_pos;
-                saw_padded_chunk = true;
-                chunk_len = 0;
-                continue;
-            }
-            if (target) |bytes| {
-                if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
-                if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
-            } else if (out) |list| {
-                try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
-            }
-            written += decoded.len;
-            last_read = read_pos;
-            chunk_len = 0;
-            if (target) |bytes| {
-                if (written == bytes.len) return .{ .read = last_read, .written = written };
-            }
-        }
-    }
-
-    if (pending_padded_chunk) |decoded| {
-        if (target) |bytes| {
-            if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
-            if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
-        } else if (out) |list| {
-            try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
-        }
-        written += decoded.len;
-        return .{ .read = pending_padded_read, .written = written };
-    }
-    if (chunk_len == 0) return .{ .read = last_read, .written = written };
-    const decoded = try decodeBase64Chunk(chunk, chunk_len, alphabet, last_chunk_handling, true);
-    if (decoded.len == 0 and last_chunk_handling == .stop_before_partial) return .{ .read = last_read, .written = written };
-    if (target) |bytes| {
-        if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
-        if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
-    } else if (out) |list| {
-        try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
-    }
-    written += decoded.len;
-    return .{ .read = read_pos, .written = written };
-}
-
-pub fn decodeBase64Chunk(
-    chunk: [4]u8,
-    chunk_len: usize,
-    alphabet: Uint8ArrayBase64Alphabet,
-    last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
-    is_final: bool,
-) !Base64Chunk {
-    if (chunk_len == 0) return .{};
-    if (chunk_len < 4) {
-        var first_padding: ?usize = null;
-        var i: usize = 0;
-        while (i < chunk_len) : (i += 1) {
-            if (chunk[i] == '=') {
-                if (first_padding == null) first_padding = i;
-            } else if (first_padding != null) {
-                return error.SyntaxError;
-            }
-        }
-        if (first_padding) |padding_index| {
-            if (padding_index < 2) return error.SyntaxError;
-            if (last_chunk_handling == .stop_before_partial and is_final) return .{};
-            return error.SyntaxError;
-        }
-        if (chunk_len == 1) {
-            if (last_chunk_handling == .stop_before_partial and is_final) return .{};
-            return error.SyntaxError;
-        }
-        if (last_chunk_handling == .stop_before_partial and is_final) return .{};
-        if (last_chunk_handling == .strict) return error.SyntaxError;
-        const a = base64Value(chunk[0], alphabet) orelse return error.SyntaxError;
-        const b = base64Value(chunk[1], alphabet) orelse return error.SyntaxError;
-        var result = Base64Chunk{ .bytes = .{ (a << 2) | (b >> 4), 0, 0 }, .len = 1 };
-        if (chunk_len == 3) {
-            const c = base64Value(chunk[2], alphabet) orelse return error.SyntaxError;
-            result.bytes[1] = ((b & 0x0f) << 4) | (c >> 2);
-            result.len = 2;
-        }
-        return result;
-    }
-
-    if (chunk[0] == '=' or chunk[1] == '=') return error.SyntaxError;
-    const a = base64Value(chunk[0], alphabet) orelse return error.SyntaxError;
-    const b = base64Value(chunk[1], alphabet) orelse return error.SyntaxError;
-    if (chunk[2] == '=') {
-        if (chunk[3] != '=') return error.SyntaxError;
-        if (last_chunk_handling == .strict and (b & 0x0f) != 0) return error.SyntaxError;
-        return .{ .bytes = .{ (a << 2) | (b >> 4), 0, 0 }, .len = 1 };
-    }
-    const c = base64Value(chunk[2], alphabet) orelse return error.SyntaxError;
-    if (chunk[3] == '=') {
-        if (last_chunk_handling == .strict and (c & 0x03) != 0) return error.SyntaxError;
-        return .{ .bytes = .{ (a << 2) | (b >> 4), ((b & 0x0f) << 4) | (c >> 2), 0 }, .len = 2 };
-    }
-    const d = base64Value(chunk[3], alphabet) orelse return error.SyntaxError;
-    return .{ .bytes = .{ (a << 2) | (b >> 4), ((b & 0x0f) << 4) | (c >> 2), ((c & 0x03) << 6) | d }, .len = 3 };
-}
-
-pub fn encodeBase64Bytes(rt: *core.JSRuntime, bytes: []const u8, alphabet: Uint8ArrayBase64Alphabet, omit_padding: bool) !std.ArrayList(u8) {
-    const table = if (alphabet == .base64) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" else "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
-    var index: usize = 0;
-    while (index < bytes.len) : (index += 3) {
-        const rem = bytes.len - index;
-        const b0 = bytes[index];
-        const b1 = if (rem > 1) bytes[index + 1] else 0;
-        const b2 = if (rem > 2) bytes[index + 2] else 0;
-        try out.append(rt.memory.allocator, table[b0 >> 2]);
-        try out.append(rt.memory.allocator, table[((b0 & 0x03) << 4) | (b1 >> 4)]);
-        if (rem > 1) {
-            try out.append(rt.memory.allocator, table[((b1 & 0x0f) << 2) | (b2 >> 6)]);
-        } else if (!omit_padding) {
-            try out.append(rt.memory.allocator, '=');
-        }
-        if (rem > 2) {
-            try out.append(rt.memory.allocator, table[b2 & 0x3f]);
-        } else if (!omit_padding) {
-            try out.append(rt.memory.allocator, '=');
-        }
-    }
-    return out;
-}
-
-pub fn base64Value(byte: u8, alphabet: Uint8ArrayBase64Alphabet) ?u8 {
-    if (byte >= 'A' and byte <= 'Z') return byte - 'A';
-    if (byte >= 'a' and byte <= 'z') return byte - 'a' + 26;
-    if (byte >= '0' and byte <= '9') return byte - '0' + 52;
-    if (alphabet == .base64 and byte == '+') return 62;
-    if (alphabet == .base64 and byte == '/') return 63;
-    if (alphabet == .base64url and byte == '-') return 62;
-    if (alphabet == .base64url and byte == '_') return 63;
-    return null;
-}
-
 pub fn isAsciiWhitespace(byte: u8) bool {
     return unicode_lib.isAsciiWhitespaceByte(byte);
 }
@@ -4800,21 +3296,6 @@ pub fn isAsciiWhitespace(byte: u8) bool {
 pub fn isIteratorIdentityFunction(rt: *core.JSRuntime, function_object: *core.Object) bool {
     _ = rt;
     return function_object.isIteratorIdentityFunction();
-}
-
-pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord) !core.JSValue {
-    const name = rt.atoms.name(record.module_name) orelse "";
-    if (std.mem.startsWith(u8, name, "/") or std.mem.indexOfScalar(u8, name, '/') != null) {
-        const path = if (std.mem.startsWith(u8, name, "/"))
-            try rt.memory.allocator.dupe(u8, name)
-        else
-            try std.fs.path.resolve(rt.memory.allocator, &.{name});
-        defer rt.memory.allocator.free(path);
-        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{path});
-        defer rt.memory.allocator.free(url);
-        return value_ops.createStringValue(rt, url);
-    }
-    return value_ops.createStringValue(rt, name);
 }
 
 pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
@@ -5007,7 +3488,7 @@ test "direct eval private bound names release preserves memory account" {
 
     const before_bytes = rt.memory.allocated_bytes;
     const before_allocations = rt.memory.allocation_count;
-    const names = try directEvalPrivateBoundNames(rt, &function, null);
+    const names = try eval_ops.directEvalPrivateBoundNames(rt, &function, null);
     if (names.len != 0) rt.memory.free(core.Atom, names);
     try std.testing.expectEqual(before_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(before_allocations, rt.memory.allocation_count);
@@ -5023,7 +3504,7 @@ test "eval function declaration names release preserves memory account" {
     const before_bytes = rt.memory.allocated_bytes;
     const before_allocations = rt.memory.allocation_count;
     const names = (try evalFunctionDeclarationNames(rt, "function evalMemoryAccountName() {}")).?;
-    freeAtomSlice(rt, names);
+    array_ops.freeAtomSlice(rt, names);
     try std.testing.expectEqual(before_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(before_allocations, rt.memory.allocation_count);
 }
@@ -5033,8 +3514,8 @@ pub fn appendPrivateBoundNamesFromValue(
     atoms: *std.ArrayList(core.Atom),
     value: core.JSValue,
 ) !void {
-    const object = objectFromValue(value) orelse return;
-    try appendPrivateBoundNamesFromObject(rt, atoms, object);
+    const object = object_ops.objectFromValue(value) orelse return;
+    try object_ops.appendPrivateBoundNamesFromObject(rt, atoms, object);
 }
 
 pub fn appendPrivateBoundName(
@@ -5044,7 +3525,7 @@ pub fn appendPrivateBoundName(
 ) !void {
     if (rt.atoms.kind(atom_id) != .private) return;
     for (atoms.items) |existing| {
-        if (existing == atom_id or privateAtomNamesMatch(rt, existing, atom_id)) return;
+        if (existing == atom_id or string_ops.privateAtomNamesMatch(rt, existing, atom_id)) return;
     }
     try atoms.append(rt.memory.allocator, atom_id);
 }
@@ -5084,7 +3565,7 @@ pub fn evalFunctionDeclarationNames(rt: *core.JSRuntime, source: []const u8) !?[
         search_start = keyword_index + "function".len;
     }
     if (atoms.items.len == 0) return null;
-    return try atomListToMemorySlice(rt, &atoms);
+    return try array_ops.atomListToMemorySlice(rt, &atoms);
 }
 
 pub fn braceDepthBefore(source: []const u8, end: usize) usize {
@@ -5198,7 +3679,7 @@ pub fn createEvalVarRefCells(ctx: *core.JSContext, len: usize) ![]core.JSValue {
     if (len == 0) return &.{};
     const refs = try ctx.runtime.memory.alloc(core.JSValue, len);
     var rooted_refs: []core.JSValue = refs[0..0];
-    var refs_root = ValueSliceRoot{};
+    var refs_root = array_ops.ValueSliceRoot{};
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
     var initialized: usize = 0;
@@ -5254,7 +3735,7 @@ test "createEvalVarRefCells roots initialized refs while allocating next cell" {
 
         fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            const object = objectFromValue(slot.*) orelse return;
+            const object = object_ops.objectFromValue(slot.*) orelse return;
             if (object.class_payload_kind == .var_ref) self.saw_var_ref = true;
         }
 
@@ -5277,7 +3758,7 @@ test "createEvalVarRefCells roots initialized refs while allocating next cell" {
     const refs = try createEvalVarRefCells(ctx, 2);
     rt.memory.trigger_gc_fn = saved_trigger_fn;
     rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-    defer freeValueSlice(rt, refs);
+    defer array_ops.freeValueSlice(rt, refs);
 
     try std.testing.expect(!probe.trace_failed);
     try std.testing.expect(probe.saw_var_ref);
@@ -5293,7 +3774,7 @@ pub fn createDirectEvalVarRefCells(
     if (names.len == 0) return &.{};
     const refs = try ctx.runtime.memory.alloc(core.JSValue, names.len);
     var rooted_refs: []core.JSValue = refs[0..0];
-    var refs_root = ValueSliceRoot{};
+    var refs_root = array_ops.ValueSliceRoot{};
     refs_root.init(ctx.runtime, &rooted_refs);
     defer refs_root.deinit();
     var initialized: usize = 0;
@@ -5310,7 +3791,7 @@ pub fn createDirectEvalVarRefCells(
             if (caller_frame) |frame| {
                 if (callerArgIndex(ctx.runtime, function, names[initialized])) |arg_idx| {
                     if (arg_idx < frame.args.len) {
-                        refs[initialized] = try ensureVarRefCell(ctx, &frame.args[arg_idx]);
+                        refs[initialized] = try slot_ops.ensureVarRefCell(ctx, &frame.args[arg_idx]);
                         rooted_refs = refs[0 .. initialized + 1];
                         continue;
                     }
@@ -5318,7 +3799,7 @@ pub fn createDirectEvalVarRefCells(
                 if (!eval_in_parameter_initializer) {
                     if (callerLocalIndex(ctx.runtime, function, names[initialized])) |local_idx| {
                         if (local_idx < frame.locals.len) {
-                            refs[initialized] = try ensureVarRefCell(ctx, &frame.locals[local_idx]);
+                            refs[initialized] = try slot_ops.ensureVarRefCell(ctx, &frame.locals[local_idx]);
                             rooted_refs = refs[0 .. initialized + 1];
                             continue;
                         }
@@ -5352,7 +3833,7 @@ pub fn createDirectEvalVisibleLocalBindings(
     const arg_count = @min(caller_function.arg_names.len, caller_frame.args.len);
     const local_count = if (eval_in_parameter_initializer) 0 else @min(caller_function.var_names.len, caller_frame.locals.len);
     const include_implicit_arguments =
-        directEvalShouldExposeImplicitArguments(caller_frame) and
+        eval_ops.directEvalShouldExposeImplicitArguments(caller_frame) and
         !functionHasArgOrLocal(caller_function, core.atom.ids.arguments, arg_count, local_count);
     const count = arg_count + local_count + @as(usize, if (include_implicit_arguments) 1 else 0);
     if (count == 0) return .{ .names = &.{}, .slots = &.{} };
@@ -5361,7 +3842,7 @@ pub fn createDirectEvalVisibleLocalBindings(
     const slots = try ctx.runtime.memory.alloc(core.JSValue, count);
     errdefer ctx.runtime.memory.free(core.JSValue, slots);
     var rooted_slots: []core.JSValue = slots[0..0];
-    var slots_root = ValueSliceRoot{};
+    var slots_root = array_ops.ValueSliceRoot{};
     slots_root.init(ctx.runtime, &rooted_slots);
     defer slots_root.deinit();
     var initialized: usize = 0;
@@ -5379,16 +3860,16 @@ pub fn createDirectEvalVisibleLocalBindings(
         local_index -= 1;
         const atom_id = caller_function.var_names[local_index];
         if (atom_id == core.atom.null_atom) continue;
-        if (directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
+        if (eval_ops.directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
         if (eval_global_var_bindings and
             globalLexicalHas(ctx, atom_id) and
-            directEvalVisibleLocalNameCount(ctx.runtime, caller_function.var_names[0..local_count], atom_id) == 1)
+            eval_ops.directEvalVisibleLocalNameCount(ctx.runtime, caller_function.var_names[0..local_count], atom_id) == 1)
         {
             continue;
         }
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
-        slots[initialized] = try ensureVarRefCell(ctx, &caller_frame.locals[local_index]);
+        slots[initialized] = try slot_ops.ensureVarRefCell(ctx, &caller_frame.locals[local_index]);
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
@@ -5397,17 +3878,17 @@ pub fn createDirectEvalVisibleLocalBindings(
         arg_index -= 1;
         const atom_id = caller_function.arg_names[arg_index];
         if (atom_id == core.atom.null_atom) continue;
-        if (directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
+        if (eval_ops.directEvalVisibleBindingExists(ctx.runtime, names[0..initialized], atom_id)) continue;
         names[initialized] = ctx.runtime.atoms.dup(atom_id);
         initialized_names += 1;
-        slots[initialized] = try ensureVarRefCell(ctx, &caller_frame.args[arg_index]);
+        slots[initialized] = try slot_ops.ensureVarRefCell(ctx, &caller_frame.args[arg_index]);
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
     if (include_implicit_arguments) {
         names[initialized] = ctx.runtime.atoms.dup(core.atom.ids.arguments);
         initialized_names += 1;
-        slots[initialized] = try frameArgumentsObject(ctx, global, caller_frame);
+        slots[initialized] = try object_ops.frameArgumentsObject(ctx, global, caller_frame);
         initialized += 1;
         rooted_slots = slots[0..initialized];
     }
@@ -5434,7 +3915,7 @@ pub fn createDirectEvalVisibleLocalBindings(
 
 pub fn frameCurrentFunctionIsArrow(caller_frame: *frame_mod.Frame) bool {
     if (functionBytecodeFromValue(caller_frame.current_function)) |fb| return fb.is_arrow_function;
-    if (objectFromValue(caller_frame.current_function)) |function_object| {
+    if (object_ops.objectFromValue(caller_frame.current_function)) |function_object| {
         const stored = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
         return fb.is_arrow_function;
@@ -5447,7 +3928,7 @@ pub fn directEvalCallerAllowsNewTarget(caller_frame: ?*frame_mod.Frame, eval_in_
     const outer_frame = caller_frame orelse return false;
     if (outer_frame.current_function.isUndefined()) return false;
     if (functionBytecodeFromValue(outer_frame.current_function)) |fb| return fb.new_target_allowed;
-    if (objectFromValue(outer_frame.current_function)) |function_object| {
+    if (object_ops.objectFromValue(outer_frame.current_function)) |function_object| {
         const stored = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(stored) orelse return false;
         return fb.new_target_allowed;
@@ -5519,7 +4000,7 @@ pub fn directEvalVarDeclarationNames(
             simple_var_name != eval_ret_atom and
             (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
             !functionHasNonLexicalLocal(rt, function, simple_var_name) and
-            !atomSliceContains(rt, function_decl_names, simple_var_name) and
+            !array_ops.atomSliceContains(rt, function_decl_names, simple_var_name) and
             !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
         {
             n += 1;
@@ -5552,7 +4033,7 @@ pub fn directEvalVarDeclarationNames(
         simple_var_name != eval_ret_atom and
         (!eval_global_var_bindings or directEvalGlobalDataVarNeedsTemporaryRef(rt, global, simple_var_name)) and
         !functionHasNonLexicalLocal(rt, function, simple_var_name) and
-        !atomSliceContains(rt, function_decl_names, simple_var_name) and
+        !array_ops.atomSliceContains(rt, function_decl_names, simple_var_name) and
         !directEvalSourceHasLexicalDeclarationName(rt, source, simple_var_name))
     {
         names[out_idx] = rt.atoms.dup(simple_var_name);
@@ -5619,8 +4100,8 @@ pub fn directEvalSourceHasLexicalDeclarationName(rt: *core.JSRuntime, source: []
     return false;
 }
 
-pub fn minOptionalIndex(let_pos: ?usize, const_pos: ?usize, class_pos: ?usize) ?KeywordMatch {
-    var best: ?KeywordMatch = null;
+pub fn minOptionalIndex(let_pos: ?usize, const_pos: ?usize, class_pos: ?usize) ?string_ops.KeywordMatch {
+    var best: ?string_ops.KeywordMatch = null;
     if (let_pos) |index| best = .{ .index = index, .keyword = "let" };
     if (const_pos) |index| {
         if (best == null or index < best.?.index) best = .{ .index = index, .keyword = "const" };
@@ -5659,12 +4140,12 @@ pub fn publishDirectEvalVarRefs(
     if (count == 0) return;
     if (!eval_global_var_bindings) {
         if (caller_frame) |frame| {
-            if (objectFromValue(frame.current_function)) |function_object| {
+            if (object_ops.objectFromValue(frame.current_function)) |function_object| {
                 var index: usize = 0;
                 while (index < count) : (index += 1) {
-                    try appendFunctionEvalLocal(ctx, function_object, names[index], refs[index]);
+                    try eval_ops.appendFunctionEvalLocal(ctx, function_object, names[index], refs[index]);
                     if (!eval_in_parameter_initializer) {
-                        replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
+                        string_ops.replaceFrameVarRefBinding(ctx.runtime, frame, names[index], refs[index]);
                     }
                 }
                 frame.eval_var_ref_names = function_object.functionEvalLocalNamesSlot().*;
@@ -5676,13 +4157,13 @@ pub fn publishDirectEvalVarRefs(
     }
     var index: usize = 0;
     while (index < count) : (index += 1) {
-        const value = if (varRefCellFromValue(refs[index])) |cell|
+        const value = if (slot_ops.varRefCellFromValue(refs[index])) |cell|
             if (cell.varRefValueSlot().*) |stored| stored.dup() else core.JSValue.undefinedValue()
         else
             refs[index].dup();
         defer value.free(ctx.runtime);
         if (directEvalGlobalVarPublishBlocked(ctx.runtime, global, names[index])) continue;
-        try defineGlobalFunctionBindingValue(ctx.runtime, global, names[index], value, true);
+        try slot_ops.defineGlobalFunctionBindingValue(ctx.runtime, global, names[index], value, true);
     }
 }
 
@@ -5770,15 +4251,15 @@ pub fn createOsModuleNativeFunction(rt: *core.JSRuntime, name: []const u8) ?core
     return null;
 }
 
-pub fn qjsWorkerNativeFunction(rt: *core.JSRuntime, name: []const u8, length: i32, post_target: ?WorkerPostTarget) WorkerObjectInitError!core.JSValue {
+pub fn qjsWorkerNativeFunction(rt: *core.JSRuntime, name: []const u8, length: i32, post_target: ?WorkerPostTarget) object_ops.WorkerObjectInitError!core.JSValue {
     const value = try builtins.function.nativeFunction(rt, name, length);
     errdefer value.free(rt);
-    if (objectFromValue(value)) |object| {
+    if (object_ops.objectFromValue(value)) |object| {
         if (post_target) |target| object.functionWorkerPostTargetSlot().* = @intCast(@intFromEnum(target));
         if (current_qjs_worker != null and std.mem.eql(u8, name, "Worker")) {
-            const parent = try qjsWorkerParentObject(rt);
+            const parent = try object_ops.qjsWorkerParentObject(rt);
             defer parent.free(rt);
-            try defineValueProperty(rt, object, "parent", parent);
+            try object_ops.defineValueProperty(rt, object, "parent", parent);
         }
     }
     return value;
@@ -5796,7 +4277,7 @@ pub fn qjsWorkerFunctionCall(
     if (args.len == 0 or !args[0].isString()) return error.TypeError;
     var path_bytes = std.ArrayList(u8).empty;
     defer path_bytes.deinit(ctx.runtime.memory.allocator);
-    try appendSourceStringUtf8(ctx.runtime, &path_bytes, args[0]);
+    try string_ops.appendSourceStringUtf8(ctx.runtime, &path_bytes, args[0]);
 
     const allocator = workerPageAllocator();
     const worker = try allocator.create(QjsWorker);
@@ -5843,8 +4324,8 @@ pub fn qjsWorkerFunctionCall(
     (try object.workerIdSlot(ctx.runtime)).* = worker_id;
     const post = try qjsWorkerNativeFunction(ctx.runtime, "postMessage", 1, .worker);
     defer post.free(ctx.runtime);
-    try defineValueProperty(ctx.runtime, object, "postMessage", post);
-    try defineValueProperty(ctx.runtime, object, "onmessage", core.JSValue.nullValue());
+    try object_ops.defineValueProperty(ctx.runtime, object, "postMessage", post);
+    try object_ops.defineValueProperty(ctx.runtime, object, "onmessage", core.JSValue.nullValue());
     worker.object = object.value().dup();
 
     const thread = try std.Thread.spawn(.{}, qjsWorkerThreadMain, .{worker});
@@ -5937,12 +4418,12 @@ pub fn qjsWorkerThreadMain(worker: *QjsWorker) void {
     defer ctx.destroy();
     defer zjs_vm.cleanupAtomicsWaitersForContext(ctx);
     const global = zjs_vm.contextGlobal(ctx) catch return;
-    const parent = qjsWorkerParentObject(rt) catch return;
+    const parent = object_ops.qjsWorkerParentObject(rt) catch return;
     defer parent.free(rt);
     const worker_ns = core.Object.create(rt, core.class.ids.object, null) catch return;
     defer worker_ns.value().free(rt);
-    defineValueProperty(rt, worker_ns, "parent", parent) catch return;
-    defineValueProperty(rt, global, "Worker", worker_ns.value()) catch return;
+    object_ops.defineValueProperty(rt, worker_ns, "parent", parent) catch return;
+    object_ops.defineValueProperty(rt, global, "Worker", worker_ns.value()) catch return;
 
     const io = qjsWorkerIo();
     const source = std.Io.Dir.cwd().readFileAlloc(io, worker.path, allocator, .limited(64 * 1024 * 1024)) catch return;
@@ -5952,7 +4433,7 @@ pub fn qjsWorkerThreadMain(worker: *QjsWorker) void {
 
     while (!qjsWorkerShouldClose(worker)) {
         const delivered = qjsWorkerDispatchOne(ctx, null, global, parent, .worker) catch false;
-        drainPendingPromiseJobs(ctx, null, global) catch return;
+        promise_ops.drainPendingPromiseJobs(ctx, null, global) catch return;
         if (!delivered) std.Io.sleep(qjsWorkerIo(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
 }
@@ -6077,7 +4558,7 @@ pub fn qjsWorkerEvalModuleGraph(
         defer allocator.free(dep_source);
         const dep_step = try qjsWorkerEvalPreloadedFileModuleStep(ctx, null, dep_source, path, null, null);
         try qjsWorkerHandleModuleEvalStep(ctx.runtime, allocator, &continuations, dep_step, dep_source, path, false);
-        try drainPendingPromiseJobs(ctx, null, global);
+        try promise_ops.drainPendingPromiseJobs(ctx, null, global);
         if (ctx.hasException()) return error.UnhandledPromiseRejection;
     }
     try qjsWorkerDrainModuleContinuationsForDependencies(ctx, global, null, allocator, &continuations, normalized_filename);
@@ -6157,7 +4638,7 @@ pub fn qjsWorkerEvalPreloadedFileModuleStep(
 
     var module_var_refs = try module_mod.buildModuleVarRefs(ctx, module_name, &compiled.function);
     defer module_mod.freeModuleVarRefs(ctx.runtime, module_var_refs);
-    var module_var_refs_root = ValueSliceRoot{};
+    var module_var_refs_root = array_ops.ValueSliceRoot{};
     module_var_refs_root.init(ctx.runtime, &module_var_refs);
     defer module_var_refs_root.deinit();
     var owned_continuation = if (input_continuation) |value| blk: {
@@ -6273,7 +4754,7 @@ pub fn qjsWorkerDrainModuleContinuationsForDependencies(
     continuations: *std.ArrayList(WorkerModuleContinuation),
     filename: []const u8,
 ) !void {
-    while (try qjsWorkerHasActiveAsyncDependency(ctx, continuations, filename)) {
+    while (try promise_ops.qjsWorkerHasActiveAsyncDependency(ctx, continuations, filename)) {
         if (try qjsWorkerDrainOneModuleContinuation(ctx, global, output, allocator, continuations)) |value| value.free(ctx.runtime);
     }
 }
@@ -6306,7 +4787,7 @@ pub fn qjsWorkerDrainOneModuleContinuation(
     const module_source = current.source;
     const path = current.path;
     const keep_result = current.keep_result;
-    try drainPendingPromiseJobs(ctx, output, global);
+    try promise_ops.drainPendingPromiseJobs(ctx, output, global);
     continuation_owned = false;
     const step = try qjsWorkerEvalPreloadedFileModuleStep(ctx, output, module_source, path, continuation, awaited_value);
     awaited_value.free(ctx.runtime);
@@ -6318,7 +4799,7 @@ pub fn qjsWorkerDrainOneModuleContinuation(
     const step_symbol_root_mask = try qjsWorkerRegisterModuleEvalStepSymbolRoots(ctx.runtime, step);
     var step_roots_registered = true;
     errdefer if (step_roots_registered) qjsWorkerUnregisterModuleEvalStepSymbolRoots(ctx.runtime, step, step_symbol_root_mask);
-    try drainPendingPromiseJobs(ctx, output, global);
+    try promise_ops.drainPendingPromiseJobs(ctx, output, global);
     if (ctx.hasException()) return error.UnhandledPromiseRejection;
     qjsWorkerUnregisterModuleEvalStepSymbolRoots(ctx.runtime, step, step_symbol_root_mask);
     step_roots_registered = false;
@@ -6383,7 +4864,7 @@ pub fn qjsWorkerPostMessage(ctx: *core.JSContext, this_value: core.JSValue, args
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const worker_id = try qjsWorkerObjectId(ctx.runtime, rooted_this);
+    const worker_id = try object_ops.qjsWorkerObjectId(ctx.runtime, rooted_this);
     const payload = try qjsWorkerMessageFromValue(ctx.runtime, rooted_payload);
     errdefer payload.deinit(workerPageAllocator());
     const io = qjsWorkerIo();
@@ -6435,7 +4916,7 @@ pub fn qjsWorkerDispatchAnyForRuntime(ctx: *core.JSContext, output: ?*std.Io.Wri
     qjs_workers.mutex.unlock(io);
     if (selected == null) return false;
     defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return false;
+    const object = object_ops.objectFromValue(object_value) orelse return false;
     const handler_key = try ctx.runtime.internAtom("onmessage");
     defer ctx.runtime.atoms.free(handler_key);
     const handler = object.getProperty(handler_key);
@@ -6465,7 +4946,7 @@ pub fn qjsWorkerDispatchOne(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const endpoint_object = objectFromValue(rooted_endpoint_value) orelse return false;
+    const endpoint_object = object_ops.objectFromValue(rooted_endpoint_value) orelse return false;
     const handler_key = try ctx.runtime.internAtom("onmessage");
     defer ctx.runtime.atoms.free(handler_key);
     handler = endpoint_object.getProperty(handler_key);
@@ -6475,8 +4956,8 @@ pub fn qjsWorkerDispatchOne(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
         owned_handler.free(ctx.runtime);
     }
     if (!isCallableValue(handler)) return false;
-    const worker_id = try qjsWorkerObjectId(ctx.runtime, rooted_endpoint_value);
-    const message = qjsWorkerPopMessage(worker_id, endpoint) orelse return false;
+    const worker_id = try object_ops.qjsWorkerObjectId(ctx.runtime, rooted_endpoint_value);
+    const message = array_ops.qjsWorkerPopMessage(worker_id, endpoint) orelse return false;
     defer message.deinit(workerPageAllocator());
     data = try qjsWorkerMessageToValue(ctx.runtime, message);
     defer {
@@ -6491,7 +4972,7 @@ pub fn qjsWorkerDispatchOne(ctx: *core.JSContext, output: ?*std.Io.Writer, globa
         event_value = core.JSValue.undefinedValue();
         owned_event.free(ctx.runtime);
     }
-    try defineValueProperty(ctx.runtime, event, "data", data);
+    try object_ops.defineValueProperty(ctx.runtime, event, "data", data);
     const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), handler, &.{event_value}, null, null);
     result.free(ctx.runtime);
     return true;
@@ -6589,10 +5070,10 @@ pub fn qjsWorkerMessageFromValue(rt: *core.JSRuntime, value: core.JSValue) !Work
     if (rooted_value.isString()) {
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.memory.allocator);
-        try appendSourceStringUtf8(rt, &bytes, rooted_value);
+        try string_ops.appendSourceStringUtf8(rt, &bytes, rooted_value);
         return .{ .string = try workerPageAllocator().dupe(u8, bytes.items) };
     }
-    if (objectFromValue(rooted_value)) |object| {
+    if (object_ops.objectFromValue(rooted_value)) |object| {
         if (object.class_id == core.class.ids.shared_array_buffer) {
             const store = object.sharedByteStorageStore() orelse return error.TypeError;
             store.retain();
@@ -6624,7 +5105,7 @@ pub fn indirectEval(
     if (!args[0].isString()) return args[0].dup();
     var source = std.ArrayList(u8).empty;
     defer source.deinit(ctx.runtime.memory.allocator);
-    try appendSourceStringUtf8(ctx.runtime, &source, args[0]);
+    try string_ops.appendSourceStringUtf8(ctx.runtime, &source, args[0]);
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
@@ -6645,7 +5126,7 @@ pub fn indirectEval(
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
     return runWithArgsState(ctx, &nested_stack, &compiled.function, eval_global.value(), &.{}, &.{}, output, eval_global, true, false, false, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, null, null, null, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true, core.JSValue.undefinedValue(), false, false) catch |err| {
-        return normalizeEvalRuntimeError(err);
+        return exception_ops.normalizeEvalRuntimeError(err);
     };
 }
 
@@ -6656,7 +5137,7 @@ pub fn simpleEvalRegExpLiteral(ctx: *core.JSContext, global: *core.Object, sourc
     const literal = frontend.zjs_lexer.scanRegExpLiteral(trimmed, 0) catch return null;
     if (literal.end_offset != trimmed.len) return null;
     if (containsUtf8LineSeparator(literal.pattern)) return null;
-    return try builtins.regexp.constructLiteral(ctx.runtime, literal.pattern, literal.flags, constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
+    return try builtins.regexp.constructLiteral(ctx.runtime, literal.pattern, literal.flags, object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"));
 }
 
 pub fn containsUtf8LineSeparator(bytes: []const u8) bool {
@@ -6676,8 +5157,8 @@ pub fn evalSimpleCallerExpression(
 ) !?core.JSValue {
     const frame = caller_frame orelse return null;
     const trimmed = std.mem.trim(u8, source, " \t\r\n");
-    if (simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
-    if (std.mem.eql(u8, trimmed, "this")) return directEvalThisValue(ctx.runtime, caller_function, caller_frame).dup();
+    if (string_ops.simpleEvalStringLiteral(ctx.runtime, trimmed)) |value| return value;
+    if (std.mem.eql(u8, trimmed, "this")) return eval_ops.directEvalThisValue(ctx.runtime, caller_function, caller_frame).dup();
     if (std.mem.startsWith(u8, trimmed, "delete ")) {
         const ident = std.mem.trim(u8, trimmed["delete ".len..], " \t\r\n");
         if (isSimpleIdentifierName(ident) and callerFunctionHasBinding(ctx.runtime, caller_function, frame, ident)) {
@@ -6918,7 +5399,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    const args = try argsFromArrayLike(ctx, null, global, source.value(), null, null);
+    const args = try array_ops.argsFromArrayLike(ctx, null, global, source.value(), null, null);
     var args_alive = true;
     defer if (args_alive) freeArgs(rt, args);
 
@@ -7002,7 +5483,7 @@ pub fn callFunctionBytecodeModeState(
 ) HostError!core.JSValue {
     const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
     if (defer_generators and (fb.func_kind == .generator or fb.func_kind == .async_generator)) {
-        return createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, fb.func_kind == .async_generator);
+        return object_ops.createGeneratorObject(ctx, func, current_function_value, this_value, args, var_refs, output, global, eval_var_ref_names, eval_var_refs, fb.func_kind == .async_generator);
     }
 
     var nested = bytecode.function.asBytecodeView(fb, ctx.runtime);
@@ -7011,7 +5492,7 @@ pub fn callFunctionBytecodeModeState(
     var allocated_combined_refs: []core.JSValue = &.{};
     defer if (allocated_combined_refs.len != 0) ctx.runtime.memory.free(core.JSValue, allocated_combined_refs);
     var rooted_combined_refs: []core.JSValue = &.{};
-    var combined_refs_root = ValueSliceRoot{};
+    var combined_refs_root = array_ops.ValueSliceRoot{};
     combined_refs_root.init(ctx.runtime, &rooted_combined_refs);
     defer combined_refs_root.deinit();
     var allocated_var_ref_names: []core.Atom = &.{};
@@ -7060,13 +5541,13 @@ pub fn callFunctionBytecodeModeState(
     const effective_this = if (!fb_runtime_strict) blk: {
         if (this_value.isUndefined() or this_value.isNull()) break :blk global.value();
         if (!this_value.isObject()) {
-            boxed_this = try primitiveObjectForAccess(ctx.runtime, global, this_value);
+            boxed_this = try object_ops.primitiveObjectForAccess(ctx.runtime, global, this_value);
             break :blk boxed_this.?;
         }
         break :blk this_value;
     } else this_value;
     if (fb.func_kind == .async and generator_state == null) {
-        return qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs);
+        return promise_ops.qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs);
     }
     const stop_on_yield = fb.func_kind == .generator or fb.func_kind == .async_generator;
 
@@ -7088,13 +5569,13 @@ pub fn callFunctionBytecodeModeState(
     defer nested_stack.deinit(ctx.runtime);
     const result = runWithArgsState(ctx, &nested_stack, &nested, effective_this, args, combined_var_refs, output, global, false, fb_runtime_strict, stop_on_yield, &.{}, &.{}, eval_var_ref_names, eval_var_refs, &.{}, &.{}, &.{}, &.{}, generator_state, resume_value, stop_before_pc, current_function_value, new_target_value, constructor_this_value, false, false, core.JSValue.undefinedValue(), false, false) catch |err| {
         if (fb.func_kind == .async_generator) {
-            return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+            return exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
         }
         return err;
     };
     if (fb.func_kind == .async_generator) {
         defer result.free(ctx.runtime);
-        return builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promisePrototypeFromGlobal(ctx.runtime, global));
+        return builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
     }
     return result;
 }
@@ -7171,12 +5652,12 @@ pub fn qjsGeneratorNext(
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = objectRealmGlobal(object) orelse global;
+    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     if (object.generatorDone()) {
         const done_result = try createIteratorResult(ctx.runtime, generator_global, core.JSValue.undefinedValue(), true);
         defer done_result.free(ctx.runtime);
         if (object.class_id == core.class.ids.async_generator) {
-            return try builtins.promise.fulfilledWithPrototype(ctx.runtime, done_result, promisePrototypeFromGlobal(ctx.runtime, generator_global));
+            return try builtins.promise.fulfilledWithPrototype(ctx.runtime, done_result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
         }
         return done_result.dup();
     }
@@ -7207,13 +5688,13 @@ pub fn qjsGeneratorNext(
     ) catch |err| {
         object.generatorDoneSlot().* = true;
         if (object.class_id == core.class.ids.async_generator) {
-            return try rejectedPromiseForRuntimeError(ctx, generator_global, err, promisePrototypeFromGlobal(ctx.runtime, generator_global));
+            return try exception_ops.rejectedPromiseForRuntimeError(ctx, generator_global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
         }
         return err;
     };
     if (object.class_id == core.class.ids.async_generator) {
         defer result.free(ctx.runtime);
-        const promise = objectFromValue(result) orelse return error.TypeError;
+        const promise = object_ops.objectFromValue(result) orelse return error.TypeError;
         if (promise.class_id != core.class.ids.promise) return error.TypeError;
         if (promise.promiseIsRejected()) {
             object.generatorDoneSlot().* = true;
@@ -7221,11 +5702,11 @@ pub fn qjsGeneratorNext(
         }
         const done = !object.generatorJustYielded();
         if (promise.promiseResult() == null) {
-            return try asyncGeneratorIteratorResultFromPromise(ctx, output, generator_global, result, done);
+            return try promise_ops.asyncGeneratorIteratorResultFromPromise(ctx, output, generator_global, result, done);
         }
         const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
         defer value.free(ctx.runtime);
-        if (objectFromValue(value)) |inner_promise| {
+        if (object_ops.objectFromValue(value)) |inner_promise| {
             if (inner_promise.class_id == core.class.ids.promise and inner_promise.promiseIsRejected()) {
                 object.generatorDoneSlot().* = true;
                 if (ctx.hasException()) ctx.clearException();
@@ -7234,7 +5715,7 @@ pub fn qjsGeneratorNext(
         }
         const iterator_result = try createIteratorResult(ctx.runtime, generator_global, value, done);
         defer iterator_result.free(ctx.runtime);
-        return try builtins.promise.fulfilledWithPrototype(ctx.runtime, iterator_result, promisePrototypeFromGlobal(ctx.runtime, generator_global));
+        return try builtins.promise.fulfilledWithPrototype(ctx.runtime, iterator_result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
     }
     defer result.free(ctx.runtime);
     if (object.generatorJustYielded() and
@@ -7298,13 +5779,13 @@ pub fn resumeGeneratorYieldStarCompletion(
     ) catch |err| {
         object.generatorDoneSlot().* = true;
         if (object.class_id == core.class.ids.async_generator) {
-            return try rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
+            return try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, promise_ops.promisePrototypeFromGlobal(ctx.runtime, global));
         }
         return err;
     };
     defer result.free(ctx.runtime);
     if (object.class_id == core.class.ids.async_generator) {
-        const promise = objectFromValue(result) orelse return error.TypeError;
+        const promise = object_ops.objectFromValue(result) orelse return error.TypeError;
         if (promise.class_id != core.class.ids.promise) return error.TypeError;
         if (promise.promiseIsRejected()) {
             object.generatorDoneSlot().* = true;
@@ -7313,12 +5794,12 @@ pub fn resumeGeneratorYieldStarCompletion(
         const done = !object.generatorJustYielded();
         if (promise.promiseResult() == null) {
             if (done) object.generatorDoneSlot().* = true;
-            return try asyncGeneratorIteratorResultFromPromise(ctx, output, global, result, done);
+            return try promise_ops.asyncGeneratorIteratorResultFromPromise(ctx, output, global, result, done);
         }
         const value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
         defer value.free(ctx.runtime);
         if (done) object.generatorDoneSlot().* = true;
-        return try asyncGeneratorFulfilledIteratorResult(ctx, global, value, done);
+        return try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, global, value, done);
     }
     const done = !object.generatorJustYielded();
     if (done) object.generatorDoneSlot().* = true;
@@ -7337,7 +5818,7 @@ pub fn qjsGeneratorReturn(
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = objectRealmGlobal(object) orelse global;
+    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     try closeGeneratorDestructuringIterators(ctx, output, generator_global, object);
     var return_value = if (args.len > 0) args[0].dup() else core.JSValue.undefinedValue();
     defer return_value.free(ctx.runtime);
@@ -7353,7 +5834,7 @@ pub fn qjsGeneratorReturn(
             .yield_result => |result| {
                 if (object.class_id == core.class.ids.async_generator) {
                     defer result.free(ctx.runtime);
-                    const promise = try builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promisePrototypeFromGlobal(ctx.runtime, generator_global));
+                    const promise = try builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
                     return promise;
                 }
                 return result;
@@ -7396,7 +5877,7 @@ pub fn qjsGeneratorReturn(
             if (done) object.generatorDoneSlot().* = true;
             const iterator_value = if (done and result.isUndefined()) return_value else result;
             if (object.class_id == core.class.ids.async_generator) {
-                const promise = try asyncGeneratorFulfilledIteratorResult(ctx, generator_global, iterator_value, done);
+                const promise = try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, iterator_value, done);
                 return promise;
             }
             return try createIteratorResult(ctx.runtime, generator_global, iterator_value, done);
@@ -7404,7 +5885,7 @@ pub fn qjsGeneratorReturn(
     }
     object.generatorDoneSlot().* = true;
     if (object.class_id == core.class.ids.async_generator) {
-        const promise = try asyncGeneratorFulfilledIteratorResult(ctx, generator_global, return_value, true);
+        const promise = try promise_ops.asyncGeneratorFulfilledIteratorResult(ctx, generator_global, return_value, true);
         return promise;
     }
     return try createIteratorResult(ctx.runtime, generator_global, return_value, true);
@@ -7476,7 +5957,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     defer iterator_value.free(ctx.runtime);
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
     defer return_method.free(ctx.runtime);
 
     if (return_method.isUndefined() or return_method.isNull()) {
@@ -7490,7 +5971,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done_value = try getValueProperty(ctx, output, global, result.value(), done_key, null, null);
+    const done_value = try object_ops.getValueProperty(ctx, output, global, result.value(), done_key, null, null);
     defer done_value.free(ctx.runtime);
     const is_done = value_ops.isTruthy(done_value);
 
@@ -7500,7 +5981,7 @@ pub fn qjsGeneratorYieldStarReturnStep(
     }
 
     const value_key = core.atom.predefinedId("value", .string).?;
-    const value = try getValueProperty(ctx, output, global, result.value(), value_key, null, null);
+    const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
     errdefer value.free(ctx.runtime);
     result_value.free(ctx.runtime);
     generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
@@ -7518,7 +5999,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     defer iterator_value.free(ctx.runtime);
     const throw_key = try ctx.runtime.internAtom("throw");
     defer ctx.runtime.atoms.free(throw_key);
-    const throw_method = try getValueProperty(ctx, output, global, iterator_value, throw_key, null, null);
+    const throw_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, throw_key, null, null);
     defer throw_method.free(ctx.runtime);
 
     if (throw_method.isUndefined() or throw_method.isNull()) {
@@ -7533,7 +6014,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     const result = property_ops.expectObject(result_value) catch return error.TypeError;
 
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done_value = try getValueProperty(ctx, output, global, result.value(), done_key, null, null);
+    const done_value = try object_ops.getValueProperty(ctx, output, global, result.value(), done_key, null, null);
     defer done_value.free(ctx.runtime);
     const is_done = value_ops.isTruthy(done_value);
 
@@ -7543,7 +6024,7 @@ pub fn qjsGeneratorYieldStarThrowStep(
     }
 
     const value_key = core.atom.predefinedId("value", .string).?;
-    const value = try getValueProperty(ctx, output, global, result.value(), value_key, null, null);
+    const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
     errdefer value.free(ctx.runtime);
     result_value.free(ctx.runtime);
     generator.clearOptionalValueSlot(ctx.runtime, generator.generatorYieldStarIteratorSlot());
@@ -7558,7 +6039,7 @@ pub fn qjsGeneratorYieldStarCloseForMissingThrow(
 ) !void {
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
@@ -7596,7 +6077,7 @@ pub fn qjsGeneratorThrow(
     const object = property_ops.expectObject(receiver) catch return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.generatorExecuting()) return error.TypeError;
-    const generator_global = objectRealmGlobal(object) orelse global;
+    const generator_global = object_ops.objectRealmGlobal(object) orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
 
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
@@ -7605,7 +6086,7 @@ pub fn qjsGeneratorThrow(
 
     if (object.class_id == core.class.ids.async_generator) {
         object.generatorDoneSlot().* = true;
-        return try builtins.promise.rejectedWithPrototype(ctx.runtime, thrown, promisePrototypeFromGlobal(ctx.runtime, generator_global));
+        return try builtins.promise.rejectedWithPrototype(ctx.runtime, thrown, promise_ops.promisePrototypeFromGlobal(ctx.runtime, generator_global));
     }
 
     if (object.generatorYieldStarIterator() != null) {
@@ -7902,11 +6383,11 @@ pub fn qjsIteratorCallForNativeRecord(
         @intFromEnum(builtins.iterator.AccessorMethod.constructor_setter),
         @intFromEnum(builtins.iterator.AccessorMethod.to_string_tag_getter),
         @intFromEnum(builtins.iterator.AccessorMethod.to_string_tag_setter),
-        => return @as(?core.JSValue, try qjsIteratorPrototypeAccessor(ctx, global, receiver, args, id)),
+        => return @as(?core.JSValue, try object_ops.qjsIteratorPrototypeAccessor(ctx, global, receiver, args, id)),
         else => {},
     }
     if (try qjsIteratorStaticCall(ctx, output, global, args, id, caller_function, caller_frame)) |value| return value;
-    return qjsIteratorPrototypeMethodCall(ctx, output, global, receiver, args, id, caller_function, caller_frame);
+    return object_ops.qjsIteratorPrototypeMethodCall(ctx, output, global, receiver, args, id, caller_function, caller_frame);
 }
 
 pub fn qjsIteratorStaticCall(
@@ -7920,7 +6401,7 @@ pub fn qjsIteratorStaticCall(
 ) !?core.JSValue {
     return switch (method_id) {
         @intFromEnum(builtins.iterator.StaticMethod.from) => try qjsIteratorFromCall(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.StaticMethod.concat) => try qjsIteratorConcatCall(ctx, output, global, args),
+        @intFromEnum(builtins.iterator.StaticMethod.concat) => try string_ops.qjsIteratorConcatCall(ctx, output, global, args),
         @intFromEnum(builtins.iterator.StaticMethod.zip) => try qjsIteratorZipCall(ctx, output, global, args, false, caller_function, caller_frame),
         @intFromEnum(builtins.iterator.StaticMethod.zip_keyed) => try qjsIteratorZipCall(ctx, output, global, args, true, caller_function, caller_frame),
         else => null,
@@ -7944,10 +6425,6 @@ pub fn qjsIteratorFromCall(
         caller_frame,
     );
 }
-
-pub const IteratorZipMode = iter_vm.IteratorZipMode;
-pub const IteratorZipRecord = iter_vm.IteratorZipRecord;
-pub const IteratorZipCompletion = iter_vm.IteratorZipCompletion;
 
 pub fn qjsIteratorZipCall(
     ctx: *core.JSContext,
@@ -7976,7 +6453,7 @@ pub fn qjsIteratorZipModeFromOptions(
     options: core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
-) !IteratorZipMode {
+) !iter_vm.IteratorZipMode {
     return iter_vm.qjsIteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
 }
 
@@ -7990,7 +6467,7 @@ pub fn qjsIteratorZipCollectIndexed(
     nexts: *core.Object,
     pads: *core.Object,
     padding: core.JSValue,
-    mode: IteratorZipMode,
+    mode: iter_vm.IteratorZipMode,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
@@ -8020,7 +6497,7 @@ pub fn qjsIteratorZipCollectKeyed(
     pads: *core.Object,
     keys: *core.Object,
     padding: core.JSValue,
-    mode: IteratorZipMode,
+    mode: iter_vm.IteratorZipMode,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
@@ -8066,7 +6543,7 @@ pub fn qjsIteratorZipCreateHelper(
     pads: *core.Object,
     keys: ?*core.Object,
     count: usize,
-    mode: IteratorZipMode,
+    mode: iter_vm.IteratorZipMode,
     keyed: bool,
 ) !core.JSValue {
     return iter_vm.qjsIteratorZipCreateHelper(rt, global, iters, nexts, pads, keys, count, mode, keyed);
@@ -8088,7 +6565,7 @@ pub fn qjsIteratorZipCloseWithCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    completion: *IteratorZipCompletion,
+    completion: *iter_vm.IteratorZipCompletion,
     iterator_value: core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -8100,7 +6577,7 @@ pub fn qjsIteratorZipCloseAllWithCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    completion: *IteratorZipCompletion,
+    completion: *iter_vm.IteratorZipCompletion,
     iters: *core.Object,
     count: usize,
     caller_function: ?*const bytecode.Bytecode,
@@ -8129,7 +6606,7 @@ pub fn iteratorCloseWithCompletionAndPropagate(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError {
-    var completion = IteratorZipCompletion.initThrow(ctx, err);
+    var completion = iter_vm.IteratorZipCompletion.initThrow(ctx, err);
     defer completion.deinit(ctx.runtime);
     qjsIteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
     completion.restore(ctx);
@@ -8166,8 +6643,8 @@ pub fn iteratorFromSourceForIteratorFrom(
         return .{ .iterator = iterator };
     }
 
-    const source_object = objectFromValue(source) orelse return error.TypeError;
-    if (iteratorIsOnIteratorPrototypeChain(ctx.runtime, global, source)) {
+    const source_object = object_ops.objectFromValue(source) orelse return error.TypeError;
+    if (object_ops.iteratorIsOnIteratorPrototypeChain(ctx.runtime, global, source)) {
         return .{ .iterator = source.dup() };
     }
 
@@ -8177,13 +6654,13 @@ pub fn iteratorFromSourceForIteratorFrom(
         if (!isCallableValue(iterator_method)) return error.TypeError;
         const iterator = try callValueOrBytecode(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
         errdefer iterator.free(ctx.runtime);
-        _ = objectFromValue(iterator) orelse return error.TypeError;
+        _ = object_ops.objectFromValue(iterator) orelse return error.TypeError;
         return .{ .iterator = iterator };
     }
 
     const next_key = try ctx.runtime.internAtom("next");
     defer ctx.runtime.atoms.free(next_key);
-    const next_method = try getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
     errdefer next_method.free(ctx.runtime);
     return .{ .iterator = source_object.value().dup(), .next_method = next_method, .wrap = true };
 }
@@ -8212,8 +6689,8 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
     ctx.runtime.active_value_roots = &root_frame;
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
-    const iterator_object = objectFromValue(rooted_iterator) orelse return error.TypeError;
-    const prototype = try wrapForValidIteratorPrototype(ctx.runtime, global);
+    const iterator_object = object_ops.objectFromValue(rooted_iterator) orelse return error.TypeError;
+    const prototype = try object_ops.wrapForValidIteratorPrototype(ctx.runtime, global);
     const wrapper = try core.Object.create(ctx.runtime, core.class.ids.iterator_wrap, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &wrapper.header);
     try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorTargetSlot(), rooted_iterator.dup());
@@ -8241,7 +6718,7 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
     defer prototype.value().free(rt);
-    try storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, prototype.value());
+    try builtin_glue.storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, prototype.value());
 
     const fb_slice = try rt.memory.alloc(bytecode.FunctionBytecode, 1);
     const fb = &fb_slice[0];
@@ -8265,7 +6742,7 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const wrapper_value = try wrapIteratorFromIterator(ctx, global, iterator.value(), next_method);
     var wrapper_alive = true;
     defer if (wrapper_alive) wrapper_value.free(rt);
-    const wrapper = objectFromValue(wrapper_value) orelse return error.TypeError;
+    const wrapper = object_ops.objectFromValue(wrapper_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.iteratorNext() orelse return error.TypeError;
@@ -8289,13 +6766,13 @@ pub fn qjsIteratorWrapNext(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (function_object.functionIteratorWrapMethod() != 1) return null;
-    const wrapper = objectFromValue(receiver) orelse return error.TypeError;
+    const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
     if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
     const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
     const next_method = if (wrapper.iteratorNext()) |stored| stored.dup() else blk: {
         const next_key = try ctx.runtime.internAtom("next");
         defer ctx.runtime.atoms.free(next_key);
-        const method = try getValueProperty(ctx, output, global, iterator, next_key, caller_function, caller_frame);
+        const method = try object_ops.getValueProperty(ctx, output, global, iterator, next_key, caller_function, caller_frame);
         errdefer method.free(ctx.runtime);
         if (!isCallableValue(method)) return error.TypeError;
         break :blk method;
@@ -8303,7 +6780,7 @@ pub fn qjsIteratorWrapNext(
     defer next_method.free(ctx.runtime);
     const result = try callValueOrBytecode(ctx, output, global, iterator, next_method, &.{}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
-    _ = objectFromValue(result) orelse return error.TypeError;
+    _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
 }
 
@@ -8317,12 +6794,12 @@ pub fn qjsIteratorWrapReturn(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (function_object.functionIteratorWrapMethod() != 2) return null;
-    const wrapper = objectFromValue(receiver) orelse return error.TypeError;
+    const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
     if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
     const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) {
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
@@ -8330,7 +6807,7 @@ pub fn qjsIteratorWrapReturn(
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = try callValueOrBytecode(ctx, output, global, iterator, return_method, &.{}, caller_function, caller_frame);
     errdefer result.free(ctx.runtime);
-    _ = objectFromValue(result) orelse return error.TypeError;
+    _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
 }
 
@@ -8407,7 +6884,7 @@ pub fn runNextOsRwHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, global:
 }
 
 pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !void {
-    try enqueuePendingPromiseJob(ctx, callback);
+    try promise_ops.enqueuePendingPromiseJob(ctx, callback);
 }
 
 pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue, done: bool) !core.JSValue {
@@ -8422,10 +6899,10 @@ pub fn createIteratorResult(rt: *core.JSRuntime, global: *core.Object, value: co
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
+    const object = try core.Object.create(rt, core.class.ids.object, object_ops.objectPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, &object.header);
-    try defineValueProperty(rt, object, "value", rooted_value);
-    try defineValueProperty(rt, object, "done", core.JSValue.boolean(done));
+    try object_ops.defineValueProperty(rt, object, "value", rooted_value);
+    try object_ops.defineValueProperty(rt, object, "done", core.JSValue.boolean(done));
     return object.value();
 }
 
@@ -8457,7 +6934,7 @@ test "createIteratorResult roots direct function bytecode value while creating r
     const iterator_result_value = try createIteratorResult(rt, global, result_value, false);
     var iterator_result_alive = true;
     defer if (iterator_result_alive) iterator_result_value.free(rt);
-    const iterator_result = objectFromValue(iterator_result_value) orelse return error.TypeError;
+    const iterator_result = object_ops.objectFromValue(iterator_result_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const value_atom = try rt.internAtom("value");
@@ -8481,7 +6958,7 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
     errdefer thrower.free(rt);
     const thrower_object = try property_ops.expectObject(thrower);
     try thrower_object.setFunctionRealmGlobalPtr(rt, global);
-    if (functionPrototypeFromGlobal(rt, global)) |function_prototype| {
+    if (object_ops.functionPrototypeFromGlobal(rt, global)) |function_prototype| {
         try thrower_object.setPrototype(rt, function_prototype);
     }
 
@@ -8492,15 +6969,15 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
     if (!thrower_object.addThrowTypeErrorIntrinsicFunction()) return error.TypeError;
     try thrower_object.freeze(rt);
 
-    try installFunctionPrototypeThrowTypeErrorAccessors(rt, global, thrower);
+    try object_ops.installFunctionPrototypeThrowTypeErrorAccessors(rt, global, thrower);
     const cached_thrower = try global.cachedThrowTypeErrorIntrinsicSlot(rt);
     try global.setOptionalValueSlot(rt, cached_thrower, thrower.dup());
     return thrower;
 }
 
 pub fn qjsThrowTypeErrorIntrinsic(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
-    const error_global = objectRealmGlobal(function_object) orelse global;
-    const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "invalid property access");
+    const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    const error_value = try exception_ops.createNamedError(ctx.runtime, error_global, "TypeError", "invalid property access");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -8509,7 +6986,7 @@ pub fn currentFrameFunctionIsStrict(frame: *frame_mod.Frame) bool {
     if (frame.function.flags.is_strict or frame.function.flags.runtime_strict) return true;
     const fb = if (functionBytecodeFromValue(frame.current_function)) |bytecode_value|
         bytecode_value
-    else if (objectFromValue(frame.current_function)) |function_object|
+    else if (object_ops.objectFromValue(frame.current_function)) |function_object|
         if (function_object.functionBytecodeSlot().*) |stored| functionBytecodeFromValue(stored) else null
     else
         null;
@@ -8534,12 +7011,12 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
         const fb = functionBytecodeFromValue(value) orelse return false;
         return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
     }
-    if (functionObjectFromValue(value)) |function_object| {
+    if (object_ops.functionObjectFromValue(value)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return false;
         const fb = functionBytecodeFromValue(function_value) orelse return false;
         return !fb.is_arrow_function and fb.has_prototype and fb.func_kind != .generator and fb.func_kind != .async_generator;
     }
-    if (callableObjectFromValue(value)) |function_object| {
+    if (object_ops.callableObjectFromValue(value)) |function_object| {
         if (function_object.class_id == core.class.ids.bound_function) {
             const target = function_object.boundTarget() orelse return false;
             return isConstructorLike(ctx, target);
@@ -8554,7 +7031,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) bool {
         defer ctx.runtime.memory.allocator.free(name);
         return isBuiltinConstructorName(name);
     }
-    return proxyTargetIsConstructor(ctx, value);
+    return object_ops.proxyTargetIsConstructor(ctx, value);
 }
 
 pub fn callBoundFunction(
@@ -8602,8 +7079,8 @@ pub fn throwPrivateBrandTypeError(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const error_global = if (caller_frame) |frame| blk: {
-        const function_object = objectFromValue(frame.current_function) orelse break :blk global;
-        break :blk objectRealmGlobal(function_object) orelse global;
+        const function_object = object_ops.objectFromValue(frame.current_function) orelse break :blk global;
+        break :blk object_ops.objectRealmGlobal(function_object) orelse global;
     } else global;
     const atom_name = ctx.runtime.atoms.name(atom_id) orelse "";
     const message = try std.fmt.allocPrint(
@@ -8662,22 +7139,22 @@ pub fn ordinarySetWithReceiver(
 ) HostError!bool {
     _ = target_value;
     if (target.proxyTarget() != null) {
-        return proxySetValueProperty(ctx, output, global, receiver_value, target, atom_id, value, caller_function, caller_frame);
+        return object_ops.proxySetValueProperty(ctx, output, global, receiver_value, target, atom_id, value, caller_function, caller_frame);
     }
-    const receiver_object = objectFromValue(receiver_value) orelse target;
-    if (try typedArrayPrototypeSet(ctx, output, global, receiver_value, receiver_object, target.getPrototype(), atom_id, value, caller_function, caller_frame)) |ok| return ok;
+    const receiver_object = object_ops.objectFromValue(receiver_value) orelse target;
+    if (try array_ops.typedArrayPrototypeSet(ctx, output, global, receiver_value, receiver_object, target.getPrototype(), atom_id, value, caller_function, caller_frame)) |ok| return ok;
     if (value_ops.atomNameEql(ctx.runtime, atom_id, "__proto__")) {
-        _ = try qjsObjectProtoSetterCall(ctx, output, global, receiver_value, value, caller_function, caller_frame);
+        _ = try object_ops.qjsObjectProtoSetterCall(ctx, output, global, receiver_value, value, caller_function, caller_frame);
         return true;
     }
     if (target.getOwnProperty(atom_id)) |own_desc| {
         defer own_desc.destroy(ctx.runtime);
-        return setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, own_desc, caller_function, caller_frame);
+        return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, own_desc, caller_function, caller_frame);
     }
     if (target.getPrototype()) |prototype| {
         return ordinarySetWithReceiver(ctx, output, global, prototype.value(), prototype, receiver_value, atom_id, value, caller_function, caller_frame);
     }
-    return setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true), caller_function, caller_frame);
+    return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true), caller_function, caller_frame);
 }
 
 pub fn qjsReflectSetCall(
@@ -8692,29 +7169,29 @@ pub fn qjsReflectSetCall(
     const set_value = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(atom_id);
     if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
     if (!object.flags.is_array or atom_id != core.atom.ids.length) {
         const receiver_value = if (args.len >= 4) args[3] else args[0];
         if (object.proxyTarget() != null) {
-            const ok = try proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
+            const ok = try object_ops.proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
             return core.JSValue.boolean(ok);
         }
         if (builtins.buffer.isTypedArrayObject(object)) {
-            switch (try typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
+            switch (try builtins.buffer.typedArrayCanonicalNumericIndex(ctx.runtime, atom_id)) {
                 .none => {},
                 .invalid => {
-                    if (sameObjectIdentity(receiver_value, args[0])) {
-                        const coerced = try coerceTypedArrayElementInput(ctx, output, global, set_value);
+                    if (object_ops.sameObjectIdentity(receiver_value, args[0])) {
+                        const coerced = try array_ops.coerceTypedArrayElementInput(ctx, output, global, set_value);
                         defer coerced.free(ctx.runtime);
                         try builtins.buffer.typedArrayCoerceElementValue(ctx.runtime, object, coerced);
                     }
                     return core.JSValue.boolean(true);
                 },
                 .index => |index| {
-                    if (sameObjectIdentity(receiver_value, args[0])) {
-                        const coerced = try coerceTypedArrayElementForSet(ctx, output, global, object, set_value);
+                    if (object_ops.sameObjectIdentity(receiver_value, args[0])) {
+                        const coerced = try array_ops.coerceTypedArrayElementForSet(ctx, output, global, object, set_value);
                         defer coerced.free(ctx.runtime);
                         if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return core.JSValue.boolean(true);
                         if (try builtins.buffer.typedArrayImmutableBuffer(ctx.runtime, object)) return core.JSValue.boolean(false);
@@ -8722,21 +7199,21 @@ pub fn qjsReflectSetCall(
                         return core.JSValue.boolean(true);
                     }
                     if (!try builtins.buffer.typedArrayIndexValid(ctx.runtime, object, index)) return core.JSValue.boolean(true);
-                    const receiver_object = objectFromValue(receiver_value) orelse return core.JSValue.boolean(false);
-                    const ok = try typedArrayReflectSetReceiverOwn(ctx, output, global, receiver_value, receiver_object, atom_id, set_value, caller_function, caller_frame);
+                    const receiver_object = object_ops.objectFromValue(receiver_value) orelse return core.JSValue.boolean(false);
+                    const ok = try array_ops.typedArrayReflectSetReceiverOwn(ctx, output, global, receiver_value, receiver_object, atom_id, set_value, caller_function, caller_frame);
                     return core.JSValue.boolean(ok);
                 },
             }
         }
-        if (objectFromValue(receiver_value)) |receiver_object| {
-            if (try typedArrayPrototypeSet(ctx, output, global, receiver_value, receiver_object, object.getPrototype(), atom_id, set_value, caller_function, caller_frame)) |ok| {
+        if (object_ops.objectFromValue(receiver_value)) |receiver_object| {
+            if (try array_ops.typedArrayPrototypeSet(ctx, output, global, receiver_value, receiver_object, object.getPrototype(), atom_id, set_value, caller_function, caller_frame)) |ok| {
                 return core.JSValue.boolean(ok);
             }
         }
         const ok = try ordinarySetWithReceiver(ctx, output, global, args[0], object, receiver_value, atom_id, set_value, caller_function, caller_frame);
         return core.JSValue.boolean(ok);
     }
-    const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
+    const value_to_set = try array_ops.arrayLengthAssignmentValue(ctx, output, global, object, atom_id, set_value, caller_function, caller_frame);
     defer if (!value_to_set.same(set_value)) value_to_set.free(ctx.runtime);
     object.setProperty(ctx.runtime, atom_id, value_to_set) catch |err| switch (err) {
         error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return core.JSValue.boolean(false),
@@ -8761,11 +7238,6 @@ pub fn qjsDefinePropertiesCall(
 }
 
 const math_ops = @import("math_ops.zig");
-pub const qjsMathSumPrecise = math_ops.qjsMathSumPrecise;
-pub const exactF64Sum = math_ops.exactF64Sum;
-pub const exactF64ScaledInteger = math_ops.exactF64ScaledInteger;
-pub const scaledIntegerToF64 = math_ops.scaledIntegerToF64;
-pub const shouldRoundScaledIntegerUp = math_ops.shouldRoundScaledIntegerUp;
 
 pub const IntegrityLevel = enum {
     sealed,
@@ -8782,7 +7254,7 @@ pub fn qjsReflectIsExtensibleCall(
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
     if (!args[0].isObject()) return error.TypeError;
-    return qjsObjectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame);
+    return object_ops.qjsObjectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame);
 }
 
 pub fn qjsReflectPreventExtensionsCall(
@@ -8794,9 +7266,9 @@ pub fn qjsReflectPreventExtensionsCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return error.TypeError;
+    const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
     if (object.proxyTarget() != null) {
-        return core.JSValue.boolean(try proxyAwarePreventExtensions(ctx, output, global, object, caller_function, caller_frame));
+        return core.JSValue.boolean(try object_ops.proxyAwarePreventExtensions(ctx, output, global, object, caller_function, caller_frame));
     }
     object.preventExtensions();
     return core.JSValue.boolean(true);
@@ -8813,17 +7285,17 @@ pub fn qjsReflectConstructCall(
     if (args.len < 2 or !isConstructorLike(ctx, args[0])) return error.TypeError;
     const new_target = if (args.len >= 3) args[2] else args[0];
     if (!isConstructorLike(ctx, new_target)) return error.TypeError;
-    var construct_args = try argsFromArrayLike(ctx, output, global, args[1], caller_function, caller_frame);
+    var construct_args = try array_ops.argsFromArrayLike(ctx, output, global, args[1], caller_function, caller_frame);
     defer freeArgs(ctx.runtime, construct_args);
-    var construct_args_root = ValueSliceRoot{};
+    var construct_args_root = array_ops.ValueSliceRoot{};
     construct_args_root.init(ctx.runtime, &construct_args);
     defer construct_args_root.deinit();
-    if (objectFromValue(args[0])) |target| {
+    if (object_ops.objectFromValue(args[0])) |target| {
         if (target.proxyTarget() == null) {
             const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target);
             defer ctx.runtime.memory.allocator.free(target_name);
             if (construct_mod.typedArrayElement(target_name) != null) {
-                try qjsTypedArrayValidateConstructArgsPreAllocate(ctx, output, global, construct_args);
+                try array_ops.qjsTypedArrayValidateConstructArgsPreAllocate(ctx, output, global, construct_args);
             }
         }
     }
@@ -8847,28 +7319,28 @@ pub fn qjsReflectConstructGenericCallable(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
-    const resolved = try qjsReflectConstructResolveBound(ctx.runtime, target_value, new_target_value, args);
+    const resolved = try promise_ops.qjsReflectConstructResolveBound(ctx.runtime, target_value, new_target_value, args);
     defer if (resolved.owned_args.len != 0) freeArgs(ctx.runtime, resolved.owned_args);
     var rooted_owned_args = resolved.owned_args;
-    var owned_args_root = ValueSliceRoot{};
+    var owned_args_root = array_ops.ValueSliceRoot{};
     if (rooted_owned_args.len != 0) owned_args_root.init(ctx.runtime, &rooted_owned_args);
     defer owned_args_root.deinit();
     const resolved_args: []const core.JSValue = if (rooted_owned_args.len != 0) rooted_owned_args else resolved.args;
 
-    if (objectFromValue(resolved.target)) |target_object| {
+    if (object_ops.objectFromValue(resolved.target)) |target_object| {
         const target_name = call_mod.nativeFunctionNameForVm(ctx.runtime, target_object) catch "";
         defer if (target_name.len != 0) ctx.runtime.memory.allocator.free(target_name);
         if (std.mem.eql(u8, target_name, "Array")) {
-            const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Array", resolved.new_target, caller_function, caller_frame);
+            const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Array", resolved.new_target, caller_function, caller_frame);
             return try builtins.array.constructConstructorWithPrototype(ctx.runtime, resolved_args, prototype);
         }
     }
 
-    const prototype = try reflectConstructPrototypeVm(ctx, output, global, "Object", resolved.new_target, caller_function, caller_frame);
+    const prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Object", resolved.new_target, caller_function, caller_frame);
 
-    if (objectFromValue(resolved.target)) |proxy| {
+    if (object_ops.objectFromValue(resolved.target)) |proxy| {
         if (proxy.proxyTarget() != null) {
-            return try constructProxy(ctx, output, global, resolved.target, proxy, resolved_args, caller_function, caller_frame, resolved.new_target);
+            return try object_ops.constructProxy(ctx, output, global, resolved.target, proxy, resolved_args, caller_function, caller_frame, resolved.new_target);
         }
     }
 
@@ -8881,7 +7353,7 @@ pub fn qjsReflectConstructGenericCallable(
         const instance = instance_object.value();
         errdefer instance.free(ctx.runtime);
         if (!fb.is_derived_class_constructor) {
-            try initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
+            try class_init_ops.initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
         }
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
@@ -8894,7 +7366,7 @@ pub fn qjsReflectConstructGenericCallable(
         return instance;
     }
 
-    if (functionObjectFromValue(resolved.target)) |function_object| {
+    if (object_ops.functionObjectFromValue(resolved.target)) |function_object| {
         const function_value = function_object.functionBytecodeSlot().* orelse return error.TypeError;
         const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
         if (fb.is_arrow_function or !fb.has_prototype or fb.func_kind == .generator or fb.func_kind == .async_generator) {
@@ -8904,9 +7376,9 @@ pub fn qjsReflectConstructGenericCallable(
         const instance = instance_object.value();
         errdefer instance.free(ctx.runtime);
         if (!fb.is_derived_class_constructor) {
-            try initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
+            try class_init_ops.initializeClassInstanceElements(ctx, output, global, resolved.target, instance, fb, caller_function, caller_frame);
         }
-        const function_global = objectRealmGlobal(function_object) orelse global;
+        const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
         const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else instance;
         const constructor_this = if (fb.is_derived_class_constructor) instance else core.JSValue.undefinedValue();
         const result = try callFunctionBytecodeConstruct(ctx, function_value, resolved.target, initial_this, resolved_args, function_object.functionCapturesSlot().*, output, function_global, function_object.functionEvalLocalNamesSlot().*, function_object.functionEvalLocalRefsSlot().*, resolved.new_target, constructor_this);
@@ -8930,13 +7402,13 @@ pub fn qjsReflectHasCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return error.TypeError;
-    const key = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
+    const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
+    const key = try object_ops.toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
     defer ctx.runtime.atoms.free(key);
     const found = if (object.proxyTarget() != null)
-        try hasValueProperty(ctx, output, global, args[0], object, key, caller_function, caller_frame)
+        try object_ops.hasValueProperty(ctx, output, global, args[0], object, key, caller_function, caller_frame)
     else
-        try ordinaryHasValueProperty(ctx, output, global, object, key, false, caller_function, caller_frame);
+        try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, false, caller_function, caller_frame);
     return core.JSValue.boolean(found);
 }
 
@@ -8949,9 +7421,9 @@ pub fn qjsReflectApplyCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (args.len < 3 or !isCallableValue(args[0])) return error.TypeError;
-    var apply_args = try argsFromArrayLike(ctx, output, global, args[2], caller_function, caller_frame);
+    var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, args[2], caller_function, caller_frame);
     defer freeArgs(ctx.runtime, apply_args);
-    var apply_args_root = ValueSliceRoot{};
+    var apply_args_root = array_ops.ValueSliceRoot{};
     apply_args_root.init(ctx.runtime, &apply_args);
     defer apply_args_root.deinit();
     return callValueOrBytecode(ctx, output, global, args[1], args[0], apply_args, caller_function, caller_frame);
@@ -8965,7 +7437,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
 ) !void {
     const return_key = try ctx.runtime.internAtom("return");
     defer ctx.runtime.atoms.free(return_key);
-    const return_method = try getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
     defer return_method.free(ctx.runtime);
     if (return_method.isUndefined() or return_method.isNull()) return;
     if (!isCallableValue(return_method)) return error.TypeError;
@@ -8983,28 +7455,28 @@ pub fn qjsDefinePropertiesOnTarget(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (properties_arg.isNull() or properties_arg.isUndefined()) return error.TypeError;
-    const properties_value = if (objectFromValue(properties_arg)) |_| properties_arg.dup() else try primitiveObjectForAccess(ctx.runtime, global, properties_arg);
+    const properties_value = if (object_ops.objectFromValue(properties_arg)) |_| properties_arg.dup() else try object_ops.primitiveObjectForAccess(ctx.runtime, global, properties_arg);
     defer properties_value.free(ctx.runtime);
-    const properties = objectFromValue(properties_value) orelse return error.TypeError;
+    const properties = object_ops.objectFromValue(properties_value) orelse return error.TypeError;
 
-    const keys = try objectRestOwnKeys(ctx, output, global, properties);
+    const keys = try object_ops.objectRestOwnKeys(ctx, output, global, properties);
     defer core.Object.freeKeys(ctx.runtime, keys);
 
-    var pending = std.ArrayList(PendingPropertyDescriptor).empty;
+    var pending = std.ArrayList(object_ops.PendingPropertyDescriptor).empty;
     defer {
         for (pending.items) |item| item.destroy(ctx.runtime);
         pending.deinit(ctx.runtime.memory.allocator);
     }
 
     for (keys) |key| {
-        const prop_desc = try objectRestOwnPropertyDescriptor(ctx, output, global, properties, key) orelse continue;
+        const prop_desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, properties, key) orelse continue;
         defer prop_desc.destroy(ctx.runtime);
         if (prop_desc.enumerable != true) continue;
 
-        const desc_value = try getValueProperty(ctx, output, global, properties_value, key, caller_function, caller_frame);
+        const desc_value = try object_ops.getValueProperty(ctx, output, global, properties_value, key, caller_function, caller_frame);
         defer desc_value.free(ctx.runtime);
-        const desc_object = objectFromValue(desc_value) orelse return error.TypeError;
-        const desc = try qjsDescriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
+        const desc_object = object_ops.objectFromValue(desc_value) orelse return error.TypeError;
+        const desc = try object_ops.qjsDescriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
         errdefer desc.destroy(ctx.runtime);
         const pending_key = ctx.runtime.atoms.dup(key);
         var pending_key_owned = true;
@@ -9015,7 +7487,7 @@ pub fn qjsDefinePropertiesOnTarget(
 
     for (pending.items) |item| {
         const defined = if (target.proxyTarget() != null)
-            proxyDefineOwnProperty(ctx, output, global, target, item.atom_id, item.desc, caller_function, caller_frame) catch |err| switch (err) {
+            object_ops.proxyDefineOwnProperty(ctx, output, global, target, item.atom_id, item.desc, caller_function, caller_frame) catch |err| switch (err) {
                 error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
                 error.InvalidLength => return error.RangeError,
                 else => return err,
@@ -9045,11 +7517,11 @@ pub fn qjsReflectGetCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
-    const object = objectFromValue(args[0]) orelse return error.TypeError;
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
+    const object = object_ops.objectFromValue(args[0]) orelse return error.TypeError;
+    const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
     defer ctx.runtime.atoms.free(atom_id);
     const receiver = if (args.len >= 3) args[2] else args[0];
-    return try getValuePropertyWithReceiver(ctx, output, global, args[0], object, receiver, atom_id, caller_function, caller_frame);
+    return try object_ops.getValuePropertyWithReceiver(ctx, output, global, args[0], object, receiver, atom_id, caller_function, caller_frame);
 }
 
 pub fn qjsReflectOwnKeysCall(
@@ -9060,12 +7532,12 @@ pub fn qjsReflectOwnKeysCall(
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
     const object = property_ops.expectObject(args[0]) catch return error.TypeError;
-    const keys = try objectRestOwnKeys(ctx, output, global, object);
+    const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
     const out = try core.Object.createArray(ctx.runtime, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
     for (keys) |key| {
-        const key_value = try proxyTrapKeyValue(ctx.runtime, key);
+        const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
         defer key_value.free(ctx.runtime);
         try out.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(out.length), core.Descriptor.data(key_value, true, true, true));
     }
@@ -9083,7 +7555,7 @@ pub fn callAccessorSetter(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    if (try findPropertyDescriptor(object, atom_id)) |desc| {
+    if (try object_ops.findPropertyDescriptor(object, atom_id)) |desc| {
         defer desc.destroy(ctx.runtime);
         if (desc.kind != .accessor) return false;
         if (desc.setter.isUndefined()) return error.AccessorWithoutSetter;
@@ -9239,11 +7711,11 @@ pub fn copyPrivateNameRemap(rt: *core.JSRuntime, dst: *core.Object, src: *const 
 pub fn remapPrivateAtomFromFrame(rt: *core.JSRuntime, caller_frame: ?*frame_mod.Frame, atom_id: core.Atom) core.Atom {
     if (rt.atoms.kind(atom_id) != .private) return atom_id;
     const frame = caller_frame orelse return atom_id;
-    const function_object = objectFromValue(frame.current_function) orelse return atom_id;
-    const function_atom = remapPrivateAtomFromObject(rt, function_object, atom_id);
+    const function_object = object_ops.objectFromValue(frame.current_function) orelse return atom_id;
+    const function_atom = object_ops.remapPrivateAtomFromObject(rt, function_object, atom_id);
     if (function_atom != atom_id) return function_atom;
     const home_object = function_object.functionHomeObjectSlot().* orelse return atom_id;
-    return remapPrivateAtomFromObject(rt, home_object, atom_id);
+    return object_ops.remapPrivateAtomFromObject(rt, home_object, atom_id);
 }
 
 pub fn remapPrivateAtomForOperation(
@@ -9254,7 +7726,7 @@ pub fn remapPrivateAtomForOperation(
 ) core.Atom {
     const frame_atom = remapPrivateAtomFromFrame(rt, caller_frame, atom_id);
     if (frame_atom != atom_id) return frame_atom;
-    if (object) |target| return remapPrivateAtomFromObject(rt, target, atom_id);
+    if (object) |target| return object_ops.remapPrivateAtomFromObject(rt, target, atom_id);
     return atom_id;
 }
 
@@ -9271,13 +7743,13 @@ pub fn inOp(
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
     const object = property_ops.expectObject(rhs) catch return error.TypeError;
-    const key = try toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
+    const key = try object_ops.toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(key);
     const has_builtin_object_proto = value_ops.atomNameEql(ctx.runtime, key, "toString") and (object.class_id == core.class.ids.object or object.flags.is_array);
     const found = if (object.proxyTarget() != null)
-        try hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
+        try object_ops.hasValueProperty(ctx, output, global, rhs, object, key, caller_function, caller_frame)
     else
-        try ordinaryHasValueProperty(ctx, output, global, object, key, has_builtin_object_proto, caller_function, caller_frame);
+        try object_ops.ordinaryHasValueProperty(ctx, output, global, object, key, has_builtin_object_proto, caller_function, caller_frame);
     try stack.pushOwned(core.JSValue.boolean(found));
 }
 
@@ -9295,12 +7767,12 @@ pub fn instanceofOp(
     defer lhs.free(ctx.runtime);
     const ctor = property_ops.expectObject(rhs) catch return error.TypeError;
     const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.TypeError;
-    const has_instance = try getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
+    const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
     if (!has_instance.isUndefined() and !has_instance.isNull()) {
         const result = try callValueOrBytecode(ctx, output, global, rhs, has_instance, &.{lhs}, caller_function, caller_frame);
         defer result.free(ctx.runtime);
-        try stack.pushOwned(core.JSValue.boolean(valueTruthy(result)));
+        try stack.pushOwned(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
         return;
     }
     if (!isCallableValue(rhs)) return error.TypeError;
@@ -9313,19 +7785,19 @@ pub fn instanceofOp(
         try stack.pushOwned(core.JSValue.boolean(object.flags.is_array));
         return;
     }
-    const proto_value = try getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
+    const proto_value = try object_ops.getValueProperty(ctx, output, global, rhs, core.atom.ids.prototype, caller_function, caller_frame);
     defer proto_value.free(ctx.runtime);
     if (!proto_value.isObject()) {
         return error.TypeError;
     }
     const proto = try property_ops.expectObject(proto_value);
-    var current = try qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
+    var current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame);
     while (current) |candidate| {
         if (candidate == proto) {
             try stack.pushOwned(core.JSValue.boolean(true));
             return;
         }
-        current = try qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
+        current = try object_ops.qjsObjectGetPrototypeOfStep(ctx, output, global, candidate, caller_function, caller_frame);
     }
     try stack.pushOwned(core.JSValue.boolean(false));
 }
@@ -9364,12 +7836,12 @@ pub fn isBlockedByUnscopables(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     const unscopables_atom = core.atom.predefinedId("Symbol.unscopables", .symbol) orelse return false;
-    const unscopables = try getValueProperty(ctx, output, global, object_value, unscopables_atom, caller_function, caller_frame);
+    const unscopables = try object_ops.getValueProperty(ctx, output, global, object_value, unscopables_atom, caller_function, caller_frame);
     defer unscopables.free(ctx.runtime);
     if (!unscopables.isObject()) return false;
-    const blocked = try getValueProperty(ctx, output, global, unscopables, atom_id, caller_function, caller_frame);
+    const blocked = try object_ops.getValueProperty(ctx, output, global, unscopables, atom_id, caller_function, caller_frame);
     defer blocked.free(ctx.runtime);
-    return valueTruthy(blocked);
+    return coercion_ops.valueTruthy(blocked);
 }
 
 pub fn lookupFrameVarRef(rt: *core.JSRuntime, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, atom_id: core.Atom) ?core.JSValue {
@@ -9380,7 +7852,7 @@ pub fn lookupFrameLocalValue(rt: *core.JSRuntime, function: *const bytecode.Byte
     const count = @min(function.var_names.len, frame.locals.len);
     for (function.var_names[0..count], 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id)) continue;
-        return slotValueDup(frame.locals[idx]);
+        return slot_ops.slotValueDup(frame.locals[idx]);
     }
     return null;
 }
@@ -9426,9 +7898,9 @@ pub fn lookupParentFunctionEvalBindingValue(
     frame: *frame_mod.Frame,
     atom_id: core.Atom,
 ) ?core.JSValue {
-    const function_object = objectFromValue(frame.current_function) orelse return null;
+    const function_object = object_ops.objectFromValue(frame.current_function) orelse return null;
     const parent_value = function_object.functionEvalParentFunction() orelse return null;
-    const parent_object = objectFromValue(parent_value) orelse return null;
+    const parent_object = object_ops.objectFromValue(parent_value) orelse return null;
     return lookupNamedVarRef(rt, parent_object.functionEvalLocalNamesSlot().*, parent_object.functionEvalLocalRefsSlot().*, atom_id);
 }
 
@@ -9442,8 +7914,8 @@ pub fn atomIdOrNameEql(rt: *core.JSRuntime, left: core.Atom, right: core.Atom) b
 pub fn lookupNamedVarRef(rt: *core.JSRuntime, names: []const core.Atom, refs: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= refs.len) continue;
-        if (varRefSlotIsDeleted(refs[idx])) return core.JSValue.uninitialized();
-        return slotValueDup(refs[idx]);
+        if (slot_ops.varRefSlotIsDeleted(refs[idx])) return core.JSValue.uninitialized();
+        return slot_ops.slotValueDup(refs[idx]);
     }
     return null;
 }
@@ -9502,7 +7974,7 @@ pub fn deleteNamedVarRefBinding(rt: *core.JSRuntime, names: []const core.Atom, r
 }
 
 pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
-    const cell = varRefCellFromValue(slot) orelse return false;
+    const cell = slot_ops.varRefCellFromValue(slot) orelse return false;
     if (cell.varRefIsDeletedSlot().*) return null;
     if (!cell.varRefIsDeletableSlot().*) return false;
     const old_value = cell.varRefValueSlot().*;
@@ -9515,8 +7987,8 @@ pub fn deleteVarRefSlot(rt: *core.JSRuntime, slot: core.JSValue) ?bool {
 pub fn lookupNamedSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= slots.len) continue;
-        if (varRefSlotIsDeleted(slots[idx])) return core.JSValue.uninitialized();
-        return slotValueDup(slots[idx]);
+        if (slot_ops.varRefSlotIsDeleted(slots[idx])) return core.JSValue.uninitialized();
+        return slot_ops.slotValueDup(slots[idx]);
     }
     return null;
 }
@@ -9524,7 +7996,7 @@ pub fn lookupNamedSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots
 pub fn lookupNamedRawSlotValue(rt: *core.JSRuntime, names: []const core.Atom, slots: []const core.JSValue, atom_id: core.Atom) ?core.JSValue {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(rt, name, atom_id) or idx >= slots.len) continue;
-        if (varRefSlotIsDeleted(slots[idx])) continue;
+        if (slot_ops.varRefSlotIsDeleted(slots[idx])) continue;
         return slots[idx].dup();
     }
     return null;
@@ -9550,7 +8022,7 @@ pub fn initializeEvalFrameLocals(
 pub fn setNamedSlotValue(ctx: *core.JSContext, names: []const core.Atom, slots: []core.JSValue, atom_id: core.Atom, value: core.JSValue) !bool {
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= slots.len) continue;
-        try setSlotValue(ctx, &slots[idx], value);
+        try slot_ops.setSlotValue(ctx, &slots[idx], value);
         return true;
     }
     return false;
@@ -9567,7 +8039,7 @@ pub fn setFrameLocalValue(
     for (function.var_names[0..count], 0..) |name, idx| {
         if (name != atom_id) continue;
         if (idx < function.var_is_lexical.len and function.var_is_lexical[idx]) continue;
-        try setSlotValue(ctx, &frame.locals[idx], value);
+        try slot_ops.setSlotValue(ctx, &frame.locals[idx], value);
         return true;
     }
     return false;
@@ -9582,8 +8054,8 @@ pub fn setFrameVarRefValue(
 ) !bool {
     for (function.var_ref_names, 0..) |name, idx| {
         if (name != atom_id) continue;
-        if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, @intCast(idx));
-        try setSlotValue(ctx, &frame.var_refs[idx], value);
+        if (idx >= frame.var_refs.len) try utils.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        try slot_ops.setSlotValue(ctx, &frame.var_refs[idx], value);
         return true;
     }
     return false;
@@ -9601,7 +8073,7 @@ pub fn setNamedVarRefValue(
     for (names, 0..) |name, idx| {
         if (!atomIdOrNameEql(ctx.runtime, name, atom_id) or idx >= refs.len) continue;
         const slot = refs[idx];
-        if (varRefCellFromValue(slot)) |cell| {
+        if (slot_ops.varRefCellFromValue(slot)) |cell| {
             if (cell.varRefIsConstSlot().* and !is_init) {
                 value.free(ctx.runtime);
                 if (cell.varRefIsFunctionNameSlot().* and !strict_assignment) return true;
@@ -9649,7 +8121,7 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
     if (index >= refs.len) return null;
     if (refs[index].isUninitialized()) return null;
     if (!object.hasOwnProperty(atom_id)) return null;
-    const cell = varRefCellFromValue(refs[index]) orelse return refs[index].dup();
+    const cell = slot_ops.varRefCellFromValue(refs[index]) orelse return refs[index].dup();
     return if (cell.varRefValueSlot().*) |value| value.dup() else core.JSValue.undefinedValue();
 }
 
@@ -9665,7 +8137,7 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
         old_value.free(ctx.runtime);
         return false;
     }
-    if (varRefCellFromValue(refs.*[index])) |cell| {
+    if (slot_ops.varRefCellFromValue(refs.*[index])) |cell| {
         const next_value = value.dup();
         try cell.setVarRefValue(ctx.runtime, next_value);
         return true;
@@ -9679,7 +8151,7 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
 }
 
 pub fn throwTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try createNamedError(ctx.runtime, global, "TypeError", message);
+    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "TypeError", message);
     var error_value_owned = true;
     errdefer if (error_value_owned) error_value.free(ctx.runtime);
     try attachStackToErrorValue(ctx, global, error_value);
@@ -9689,7 +8161,7 @@ pub fn throwTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, message
 }
 
 pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try createNamedError(ctx.runtime, global, "RangeError", message);
+    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "RangeError", message);
     var error_value_owned = true;
     errdefer if (error_value_owned) error_value.free(ctx.runtime);
     try attachStackToErrorValue(ctx, global, error_value);
@@ -9699,7 +8171,7 @@ pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, messag
 }
 
 pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try createNamedError(ctx.runtime, global, "ReferenceError", message);
+    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "ReferenceError", message);
     var error_value_owned = true;
     errdefer if (error_value_owned) error_value.free(ctx.runtime);
     try attachStackToErrorValue(ctx, global, error_value);
@@ -9709,7 +8181,7 @@ pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, me
 }
 
 pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try createNamedError(ctx.runtime, global, "SyntaxError", message);
+    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "SyntaxError", message);
     var error_value_owned = true;
     errdefer if (error_value_owned) error_value.free(ctx.runtime);
     try attachStackToErrorValue(ctx, global, error_value);
@@ -9720,7 +8192,7 @@ pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, messa
 
 pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
     const object = property_ops.expectObject(value) catch return;
-    try captureErrorStack(ctx, null, global, object);
+    try error_stack_ops.captureErrorStack(ctx, null, global, object);
 }
 
 pub fn qjsErrorCaptureStackTrace(
@@ -9736,9 +8208,9 @@ pub fn qjsErrorCaptureStackTrace(
     else
         null;
     defer if (skip_name) |bytes| ctx.runtime.memory.allocator.free(bytes);
-    const stack_value = try buildErrorStackValue(ctx, output, global, args[0], skip_name);
+    const stack_value = try error_stack_ops.buildErrorStackValue(ctx, output, global, args[0], skip_name);
     defer stack_value.free(ctx.runtime);
-    try defineDataProperty(ctx.runtime, target, "stack", stack_value, true, false, true);
+    try object_ops.defineDataProperty(ctx.runtime, target, "stack", stack_value, true, false, true);
     return core.JSValue.undefinedValue();
 }
 
