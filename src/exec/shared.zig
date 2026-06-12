@@ -7942,8 +7942,6 @@ pub fn qjsIteratorFromCall(
         args,
         caller_function,
         caller_frame,
-        iteratorFromSourceForIteratorFrom,
-        wrapIteratorFromIterator,
     );
 }
 
@@ -7968,16 +7966,6 @@ pub fn qjsIteratorZipCall(
         keyed,
         caller_function,
         caller_frame,
-        getValueProperty,
-        iteratorForValue,
-        callValueOrBytecode,
-        valueTruthy,
-        stringValueUnitsEqualBytes,
-        objectRestOwnKeys,
-        proxyAwareOwnPropertyDescriptor,
-        proxyTrapKeyValue,
-        qjsIteratorClose,
-        isCallableValue,
     );
 }
 
@@ -7989,7 +7977,7 @@ pub fn qjsIteratorZipModeFromOptions(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorZipMode {
-    return iter_vm.qjsIteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame, getValueProperty, stringValueUnitsEqualBytes);
+    return iter_vm.qjsIteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
 }
 
 pub fn qjsIteratorZipCollectIndexed(
@@ -8019,12 +8007,6 @@ pub fn qjsIteratorZipCollectIndexed(
         mode,
         caller_function,
         caller_frame,
-        getValueProperty,
-        iteratorForValue,
-        callValueOrBytecode,
-        valueTruthy,
-        qjsIteratorClose,
-        isCallableValue,
     );
 }
 
@@ -8055,13 +8037,6 @@ pub fn qjsIteratorZipCollectKeyed(
         mode,
         caller_function,
         caller_frame,
-        getValueProperty,
-        callValueOrBytecode,
-        qjsIteratorClose,
-        objectRestOwnKeys,
-        proxyAwareOwnPropertyDescriptor,
-        proxyTrapKeyValue,
-        isCallableValue,
     );
 }
 
@@ -8080,8 +8055,6 @@ pub fn qjsIteratorZipNextMethod(
         iterator_value,
         caller_function,
         caller_frame,
-        getValueProperty,
-        isCallableValue,
     );
 }
 
@@ -8120,7 +8093,7 @@ pub fn qjsIteratorZipCloseWithCompletion(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) void {
-    iter_vm.qjsIteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame, qjsIteratorClose);
+    iter_vm.qjsIteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame);
 }
 
 pub fn qjsIteratorZipCloseAllWithCompletion(
@@ -8133,7 +8106,7 @@ pub fn qjsIteratorZipCloseAllWithCompletion(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    try iter_vm.qjsIteratorZipCloseAllWithCompletion(ctx, output, global, completion, iters, count, caller_function, caller_frame, qjsIteratorClose);
+    try iter_vm.qjsIteratorZipCloseAllWithCompletion(ctx, output, global, completion, iters, count, caller_function, caller_frame);
 }
 
 pub fn qjsIteratorZipClose(
@@ -8144,7 +8117,7 @@ pub fn qjsIteratorZipClose(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    try iter_vm.qjsIteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame, qjsIteratorClose);
+    try iter_vm.qjsIteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame);
 }
 
 pub fn iteratorCloseWithCompletionAndPropagate(
@@ -8174,7 +8147,7 @@ pub fn qjsIteratorZipCloseAllAndPropagate(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError {
-    return iter_vm.qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, extra_iterator, caller_function, caller_frame, qjsIteratorClose);
+    return iter_vm.qjsIteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, extra_iterator, caller_function, caller_frame);
 }
 
 pub fn iteratorFromSourceForIteratorFrom(
@@ -8378,13 +8351,6 @@ pub fn qjsIteratorHelperNext(
         function_object,
         caller_function,
         caller_frame,
-        createIteratorResult,
-        getValueProperty,
-        callValueOrBytecode,
-        valueTruthy,
-        qjsIteratorClose,
-        arrayPrototypeFromGlobal,
-        isCallableValue,
     );
 }
 
@@ -8405,13 +8371,6 @@ pub fn qjsIteratorHelperReturn(
         function_object,
         caller_function,
         caller_frame,
-        createIteratorResult,
-        getValueProperty,
-        callValueOrBytecode,
-        valueTruthy,
-        qjsIteratorClose,
-        arrayPrototypeFromGlobal,
-        isCallableValue,
     );
 }
 

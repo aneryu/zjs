@@ -17,9 +17,8 @@ pub fn object(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,
     global: *core.Object,
-    comptime objectPrototypeFromGlobal: anytype,
 ) !void {
-    const created = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
+    const created = try core.Object.create(ctx.runtime, core.class.ids.object, shared_vm.objectPrototypeFromGlobal(ctx.runtime, global));
     const value = created.value();
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
@@ -31,7 +30,6 @@ pub fn arrayFrom(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     global: *core.Object,
-    comptime arrayPrototypeFromGlobal: anytype,
 ) !void {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
@@ -47,7 +45,7 @@ pub fn arrayFrom(
         values[remaining] = try stack.pop();
     }
     defer for (values) |value| value.free(ctx.runtime);
-    const array = try builtins.array.constructLiteralWithPrototype(ctx.runtime, values, arrayPrototypeFromGlobal(ctx.runtime, global));
+    const array = try builtins.array.constructLiteralWithPrototype(ctx.runtime, values, shared_vm.arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer array.free(ctx.runtime);
     try stack.pushOwned(array);
 }
@@ -191,10 +189,6 @@ pub fn defineField(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime remapPrivateAtomForOperation: anytype,
-    comptime defineClassFieldDataProperty: anytype,
-    comptime createDataPropertyOrThrow: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -228,7 +222,7 @@ pub fn defineField(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     const target = try property_ops.expectObject(obj);
-    const effective_atom = remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
+    const effective_atom = shared_vm.remapPrivateAtomForOperation(ctx.runtime, frame, target, atom_id);
     if (target.flags.is_array and effective_atom == core.atom.ids.length) {
         if (value.asInt32()) |length| {
             const new_len: u32 = @intCast(@max(length, 0));
@@ -243,7 +237,7 @@ pub fn defineField(
         }
     }
     if (ctx.runtime.atoms.kind(effective_atom) == .private) {
-        try defineClassFieldDataProperty(ctx.runtime, target, effective_atom, rooted_value);
+        try shared_vm.defineClassFieldDataProperty(ctx.runtime, target, effective_atom, rooted_value);
         return .done;
     }
     if (target.class_id == core.class.ids.object and
@@ -255,8 +249,8 @@ pub fn defineField(
         try target.defineOwnPropertyAssumingNew(ctx.runtime, effective_atom, core.Descriptor.data(rooted_value, true, true, true));
         return .done;
     }
-    createDataPropertyOrThrow(ctx, output, global, rooted_obj, target, effective_atom, rooted_value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    shared_vm.createDataPropertyOrThrow(ctx, output, global, rooted_obj, target, effective_atom, rooted_value, function, frame) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -286,9 +280,6 @@ pub fn defineArrayEl(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime toPropertyKeyAtom: anytype,
-    comptime createDataPropertyOrThrow: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const value = try stack.pop();
     var rooted_value = value;
@@ -313,12 +304,12 @@ pub fn defineArrayEl(
     defer ctx.runtime.active_value_roots = root_frame.previous;
 
     const object_value = property_ops.expectObject(rooted_array) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err, handleCatchableRuntimeError);
-    const atom_id = toPropertyKeyAtom(ctx, output, global, rooted_index, function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err, handleCatchableRuntimeError);
+        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err);
+    const atom_id = shared_vm.toPropertyKeyAtom(ctx, output, global, rooted_index, function, frame) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err);
     defer ctx.runtime.atoms.free(atom_id);
-    createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err, handleCatchableRuntimeError);
+    shared_vm.createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, function, frame) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, frame, catch_target, global, err);
     try stack.push(rooted_index);
     return .done;
 }
@@ -329,7 +320,6 @@ pub fn appendSpreadValues(
     global: *core.Object,
     stack: *stack_mod.Stack,
     opc: u8,
-    comptime appendIteratorValues: anytype,
 ) !void {
     const iterable = try stack.pop();
     defer iterable.free(ctx.runtime);
@@ -351,10 +341,10 @@ pub fn appendSpreadValues(
                 out_index += 1;
             }
         } else {
-            out_index = try appendIteratorValues(ctx, output, global, array, iterable, out_index);
+            out_index = try shared_vm.appendIteratorValues(ctx, output, global, array, iterable, out_index);
         }
     } else {
-        out_index = try appendIteratorValues(ctx, output, global, array, iterable, out_index);
+        out_index = try shared_vm.appendIteratorValues(ctx, output, global, array, iterable, out_index);
     }
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
@@ -367,11 +357,9 @@ pub fn appendSpreadValuesVm(
     opc: u8,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime appendIteratorValues: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    appendSpreadValues(ctx, output, global, stack, opc, appendIteratorValues) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    appendSpreadValues(ctx, output, global, stack, opc) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -386,10 +374,6 @@ pub fn copyDataProperties(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime objectRestOwnKeys: anytype,
-    comptime objectRestOwnPropertyDescriptor: anytype,
-    comptime getValueProperty: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const rt = ctx.runtime;
     const target_value = try stackValueFromTop(stack, mask & 3);
@@ -413,21 +397,21 @@ pub fn copyDataProperties(
     if (rooted_source_value.isNull() or rooted_source_value.isUndefined()) return .done;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
     const source = property_ops.expectObject(rooted_source_value) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
-    const keys = objectRestOwnKeys(ctx, output, global, source) catch |err|
-        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
+    const keys = shared_vm.objectRestOwnKeys(ctx, output, global, source) catch |err|
+        return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
     defer core.Object.freeKeys(rt, keys);
 
     for (keys) |key| {
-        const maybe_desc = objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
-            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+        const maybe_desc = shared_vm.objectRestOwnPropertyDescriptor(ctx, output, global, source, key) catch |err|
+            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
         const desc = maybe_desc orelse continue;
         defer desc.destroy(rt);
         if (!(desc.enumerable orelse false)) continue;
-        const value = getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
-            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+        const value = shared_vm.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
+            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
         var rooted_value = value;
         defer value.free(rt);
         var value_root_values = [_]core.runtime.ValueRootValue{
@@ -440,7 +424,7 @@ pub fn copyDataProperties(
         rt.active_value_roots = &value_root_frame;
         defer rt.active_value_roots = value_root_frame.previous;
         property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
-            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err, handleCatchableRuntimeError);
+            return try handleLiteralRuntimeError(ctx, stack, caller_frame, catch_target, global, err);
     }
     return .done;
 }
@@ -452,9 +436,8 @@ fn handleLiteralRuntimeError(
     catch_target: *?usize,
     global: *core.Object,
     err: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
     return err;
 }
 
@@ -468,14 +451,12 @@ pub fn specialObject(
     eval_local_slots: []core.JSValue,
     eval_var_ref_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
-    comptime capturedArgumentsObject: anytype,
-    comptime frameArgumentsObjectForSpecialObject: anytype,
 ) !void {
     const subtype = function.code[frame.pc];
     frame.pc += 1;
     if (subtype == 0 or subtype == 1) {
-        const arguments = capturedArgumentsObject(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame) orelse
-            try frameArgumentsObjectForSpecialObject(ctx, global, frame, subtype);
+        const arguments = shared_vm.capturedArgumentsObject(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame) orelse
+            try shared_vm.frameArgumentsObjectForSpecialObject(ctx, global, frame, subtype);
         errdefer arguments.free(ctx.runtime);
         try stack.pushOwned(arguments);
     } else if (subtype == 2) {
@@ -507,14 +488,12 @@ pub fn getLength(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime getValueProperty: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
     if (fusion_stats.counted(.tryFuseArrayLengthLessThanFalseBranch, tryFuseArrayLengthLessThanFalseBranch(ctx.runtime, stack, function, frame, value))) return .done;
-    const length = getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    const length = shared_vm.getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer length.free(ctx.runtime);

@@ -4,6 +4,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
+const shared_vm = @import("shared.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -111,12 +112,11 @@ pub fn throwTop(
     stack: *stack_mod.Stack,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-    comptime closeStackTopForOfIteratorForPendingError: anytype,
 ) !ThrowResult {
     const value = try stack.pop();
     var value_owned = true;
     errdefer if (value_owned) value.free(ctx.runtime);
-    try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+    try shared_vm.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
     try stack.reserveAdditional(1);
     if (catch_target.* == null) {
         if (try array_ops.popCatchMarker(ctx.runtime, stack)) |restored| {
@@ -153,10 +153,9 @@ pub fn throwErrorVm(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     global: *core.Object,
-    comptime handleCatchableRuntimeError: anytype,
 ) !ThrowResult {
     const err = throwError(function, frame);
-    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
+    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .handled;
     return err;
 }
 

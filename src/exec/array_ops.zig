@@ -153,7 +153,7 @@ pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*cor
 }
 
 pub fn arrayIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Object) !*core.Object {
-    return iter_vm.arrayIteratorPrototypeFromContext(ctx, global, qjsIteratorPrototype, defineNativeDataMethod);
+    return iter_vm.arrayIteratorPrototypeFromContext(ctx, global);
 }
 
 pub fn isArrayMethodReceiver(value: core.JSValue) bool {
@@ -5096,7 +5096,7 @@ pub fn qjsGeneratorSlice(
 }
 
 pub fn qjsArrayIteratorMethod(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
-    return iter_vm.arrayIteratorMethod(ctx, global, receiver, function_object, primitiveObjectForAccess, isTypedArrayPrototypeMethod, arrayIteratorPrototypeFromContext);
+    return iter_vm.arrayIteratorMethod(ctx, global, receiver, function_object);
 }
 
 pub fn qjsArrayIteratorMethodRecord(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, function_object: *core.Object, method_id: u32) !?core.JSValue {
@@ -5144,9 +5144,6 @@ pub fn qjsIteratorZipFlattenableRecord(
         value,
         caller_function,
         caller_frame,
-        getValueProperty,
-        callValueOrBytecode,
-        isCallableValue,
     );
 }
 
@@ -5190,7 +5187,7 @@ pub fn iteratorFlattenableForIteratorFrom(
 
 pub fn qjsArrayIteratorNext(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, function_object: *core.Object) !?core.JSValue {
     if (!function_object.isArrayIteratorNextFunction()) return null;
-    return iter_vm.arrayIteratorNext(ctx, output, global, receiver, createIteratorResult, getValueProperty, toLengthIndex);
+    return iter_vm.arrayIteratorNext(ctx, output, global, receiver);
 }
 
 pub fn qjsArrayIteratorValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, target: *core.Object, index: u32, kind: u8) !core.JSValue {

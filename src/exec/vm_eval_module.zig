@@ -29,13 +29,12 @@ pub fn directEval(
     class_field_initializer_flag: u16,
     parameter_initializer_flag: u16,
     allow_tail_inline: bool,
-    comptime execDirectEval: anytype,
 ) !EvalStep {
     const eval_operands = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     const argc: u16 = @intCast(eval_operands & 0xffff);
     const eval_scope: u16 = @intCast((eval_operands >> 16) & 0xffff);
-    return switch (try execDirectEval(
+    return switch (try shared_vm.execDirectEval(
         ctx,
         stack,
         function,
@@ -64,11 +63,10 @@ pub fn applyEval(
     global: *core.Object,
     class_field_initializer_flag: u16,
     parameter_initializer_flag: u16,
-    comptime execApplyEval: anytype,
 ) !Step {
     const eval_scope = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    return switch (try execApplyEval(
+    return switch (try shared_vm.execApplyEval(
         ctx,
         stack,
         function,
@@ -81,7 +79,7 @@ pub fn applyEval(
     )) {
         .done => .done,
         .continue_loop => .continue_loop,
-        // execApplyEval never requests tail-call inlining.
+        // shared_vm.execApplyEval never requests tail-call inlining.
         .tail_inline => unreachable,
     };
 }
@@ -93,20 +91,15 @@ pub fn dynamicImport(
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    comptime toStringForAnnexB: anytype,
-    comptime getValueProperty: anytype,
-    comptime promisePrototypeFromGlobal: anytype,
-    comptime createNamedError: anytype,
-    comptime rejectedPromiseForRuntimeError: anytype,
 ) !void {
     const options = try stack.pop();
     defer options.free(ctx.runtime);
     const specifier = try stack.pop();
     defer specifier.free(ctx.runtime);
 
-    const prototype = promisePrototypeFromGlobal(ctx.runtime, global);
-    const specifier_string = toStringForAnnexB(ctx, output, global, specifier, function, frame) catch |err| {
-        const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+    const prototype = shared_vm.promisePrototypeFromGlobal(ctx.runtime, global);
+    const specifier_string = shared_vm.toStringForAnnexB(ctx, output, global, specifier, function, frame) catch |err| {
+        const rejected = try shared_vm.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         errdefer rejected.free(ctx.runtime);
         try stack.pushOwned(rejected);
         return;
@@ -114,26 +107,26 @@ pub fn dynamicImport(
     defer specifier_string.free(ctx.runtime);
 
     if (!options.isUndefined() and !options.isObject()) {
-        try pushRejectedTypeError(ctx, global, stack, prototype, createNamedError, "options must be an object");
+        try pushRejectedTypeError(ctx, global, stack, prototype, "options must be an object");
         return;
     }
 
     if (options.isObject()) {
         const with_atom = try ctx.runtime.internAtom("with");
         defer ctx.runtime.atoms.free(with_atom);
-        const attributes = getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err| {
-            const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+        const attributes = shared_vm.getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err| {
+            const rejected = try shared_vm.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
             errdefer rejected.free(ctx.runtime);
             try stack.pushOwned(rejected);
             return;
         };
         defer attributes.free(ctx.runtime);
         if (!attributes.isUndefined() and !attributes.isObject()) {
-            try pushRejectedTypeError(ctx, global, stack, prototype, createNamedError, "options.with must be an object");
+            try pushRejectedTypeError(ctx, global, stack, prototype, "options.with must be an object");
             return;
         }
         if (attributes.isObject()) {
-            try enumerateImportAttributes(ctx, output, global, attributes, function, frame, getValueProperty, rejectedPromiseForRuntimeError, prototype, stack);
+            try enumerateImportAttributes(ctx, output, global, attributes, function, frame, prototype, stack);
         }
     }
 
@@ -145,10 +138,10 @@ pub fn dynamicImport(
 
         const namespace = callback(ctx.dynamic_import_userdata, ctx, output, global, referrer_path, specifier_bytes.items) catch |err| {
             if (err == error.ModuleNotFound) {
-                try pushRejectedTypeError(ctx, global, stack, prototype, createNamedError, "module not found");
+                try pushRejectedTypeError(ctx, global, stack, prototype, "module not found");
                 return;
             }
-            const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+            const rejected = try shared_vm.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
             errdefer rejected.free(ctx.runtime);
             try stack.pushOwned(rejected);
             return;
@@ -160,7 +153,7 @@ pub fn dynamicImport(
         return;
     }
 
-    try pushRejectedTypeError(ctx, global, stack, prototype, createNamedError, "dynamic import is not supported");
+    try pushRejectedTypeError(ctx, global, stack, prototype, "dynamic import is not supported");
 }
 
 fn enumerateImportAttributes(
@@ -170,14 +163,12 @@ fn enumerateImportAttributes(
     attributes: core.JSValue,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    comptime getValueProperty: anytype,
-    comptime rejectedPromiseForRuntimeError: anytype,
     prototype: ?*core.Object,
     stack: *stack_mod.Stack,
 ) !void {
     const object = property_ops.expectObject(attributes) catch return;
     const keys = shared_vm.objectRestOwnKeys(ctx, output, global, object) catch |err| {
-        const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+        const rejected = try shared_vm.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         errdefer rejected.free(ctx.runtime);
         try stack.pushOwned(rejected);
         return;
@@ -186,15 +177,15 @@ fn enumerateImportAttributes(
     for (keys) |key| {
         if (ctx.runtime.atoms.kind(key) != .string) continue;
         const desc = (shared_vm.proxyAwareOwnPropertyDescriptor(ctx, output, global, object, key, function, frame) catch |err| {
-            const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+            const rejected = try shared_vm.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
             errdefer rejected.free(ctx.runtime);
             try stack.pushOwned(rejected);
             return;
         }) orelse continue;
         defer desc.destroy(ctx.runtime);
         if (!(desc.enumerable orelse false)) continue;
-        const value = getValueProperty(ctx, output, global, attributes, key, function, frame) catch |err| {
-            const rejected = try rejectedPromiseForRuntimeError(ctx, global, err, prototype);
+        const value = shared_vm.getValueProperty(ctx, output, global, attributes, key, function, frame) catch |err| {
+            const rejected = try shared_vm.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
             errdefer rejected.free(ctx.runtime);
             try stack.pushOwned(rejected);
             return;
@@ -208,10 +199,9 @@ fn pushRejectedTypeError(
     global: *core.Object,
     stack: *stack_mod.Stack,
     prototype: ?*core.Object,
-    comptime createNamedError: anytype,
     message: []const u8,
 ) !void {
-    const error_value = try createNamedError(ctx.runtime, global, "TypeError", message);
+    const error_value = try shared_vm.createNamedError(ctx.runtime, global, "TypeError", message);
     defer error_value.free(ctx.runtime);
     const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
     errdefer promise.free(ctx.runtime);

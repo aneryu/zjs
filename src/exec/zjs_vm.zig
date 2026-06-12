@@ -285,11 +285,11 @@ pub fn runWithArgsState(
     try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, use_inline_frame_storage, argumentsNeedsOriginalSnapshot(entry_function));
     try call_vm.initFrameVarRefs(ctx, global, entry_function, &frame_storage, var_refs, use_inline_frame_storage);
 
-    const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value, generatorYieldStarSuspended, generatorResumeCompletionType, setGeneratorYieldStarSuspended, setGeneratorResumeCompletionType);
+    const resume_state = try gen_async_vm.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
     errdefer {
         closeFrameDestructuringIteratorsForAbruptCompletion(ctx, output, global, entry_stack, &frame_storage);
     }
-    var catch_target_storage: ?usize = try gen_async_vm.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value, closeForAwaitIteratorForPendingError, closeStackTopForOfIteratorForPendingError, handleCatchableRuntimeError);
+    var catch_target_storage: ?usize = try gen_async_vm.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value);
 
     var machine = inline_calls.Machine.init(ctx, output, global, &frame_storage, entry_stack, &catch_target_storage);
     defer machine.deinit();
@@ -466,7 +466,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .eval_local_names = eval_local_names,
                     .eval_var_ref_names = eval_var_ref_names,
                     .eval_with_object = eval_with_object,
-                }, property_vm.tryFuseGlobalInt32PrefixTermsStore);
+                });
             },
             op.push_i8 => try value_vm.pushI8Operand(stack, function, frame),
             op.push_minus1 => try value_vm.pushSmallIntMaybeFuse(stack, function, frame, -1),
@@ -531,7 +531,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         .eval_with_object = eval_with_object,
                     },
                     .regexp_prototype = constructorPrototypeFromGlobal(ctx.runtime, global, "RegExp"),
-                }, property_vm.tryFuseAtomPercentHexGlobalStringStore, regexp_vm.tryPushLiteralFromAtomPair);
+                });
             },
             op.push_empty_string => try value_vm.pushEmptyString(ctx, stack),
             op.to_propkey => switch (try property_vm.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
@@ -600,7 +600,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 .continue_loop => continue,
             },
             op.private_in => {
-                switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target, toPropertyKeyAtom, throwTypeErrorMessage, handleCatchableRuntimeError)) {
+                switch (try class_vm.privateInVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -684,7 +684,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.to_object => switch (try value_vm.toObjectVm(ctx, stack, frame, catch_target, global, handleCatchableRuntimeError)) {
+            op.to_object => switch (try value_vm.toObjectVm(ctx, stack, frame, catch_target, global)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -721,11 +721,11 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Super ----
             op.get_super => try class_vm.getSuper(ctx, stack, frame),
-            op.get_super_value => switch (try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target, varRefSlotIsUninitialized, handleCatchableRuntimeError, slotValueDup, toPropertyKeyAtom, sameObjectIdentity, getSuperPropertyValue)) {
+            op.get_super_value => switch (try class_vm.getSuperValue(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.put_super_value => switch (try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target, varRefSlotIsUninitialized, handleCatchableRuntimeError, slotValueDup, toPropertyKeyAtom, sameObjectIdentity, setSuperPropertyValue)) {
+            op.put_super_value => switch (try class_vm.putSuperValue(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -761,7 +761,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue;
                 },
             },
-            op.eval => switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, machine.depth > 0, execDirectEval)) {
+            op.eval => switch (try eval_module_vm.directEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, machine.depth > 0)) {
                 .done => {},
                 .continue_loop => continue,
                 // Non-%eval% callee in tail position: proper tail call via
@@ -771,11 +771,11 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     continue;
                 },
             },
-            op.apply_eval => switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag, execApplyEval)) {
+            op.apply_eval => switch (try eval_module_vm.applyEval(ctx, stack, function, frame, catch_target, output, global, eval_class_field_initializer_flag, eval_parameter_initializer_flag)) {
                 .done => {},
                 .continue_loop => continue,
             },
-            op.import => try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame, toStringForAnnexB, getValueProperty, promisePrototypeFromGlobal, createNamedError, rejectedPromiseForRuntimeError),
+            op.import => try eval_module_vm.dynamicImport(ctx, output, global, stack, function, frame),
             op.prepare_call_prop_atom => switch (try call_vm.prepareCallPropAtom(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
@@ -798,44 +798,44 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Object/array literals ----
-            op.object => try literal_vm.object(ctx, stack, global, objectPrototypeFromGlobal),
-            op.array_from => try literal_vm.arrayFrom(ctx, stack, function, frame, global, arrayPrototypeFromGlobal),
-            op.define_field => switch (try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target, remapPrivateAtomForOperation, defineClassFieldDataProperty, createDataPropertyOrThrow, handleCatchableRuntimeError)) {
+            op.object => try literal_vm.object(ctx, stack, global),
+            op.array_from => try literal_vm.arrayFrom(ctx, stack, function, frame, global),
+            op.define_field => switch (try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
             op.set_proto => try literal_vm.setProto(ctx, stack),
-            op.set_home_object => try class_vm.setHomeObject(ctx, stack, functionBytecodeFromValue),
+            op.set_home_object => try class_vm.setHomeObject(ctx, stack),
             op.define_class, op.define_class_computed => {
-                switch (try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, handleCatchableRuntimeError, createBytecodeFunctionObject, objectPrototypeFromGlobal, isConstructorLike, getValueProperty, toPropertyKeyAtom, functionBytecodeFromValue, clearPrivateNameRemap, installLexicalPrivateNameRemap, installFreshPrivateNameRemap, copyPrivateNameRemap, objectFromValue, functionNameValueFromAtom, defineFunctionNameProperty, opc == op.define_class_computed)) {
+                switch (try class_vm.defineClass(ctx, output, global, stack, function, frame, catch_target, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, opc == op.define_class_computed)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.define_array_el => switch (try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target, toPropertyKeyAtom, createDataPropertyOrThrow, handleCatchableRuntimeError)) {
+            op.define_array_el => switch (try literal_vm.defineArrayEl(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
             op.define_method => {
-                switch (try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target, remapPrivateAtomFromObject, functionBytecodeFromValue, installLexicalPrivateNameRemap, functionNameValueFromAtom, defineFunctionNameProperty, handleCatchableRuntimeError)) {
+                switch (try class_vm.defineMethod(ctx, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.define_method_computed => {
-                switch (try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target, toPropertyKeyAtom, remapPrivateAtomFromObject, functionBytecodeFromValue, installLexicalPrivateNameRemap, functionNameValueFromAtom, defineFunctionNameProperty, handleCatchableRuntimeError)) {
+                switch (try class_vm.defineMethodComputed(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.append => switch (try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target, appendIteratorValues, handleCatchableRuntimeError)) {
+            op.append => switch (try literal_vm.appendSpreadValuesVm(ctx, output, global, stack, opc, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
             op.copy_data_properties => {
                 const mask = function.code[frame.pc];
                 frame.pc += 1;
-                switch (try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target, objectRestOwnKeys, objectRestOwnPropertyDescriptor, getValueProperty, handleCatchableRuntimeError)) {
+                switch (try literal_vm.copyDataProperties(ctx, output, global, stack, mask, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -853,7 +853,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 .return_value => |value| return value,
             },
             op.yield_star, op.async_yield_star => {
-                const yield_star_result = try gen_async_vm.yieldStar(ctx, output, global, stack, function, frame, generator_state, stop_on_yield, catch_target, iteratorForValue, iteratorStepResult, setGeneratorYieldStarSuspended, handleCatchableRuntimeError);
+                const yield_star_result = try gen_async_vm.yieldStar(ctx, output, global, stack, function, frame, generator_state, stop_on_yield, catch_target);
                 switch (yield_star_result) {
                     .none => {},
                     .continue_loop => continue,
@@ -861,7 +861,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.await => {
-                const await_result = try gen_async_vm.awaitValue(ctx, output, global, stack, function, frame, generator_state, suspend_on_module_await, stop_on_yield, catch_target, settlePendingPromiseReaction, awaitPendingPromise, drainPendingPromiseJobs, awaitThenableValue, closeForAwaitIteratorForPendingError, closeStackTopForOfIteratorForPendingError, handleCatchableRuntimeError);
+                const await_result = try gen_async_vm.awaitValue(ctx, output, global, stack, function, frame, generator_state, suspend_on_module_await, stop_on_yield, catch_target);
                 switch (await_result) {
                     .none => {},
                     .continue_loop => continue,
@@ -876,7 +876,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Special object (prologue) ----
-            op.special_object => try literal_vm.specialObject(ctx, stack, function, frame, global, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, capturedArgumentsObject, frameArgumentsObjectForSpecialObject),
+            op.special_object => try literal_vm.specialObject(ctx, stack, function, frame, global, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs),
 
             // ---- Typeof ----
             op.typeof => try value_vm.typeOf(ctx, stack),
@@ -884,10 +884,10 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             op.typeof_is_function => try value_vm.typeOfIsFunction(ctx.runtime, stack),
 
             // ---- Throw ----
-            op.throw => switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target, closeStackTopForOfIteratorForPendingError)) {
+            op.throw => switch (try control_vm.throwTop(ctx, output, global, stack, frame, catch_target)) {
                 .handled => continue,
             },
-            op.throw_error => switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global, handleCatchableRuntimeError)) {
+            op.throw_error => switch (try control_vm.throwErrorVm(ctx, stack, function, frame, catch_target, global)) {
                 .handled => continue,
             },
             op.@"catch" => try control_vm.catchTarget(function, frame, stack, catch_target),
@@ -910,13 +910,13 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 }
             },
             op.check_brand => {
-                switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global, handleCatchableRuntimeError)) {
+                switch (try class_vm.checkBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.add_brand => {
-                switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global, handleCatchableRuntimeError)) {
+                switch (try class_vm.addBrandVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -927,7 +927,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             op.nop => control_vm.nop(),
 
             // ---- Push this ----
-            op.push_this => switch (try value_vm.pushThisVm(ctx, stack, frame, catch_target, global, handleCatchableRuntimeError)) {
+            op.push_this => switch (try value_vm.pushThisVm(ctx, stack, frame, catch_target, global)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -959,7 +959,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             op.is_undefined_or_null => try value_vm.isUndefinedOrNull(ctx.runtime, stack),
             op.is_undefined => try value_vm.isUndefined(ctx.runtime, stack),
             op.is_null => try value_vm.isNull(ctx.runtime, stack),
-            op.get_length => switch (try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target, getValueProperty, handleCatchableRuntimeError)) {
+            op.get_length => switch (try literal_vm.getLength(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -993,50 +993,50 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Iterator protocol ----
             op.for_of_start, op.for_await_of_start => {
-                switch (try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start, getIteratorMethod, getValueProperty, isCallableValue, callValueOrBytecode, handleCatchableRuntimeError)) {
+                switch (try iter_vm.forOfStartVm(ctx, output, global, stack, function, frame, catch_target, opc == op.for_await_of_start)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.for_in_start => {
-                switch (try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target, createForInIterator, handleCatchableRuntimeError)) {
+                switch (try iter_vm.forInStartVm(ctx, output, global, stack, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_next => {
-                switch (try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target, callValueOrBytecode, handleCatchableRuntimeError)) {
+                switch (try iter_vm.iteratorNextVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_check_object => {
-                switch (try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global, handleCatchableRuntimeError)) {
+                switch (try iter_vm.iteratorCheckObjectVm(ctx, stack, frame, catch_target, global)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_get_value_done => {
-                switch (try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target, getValueProperty, valueTruthy, handleCatchableRuntimeError)) {
+                switch (try iter_vm.iteratorGetValueDoneVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.iterator_call => {
-                switch (try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target, getValueProperty, callValueOrBytecode, handleCatchableRuntimeError)) {
+                switch (try iter_vm.iteratorCallVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
             op.for_of_next => {
-                switch (try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target, findForOfIteratorIndex, callValueOrBytecode, getValueProperty, valueTruthy, handleCatchableRuntimeError)) {
+                switch (try iter_vm.forOfNextVm(ctx, output, global, stack, function, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
             },
-            op.for_in_next => try iter_vm.forInNext(ctx, output, global, stack, hasValueProperty),
+            op.for_in_next => try iter_vm.forInNext(ctx, output, global, stack),
             op.iterator_close => {
-                switch (try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target, closeIteratorFromVm, closeForAwaitIteratorFromVm, handleCatchableRuntimeError)) {
+                switch (try iter_vm.iteratorCloseVm(ctx, output, global, stack, frame, catch_target)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -1060,71 +1060,17 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
 // ---- Helpers ----
 // ---- Shared helper aliases ----
-const createForInIterator = shared_vm.createForInIterator;
-const findForOfIteratorIndex = shared_vm.findForOfIteratorIndex;
 const closeStackTopForOfIteratorForPendingError = shared_vm.closeStackTopForOfIteratorForPendingError;
-const objectPrototypeFromGlobal = shared_vm.objectPrototypeFromGlobal;
 const constructorPrototypeFromGlobal = shared_vm.constructorPrototypeFromGlobal;
-const arrayPrototypeFromGlobal = shared_vm.arrayPrototypeFromGlobal;
-const promisePrototypeFromGlobal = shared_vm.promisePrototypeFromGlobal;
-const toStringForAnnexB = shared_vm.toStringForAnnexB;
-const valueTruthy = shared_vm.valueTruthy;
-const slotValueDup = shared_vm.slotValueDup;
-const varRefSlotIsUninitialized = shared_vm.varRefSlotIsUninitialized;
-const createBytecodeFunctionObject = shared_vm.createBytecodeFunctionObject;
-const execDirectEval = shared_vm.execDirectEval;
-const execApplyEval = shared_vm.execApplyEval;
 const handleCatchableRuntimeError = shared_vm.handleCatchableRuntimeError;
-const callValueOrBytecode = shared_vm.callValueOrBytecode;
-const defineClassFieldDataProperty = shared_vm.defineClassFieldDataProperty;
-const closeIteratorFromVm = shared_vm.closeIteratorFromVm;
-const closeForAwaitIteratorFromVm = shared_vm.closeForAwaitIteratorFromVm;
-const createDataPropertyOrThrow = shared_vm.createDataPropertyOrThrow;
 pub const qjsArraySortCall = shared_vm.qjsArraySortCall;
 pub const qjsArrayByCopyCall = shared_vm.qjsArrayByCopyCall;
-const objectRestOwnKeys = shared_vm.objectRestOwnKeys;
-const objectRestOwnPropertyDescriptor = shared_vm.objectRestOwnPropertyDescriptor;
-const getIteratorMethod = shared_vm.getIteratorMethod;
-const iteratorForValue = shared_vm.iteratorForValue;
-const appendIteratorValues = shared_vm.appendIteratorValues;
-const iteratorStepResult = shared_vm.iteratorStepResult;
-const isCallableValue = shared_vm.isCallableValue;
 const closeFrameDestructuringIteratorsForAbruptCompletion = shared_vm.closeFrameDestructuringIteratorsForAbruptCompletion;
-const closeForAwaitIteratorForPendingError = shared_vm.closeForAwaitIteratorForPendingError;
-const generatorYieldStarSuspended = shared_vm.generatorYieldStarSuspended;
-const setGeneratorYieldStarSuspended = shared_vm.setGeneratorYieldStarSuspended;
-const generatorResumeCompletionType = shared_vm.generatorResumeCompletionType;
-const setGeneratorResumeCompletionType = shared_vm.setGeneratorResumeCompletionType;
-const settlePendingPromiseReaction = shared_vm.settlePendingPromiseReaction;
-const awaitPendingPromise = shared_vm.awaitPendingPromise;
 pub const drainPendingPromiseJobs = shared_vm.drainPendingPromiseJobs;
 pub const cleanupAtomicsWaitersForContext = shared_vm.cleanupAtomicsWaitersForContext;
 pub const cleanupWorkersForRuntime = shared_vm.cleanupWorkersForRuntime;
-const awaitThenableValue = shared_vm.awaitThenableValue;
-const rejectedPromiseForRuntimeError = shared_vm.rejectedPromiseForRuntimeError;
 const throwTypeErrorIntrinsicForGlobal = shared_vm.throwTypeErrorIntrinsicForGlobal;
-const frameArgumentsObjectForSpecialObject = shared_vm.frameArgumentsObjectForSpecialObject;
-const functionBytecodeFromValue = shared_vm.functionBytecodeFromValue;
-const objectFromValue = shared_vm.objectFromValue;
-const isConstructorLike = shared_vm.isConstructorLike;
-const toPropertyKeyAtom = shared_vm.toPropertyKeyAtom;
 pub const getValueProperty = shared_vm.getValueProperty;
-pub const qjsErrorStackGetter = shared_vm.qjsErrorStackGetter;
-const throwTypeErrorMessage = shared_vm.throwTypeErrorMessage;
-const getSuperPropertyValue = shared_vm.getSuperPropertyValue;
-const setSuperPropertyValue = shared_vm.setSuperPropertyValue;
-const sameObjectIdentity = shared_vm.sameObjectIdentity;
-const clearPrivateNameRemap = shared_vm.clearPrivateNameRemap;
-const installLexicalPrivateNameRemap = shared_vm.installLexicalPrivateNameRemap;
-const installFreshPrivateNameRemap = shared_vm.installFreshPrivateNameRemap;
-const copyPrivateNameRemap = shared_vm.copyPrivateNameRemap;
-const remapPrivateAtomFromObject = shared_vm.remapPrivateAtomFromObject;
-const remapPrivateAtomForOperation = shared_vm.remapPrivateAtomForOperation;
-const hasValueProperty = shared_vm.hasValueProperty;
-const capturedArgumentsObject = shared_vm.capturedArgumentsObject;
-const defineFunctionNameProperty = shared_vm.defineFunctionNameProperty;
-const functionNameValueFromAtom = shared_vm.functionNameValueFromAtom;
-const createNamedError = shared_vm.createNamedError;
 
 test "engine eval host globals and throw intrinsic tear down cleanly" {
     const exec = @import("root.zig");
