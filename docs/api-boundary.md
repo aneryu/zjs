@@ -117,9 +117,13 @@ helpers.
 `run-test262` still marks `$262.IsHTMLDDA` through a local object shortcut. This
 is harness and Annex-B specific; it is not a general embedding API.
 
-`src/exec/call.zig` still contains QuickJS-shaped `std`/`os` host-function
-records and file payload support for legacy internal paths. The default public
-`zjs` and embedding global surface does not install those namespaces.
+The QuickJS-shaped `std`/`os` host-function records and their installers have
+been deleted (recoverable from git history). Host-provided native functions go
+through the `external_host` id and the per-runtime `ExternalRecord` registry;
+the internal `HostFunction` enum is reserved for engine-internal callables.
+`src/core/` still carries the `std_file` class payload plumbing
+(`class.ids.std_file`, `StdFilePayload`); nothing instantiates it from the
+engine anymore.
 
 ## Non-Goals
 

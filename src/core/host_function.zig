@@ -4,7 +4,6 @@ const JSValue = @import("value.zig").JSValue;
 
 pub const ids = struct {
     pub const output = 1;
-    pub const std_gc = 44;
     pub const external_host = 119;
 };
 

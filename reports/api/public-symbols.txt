@@ -51,7 +51,6 @@ zjs.host.defineArgvGlobals
 zjs.host.defineScriptArgs
 zjs.host.evalGlobalScriptSource
 zjs.host.evalGlobalScriptValue
-zjs.host.exposeStdOsGlobals
 zjs.job
 zjs.job.DrainOptions
 zjs.job.DrainResult

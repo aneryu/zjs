@@ -185,6 +185,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
         try createStringValue(rt, "");
     defer data_value.free(rt);
     const data = stringValueFromReceiver(data_value) orelse return error.TypeError;
+    try data.ensureFlat(rt);
 
     const object = try core.Object.create(rt, core.class.ids.string, prototype);
     object_value = object.value();
@@ -268,6 +269,7 @@ pub fn iteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, core.JSValue.undefinedValue(), true);
     const header = target.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     if ((iterator_object.iteratorIndexSlot().*) >= string_value.len()) {
         const done_result = try iteratorResult(rt, core.JSValue.undefinedValue(), true);
         iterator_object.clearOptionalValueSlot(rt, iterator_object.iteratorTargetSlot());
@@ -355,6 +357,7 @@ pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: cor
     const index = try stringInteger(rt, index_value);
     if (stringValueFromReceiver(receiver)) |string_value| {
         if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return createStringValue(rt, "");
+        try string_value.ensureFlat(rt);
         return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
     }
 
@@ -485,6 +488,7 @@ fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !co
 }
 
 fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode: TrimMode) !core.JSValue {
+    try string_value.ensureFlat(rt);
     var start: usize = 0;
     var end = string_value.len();
     if (mode == .start or mode == .both) {
@@ -535,6 +539,7 @@ fn isWellFormedString(string_value: *core.string.String) bool {
 }
 
 fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue {
+    try string_value.ensureFlat(rt);
     var units = std.ArrayList(u16).empty;
     defer units.deinit(rt.memory.allocator);
     try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
@@ -673,6 +678,7 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
     defer rt.active_value_roots = root_frame.previous;
 
     if (stringValueFromReceiver(rooted_receiver)) |string_value| {
+        try string_value.ensureFlat(rt);
         const out = try core.Object.createArray(rt, null);
         out_value = out.value();
         errdefer {
@@ -1155,6 +1161,7 @@ fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.float64(std.math.nan(f64));
+    try string_value.ensureFlat(rt);
     return core.JSValue.int32(string_value.codeUnitAt(@intCast(index)));
 }
 
@@ -1165,6 +1172,7 @@ fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
     if (index < 0 or index >= @as(i64, @intCast(string_value.len()))) return core.JSValue.undefinedValue();
+    try string_value.ensureFlat(rt);
     const unit = string_value.codeUnitAt(@intCast(index));
     if (isHighSurrogateUnit(unit) and index + 1 < string_value.len()) {
         const next = string_value.codeUnitAt(@intCast(index + 1));
@@ -1189,6 +1197,7 @@ fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JS
         const len: i64 = @intCast(string_value.len());
         const index = if (relative < 0) len + relative else relative;
         if (index < 0 or index >= len) return core.JSValue.undefinedValue();
+        try string_value.ensureFlat(rt);
         return codeUnitStringValue(rt, string_value.codeUnitAt(@intCast(index)));
     }
 
@@ -1670,6 +1679,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);

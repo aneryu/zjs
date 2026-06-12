@@ -670,6 +670,11 @@ pub const JSRuntime = struct {
     /// destructuring bytecode uses these as stack-only callees instead of
     /// resolving pseudo-private `__zjs_dstr_*` globals.
     internal_destructuring_helpers: [internal_destructuring_helper_slots]?JSValue = @splat(null),
+    /// Error object preallocated while memory is plentiful so the VM catch
+    /// machinery can still materialize a catch value when the heap is fully
+    /// exhausted (QuickJS's preallocated out-of-memory exception analogue).
+    /// Populated by the exec layer at context-global bootstrap.
+    preallocated_oom_error: ?JSValue = null,
     performance_time_origin_ms: f64 = 0,
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
@@ -787,6 +792,7 @@ pub const JSRuntime = struct {
         rt.percent_hex_strings = @splat(null);
         rt.small_int_strings = @splat(null);
         rt.internal_destructuring_helpers = @splat(null);
+        rt.preallocated_oom_error = null;
         rt.performance_time_origin_ms = 0;
         rt.opcode_profile = null;
         rt.external_host_functions = &.{};
@@ -849,6 +855,10 @@ pub const JSRuntime = struct {
             const cached = slot.*;
             slot.* = null;
             if (cached) |stored| stored.free(self);
+        }
+        if (self.preallocated_oom_error) |stored| {
+            self.preallocated_oom_error = null;
+            stored.free(self);
         }
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
@@ -1051,6 +1061,7 @@ pub const JSRuntime = struct {
         for (&self.internal_destructuring_helpers) |*maybe_helper| {
             try visitor.optionalValue(maybe_helper);
         }
+        try visitor.optionalValue(&self.preallocated_oom_error);
         for (self.local_root_slots) |slot| {
             try visitor.value(&slot.value);
         }

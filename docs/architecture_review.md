@@ -237,6 +237,18 @@ the public runtime namespace:
 This layer is separate from `src/core/`; core runtime/context/value ownership
 must stay independent of host event-loop and plugin policy.
 
+宿主/未来 runtime 功能接入的唯一路径是 `ExternalHostCall` + record 机制：
+binding 层的 `ExternalHostCall`/`ExternalHostCallFn`/`ExternalHostFinalizer`
+（public API 经 `zjs.host.Call`/`Function`/`Finalizer` re-export）注册进
+`JSRuntime.external_host_functions` 的 `ExternalRecord` 表，函数对象只携带
+`host_function.ids.external_host` kind + 注册 id，调用路径按 id 直达分发、
+无字符串查找；finalizer 由 runtime 销毁时统一排空。引擎内部 `HostFunction`
+枚举不再对宿主开放扩展。legacy qjs:std/qjs:os 宿主簇（`installLegacyStdOsGlobals`、
+`hostCallStd*`/`hostCallOs*` 记录与 `exposeStdOsGlobals` 公共 API）已删除，
+git 历史可找回；接口契约由 `src/tests/embedding_examples.zig` 的
+"embedding external host function contract" 测试钉住（参数/this/返回值/错误
+映射/finalizer 时机）。
+
 ## 8. Validation Map
 
 Use the narrowest validation that covers the changed surface:

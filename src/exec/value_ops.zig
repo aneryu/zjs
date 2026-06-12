@@ -411,6 +411,7 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isNull()) return core.JSValue.int32(0);
     if (value.isString()) {
         const str = stringObject(value).?;
+        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| {
                 if (fastStringToInt32(bytes)) |val| return core.JSValue.int32(val);
@@ -627,6 +628,7 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
 pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| try appendUtf16AsUtf8(rt, buffer, units),
@@ -668,6 +670,7 @@ pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
     } else if (value.isString()) {
         const header = value.refHeader() orelse return;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
+        try string_value.ensureFlat(rt);
         switch (string_value.resolveData()) {
             .latin1 => |bytes| {
                 for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);
@@ -1007,6 +1010,7 @@ fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs
     // Never resolve a rope lhs here: resolveData() would flatten it eagerly.
     // Bailing out lets the caller build a rope-of-rope instead.
     if (lhs_string.isRope()) return false;
+    try rhs_string.ensureFlat(rt);
     return switch (rhs_string.resolveData()) {
         .latin1 => |rhs_bytes| switch (lhs_string.resolveData()) {
             .latin1 => try lhs_string.appendLatin1InPlace(rt, rhs_bytes),
@@ -1045,6 +1049,7 @@ pub fn tryAppendLatin1AtomRepeatedInPlace(rt: *core.JSRuntime, lhs: core.JSValue
 
 pub fn latin1AtomRepeatedConcatValue(rt: *core.JSRuntime, lhs: core.JSValue, atom_id: core.Atom, repeat_count: usize) !?core.JSValue {
     const lhs_string = stringObject(lhs) orelse return null;
+    try lhs_string.ensureFlat(rt);
     const lhs_bytes = switch (lhs_string.resolveData()) {
         .latin1 => |bytes| bytes,
         .utf16 => return null,

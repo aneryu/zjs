@@ -1815,6 +1815,7 @@ pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), val
         return;
     }
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
     switch (string_object.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
         .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
@@ -2523,6 +2524,7 @@ pub fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args
     if (!string_value.isString() or args.len > 2) return null;
     const header = string_value.refHeader() orelse return null;
     const string: *core.string.String = @fieldParentPtr("header", header);
+    try string.ensureFlat(rt);
     const bytes = switch (string.resolveData()) {
         .latin1 => |latin1| latin1,
         .utf16 => return null,
@@ -3129,7 +3131,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     const input_len = try stringLengthIndex(rt, string_value);
 
     if (input_len == 0) {
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3154,7 +3156,7 @@ pub fn qjsRegExpSplit(rt: *core.JSRuntime, separator: core.JSValue, string_value
     var pos: usize = 0;
     var out_index: u32 = 0;
     while (pos <= input_len) {
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, pos) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, pos) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3224,7 +3226,7 @@ pub fn qjsRegExpSearch(rt: *core.JSRuntime, regexp: core.JSValue, string_value: 
     defer compiled.deinit(rt.memory.allocator);
 
     const input_len = try stringLengthIndex(rt, string_value);
-    const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+    const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -3259,7 +3261,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
         };
         defer compiled.deinit(rt.memory.allocator);
         const input_len = try stringLengthIndex(rt, string_value);
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3299,7 +3301,7 @@ pub fn qjsRegExpMatch(rt: *core.JSRuntime, global: *core.Object, regexp: core.JS
     var out_index: u32 = 0;
     var search_pos: usize = 0;
     while (search_pos <= input_len) {
-        const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, search_pos) catch |err| switch (err) {
+        const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, search_pos) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -3672,10 +3674,10 @@ pub fn isStringHighSurrogateAt(value: core.JSValue, index: usize) bool {
 }
 
 pub fn singleDotAnchoredMatches(rt: *core.JSRuntime, string_value: core.JSValue, flags: []const u8) !bool {
-    _ = rt;
     const header = string_value.refHeader() orelse return false;
     if (!string_value.isString()) return false;
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
     const dot_all = std.mem.indexOfScalar(u8, flags, 's') != null;
     const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null;
     switch (string_object.resolveData()) {
@@ -4199,6 +4201,7 @@ pub fn stringSliceValue(rt: *core.JSRuntime, value: core.JSValue, start: usize, 
     const slice_len = slice_end - slice_start;
     if (slice_start == 0 and slice_len == input_len) return value.dup();
     if (slice_len == 0) return (try rt.emptyString()).value().dup();
+    try string_value.ensureFlat(rt);
     if (slice_len == 1) {
         const unit = string_value.codeUnitAt(slice_start);
         if (unit <= 0x7f) {
@@ -4689,6 +4692,7 @@ pub fn replaceFrameVarRefBinding(rt: *core.JSRuntime, frame: *frame_mod.Frame, a
 pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return error.TypeError;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
@@ -4830,6 +4834,7 @@ pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: co
     const header = value.refHeader() orelse return null;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
     if (index >= string_value.len()) return core.JSValue.undefinedValue();
+    try string_value.ensureFlat(rt);
     const unit = string_value.codeUnitAt(index);
     if (unit <= 0x7f) {
         // ASCII fast path: reuse the runtime's cached single-byte

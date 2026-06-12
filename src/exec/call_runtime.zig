@@ -234,7 +234,15 @@ pub fn tryCatchInFrame(
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
     else
-        try exception_ops.createNamedError(ctx.runtime, global, error_info.?.name, error_info.?.message);
+        exception_ops.createNamedError(ctx.runtime, global, error_info.?.name, error_info.?.message) catch |create_err| blk: {
+            // A fully exhausted heap cannot materialize a fresh error object;
+            // fall back to the preallocated out-of-memory exception so the
+            // JS catch handler still runs (allocation-free dup).
+            if (create_err == error.OutOfMemory) {
+                if (ctx.runtime.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
+            }
+            return create_err;
+        };
     var catch_value_owned = true;
     errdefer if (catch_value_owned) {
         if (is_pending_exception) {

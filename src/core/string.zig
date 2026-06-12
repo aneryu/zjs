@@ -413,6 +413,27 @@ pub const String = struct {
         }
     };
 
+    /// Materializes rope-backed content (including ropes reached through a
+    /// slice parent chain) so subsequent `resolveData` reads are
+    /// allocation-free. Already-flat strings return at zero cost. Unlike the
+    /// infallible `resolveData` path, allocation failure propagates to the
+    /// caller instead of panicking, so fallible read paths can surface OOM
+    /// as a regular error.
+    pub fn ensureFlat(self: *String, rt: *JSRuntime) !void {
+        var cursor: *const String = self;
+        while (cursor.data == .slice) cursor = cursor.data.slice.parent;
+        switch (cursor.data) {
+            .rope => |node| {
+                std.debug.assert(node.rt == rt);
+                try flattenRopeNodeFallible(node);
+                // Keep the canonical wrapper's hash cache coherent, matching
+                // the infallible flatten path.
+                @constCast(cursor).hash = node.hash;
+            },
+            else => {},
+        }
+    }
+
     pub fn resolveData(self: *const String) ResolvedData {
         switch (self.data) {
             .latin1 => |latin1| return .{ .latin1 = latin1 },
@@ -723,21 +744,35 @@ fn flattenedRopeData(self: *const String, node: *Rope) String.ResolvedData {
     };
 }
 
-/// Materializes the rope's content into `node.flat` and releases the children.
-/// Idempotent. Borrowed-slice readers (`resolveData`) cannot propagate errors,
-/// so an allocation failure here is fatal, mirroring unrecoverable internal
-/// OOM behaviour.
+/// Infallible flatten used by borrowed-slice readers (`resolveData`), which
+/// cannot propagate errors. On allocation failure it runs object-cycle
+/// removal to reclaim memory and retries once; only a second failure is
+/// fatal, mirroring unrecoverable internal OOM behaviour. Fallible read
+/// paths should call `String.ensureFlat` first so OOM surfaces as an error
+/// instead of reaching this backstop.
 fn flattenRopeNode(node: *Rope) void {
+    flattenRopeNodeFallible(node) catch {
+        _ = node.rt.runObjectCycleRemoval();
+        flattenRopeNodeFallible(node) catch @panic("zjs: out of memory while flattening string rope");
+    };
+}
+
+/// Materializes the rope's content into `node.flat` and releases the children.
+/// Idempotent. On error the rope is left untouched (children retained,
+/// `flat == .none`), so the caller can retry or surface the failure.
+fn flattenRopeNodeFallible(node: *Rope) !void {
     if (node.flat != .none) return;
     const rt = node.rt;
     if (node.wide) {
-        const buf = rt.memory.alloc(u16, node.len) catch @panic("zjs: out of memory while flattening string rope");
-        copyRopeContent(u16, rt, node, buf);
+        const buf = try rt.memory.alloc(u16, node.len);
+        errdefer rt.memory.free(u16, buf);
+        try copyRopeContent(u16, rt, node, buf);
         node.flat = .{ .utf16 = buf };
         node.hash = hashUtf16(buf, 0);
     } else {
-        const buf = rt.memory.alloc(u8, node.len) catch @panic("zjs: out of memory while flattening string rope");
-        copyRopeContent(u8, rt, node, buf);
+        const buf = try rt.memory.alloc(u8, node.len);
+        errdefer rt.memory.free(u8, buf);
+        try copyRopeContent(u8, rt, node, buf);
         node.flat = .{ .latin1 = buf };
         node.hash = hashLatin1(buf, 0);
     }
@@ -748,20 +783,22 @@ fn flattenRopeNode(node: *Rope) void {
 }
 
 /// Iterative left-to-right leaf copy; never recurses, so arbitrarily deep
-/// rope chains (`s = s + x` loops) cannot overflow the native stack.
-fn copyRopeContent(comptime T: type, rt: *JSRuntime, root: *Rope, out: []T) void {
+/// rope chains (`s = s + x` loops) cannot overflow the native stack. Only the
+/// traversal stack can fail; the output buffer is owned by the caller, so an
+/// error leaves the rope itself unmodified.
+fn copyRopeContent(comptime T: type, rt: *JSRuntime, root: *Rope, out: []T) !void {
     const allocator = rt.memory.allocator;
     var stack = std.ArrayList(*const String).empty;
     defer stack.deinit(allocator);
-    stack.append(allocator, root.right) catch @panic("zjs: out of memory while flattening string rope");
-    stack.append(allocator, root.left) catch @panic("zjs: out of memory while flattening string rope");
+    try stack.append(allocator, root.right);
+    try stack.append(allocator, root.left);
     var offset: usize = 0;
     while (stack.pop()) |item| {
         if (item.data == .rope) {
             const child = item.data.rope;
             if (child.flat == .none) {
-                stack.append(allocator, child.right) catch @panic("zjs: out of memory while flattening string rope");
-                stack.append(allocator, child.left) catch @panic("zjs: out of memory while flattening string rope");
+                try stack.append(allocator, child.right);
+                try stack.append(allocator, child.left);
                 continue;
             }
             offset += copyResolvedUnits(T, out[offset..], switch (child.flat) {

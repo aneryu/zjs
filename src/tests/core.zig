@@ -4235,7 +4235,7 @@ test "specialized auto-init realm metadata registers borrowed holders" {
     try navigator_holder.defineNavigatorAutoInitProperty(rt, navigator_key, flags, global);
     try performance_holder.definePerformanceAutoInitProperty(rt, performance_key, flags, global);
     try namespace_holder.defineBuiltinNamespaceAutoInitProperty(rt, namespace_key, "Math", flags, global, .math_namespace);
-    try host_holder.defineHostAutoInitProperty(rt, host_key, "gc", 0, flags, core.host_function.ids.std_gc, false, global);
+    try host_holder.defineHostAutoInitProperty(rt, host_key, "gc", 0, flags, core.host_function.ids.output, false, global);
     try replace_holder.defineAutoInitProperty(rt, replace_key, "replace", 0, flags);
     try replace_holder.replaceAutoInitPropertyWithRealmNativeAndCache(rt, replace_key, "replace", 0, flags, global, 0, 0);
 
@@ -4274,7 +4274,7 @@ test "materialized auto-init function realm pointer registers borrowed holder" {
         "gc",
         0,
         core.property.Flags.data(true, false, true),
-        core.host_function.ids.std_gc,
+        core.host_function.ids.output,
         false,
         global,
     );

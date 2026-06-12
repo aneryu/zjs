@@ -83,6 +83,7 @@ pub fn call(rt: *core.JSRuntime, mode: u32, input: core.JSValue) !core.JSValue {
 /// (`decodeURI("%F0%9F%98%80")` and similar) never spills to the heap.
 /// Larger strings spill to an `ArrayList`.
 fn decodeStringDataFast(rt: *core.JSRuntime, string_value: *core.string.String, component: bool) !?core.JSValue {
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| return try decodeAsciiBytes(rt, bytes, component),
         .utf16 => |units| {
@@ -291,6 +292,7 @@ fn stringHasUnpairedSurrogate(value: core.JSValue) bool {
 fn encodeStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u8), value: core.JSValue, component: bool) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try encodeCodepoint(rt, out, byte, component);
@@ -554,6 +556,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {
@@ -601,6 +604,7 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
 fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
         .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),

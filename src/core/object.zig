@@ -9652,7 +9652,8 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
 
 fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
     const header = value.refHeader() orelse return std.math.nan(f64);
-    const string_value: *const @import("string.zig").String = @fieldParentPtr("header", header);
+    const string_value: *@import("string.zig").String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
     try bytes.ensureTotalCapacity(rt.memory.allocator, string_value.len());

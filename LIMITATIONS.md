@@ -44,8 +44,9 @@ and should not rely on process exit for cleanup.
 ## Standard Library and Host APIs
 
 - No Node.js or Deno standard modules are provided.
-- QuickJS-style `qjs:std` and `qjs:os` support exists only where the current
-  engine and tests require it.
+- There is no QuickJS-style `qjs:std`/`qjs:os` layer; the legacy implementation
+  was removed (git history has it). Host capabilities are added through the
+  external host-function registry instead.
 - There is no stable JavaScript FFI for loading arbitrary C, C++, or Zig
   libraries.
 - Host APIs such as Fetch, Streams, WebCrypto, DOM, and browser event-loop

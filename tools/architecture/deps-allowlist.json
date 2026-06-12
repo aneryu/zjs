@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "source": "src/frontend/zjs_parser.zig",
+    "import": "src/builtins/regexp.zig",
+    "reason": "regexp literal early errors reuse builtins.regexp.validatePatternAndFlags, which wraps libs/quickjs_regexp compile plus builtins-side fast-path validators",
+    "exit_milestone": "move pattern/flags validation into src/libs so frontend depends only on core/libs/frontend/bytecode"
+  }
+]

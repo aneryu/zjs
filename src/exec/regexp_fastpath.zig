@@ -437,7 +437,7 @@ pub fn qjsRegExpTestFastNoResult(
         const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(cached_bytecode) };
         const flag_bits = compiled.flagBits();
         if ((flag_bits & (quickjs_regexp.flag_bits.global | quickjs_regexp.flag_bits.sticky)) != 0) return null;
-        return quickjs_regexp.testOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+        return quickjs_regexp.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -461,7 +461,7 @@ pub fn qjsRegExpTestFastNoResult(
     }
     const compiled = quickjs_regexp.Compiled{ .bytecode = @constCast(regexp_object.regexpCompiledBytecode()) };
 
-    return quickjs_regexp.testOnStringFromIndex(compiled, string_value, 0) catch |err| switch (err) {
+    return quickjs_regexp.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -1126,7 +1126,7 @@ pub fn qjsRegExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    const status = quickjs_regexp.execOnStringFromIndex(compiled, string_value, start_index) catch |err| switch (err) {
+    const status = quickjs_regexp.execOnStringFromIndex(rt, compiled, string_value, start_index) catch |err| switch (err) {
         error.BytecodeCorrupt, error.Timeout => return null,
         else => return err,
     };
@@ -1691,6 +1691,7 @@ pub fn appendRegExpInputUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), valu
     const header = value.refHeader() orelse return value_ops.appendRawString(rt, out, value);
     if (!value.isString()) return value_ops.appendRawString(rt, out, value);
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try out.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {

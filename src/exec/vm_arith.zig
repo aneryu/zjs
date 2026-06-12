@@ -515,6 +515,25 @@ pub fn addLocal(
         const rhs_primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, rhs);
         defer rhs_primitive.free(ctx.runtime);
 
+        // QuickJS OP_add_loc appends into the local's string storage when the
+        // accumulator is unshared. Mirror tryFuseLocalStringAppend's reference
+        // accounting: the local slot plus our dup hold two references, and a
+        // synced top-level global-lexical mirror may hold a third reference to
+        // the same accumulator. This keeps `s += part` loops on a flat
+        // growable buffer instead of chaining rope nodes per iteration.
+        if (cell_opt == null and rhs_primitive.isString()) {
+            const has_global_sync_mirror =
+                sync_global_lexical_locals and
+                frame.global_lexical_sync_checked and
+                idx < frame.global_lexical_sync_slots.len and
+                frame.global_lexical_sync_slots[idx];
+            const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
+            if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs_primitive, max_ref_count)) {
+                try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+                return;
+            }
+        }
+
         const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
 
         try slot_ops.setSlotValue(ctx, &frame.locals[idx], updated);

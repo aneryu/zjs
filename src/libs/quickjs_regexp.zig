@@ -863,10 +863,11 @@ pub fn execOnString(compiled: Compiled, string_value: core.JSValue) ExecError!?M
     };
 }
 
-pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
+pub fn execOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!ExecStatus {
     const header = string_value.refHeader() orelse return .{ .result = .not_available };
     if (!string_value.isString()) return .{ .result = .not_available };
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
 
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| try regexp_bytecode.exec(std.heap.page_allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index),
@@ -874,10 +875,11 @@ pub fn execOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, sta
     };
 }
 
-pub fn testOnStringFromIndex(compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
+pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
     const header = string_value.refHeader() orelse return null;
     if (!string_value.isString()) return null;
     const string_object: *core.string.String = @fieldParentPtr("header", header);
+    try string_object.ensureFlat(rt);
 
     return switch (string_object.resolveData()) {
         .latin1 => |bytes| try regexp_bytecode.testMatch(std.heap.page_allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index),

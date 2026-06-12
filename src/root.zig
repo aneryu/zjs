@@ -109,12 +109,6 @@ pub const host = struct {
     pub const NativeObject = object.Object;
     pub const PropName = zjs_binding.PropNameID;
 
-    var test_host_context: u8 = 0;
-
-    pub fn exposeStdOsGlobals(ctx: *JSContext) !void {
-        try zjs_exec.call.installLegacyStdOsGlobals(&ctx.core);
-    }
-
     pub fn defineScriptArgs(ctx: *JSContext, args: []const []const u8) !void {
         try object.defineStringArrayGlobal(ctx, "scriptArgs", args);
     }

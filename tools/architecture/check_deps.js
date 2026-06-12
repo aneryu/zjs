@@ -132,6 +132,60 @@ function violationReason(source, target) {
     return targetStarts(target, disallowed) ? 'builtins may import core/libs/builtins only; exec/runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
   }
 
+  if (source.startsWith('src/libs/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/bytecode/',
+      'src/cli/',
+      'src/exec/',
+      'src/frontend/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'libs may import core/libs only' : null;
+  }
+
+  if (source.startsWith('src/frontend/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/cli/',
+      'src/exec/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'frontend may import core/libs/frontend/bytecode only (the parser emits bytecode directly); builtins/exec/runtime/binding/CLI dependencies must be explicit debt' : null;
+  }
+
+  if (source.startsWith('src/bytecode/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/builtins/',
+      'src/cli/',
+      'src/exec/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'bytecode may import core/libs/frontend/bytecode only' : null;
+  }
+
+  if (source.startsWith('src/exec/')) {
+    const disallowed = [
+      'src/binding/',
+      'src/cli/',
+      'src/runtime/',
+    ];
+    return targetStarts(target, disallowed) ? 'exec must not depend on runtime, binding, or CLI; host policy reaches exec through core interfaces (e.g. HostEventLoop) or the external host-function registry' : null;
+  }
+
+  if (source.startsWith('src/runtime/')) {
+    const disallowed = ['src/cli/'];
+    return targetStarts(target, disallowed) ? 'runtime must not depend on CLI' : null;
+  }
+
+  if (source.startsWith('src/binding/')) {
+    const disallowed = ['src/cli/'];
+    return targetStarts(target, disallowed) ? 'binding must not depend on CLI' : null;
+  }
+
   return null;
 }
 

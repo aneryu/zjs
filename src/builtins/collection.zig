@@ -1880,6 +1880,7 @@ fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValu
 }
 
 fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
+    try string_object.ensureFlat(rt);
     const first = string_object.codeUnitAt(index.*);
     index.* += 1;
     if (isHighSurrogate(first) and index.* < string_object.len()) {

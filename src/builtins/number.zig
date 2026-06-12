@@ -171,6 +171,7 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
     if (input.isString()) {
         const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
         const str = stringFromValue(input).?;
+        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseIntLatin1Bytes(bytes, radix),
             .utf16 => {},
@@ -190,6 +191,7 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
 pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     if (input.isString()) {
         const str = stringFromValue(input).?;
+        try str.ensureFlat(rt);
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseFloatLatin1Bytes(bytes),
             .utf16 => {},
@@ -367,6 +369,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {

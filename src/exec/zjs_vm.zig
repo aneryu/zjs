@@ -113,6 +113,17 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     try call_mod.installHostGlobals(ctx.runtime, global_object);
     const thrower = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     thrower.free(ctx.runtime);
+    if (ctx.runtime.preallocated_oom_error == null) {
+        // Preallocate the out-of-memory catch value while the heap still has
+        // room; when a memory limit is later exhausted, the catch machinery
+        // can throw this object without allocating (QuickJS analogue).
+        ctx.runtime.preallocated_oom_error = exception_ops.createNamedError(
+            ctx.runtime,
+            global_object,
+            "InternalError",
+            "out of memory",
+        ) catch null;
+    }
     const next_eval = global_object.getProperty(core.atom.predefinedId("eval", .string).?);
     const old_eval = ctx.eval_function;
     ctx.eval_function = next_eval;
@@ -582,12 +593,20 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Binary arithmetic ----
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-                if (opc == op.add or opc == op.sub or opc == op.mul) {}
-                if (opc == op.add and fusion_stats.counted(.tryFuseLocalStringAppend, try arith_vm.tryFuseLocalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals))) {
-                    continue;
-                }
-                if (opc == op.add and fusion_stats.counted(.tryFuseGlobalDataAdd, try arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object))) {
-                    continue;
+                if (opc == op.add) {
+                    // Fusion failures (string-append OOM in particular) must
+                    // reach the frame's catch handler just like the unfused
+                    // `binaryVm` path would.
+                    const fused_local_append = arith_vm.tryFuseLocalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals) catch |err| {
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    if (fusion_stats.counted(.tryFuseLocalStringAppend, fused_local_append)) continue;
+                    const fused_global_add = arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    if (fusion_stats.counted(.tryFuseGlobalDataAdd, fused_global_add)) continue;
                 }
                 switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global)) {
                     .done => {},

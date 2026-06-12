@@ -55,7 +55,7 @@ These domains are still reasonable candidates for future splits when touched:
 - closure and var-ref operations.
 - builtin wrapper glue that does not belong in an existing `builtins/` module
   (Reflect/Iterator-helper native records and similar `qjs*` call glue).
-- worker and `qjs:os`/`qjs:std` helper paths.
+- worker helper paths (the legacy `qjs:os`/`qjs:std` cluster has been deleted).
 
 Do not create a new shard for a single unrelated helper. Leave nearby code in
 place until there is a stable domain boundary.

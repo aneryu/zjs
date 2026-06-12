@@ -299,6 +299,10 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
 pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        // Allocation failure under a memory limit is catchable, mirroring
+        // QuickJS's InternalError "out of memory" exception; paths without a
+        // JS catch handler still surface error.OutOfMemory to the embedder.
+        error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
         error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "" },
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },

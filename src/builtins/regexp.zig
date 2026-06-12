@@ -3281,6 +3281,7 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
 
+    try input.ensureFlat(rt);
     switch (input.resolveData()) {
         .latin1 => |bytes| {
             for (bytes, 0..) |byte, index| try appendEscapedCodeUnit(rt, &buffer, byte, index == 0);
@@ -3433,6 +3434,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| try appendUtf8CodePoint(rt, buffer, byte);

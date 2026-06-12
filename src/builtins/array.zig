@@ -1053,6 +1053,7 @@ fn createStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
 fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
     const header = value.refHeader() orelse return;
     const string_value: *core.string.String = @fieldParentPtr("header", header);
+    try string_value.ensureFlat(rt);
     switch (string_value.resolveData()) {
         .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
         .utf16 => |units| {
@@ -1097,6 +1098,7 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
     } else if (value.isString()) {
         const header = value.refHeader() orelse return;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
+        try string_value.ensureFlat(rt);
         switch (string_value.resolveData()) {
             .latin1 => |bytes| try buffer.appendSlice(rt.memory.allocator, bytes),
             .utf16 => |units| {

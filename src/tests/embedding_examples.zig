@@ -121,6 +121,97 @@ test "embedding cookbook host function example compiles and runs" {
     try std.testing.expectEqual(@as(?i32, 42), result.asInt32());
 }
 
+// Contract pin for the high-performance host hookup path: native functions
+// register through `zjs.host.Function`/`zjs.host.Call` (ExternalHostCallFn /
+// ExternalHostCall) into the per-runtime external-record registry and dispatch
+// by id, with no string lookup on the call path. This is the only supported
+// route for host/runtime capability hookup; the legacy qjs:std/qjs:os host
+// cluster was deleted (git history has it).
+const ContractHost = struct {
+    factor: i32,
+    calls: usize = 0,
+    saw_object_this: bool = false,
+    finalized: *bool,
+
+    fn call(ptr: *anyopaque, call_info: zjs.host.Call) anyerror!zjs.JSValue {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        if (call_info.this_value.isObject()) self.saw_object_this = true;
+        if (call_info.args.len < 2) return error.TypeError;
+        const a = call_info.args[0].asInt32() orelse return error.TypeError;
+        const b = call_info.args[1].asInt32() orelse return error.TypeError;
+        if (a < 0) return error.RangeError;
+        return zjs.JSValue.int32(self.factor * (a + b));
+    }
+
+    fn finalize(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.finalized.* = true;
+    }
+};
+
+test "embedding external host function contract covers args, this, errors, and finalizer" {
+    const allocator = std.testing.allocator;
+    var finalized = false;
+    var state = ContractHost{ .factor = 2, .finalized = &finalized };
+
+    const rt = try zjs.JSRuntime.create(allocator);
+    var rt_alive = true;
+    defer if (rt_alive) rt.destroy();
+    const ctx = try zjs.JSContext.create(rt);
+    var ctx_alive = true;
+    defer if (ctx_alive) ctx.destroy();
+
+    try ctx.defineGlobalFunction("hostCombine", 2, &state, ContractHost.call, ContractHost.finalize);
+
+    // Scoped so every eval result is released before the teardown choreography
+    // below asserts on runtime/context destruction order.
+    {
+        // Identity installed from registration metadata, not from the call path.
+        const shape = try ctx.eval(
+            "typeof hostCombine === 'function' && hostCombine.name === 'hostCombine' && hostCombine.length === 2",
+            .{},
+        );
+        defer shape.free(rt);
+        try std.testing.expectEqual(true, shape.asBool().?);
+
+        // Arguments flow host-ward; the return value flows back into JS expressions.
+        const sum = try ctx.eval("hostCombine(19, 23) + 16", .{});
+        defer sum.free(rt);
+        try std.testing.expectEqual(@as(?i32, 100), sum.asInt32());
+
+        // Method-style invocation hands the receiver to the host as `this_value`.
+        const method_sum = try ctx.eval("({ combine: hostCombine }).combine(1, 2)", .{});
+        defer method_sum.free(rt);
+        try std.testing.expectEqual(@as(?i32, 6), method_sum.asInt32());
+        try std.testing.expect(state.saw_object_this);
+
+        // Host Zig errors surface as catchable JS exceptions with mapped names.
+        const caught = try ctx.eval(
+            \\var caught = "none";
+            \\try { hostCombine(-1, 0); } catch (e) {
+            \\  caught = (e instanceof RangeError) ? e.name : "wrong-class";
+            \\}
+            \\caught;
+        , .{});
+        defer caught.free(rt);
+        const caught_text = try ctx.toOwnedUtf8(caught, allocator);
+        defer allocator.free(caught_text);
+        try std.testing.expectEqualStrings("RangeError", caught_text);
+
+        try std.testing.expectEqual(@as(usize, 3), state.calls);
+    }
+
+    // The record (and its finalizer) is owned by the runtime, not the context.
+    ctx.destroy();
+    ctx_alive = false;
+    try std.testing.expect(!finalized);
+
+    rt.destroy();
+    rt_alive = false;
+    try std.testing.expect(finalized);
+}
+
 test "embedding cookbook strings and bytes examples compile and run" {
     const allocator = std.testing.allocator;
     const rt = try zjs.JSRuntime.create(allocator);

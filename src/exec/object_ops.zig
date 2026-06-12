@@ -4699,6 +4699,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive.dup());
         const header = rooted_primitive.refHeader() orelse return error.TypeError;
         const string_value: *core.string.String = @fieldParentPtr("header", header);
+        try string_value.ensureFlat(rt);
         var index: u32 = 0;
         while (index < string_value.len()) : (index += 1) {
             try defineStringWrapperIndexProperty(rt, object, index, string_value.codeUnitAt(index));
