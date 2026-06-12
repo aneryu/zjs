@@ -30,7 +30,6 @@ const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
-const utils = @import("vm_utils.zig");
 const ActiveRootValueProbe = call_runtime.ActiveRootValueProbe;
 const IteratorZipRecord = iter_vm.IteratorZipRecord;
 const RegExpMatch = string_ops.RegExpMatch;
@@ -39,16 +38,15 @@ const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
 const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
 const WorkerMessage = call_runtime.WorkerMessage;
 const WorkerPostTarget = call_runtime.WorkerPostTarget;
-const appendAtom = utils.appendAtom;
+const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
-const atomListContains = utils.atomListContains;
+const atomListContains = core.atom.atomListContains;
 const atomicsBufferObject = object_ops.atomicsBufferObject;
 const backtraceFunctionNameEql = error_stack_ops.backtraceFunctionNameEql;
 const cacheIteratorNextMethod = call_runtime.cacheIteratorNextMethod;
 const callCollectionAdderFromVm = builtin_glue.callCollectionAdderFromVm;
 const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const callableObjectFromValue = object_ops.callableObjectFromValue;
-const catchTargetFromMarker = utils.catchTargetFromMarker;
 const constructValueOrBytecode = call_runtime.constructValueOrBytecode;
 const constructorPrototypeFromGlobal = object_ops.constructorPrototypeFromGlobal;
 const constructorPrototypeFromGlobalAtom = object_ops.constructorPrototypeFromGlobalAtom;
@@ -6997,3 +6995,11 @@ pub const LengthIndexAtom = struct {
         if (self.owned) rt.atoms.free(self.atom);
     }
 };
+
+// Catch-marker decoding for the iterator unwind path (moved from the
+// dissolved exec/vm_utils.zig).
+fn catchTargetFromMarker(marker: core.JSValue) ?usize {
+    const previous = marker.asCatchOffset() orelse -1;
+    if (previous < 0) return null;
+    return @intCast(previous);
+}

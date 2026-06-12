@@ -9,15 +9,14 @@ const stack_mod = @import("stack.zig");
 const std = @import("std");
 
 const call_runtime = @import("call_runtime.zig");
-const utils = @import("vm_utils.zig");
 const object_ops = @import("object_ops.zig");
 
 // Helpers that remain in call_runtime.zig (generic utilities outside the for-of
 // iterator cluster).
-const appendAtom = utils.appendAtom;
-const atomListContains = utils.atomListContains;
+const appendAtom = core.atom.appendAtom;
+const atomListContains = core.atom.atomListContains;
 const callValueOrBytecode = call_runtime.callValueOrBytecode;
-const freeAtomList = utils.freeAtomList;
+const freeAtomList = core.atom.freeAtomList;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
 const isDestructuringIteratorState = call_runtime.isDestructuringIteratorState;

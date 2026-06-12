@@ -117,3 +117,11 @@ pub const Stack = struct {
         if (old_capacity != 0 and !old_arena_window) self.memory.free(JSValue, old_values.ptr[0..old_capacity]);
     }
 };
+
+/// Read the value `offset` slots below the top of the stack without popping
+/// (moved from the dissolved exec/vm_utils.zig).
+pub fn stackValueFromTop(stack: *const Stack, offset: u8) !JSValue {
+    const index_from_top: usize = offset;
+    if (index_from_top >= stack.values.len) return error.StackUnderflow;
+    return stack.values[stack.values.len - 1 - index_from_top].dup();
+}

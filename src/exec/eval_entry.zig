@@ -252,3 +252,13 @@ fn monotonicNanos() u64 {
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
+
+// Eval compile wrappers (moved from the dissolved exec/eval.zig).
+
+pub fn compileDirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
+    return parser.parse(rt, source, .{ .mode = .eval_direct, .filename = "<eval>" });
+}
+
+pub fn compileIndirect(rt: *core.JSRuntime, source: []const u8) !parser.Result {
+    return parser.parse(rt, source, .{ .mode = .eval_indirect, .filename = "<eval>" });
+}

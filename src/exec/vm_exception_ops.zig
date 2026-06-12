@@ -144,18 +144,15 @@ pub fn normalizeEvalRuntimeError(err: anytype) (@TypeOf(err) || error{TypeError}
 
 pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
-    const name = @errorName(err);
-    const value = if (std.mem.eql(u8, name, "TypeError"))
-        try createNamedError(ctx.runtime, global, "TypeError", "not a function")
-    else if (std.mem.eql(u8, name, "RangeError"))
-        try createNamedError(ctx.runtime, global, "RangeError", "")
-    else if (std.mem.eql(u8, name, "ReferenceError"))
-        try createNamedError(ctx.runtime, global, "ReferenceError", "not defined")
-    else if (std.mem.eql(u8, name, "SyntaxError"))
-        try createNamedError(ctx.runtime, global, "SyntaxError", "invalid syntax")
-    else {
-        if (ctx.hasException()) ctx.clearException();
-        return err;
+    const value = switch (@as(anyerror, err)) {
+        error.TypeError => try createNamedError(ctx.runtime, global, "TypeError", "not a function"),
+        error.RangeError => try createNamedError(ctx.runtime, global, "RangeError", ""),
+        error.ReferenceError => try createNamedError(ctx.runtime, global, "ReferenceError", "not defined"),
+        error.SyntaxError => try createNamedError(ctx.runtime, global, "SyntaxError", "invalid syntax"),
+        else => {
+            if (ctx.hasException()) ctx.clearException();
+            return err;
+        },
     };
     if (ctx.hasException()) ctx.clearException();
     return value;
@@ -269,7 +266,7 @@ pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
 
 pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     if (!ctx.hasException()) return false;
-    if (std.mem.eql(u8, @errorName(err), "JSException")) return true;
+    if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
     const object = objectFromValue(ctx.exception_slot.value) orelse return false;
     const name_value = object.getProperty(core.atom.ids.name);
@@ -290,35 +287,38 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
 }
 
 pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "expecting hex digit" };
-    if (std.mem.eql(u8, name, "TypeError") or std.mem.eql(u8, name, "NotExtensible")) return .{ .name = "TypeError", .message = "not a Date object" };
-    if (std.mem.eql(u8, name, "InvalidCharacterError")) return .{ .name = "InvalidCharacterError", .message = "" };
-    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "invalid syntax" };
-    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "Date value is NaN" };
-    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "not defined" };
-    return null;
+    return switch (@as(anyerror, err)) {
+        error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "not a Date object" },
+        error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
+        error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
+        error.RangeError => .{ .name = "RangeError", .message = "Date value is NaN" },
+        error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
+        else => null,
+    };
 }
 
 pub fn promiseErrorInfo(err: anytype) ErrorInfo {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return .{ .name = "URIError", .message = "expecting hex digit" };
-    if (std.mem.eql(u8, name, "TypeError")) return .{ .name = "TypeError", .message = "not a Date object" };
-    if (std.mem.eql(u8, name, "SyntaxError")) return .{ .name = "SyntaxError", .message = "invalid syntax" };
-    if (std.mem.eql(u8, name, "RangeError")) return .{ .name = "RangeError", .message = "Date value is NaN" };
-    if (std.mem.eql(u8, name, "ReferenceError")) return .{ .name = "ReferenceError", .message = "not defined" };
-    return .{ .name = "Error", .message = "" };
+    return switch (@as(anyerror, err)) {
+        error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
+        error.TypeError => .{ .name = "TypeError", .message = "not a Date object" },
+        error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
+        error.RangeError => .{ .name = "RangeError", .message = "Date value is NaN" },
+        error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
+        else => .{ .name = "Error", .message = "" },
+    };
 }
 
 fn errorNameForRuntimeError(err: anytype) ?[]const u8 {
-    const name = @errorName(err);
-    if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return "URIError";
-    if (std.mem.eql(u8, name, "TypeError")) return "TypeError";
-    if (std.mem.eql(u8, name, "InvalidCharacterError")) return "InvalidCharacterError";
-    if (std.mem.eql(u8, name, "SyntaxError")) return "SyntaxError";
-    if (std.mem.eql(u8, name, "RangeError")) return "RangeError";
-    if (std.mem.eql(u8, name, "ReferenceError")) return "ReferenceError";
-    return null;
+    return switch (@as(anyerror, err)) {
+        error.URIError, error.InvalidUtf8 => "URIError",
+        error.TypeError => "TypeError",
+        error.InvalidCharacterError => "InvalidCharacterError",
+        error.SyntaxError => "SyntaxError",
+        error.RangeError => "RangeError",
+        error.ReferenceError => "ReferenceError",
+        else => null,
+    };
 }
 
 fn sourceSlotUpperBound(slots: []const bytecode.pipeline.pc2line.SourceLocSlot, target_pc: usize) usize {

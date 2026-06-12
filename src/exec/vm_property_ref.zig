@@ -13,7 +13,6 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
-const utils = @import("vm_utils.zig");
 const readInt = call_runtime.readInt;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
@@ -156,7 +155,7 @@ pub fn makeSlotRef(
             break :blk try slot_ops.ensureVarRefCell(ctx, &frame.args[idx]);
         },
         op.make_var_ref_ref => blk: {
-            try utils.ensureVarRefsCapacity(ctx, frame, idx);
+            try frame_mod.ensureVarRefsCapacity(ctx, frame, idx);
             break :blk try slot_ops.ensureVarRefCell(ctx, &frame.var_refs[idx]);
         },
         else => unreachable,

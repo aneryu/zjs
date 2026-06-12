@@ -1252,3 +1252,38 @@ fn parseArrayIndex(bytes: []const u8) ?u32 {
 }
 
 const std = @import("std");
+
+// Atom-list helpers shared by the VM operation clusters (moved from the
+// dissolved exec/vm_utils.zig).
+
+pub fn atomListContains(list: []const Atom, needle: Atom) bool {
+    for (list) |atom_id| {
+        if (atom_id == needle) return true;
+    }
+    return false;
+}
+
+pub fn appendAtom(rt: *JSRuntime, list: *[]Atom, atom_id: Atom) !void {
+    const next = try rt.memory.alloc(Atom, list.len + 1);
+    errdefer rt.memory.free(Atom, next);
+    @memcpy(next[0..list.len], list.*);
+    next[list.len] = rt.atoms.dup(atom_id);
+    const old = list.*;
+    list.* = next;
+    if (old.len != 0) rt.memory.free(Atom, old);
+}
+
+pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
+    for (list) |atom_id| rt.atoms.free(atom_id);
+    if (list.len != 0) rt.memory.free(Atom, list);
+}
+
+pub fn appendOwnedAtom(rt: *JSRuntime, keys: *[]Atom, atom_id: Atom) !void {
+    const next = try rt.memory.alloc(Atom, keys.*.len + 1);
+    errdefer rt.memory.free(Atom, next);
+    @memcpy(next[0..keys.*.len], keys.*);
+    next[keys.*.len] = atom_id;
+    const old = keys.*;
+    keys.* = next;
+    if (old.len != 0) rt.memory.free(Atom, old);
+}

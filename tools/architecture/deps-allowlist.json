@@ -1,1 +1,56 @@
-[]
+[
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/call.zig",
+    "reason": "Reflect/Proxy implementations moved out of exec/call.zig still reuse the shared call dispatcher helpers",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/array_ops.zig",
+    "reason": "Reflect argument-list rooting reuses the exec ValueSliceRoot helper",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/call_runtime.zig",
+    "reason": "Reflect.apply/set delegate callable checks and the qjs reflect-set path to the exec call runtime",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/construct.zig",
+    "reason": "Reflect.construct reuses exec construction paths for WeakRef and typed arrays",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/exceptions.zig",
+    "reason": "Reflect host entry points share the exec HostError error set",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/globals.zig",
+    "reason": "Reflect entry points thread the exec VM globals slots through call helpers",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/object_ops.zig",
+    "reason": "Proxy has-trap validation reuses exec proxy trap helpers",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/property_ops.zig",
+    "reason": "Reflect property entry points reuse the exec property-key atom conversion",
+    "exit_milestone": "M2-builtins-exec-split"
+  },
+  {
+    "source": "src/builtins/reflect_proxy.zig",
+    "import": "src/exec/value_ops.zig",
+    "reason": "Reflect.construct argument coercion reuses exec value conversion helpers",
+    "exit_milestone": "M2-builtins-exec-split"
+  }
+]

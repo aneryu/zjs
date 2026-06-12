@@ -1,5 +1,6 @@
 pub const event_loop = @import("event_loop.zig");
 pub const cleanup = @import("cleanup.zig");
+pub const legacy_std_os = @import("legacy_std_os.zig");
 pub const modules = @import("modules.zig");
 pub const plugin = @import("plugin.zig");
 pub const buffer = @import("buffer.zig");

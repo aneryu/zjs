@@ -8,6 +8,7 @@ const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const globals_mod = @import("globals.zig");
 const json_vm = @import("json_ops.zig");
+const legacy_std_os = @import("../runtime/legacy_std_os.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -72,16 +73,6 @@ extern "c" fn fgetc(stream: *std.c.FILE) c_int;
 extern "c" fn fputc(c: c_int, stream: *std.c.FILE) c_int;
 const builtin = @import("builtin");
 
-pub fn stdin() *std.c.FILE {
-    return @extern(**std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stdinp" else "stdin" }).*;
-}
-pub fn stdout() *std.c.FILE {
-    return @extern(**std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stdoutp" else "stdout" }).*;
-}
-pub fn stderr() *std.c.FILE {
-    return @extern(**std.c.FILE, .{ .name = if (builtin.os.tag == .macos) "__stderrp" else "stderr" }).*;
-}
-
 extern "c" fn snprintf(buffer: [*]u8, size: usize, format: [*:0]const u8, ...) c_int;
 extern "c" fn strerror(errnum: c_int) [*:0]u8;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
@@ -89,64 +80,6 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
 extern "c" fn write(fd: c_int, buf: [*]const u8, count: usize) isize;
 extern "c" fn lseek(fd: c_int, offset: c_long, whence: c_int) c_long;
-
-const execvpe = if (builtin.os.tag == .macos) execvpe_mac else execvpe_linux;
-
-const execvpe_linux = if (builtin.os.tag != .macos) struct {
-    extern "c" fn execvpe(file: [*:0]const u8, argv: [*:null]?[*:0]u8, envp: [*:null]?[*:0]u8) c_int;
-}.execvpe else undefined;
-
-fn execvpe_mac(file: [*:0]const u8, argv: [*:null]?[*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) c_int {
-    const file_span = std.mem.span(file);
-    const errno_noent: c_int = @intCast(@intFromEnum(std.posix.E.NOENT));
-    const errno_notdir: c_int = @intCast(@intFromEnum(std.posix.E.NOTDIR));
-    const errno_acces: c_int = @intCast(@intFromEnum(std.posix.E.ACCES));
-    const errno_nametoolong: c_int = @intCast(@intFromEnum(std.posix.E.NAMETOOLONG));
-
-    if (file_span.len == 0) {
-        std.c._errno().* = errno_noent;
-        return -1;
-    }
-    if (std.mem.indexOfScalar(u8, file_span, '/') != null) {
-        return execve(file, argv, envp);
-    }
-
-    const path_env = std.c.getenv("PATH");
-    const path = if (path_env) |p| std.mem.span(p) else "/bin:/usr/bin";
-    var buf: [4096:0]u8 = undefined;
-    var saw_acces = false;
-    var saw_nametoolong = false;
-    var it = std.mem.splitScalar(u8, path, ':');
-    while (it.next()) |dir| {
-        if (dir.len == 0) {
-            if (file_span.len >= buf.len) {
-                saw_nametoolong = true;
-                continue;
-            }
-            @memcpy(buf[0..file_span.len], file_span);
-            buf[file_span.len] = 0;
-        } else {
-            if (dir.len + 1 + file_span.len >= buf.len) {
-                saw_nametoolong = true;
-                continue;
-            }
-            @memcpy(buf[0..dir.len], dir);
-            buf[dir.len] = '/';
-            @memcpy(buf[dir.len + 1 .. dir.len + 1 + file_span.len], file_span);
-            buf[dir.len + 1 + file_span.len] = 0;
-        }
-        _ = execve(&buf, argv, envp);
-        const err = std.c._errno().*;
-        if (err == errno_acces) {
-            saw_acces = true;
-            continue;
-        }
-        if (err == errno_noent or err == errno_notdir) continue;
-        return -1;
-    }
-    std.c._errno().* = if (saw_acces) errno_acces else if (saw_nametoolong) errno_nametoolong else errno_noent;
-    return -1;
-}
 
 extern "c" fn execve(file: [*:0]const u8, argv: [*:null]?[*:0]u8, envp: [*:null]?[*:0]u8) c_int;
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
@@ -180,204 +113,9 @@ pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try defineConsoleObject(rt, global, output_external_id);
 }
 
-pub fn installLegacyStdOsGlobals(ctx: *core.JSContext) !void {
-    const rt = ctx.runtimePtr();
-    const global = try ctx.globalObject();
+pub const installLegacyStdOsGlobals = legacy_std_os.installLegacyStdOsGlobals;
 
-    const std_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, legacy_std_object_property_count);
-    const std_value = std_object.value();
-    defer std_value.free(rt);
-    try installLegacyStdObject(rt, global, std_object);
-    try defineObjectProperty(rt, global, "std", std_value);
-
-    const os_object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, legacy_os_object_property_count);
-    const os_value = os_object.value();
-    defer os_value.free(rt);
-    try installLegacyOsObject(rt, os_object);
-    try defineObjectProperty(rt, global, "os", os_value);
-}
-
-const legacy_std_object_property_count: usize = 20 + 3 + 1 + 3;
-const legacy_os_object_property_count: usize = 41 + 1 + 7 + 10 + 1 + 17;
-const legacy_std_error_property_count: usize = 11;
 const std_file_prototype_property_count: usize = 17;
-
-fn installLegacyStdObject(rt: *core.JSRuntime, global: *core.Object, target: *core.Object) !void {
-    const functions = [_]struct { name: []const u8, kind: HostFunction }{
-        .{ .name = "loadFile", .kind = .std_load_file },
-        .{ .name = "writeFile", .kind = .std_write_file },
-        .{ .name = "exists", .kind = .std_exists },
-        .{ .name = "exit", .kind = .std_exit },
-        .{ .name = "getenv", .kind = .std_getenv },
-        .{ .name = "setenv", .kind = .std_setenv },
-        .{ .name = "unsetenv", .kind = .std_unsetenv },
-        .{ .name = "getenviron", .kind = .std_getenviron },
-        .{ .name = "gc", .kind = .std_gc },
-        .{ .name = "evalScript", .kind = .std_eval_script },
-        .{ .name = "loadScript", .kind = .std_load_script },
-        .{ .name = "open", .kind = .std_open },
-        .{ .name = "fdopen", .kind = .std_fdopen },
-        .{ .name = "tmpfile", .kind = .std_tmpfile },
-        .{ .name = "popen", .kind = .std_popen },
-        .{ .name = "puts", .kind = .std_puts },
-        .{ .name = "printf", .kind = .std_printf },
-        .{ .name = "sprintf", .kind = .std_sprintf },
-        .{ .name = "strerror", .kind = .std_strerror },
-        .{ .name = "urlGet", .kind = .std_url_get },
-    };
-    for (functions) |entry| {
-        try defineLegacyHostFunction(rt, target, entry.name, entry.kind);
-    }
-
-    try defineIntProperty(rt, target, "SEEK_SET", std.c.SEEK.SET);
-    try defineIntProperty(rt, target, "SEEK_CUR", std.c.SEEK.CUR);
-    try defineIntProperty(rt, target, "SEEK_END", std.c.SEEK.END);
-    try defineLegacyStdErrorObject(rt, target);
-    try defineLegacyStdFileValue(rt, global, target, "in", stdin(), false, true);
-    try defineLegacyStdFileValue(rt, global, target, "out", stdout(), false, true);
-    try defineLegacyStdFileValue(rt, global, target, "err", stderr(), false, true);
-}
-
-fn installLegacyOsObject(rt: *core.JSRuntime, target: *core.Object) !void {
-    const functions = [_]struct { name: []const u8, kind: HostFunction }{
-        .{ .name = "getenv", .kind = .os_getenv },
-        .{ .name = "getcwd", .kind = .os_getcwd },
-        .{ .name = "chdir", .kind = .os_chdir },
-        .{ .name = "remove", .kind = .os_remove },
-        .{ .name = "rename", .kind = .os_rename },
-        .{ .name = "open", .kind = .os_open },
-        .{ .name = "close", .kind = .os_close },
-        .{ .name = "read", .kind = .os_read },
-        .{ .name = "write", .kind = .os_write },
-        .{ .name = "seek", .kind = .os_seek },
-        .{ .name = "mkdir", .kind = .os_mkdir },
-        .{ .name = "readdir", .kind = .os_readdir },
-        .{ .name = "stat", .kind = .os_stat },
-        .{ .name = "lstat", .kind = .os_lstat },
-        .{ .name = "realpath", .kind = .os_realpath },
-        .{ .name = "symlink", .kind = .os_symlink },
-        .{ .name = "readlink", .kind = .os_readlink },
-        .{ .name = "utimes", .kind = .os_utimes },
-        .{ .name = "setTimeout", .kind = .os_set_timeout },
-        .{ .name = "clearTimeout", .kind = .os_clear_timeout },
-        .{ .name = "setInterval", .kind = .os_set_interval },
-        .{ .name = "clearInterval", .kind = .os_clear_interval },
-        .{ .name = "exec", .kind = .os_exec },
-        .{ .name = "waitpid", .kind = .os_waitpid },
-        .{ .name = "getpid", .kind = .os_getpid },
-        .{ .name = "pipe", .kind = .os_pipe },
-        .{ .name = "kill", .kind = .os_kill },
-        .{ .name = "dup", .kind = .os_dup },
-        .{ .name = "dup2", .kind = .os_dup2 },
-        .{ .name = "isatty", .kind = .os_isatty },
-        .{ .name = "ttyGetWinSize", .kind = .os_tty_get_win_size },
-        .{ .name = "ttySetRaw", .kind = .os_tty_set_raw },
-        .{ .name = "setReadHandler", .kind = .os_set_read_handler },
-        .{ .name = "setWriteHandler", .kind = .os_set_write_handler },
-        .{ .name = "signal", .kind = .os_signal },
-        .{ .name = "cputime", .kind = .os_cputime },
-        .{ .name = "exePath", .kind = .os_exe_path },
-        .{ .name = "now", .kind = .os_now },
-        .{ .name = "sleepAsync", .kind = .os_sleep_async },
-        .{ .name = "mkdtemp", .kind = .os_mkdtemp },
-        .{ .name = "mkstemp", .kind = .os_mkstemp },
-    };
-    for (functions) |entry| {
-        try defineLegacyHostFunction(rt, target, entry.name, entry.kind);
-    }
-
-    try defineStringProperty(rt, target, "platform", builtinPlatformName());
-    try defineIntProperty(rt, target, "O_RDONLY", osFlagValue(.{ .ACCMODE = .RDONLY }));
-    try defineIntProperty(rt, target, "O_WRONLY", osFlagValue(.{ .ACCMODE = .WRONLY }));
-    try defineIntProperty(rt, target, "O_RDWR", osFlagValue(.{ .ACCMODE = .RDWR }));
-    try defineIntProperty(rt, target, "O_APPEND", osFlagValue(.{ .APPEND = true }));
-    try defineIntProperty(rt, target, "O_CREAT", osFlagValue(.{ .CREAT = true }));
-    try defineIntProperty(rt, target, "O_EXCL", osFlagValue(.{ .EXCL = true }));
-    try defineIntProperty(rt, target, "O_TRUNC", osFlagValue(.{ .TRUNC = true }));
-    try defineIntProperty(rt, target, "S_IFMT", std.c.S.IFMT);
-    try defineIntProperty(rt, target, "S_IFIFO", std.c.S.IFIFO);
-    try defineIntProperty(rt, target, "S_IFCHR", std.c.S.IFCHR);
-    try defineIntProperty(rt, target, "S_IFDIR", std.c.S.IFDIR);
-    try defineIntProperty(rt, target, "S_IFBLK", std.c.S.IFBLK);
-    try defineIntProperty(rt, target, "S_IFREG", std.c.S.IFREG);
-    try defineIntProperty(rt, target, "S_IFSOCK", std.c.S.IFSOCK);
-    try defineIntProperty(rt, target, "S_IFLNK", std.c.S.IFLNK);
-    try defineIntProperty(rt, target, "S_ISGID", std.c.S.ISGID);
-    try defineIntProperty(rt, target, "S_ISUID", std.c.S.ISUID);
-    try defineIntProperty(rt, target, "WNOHANG", std.c.W.NOHANG);
-    try defineIntProperty(rt, target, "SIGINT", @intFromEnum(std.c.SIG.INT));
-    try defineIntProperty(rt, target, "SIGABRT", @intFromEnum(std.c.SIG.ABRT));
-    try defineIntProperty(rt, target, "SIGFPE", @intFromEnum(std.c.SIG.FPE));
-    try defineIntProperty(rt, target, "SIGILL", @intFromEnum(std.c.SIG.ILL));
-    try defineIntProperty(rt, target, "SIGSEGV", @intFromEnum(std.c.SIG.SEGV));
-    try defineIntProperty(rt, target, "SIGTERM", @intFromEnum(std.c.SIG.TERM));
-    try defineIntProperty(rt, target, "SIGQUIT", @intFromEnum(std.c.SIG.QUIT));
-    try defineIntProperty(rt, target, "SIGPIPE", @intFromEnum(std.c.SIG.PIPE));
-    try defineIntProperty(rt, target, "SIGALRM", @intFromEnum(std.c.SIG.ALRM));
-    try defineIntProperty(rt, target, "SIGUSR1", @intFromEnum(std.c.SIG.USR1));
-    try defineIntProperty(rt, target, "SIGUSR2", @intFromEnum(std.c.SIG.USR2));
-    try defineIntProperty(rt, target, "SIGCHLD", @intFromEnum(std.c.SIG.CHLD));
-    try defineIntProperty(rt, target, "SIGCONT", @intFromEnum(std.c.SIG.CONT));
-    try defineIntProperty(rt, target, "SIGSTOP", @intFromEnum(std.c.SIG.STOP));
-    try defineIntProperty(rt, target, "SIGTSTP", @intFromEnum(std.c.SIG.TSTP));
-    try defineIntProperty(rt, target, "SIGTTIN", @intFromEnum(std.c.SIG.TTIN));
-    try defineIntProperty(rt, target, "SIGTTOU", @intFromEnum(std.c.SIG.TTOU));
-}
-
-fn defineLegacyHostFunction(rt: *core.JSRuntime, target: *core.Object, name: []const u8, kind: HostFunction) !void {
-    const function_value = try createNamedHostFunctionValue(rt, name, kind);
-    defer function_value.free(rt);
-    try defineObjectProperty(rt, target, name, function_value);
-}
-
-fn defineLegacyStdErrorObject(rt: *core.JSRuntime, target: *core.Object) !void {
-    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, legacy_std_error_property_count);
-    const object_value = object.value();
-    defer object_value.free(rt);
-
-    try defineIntProperty(rt, object, "EINVAL", @intFromEnum(std.posix.E.INVAL));
-    try defineIntProperty(rt, object, "EIO", @intFromEnum(std.posix.E.IO));
-    try defineIntProperty(rt, object, "EACCES", @intFromEnum(std.posix.E.ACCES));
-    try defineIntProperty(rt, object, "EEXIST", @intFromEnum(std.posix.E.EXIST));
-    try defineIntProperty(rt, object, "ENOSPC", @intFromEnum(std.posix.E.NOSPC));
-    try defineIntProperty(rt, object, "ENOSYS", @intFromEnum(std.posix.E.NOSYS));
-    try defineIntProperty(rt, object, "EBUSY", @intFromEnum(std.posix.E.BUSY));
-    try defineIntProperty(rt, object, "ENOENT", @intFromEnum(std.posix.E.NOENT));
-    try defineIntProperty(rt, object, "EPERM", @intFromEnum(std.posix.E.PERM));
-    try defineIntProperty(rt, object, "EPIPE", @intFromEnum(std.posix.E.PIPE));
-    try defineIntProperty(rt, object, "EBADF", @intFromEnum(std.posix.E.BADF));
-    try defineObjectProperty(rt, target, "Error", object_value);
-}
-
-fn defineLegacyStdFileValue(
-    rt: *core.JSRuntime,
-    global: *core.Object,
-    target: *core.Object,
-    name: []const u8,
-    file: *std.c.FILE,
-    is_popen: bool,
-    is_stdio: bool,
-) !void {
-    const value = try createStdFileValue(rt, global, file, is_popen, is_stdio);
-    defer value.free(rt);
-    try defineObjectProperty(rt, target, name, value);
-}
-
-fn builtinPlatformName() []const u8 {
-    return switch (builtin.os.tag) {
-        .linux => "linux",
-        .macos => "darwin",
-        .windows => "win32",
-        .freebsd => "freebsd",
-        .openbsd => "openbsd",
-        .netbsd => "netbsd",
-        else => "unknown",
-    };
-}
-
-fn osFlagValue(value: std.c.O) i32 {
-    return @intCast(@as(u32, @bitCast(value)));
-}
 
 fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try builtins.registry.installStandardGlobals(rt, global);
@@ -583,7 +321,7 @@ pub fn forEachArrayPrint(rt: *core.JSRuntime, output: ?*std.Io.Writer, array_val
 // internal paths. They are not installed by the default zjs/embedding global
 // surface; see docs/api-boundary.md before treating them as a product runtime
 // API.
-const HostFunction = enum(i32) {
+pub const HostFunction = enum(i32) {
     output = core.host_function.ids.output,
     std_load_file = 23,
     std_write_file = 24,
@@ -1168,7 +906,7 @@ fn internalDestructuringHelperForSubtype(subtype: u8) ?struct { slot: usize, kin
     };
 }
 
-fn createNamedHostFunctionValue(rt: *core.JSRuntime, name: []const u8, kind: HostFunction) !core.JSValue {
+pub fn createNamedHostFunctionValue(rt: *core.JSRuntime, name: []const u8, kind: HostFunction) !core.JSValue {
     const function_object = try createHostFunctionWithOwnPropertyCapacity(rt, kind, 2);
     errdefer function_object.value().free(rt);
     try defineStringPropertyAssumingNew(rt, function_object, "name", name);
@@ -1191,7 +929,7 @@ fn ensureHostConstructorPrototype(rt: *core.JSRuntime, global: *core.Object, nam
     try defineObjectPropertyAssumingNew(rt, function_object, "prototype", prototype_value);
 }
 
-fn defineObjectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
+pub fn defineObjectProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
@@ -1207,7 +945,7 @@ fn defineGlobalThisProperty(rt: *core.JSRuntime, global: *core.Object) !void {
     try global.defineOwnPropertyAssumingNew(rt, core.atom.predefinedId("globalThis", .string).?, core.Descriptor.data(global.value(), true, false, true));
 }
 
-fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
+pub fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
     try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
@@ -1249,7 +987,7 @@ fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Ob
     try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value_ops.numberToValue(value), false, false, false));
 }
 
-fn defineStringProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: []const u8) !void {
+pub fn defineStringProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: []const u8) !void {
     const string_value = try value_ops.createStringValue(rt, value);
     defer string_value.free(rt);
     try defineObjectProperty(rt, object, name, string_value);
@@ -1271,7 +1009,7 @@ fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {
     return object;
 }
 
-fn expectCallableObject(value: core.JSValue) ?*core.Object {
+pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.isObject()) return null;
     const object: *core.Object = @fieldParentPtr("header", header);
@@ -1411,14 +1149,14 @@ const PromiseCombinatorMode = enum {
     any,
 };
 
-fn activeGlobalObject(rt: *core.JSRuntime, global: ?*core.Object, globals: []globals_mod.Slot) !?*core.Object {
+pub fn activeGlobalObject(rt: *core.JSRuntime, global: ?*core.Object, globals: []globals_mod.Slot) !?*core.Object {
     if (global) |global_object| return global_object;
     const global_value = try globals_mod.getByName(rt, globals, "globalThis");
     defer global_value.free(rt);
     return thisObject(global_value);
 }
 
-fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
+pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?*core.Object {
     const global_object = global orelse return null;
     const ctor_key = rt.internAtom("Function") catch return null;
     defer rt.atoms.free(ctor_key);
@@ -1556,7 +1294,7 @@ test "createPromiseCapability roots builtin promise capability under GC" {
     _ = rt.runObjectCycleRemoval();
 }
 
-fn getValueProperty(
+pub fn getValueProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
@@ -2170,7 +1908,7 @@ fn callNativeBuiltin(
     }
 
     if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-    if (std.mem.eql(u8, name, "construct")) return reflectConstruct(ctx.runtime, args, globals);
+    if (std.mem.eql(u8, name, "construct")) return builtins.reflect_proxy.reflectConstruct(ctx.runtime, args, globals);
     if (std.mem.eql(u8, name, "get size")) {
         const owner_class = function_object.collectionMethodOwnerClass();
         if (owner_class == core.class.invalid_class_id) return error.TypeError;
@@ -2426,7 +2164,7 @@ fn callNativeBuiltin(
                 }
             }
             if (try constructorNameEql(ctx.runtime, receiver, "Proxy")) {
-                if (std.mem.eql(u8, name, "revocable")) return proxyRevocable(ctx.runtime, global, args);
+                if (std.mem.eql(u8, name, "revocable")) return builtins.reflect_proxy.proxyRevocable(ctx.runtime, global, args);
             }
             if (try constructorNameEql(ctx.runtime, receiver, "Number")) {
                 if (std.mem.eql(u8, name, "isNaN")) {
@@ -2633,10 +2371,10 @@ fn callNativeBuiltin(
         return callStringMethod(ctx.runtime, this_value, name, args);
     }
 
-    if (std.mem.eql(u8, name, "defineProperty")) return reflectDefineProperty(ctx.runtime, args);
-    if (std.mem.eql(u8, name, "get")) return reflectGet(ctx.runtime, args);
-    if (std.mem.eql(u8, name, "set")) return reflectSet(ctx, output, global, args);
-    if (std.mem.eql(u8, name, "has")) return reflectHas(ctx, output, global, globals, args);
+    if (std.mem.eql(u8, name, "defineProperty")) return builtins.reflect_proxy.reflectDefineProperty(ctx.runtime, args);
+    if (std.mem.eql(u8, name, "get")) return builtins.reflect_proxy.reflectGet(ctx.runtime, args);
+    if (std.mem.eql(u8, name, "set")) return builtins.reflect_proxy.reflectSet(ctx, output, global, args);
+    if (std.mem.eql(u8, name, "has")) return builtins.reflect_proxy.reflectHas(ctx, output, global, globals, args);
     return error.TypeError;
 }
 
@@ -2778,12 +2516,12 @@ fn callReflectNativeFunctionRecord(
     if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
     const reflect_mod = builtins.reflect_proxy;
     return switch (id) {
-        @intFromEnum(reflect_mod.StaticMethod.define_property) => try reflectDefineProperty(ctx.runtime, args),
-        @intFromEnum(reflect_mod.StaticMethod.get) => try reflectGet(ctx.runtime, args),
-        @intFromEnum(reflect_mod.StaticMethod.set) => try reflectSet(ctx, output, global, args),
-        @intFromEnum(reflect_mod.StaticMethod.has) => try reflectHas(ctx, output, global, globals, args),
-        @intFromEnum(reflect_mod.StaticMethod.construct) => try reflectConstruct(ctx.runtime, args, globals),
-        @intFromEnum(reflect_mod.StaticMethod.apply) => try reflectApply(ctx, output, global, globals, args),
+        @intFromEnum(reflect_mod.StaticMethod.define_property) => try reflect_mod.reflectDefineProperty(ctx.runtime, args),
+        @intFromEnum(reflect_mod.StaticMethod.get) => try reflect_mod.reflectGet(ctx.runtime, args),
+        @intFromEnum(reflect_mod.StaticMethod.set) => try reflect_mod.reflectSet(ctx, output, global, args),
+        @intFromEnum(reflect_mod.StaticMethod.has) => try reflect_mod.reflectHas(ctx, output, global, globals, args),
+        @intFromEnum(reflect_mod.StaticMethod.construct) => try reflect_mod.reflectConstruct(ctx.runtime, args, globals),
+        @intFromEnum(reflect_mod.StaticMethod.apply) => try reflect_mod.reflectApply(ctx, output, global, globals, args),
         else => error.TypeError,
     };
 }
@@ -3274,220 +3012,7 @@ fn tagRealmRegExpAccessorErrors(rt: *core.JSRuntime, realm_global: *core.Object)
     }
 }
 
-fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    if (!isConstructorValue(rt, args[0])) return error.TypeError;
-    const target = thisObject(args[0]) orelse return error.TypeError;
-    const target_name = nativeFunctionName(rt, target) catch null;
-    defer if (target_name) |name| rt.memory.allocator.free(name);
-    const new_target = if (args.len >= 3) args[2] else args[0];
-    if (!isConstructorValue(rt, new_target)) return error.TypeError;
-    if (builtins.date.isConstructorRecord(target)) {
-        var construct_args = ReflectConstructArguments{};
-        try construct_args.init(rt, args[1]);
-        defer construct_args.deinit();
-        const prototype = try reflectConstructPrototype(rt, "Date", new_target, args[0]);
-        return builtins.date.constructWithPrototype(rt, construct_args.values, prototype);
-    }
-    if (target_name) |name| {
-        if (std.mem.eql(u8, name, "Array")) {
-            if (args.len < 2) return error.TypeError;
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return builtins.array.constructConstructorWithPrototype(rt, construct_args.values, prototype);
-        }
-        if (std.mem.eql(u8, name, "Iterator")) {
-            if (builtins.object.sameValue(new_target, args[0])) return error.TypeError;
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            const instance = try core.Object.create(rt, core.class.ids.object, prototype);
-            errdefer core.Object.destroyFromHeader(rt, &instance.header);
-            return instance.value();
-        }
-        if (std.mem.eql(u8, name, "Number")) {
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const primitive = if (construct_args.values.len >= 1) blk: {
-                if (construct_args.values[0].isSymbol()) return error.TypeError;
-                break :blk value_ops.numberToValue(try value_ops.toIntegerOrInfinity(rt, construct_args.values[0]));
-            } else core.JSValue.int32(0);
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return primitiveWrapper(rt, core.class.ids.number, primitive, prototype);
-        }
-        if (std.mem.eql(u8, name, "Date")) {
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return builtins.date.constructWithPrototype(rt, construct_args.values, prototype);
-        }
-        if (std.mem.eql(u8, name, "FinalizationRegistry")) {
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const cleanup_callback = if (construct_args.values.len >= 1) construct_args.values[0] else return error.TypeError;
-            if (!isCallableObjectValue(cleanup_callback)) return error.TypeError;
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            const instance = try core.Object.create(rt, core.class.ids.finalization_registry, prototype);
-            errdefer core.Object.destroyFromHeader(rt, &instance.header);
-            try instance.setOptionalValueSlot(rt, instance.finalizationRegistryCleanupCallbackSlot(), cleanup_callback.dup());
-            return instance.value();
-        }
-        if (std.mem.eql(u8, name, "WeakRef")) {
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const target_value = if (construct_args.values.len >= 1) construct_args.values[0] else return error.TypeError;
-            if (!builtins.symbol.canBeHeldWeakly(rt, target_value)) return error.TypeError;
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return construct_mod.weakRefWithPrototype(rt, target_value, prototype);
-        }
-        if (builtins.collection.constructorId(name)) |kind| {
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return builtins.collection.constructWithPrototype(rt, kind, prototype) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (construct_mod.typedArrayElement(name)) |element| {
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            const global_object = try activeGlobalObject(rt, null, globals);
-            return construct_mod.constructTypedArrayValue(rt, prototype, element, construct_args.values, global_object);
-        }
-    }
-
-    {
-        const prototype = try reflectConstructPrototype(rt, target_name orelse "Object", new_target, args[0]);
-        const instance = try core.Object.create(rt, core.class.ids.object, prototype);
-        errdefer core.Object.destroyFromHeader(rt, &instance.header);
-        return instance.value();
-    }
-}
-
-fn reflectApply(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 3) return error.TypeError;
-    if (!call_runtime.isCallableValue(args[0])) return error.TypeError;
-    var apply_args = ReflectConstructArguments{};
-    try apply_args.init(ctx.runtime, args[2]);
-    defer apply_args.deinit();
-    return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, args[1], args[0], apply_args.values);
-}
-
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-
-const ReflectConstructArguments = struct {
-    rt: ?*core.JSRuntime = null,
-    values: []core.JSValue = &.{},
-    root: ValueSliceRoot = .{},
-
-    fn init(self: *ReflectConstructArguments, rt: *core.JSRuntime, value: core.JSValue) !void {
-        self.values = try reflectConstructArgumentList(rt, value);
-        self.rt = rt;
-        self.root.init(rt, &self.values);
-    }
-
-    fn deinit(self: *ReflectConstructArguments) void {
-        const rt = self.rt orelse return;
-        self.root.deinit();
-        freeReflectConstructArgumentList(rt, self.values);
-        self.* = .{};
-    }
-};
-
-fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]core.JSValue {
-    const object = try expectObjectArg(value);
-    if (!object.flags.is_array) return error.TypeError;
-    const out = try rt.memory.alloc(core.JSValue, object.length);
-    errdefer rt.memory.free(core.JSValue, out);
-    var rooted_out: []core.JSValue = out[0..0];
-    var out_root = ValueSliceRoot{};
-    out_root.init(rt, &rooted_out);
-    defer out_root.deinit();
-    var initialized: usize = 0;
-    errdefer {
-        for (out[0..initialized]) |item| item.free(rt);
-    }
-    var index: u32 = 0;
-    while (index < object.length) : (index += 1) {
-        out[index] = object.getProperty(core.atom.atomFromUInt32(index));
-        initialized += 1;
-        rooted_out = out[0..initialized];
-    }
-    return out;
-}
-
-fn freeReflectConstructArgumentList(rt: *core.JSRuntime, values: []core.JSValue) void {
-    for (values) |value| value.free(rt);
-    if (values.len != 0) rt.memory.free(core.JSValue, values);
-}
-
-fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
-    if (!value_ops.isFunctionObject(value)) return false;
-    const object = thisObject(value) orelse return false;
-    if (object.proxyTarget()) |target| return isConstructorValue(rt, target);
-    if (builtins.date.isConstructorRecord(object)) return true;
-    return switch (object.class_id) {
-        core.class.ids.c_function => {
-            if (object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
-                return object.hasOwnProperty(core.atom.ids.prototype);
-            }
-            const name = nativeFunctionName(rt, object) catch return false;
-            defer rt.memory.allocator.free(name);
-            return isBuiltinConstructorName(name);
-        },
-        core.class.ids.bytecode_function,
-        core.class.ids.c_closure,
-        core.class.ids.bound_function,
-        => true,
-        else => false,
-    };
-}
-
-fn reflectConstructPrototype(rt: *core.JSRuntime, target_name: []const u8, new_target: core.JSValue, target: core.JSValue) !?*core.Object {
-    if (thisObject(new_target)) |new_target_object| {
-        const prototype_value = new_target_object.getProperty(core.atom.ids.prototype);
-        defer prototype_value.free(rt);
-        if (prototype_value.isObject()) {
-            const header = prototype_value.refHeader() orelse return null;
-            return @fieldParentPtr("header", header);
-        }
-        var realm_source = new_target_object;
-        while (true) {
-            if (realm_source.class_id == core.class.ids.bound_function) {
-                realm_source = boundFunctionTargetObject(realm_source) orelse break;
-                continue;
-            }
-            if (realm_source.proxyTarget()) |target_value| {
-                realm_source = thisObject(target_value) orelse break;
-                continue;
-            }
-            break;
-        }
-        const realm_key = try realmPrototypeKey(rt, target_name);
-        defer rt.memory.allocator.free(realm_key);
-        const realm_proto_key = try rt.internAtom(realm_key);
-        defer rt.atoms.free(realm_proto_key);
-        const realm_proto_value = realm_source.getProperty(realm_proto_key);
-        defer realm_proto_value.free(rt);
-        if (realm_proto_value.isObject()) {
-            const header = realm_proto_value.refHeader() orelse return null;
-            return @fieldParentPtr("header", header);
-        }
-    }
-    const target_object = expectCallableObject(target) orelse return null;
-    return constructorPrototype(rt, target_object);
-}
 
 const ActiveRootSymbolProbe = struct {
     rt: *core.JSRuntime,
@@ -3561,7 +3086,7 @@ test "reflect construct roots argument list while resolving prototype" {
 
     var globals = [_]globals_mod.Slot{};
     const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
-    const result = try reflectConstruct(rt, &reflect_args, globals[0..]);
+    const result = try builtins.reflect_proxy.reflectConstruct(rt, &reflect_args, globals[0..]);
     var result_alive = true;
     defer if (result_alive) result.free(rt);
 
@@ -3576,7 +3101,7 @@ test "reflect construct roots argument list while resolving prototype" {
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
+pub fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
 }
 
@@ -4102,182 +3627,12 @@ fn objectProtoSetter(rt: *core.JSRuntime, receiver: core.JSValue, prototype_valu
     return core.JSValue.undefinedValue();
 }
 
-fn isCallableObjectValue(value: core.JSValue) bool {
+pub fn isCallableObjectValue(value: core.JSValue) bool {
     const object = thisObject(value) orelse return false;
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_closure or
         object.class_id == core.class.ids.bound_function or
         object.class_id == core.class.ids.bytecode_function;
-}
-fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .slices = &root_slices,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    _ = try expectObjectArg(rooted_args[0]);
-    _ = try expectObjectArg(rooted_args[1]);
-
-    const object = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &object.header);
-
-    const proxy = try core.Object.create(rt, core.class.ids.object, null);
-    var proxy_raw_owned = true;
-    errdefer if (proxy_raw_owned) core.Object.destroyFromHeader(rt, &proxy.header);
-    proxy.flags.is_proxy = true;
-    try proxy.ensureProxyPayload(rt);
-    try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_args[0].dup());
-    try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_args[1].dup());
-    try defineObjectProperty(rt, object, "proxy", proxy.value());
-    proxy_raw_owned = false;
-    proxy.value().free(rt);
-    const revoke = try builtins.function.nativeFunction(rt, "revoke", 0);
-    defer revoke.free(rt);
-    const revoke_object = thisObject(revoke) orelse return error.TypeError;
-    const empty_name = try core.string.String.createAscii(rt, "");
-    const empty_name_value = empty_name.value();
-    defer empty_name_value.free(rt);
-    try revoke_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name_value, false, false, true));
-    if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
-        try revoke_object.setPrototype(rt, function_proto);
-    }
-    try revoke_object.setOptionalValueSlot(rt, revoke_object.functionProxyRevokeTargetSlot(), proxy.value().dup());
-    try defineObjectProperty(rt, object, "revoke", revoke);
-    return object.value();
-}
-
-fn reflectHas(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const object = try expectObjectArg(args[0]);
-    const key = try property_ops.propertyKeyAtom(ctx.runtime, args[1]);
-    defer ctx.runtime.atoms.free(key);
-    return core.JSValue.boolean(try reflectHasProperty(ctx, output, global, globals, object, key));
-}
-
-fn reflectHasProperty(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    object: *core.Object,
-    atom_id: core.Atom,
-) HostError!bool {
-    if (object.proxyTarget() != null) return proxyReflectHasProperty(ctx, output, global, globals, object, atom_id);
-    if (try typedArrayReflectHas(ctx.runtime, object, atom_id)) |has| return has;
-    if (object.hasOwnProperty(atom_id)) return true;
-
-    var current = object.getPrototype();
-    while (current) |proto| : (current = proto.getPrototype()) {
-        if (proto.proxyTarget() != null) return proxyReflectHasProperty(ctx, output, global, globals, proto, atom_id);
-        if (try typedArrayReflectHas(ctx.runtime, proto, atom_id)) |has| return has;
-        if (proto.hasOwnProperty(atom_id)) return true;
-    }
-    return false;
-}
-
-fn proxyReflectHasProperty(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    proxy: *core.Object,
-    atom_id: core.Atom,
-) !bool {
-    const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const target = try expectObjectArg(target_value);
-    const handler_value = proxy.proxyHandler() orelse return error.TypeError;
-    const has_atom = try ctx.runtime.internAtom("has");
-    defer ctx.runtime.atoms.free(has_atom);
-    const trap = try getValueProperty(ctx, output, global, globals, handler_value, has_atom);
-    defer trap.free(ctx.runtime);
-    if (trap.isUndefined() or trap.isNull()) return reflectHasProperty(ctx, output, global, globals, target, atom_id);
-    const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, atom_id);
-    defer key_value.free(ctx.runtime);
-    const result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, handler_value, trap, &.{ target_value, key_value });
-    defer result.free(ctx.runtime);
-    return try object_ops.validateProxyHasResult(ctx.runtime, target, atom_id, value_ops.isTruthy(result));
-}
-
-fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
-    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id)) {
-        .none => return null,
-        .invalid => return false,
-        .index => |index| {
-            const length = builtins.buffer.typedArrayLength(rt, object) catch return false;
-            return index < length;
-        },
-    }
-}
-
-fn reflectDefineProperty(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 3) return error.TypeError;
-    const object = try expectObjectArg(args[0]);
-    const key = try property_ops.propertyKeyAtom(rt, args[1]);
-    defer rt.atoms.free(key);
-    const desc_object = try expectObjectArg(args[2]);
-    const desc = try descriptorFromObject(rt, desc_object);
-    defer desc.destroy(rt);
-    if (builtins.buffer.isTypedArrayObject(object)) {
-        if (try typedArrayReflectDefineOwnProperty(rt, object, key, desc)) |ok| return core.JSValue.boolean(ok);
-    }
-    object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
-        error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return core.JSValue.boolean(false),
-        error.InvalidLength => return error.RangeError,
-        else => return err,
-    };
-    return core.JSValue.boolean(true);
-}
-
-fn typedArrayReflectDefineOwnProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, desc: core.Descriptor) !?bool {
-    return try builtins.buffer.typedArrayDefineOwnProperty(rt, object, atom_id, desc);
-}
-
-fn reflectGet(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    const object = try expectObjectArg(args[0]);
-    const key = try property_ops.propertyKeyAtom(rt, args[1]);
-    defer rt.atoms.free(key);
-    return object.getProperty(key);
-}
-
-fn reflectSet(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (global) |global_object| {
-        if (try call_runtime.qjsReflectSetCall(ctx, output, global_object, args, null, null)) |value| {
-            return value;
-        }
-    }
-    if (args.len < 1) return error.TypeError;
-    const set_value = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const object = try expectObjectArg(args[0]);
-    const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const key = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
-    defer ctx.runtime.atoms.free(key);
-    object.setProperty(ctx.runtime, key, set_value) catch |err| switch (err) {
-        error.ReadOnly, error.AccessorWithoutSetter, error.NotExtensible, error.IncompatibleDescriptor => return core.JSValue.boolean(false),
-        error.InvalidLength => return error.RangeError,
-        else => return err,
-    };
-    return core.JSValue.boolean(true);
 }
 
 fn arrayMapCallback(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
@@ -4631,7 +3986,7 @@ fn numberIsInteger(value: core.JSValue) bool {
     return std.math.isFinite(number) and @floor(number) == number;
 }
 
-fn primitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, primitive: core.JSValue, prototype: ?*core.Object) !core.JSValue {
+pub fn primitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, primitive: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     if (class_id == core.class.ids.string) return builtins.string.constructWithPrototype(rt, &.{primitive}, prototype);
     var rooted_primitive = primitive;
     var root_values = [_]core.runtime.ValueRootValue{
@@ -4702,11 +4057,6 @@ fn defineDataPropertyWithFlags(
     configurable: bool,
 ) !void {
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, writable, enumerable, configurable));
-}
-
-fn boundFunctionTargetObject(object: *core.Object) ?*core.Object {
-    const target = object.boundTarget() orelse return null;
-    return thisObject(target);
 }
 
 fn boundFunctionNameValue(rt: *core.JSRuntime, target_name: core.JSValue) !core.JSValue {
@@ -5176,7 +4526,7 @@ fn defaultObjectTag(object: *core.Object) []const u8 {
     };
 }
 
-fn nativeFunctionName(rt: *core.JSRuntime, function_object: *core.Object) ![]u8 {
+pub fn nativeFunctionName(rt: *core.JSRuntime, function_object: *core.Object) ![]u8 {
     const name_value = try nativeFunctionNameValue(rt, function_object, false);
     defer name_value.free(rt);
     var buffer = std.ArrayList(u8).empty;
@@ -5389,7 +4739,7 @@ fn isFunctionToStringCallable(value: core.JSValue) bool {
     return isFunctionToStringCallable(target);
 }
 
-fn thisObject(value: core.JSValue) ?*core.Object {
+pub fn thisObject(value: core.JSValue) ?*core.Object {
     if (!value.isObject()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
@@ -5397,7 +4747,7 @@ fn thisObject(value: core.JSValue) ?*core.Object {
 
 const constructorNameEql = call_runtime.constructorNameEqlLocal;
 
-fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object {
+pub fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object {
     const prototype_value = object.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     if (!prototype_value.isObject()) return null;
@@ -5628,8 +4978,8 @@ fn hostCallStdPuts(call: HostCall) HostError!core.JSValue {
             try writer.writeAll(text);
             try writer.flush();
         } else {
-            _ = std.c.fwrite(text.ptr, 1, text.len, stdout());
-            _ = fflush(stdout());
+            _ = std.c.fwrite(text.ptr, 1, text.len, legacy_std_os.stdout());
+            _ = fflush(legacy_std_os.stdout());
         }
     }
     return core.JSValue.undefinedValue();
@@ -5643,8 +4993,8 @@ fn hostCallStdPrintf(call: HostCall) HostError!core.JSValue {
         try writer.flush();
         return core.JSValue.int32(@intCast(bytes.len));
     }
-    const written = std.c.fwrite(bytes.ptr, 1, bytes.len, stdout());
-    _ = fflush(stdout());
+    const written = std.c.fwrite(bytes.ptr, 1, bytes.len, legacy_std_os.stdout());
+    _ = fflush(legacy_std_os.stdout());
     return core.JSValue.int32(@intCast(written));
 }
 
@@ -5722,7 +5072,7 @@ fn hostCallStdFilePuts(call: HostCall) HostError!core.JSValue {
     for (call.args) |arg| {
         const text = try hostStringFromValue(call.ctx.runtime, arg);
         defer call.ctx.runtime.memory.allocator.free(text);
-        if (file_object.stdFileIsStdio() and file == stdout() and call.output != null) {
+        if (file_object.stdFileIsStdio() and file == legacy_std_os.stdout() and call.output != null) {
             try call.output.?.writeAll(text);
         } else {
             _ = std.c.fwrite(text.ptr, 1, text.len, file);
@@ -5736,7 +5086,7 @@ fn hostCallStdFilePrintf(call: HostCall) HostError!core.JSValue {
     const file = file_object.stdFile().?;
     const bytes = try formatPrintfBytes(call);
     defer call.ctx.runtime.memory.allocator.free(bytes);
-    if (file_object.stdFileIsStdio() and file == stdout() and call.output != null) {
+    if (file_object.stdFileIsStdio() and file == legacy_std_os.stdout() and call.output != null) {
         try call.output.?.writeAll(bytes);
         return core.JSValue.int32(@intCast(bytes.len));
     }
@@ -6179,7 +5529,7 @@ fn hostCallOsExec(call: HostCall) HostError!core.JSValue {
         }
         if (env.c_envp) |envp| {
             if (use_path) {
-                _ = execvpe(exec_file_ptr, @ptrCast(argv.c_argv.ptr), @ptrCast(envp.ptr));
+                _ = legacy_std_os.execvpe(exec_file_ptr, @ptrCast(argv.c_argv.ptr), @ptrCast(envp.ptr));
             } else {
                 _ = execve(exec_file_ptr, @ptrCast(argv.c_argv.ptr), @ptrCast(envp.ptr));
             }
@@ -7421,7 +6771,7 @@ fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     return object;
 }
 
-fn descriptorFromObject(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
+pub fn descriptorFromObject(rt: *core.JSRuntime, object: *core.Object) !core.Descriptor {
     const has_get = try expectedHas(rt, object, "get");
     const has_set = try expectedHas(rt, object, "set");
     const has_value = try expectedHas(rt, object, "value");
@@ -7573,7 +6923,7 @@ fn defineBoolProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u
     try defineObjectProperty(rt, object, name, core.JSValue.boolean(value));
 }
 
-fn expectObjectArg(value: core.JSValue) !*core.Object {
+pub fn expectObjectArg(value: core.JSValue) !*core.Object {
     const header = value.refHeader() orelse return error.TypeError;
     if (!value.isObject()) return error.TypeError;
     return @fieldParentPtr("header", header);
@@ -7600,33 +6950,6 @@ fn runtimeErrorName(err: anytype) []const u8 {
     if (std.mem.eql(u8, name, "SyntaxError")) return "SyntaxError";
     if (std.mem.eql(u8, name, "URIError") or std.mem.eql(u8, name, "InvalidUtf8")) return "URIError";
     return "Error";
-}
-
-fn isBuiltinConstructorName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "Object") or
-        std.mem.eql(u8, name, "Function") or
-        std.mem.eql(u8, name, "AsyncFunction") or
-        std.mem.eql(u8, name, "GeneratorFunction") or
-        std.mem.eql(u8, name, "AsyncGeneratorFunction") or
-        std.mem.eql(u8, name, "Array") or
-        std.mem.eql(u8, name, "String") or
-        std.mem.eql(u8, name, "Number") or
-        std.mem.eql(u8, name, "Boolean") or
-        std.mem.eql(u8, name, "Symbol") or
-        std.mem.eql(u8, name, "BigInt") or
-        std.mem.eql(u8, name, "Date") or
-        std.mem.eql(u8, name, "RegExp") or
-        builtins.error_names.isErrorConstructorName(name) or
-        std.mem.eql(u8, name, "Iterator") or
-        std.mem.eql(u8, name, "DisposableStack") or
-        std.mem.eql(u8, name, "AsyncDisposableStack") or
-        std.mem.eql(u8, name, "Promise") or
-        std.mem.eql(u8, name, "Map") or
-        std.mem.eql(u8, name, "Set") or
-        std.mem.eql(u8, name, "WeakMap") or
-        std.mem.eql(u8, name, "WeakSet") or
-        std.mem.eql(u8, name, "ArrayBuffer") or
-        std.mem.eql(u8, name, "DataView");
 }
 
 fn printArray(rt: *core.JSRuntime, writer: *std.Io.Writer, object: *core.Object) PrintError!void {

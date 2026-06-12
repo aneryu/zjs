@@ -1,6 +1,5 @@
 const regexp_unicode = @import("../libs/regexp_unicode.zig");
 const std = @import("std");
-const utils = @import("vm_utils.zig");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const bignum = @import("../libs/bignum.zig");
@@ -8054,7 +8053,7 @@ pub fn setFrameVarRefValue(
 ) !bool {
     for (function.var_ref_names, 0..) |name, idx| {
         if (name != atom_id) continue;
-        if (idx >= frame.var_refs.len) try utils.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
+        if (idx >= frame.var_refs.len) try frame_mod.ensureVarRefsCapacity(ctx, frame, @intCast(idx));
         try slot_ops.setSlotValue(ctx, &frame.var_refs[idx], value);
         return true;
     }

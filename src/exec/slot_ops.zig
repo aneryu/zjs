@@ -10,12 +10,11 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const object_ops = @import("object_ops.zig");
-const utils = @import("vm_utils.zig");
 
 // Helpers that remain in call_runtime.zig (generic runtime utilities outside the
 // slot-operation cluster).
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
-const ensureVarRefsCapacity = utils.ensureVarRefsCapacity;
+const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
 const existingGlobalLexicalEnv = call_runtime.existingGlobalLexicalEnv;
 const globalLexicalHas = call_runtime.globalLexicalHas;
 const handleCatchableRuntimeError = call_runtime.handleCatchableRuntimeError;
