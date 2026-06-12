@@ -25,7 +25,7 @@ const std = @import("std");
 const atom_module = @import("../core/atom.zig");
 const core_bigint = @import("../core/bigint.zig");
 const core = @import("../core/root.zig");
-const regexp_builtin = @import("../builtins/regexp.zig");
+const regexp_validate = @import("../libs/regexp_validate.zig");
 const libs_bignum = @import("../libs/bignum.zig");
 const unicode = @import("../libs/unicode.zig");
 const memory = @import("../core/memory.zig");
@@ -5074,7 +5074,7 @@ fn parseRegExpLiteral(s: *ParseState) Error!void {
     s.token = try s.lex.rescanRegexp(slash_offset);
     const pattern = s.token.payload.regexp.pattern;
     const flags = s.token.payload.regexp.flags;
-    if (!regexp_builtin.validatePatternAndFlags(pattern, flags)) return Error.InvalidRegExp;
+    if (!regexp_validate.validatePatternAndFlags(pattern, flags)) return Error.InvalidRegExp;
     try emitStringLiteralBytes(s, pattern);
     try emitStringLiteralBytes(s, flags);
     try s.emitOp(opcode.op.regexp);
