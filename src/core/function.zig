@@ -41,6 +41,29 @@ pub const NativeBuiltinDomain = enum(i32) {
     function = 16,
     error_object = 17,
     iterator = 18,
+    host = 19,
+    promise = 20,
+};
+
+/// Method ids for the `.host` native-builtin domain: host/web globals and
+/// engine-internal helpers that have no spec namespace of their own (HTML
+/// btoa/atob/queueMicrotask, the zjs `gc` helper, navigator accessors, host
+/// constructor stubs, the shared `[Symbol.species]` getter, and the V8-style
+/// CallSite methods).
+pub const HostGlobalMethod = enum(u32) {
+    btoa = 1,
+    atob = 2,
+    queue_microtask = 3,
+    gc = 4,
+    navigator_user_agent_get = 5,
+    dom_exception_ctor_call = 6,
+    species_getter = 7,
+    callsite_get_function = 8,
+    callsite_get_function_name = 9,
+    callsite_get_file_name = 10,
+    callsite_get_line_number = 11,
+    callsite_get_column_number = 12,
+    callsite_is_native = 13,
 };
 
 pub const NativeBuiltinRef = struct {
@@ -78,6 +101,8 @@ pub fn decodeNativeBuiltinId(encoded: i32) ?NativeBuiltinRef {
         16 => .function,
         17 => .error_object,
         18 => .iterator,
+        19 => .host,
+        20 => .promise,
         else => return null,
     };
     return .{ .domain = domain, .id = @intCast(local_id) };

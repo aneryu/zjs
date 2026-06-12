@@ -5975,6 +5975,7 @@ pub fn qjsCollectionNativeRecord(
         @intFromEnum(builtins.collection.PrototypeMethod.is_superset_of) => .is_superset_of,
         @intFromEnum(builtins.collection.PrototypeMethod.symmetric_difference) => .symmetric_difference,
         @intFromEnum(builtins.collection.PrototypeMethod.union_) => .union_,
+        @intFromEnum(builtins.collection.PrototypeMethod.iterator_next) => .iterator_next,
         else => return null,
     };
 
@@ -6012,7 +6013,13 @@ pub fn qjsCollectionNativeRecord(
         .symmetric_difference,
         .union_,
         => try qjsSetMethodRecord(ctx, output, global, receiver, method, args, caller_function, caller_frame),
-        .iterator_next => return null,
+        .iterator_next => {
+            if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
+            return builtins.collection.methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                else => err,
+            };
+        },
     };
 }
 

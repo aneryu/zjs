@@ -60,6 +60,7 @@ pub const PrototypeMethod = enum(u32) {
     match = 141,
     replace_all = 142,
     match_all = 143,
+    iterator_next = 144,
 };
 
 pub fn staticMethodId(name: []const u8) ?u32 {
@@ -249,6 +250,7 @@ fn iteratorPrototype(rt: *core.JSRuntime, tag_name: []const u8) !*core.Object {
     try defineToStringTag(rt, specific, tag_name);
     const next = try function_builtin.nativeFunction(rt, "next", 0);
     defer next.free(rt);
+    (try expectObject(next)).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.string, @intFromEnum(PrototypeMethod.iterator_next));
     try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
     return specific;
 }

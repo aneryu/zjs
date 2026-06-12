@@ -7,6 +7,7 @@ const collection_adapter = @import("collection_adapter.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const globals_mod = @import("globals.zig");
+const host_dispatch_stats = @import("host_dispatch_stats.zig");
 const json_vm = @import("json_ops.zig");
 const legacy_std_os = @import("../runtime/legacy_std_os.zig");
 const property_ops = @import("property_ops.zig");
@@ -301,20 +302,6 @@ pub fn printValue(rt: *core.JSRuntime, writer: *std.Io.Writer, value: core.JSVal
     } else {
         try writer.writeAll("[object Object]");
     }
-}
-
-pub fn forEachArrayPrint(rt: *core.JSRuntime, output: ?*std.Io.Writer, array_value: core.JSValue) !core.JSValue {
-    const array = try builtins.array.expectArray(array_value);
-    if (output) |writer| {
-        var index: u32 = 0;
-        while (index < array.length) : (index += 1) {
-            const item = array.getProperty(core.atom.atomFromUInt32(index));
-            defer item.free(rt);
-            try printValue(rt, writer, item);
-            try writer.print("\n", .{});
-        }
-    }
-    return core.JSValue.undefinedValue();
 }
 
 // The std/os entries mirror QuickJS-shaped host modules kept for legacy
@@ -1656,58 +1643,6 @@ fn createPromiseCombinatorCallback(
     return callback;
 }
 
-fn promiseThenOrCatchCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    promise: *core.Object,
-    method_name: []const u8,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const is_catch = std.mem.eql(u8, method_name, "catch");
-    const promise_proto = promise.getPrototype();
-    const result_value = if (promise.promiseResult()) |stored| stored.dup() else core.JSValue.undefinedValue();
-    defer result_value.free(ctx.runtime);
-
-    if (promise.promiseResultSlot().* == null) {
-        return builtins.promise.constructWithPrototype(ctx.runtime, promise_proto);
-    }
-
-    if (is_catch) {
-        if (!promise.promiseIsRejected()) {
-            return builtins.promise.fulfilledWithPrototype(ctx.runtime, result_value, promise_proto);
-        }
-        if (args.len == 0 or !isCallableObjectValue(args[0])) {
-            return builtins.promise.rejectedWithPrototype(ctx.runtime, result_value, promise_proto);
-        }
-        builtins.promise.markHandled(ctx, promise);
-        const callback_result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), args[0], &.{result_value}) catch |err| {
-            const reason = try promiseErrorValue(ctx, try activeGlobalObject(ctx.runtime, global, globals), err);
-            defer reason.free(ctx.runtime);
-            return builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
-        };
-        defer callback_result.free(ctx.runtime);
-        return builtins.promise.fulfilledWithPrototype(ctx.runtime, callback_result, promise_proto);
-    }
-
-    const callback_index: usize = if (promise.promiseIsRejected()) 1 else 0;
-    if (args.len <= callback_index or !isCallableObjectValue(args[callback_index])) {
-        if (promise.promiseIsRejected()) {
-            return builtins.promise.rejectedWithPrototype(ctx.runtime, result_value, promise_proto);
-        }
-        return builtins.promise.fulfilledWithPrototype(ctx.runtime, result_value, promise_proto);
-    }
-    if (promise.promiseIsRejected()) builtins.promise.markHandled(ctx, promise);
-    const callback_result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), args[callback_index], &.{result_value}) catch |err| {
-        const reason = try promiseErrorValue(ctx, try activeGlobalObject(ctx.runtime, global, globals), err);
-        defer reason.free(ctx.runtime);
-        return builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
-    };
-    defer callback_result.free(ctx.runtime);
-    return builtins.promise.fulfilledWithPrototype(ctx.runtime, callback_result, promise_proto);
-}
-
 fn promiseCombinatorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1861,520 +1796,11 @@ fn callNativeBuiltin(
     function_object: *core.Object,
     args: []const core.JSValue,
 ) HostError!core.JSValue {
-    const name = try nativeFunctionDispatchName(ctx.runtime, function_object);
-    defer ctx.runtime.memory.allocator.free(name);
-
     if (try callNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, args, null, null)) |value| return value;
-
-    if (builtins.promise.legacyStaticMethodId(name)) |mode| {
-        if (mode == @intFromEnum(builtins.promise.LegacyStaticMethod.all) or
-            mode == @intFromEnum(builtins.promise.LegacyStaticMethod.race) or
-            mode == @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) or
-            mode == @intFromEnum(builtins.promise.LegacyStaticMethod.any))
-        {
-            const is_static_builtin = if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object|
-                try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global_object, function_object, name)
-            else
-                false;
-            if (is_static_builtin) {
-                const receiver = thisObject(this_value) orelse return error.TypeError;
-                if (!isCallableObjectValue(this_value)) return error.TypeError;
-                if (try constructorNameEql(ctx.runtime, receiver, "Promise")) {
-                    return promiseCombinatorCall(
-                        ctx,
-                        output,
-                        global,
-                        globals,
-                        this_value,
-                        receiver,
-                        args,
-                        switch (mode) {
-                            @intFromEnum(builtins.promise.LegacyStaticMethod.all) => .all,
-                            @intFromEnum(builtins.promise.LegacyStaticMethod.race) => .race,
-                            @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) => .all_settled,
-                            @intFromEnum(builtins.promise.LegacyStaticMethod.any) => .any,
-                            else => unreachable,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    if (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch")) {
-        if (promiseObjectFromValue(this_value)) |promise| {
-            return promiseThenOrCatchCall(ctx, output, global, globals, promise, name, args);
-        }
-    }
-
-    if (std.mem.eql(u8, name, "get [Symbol.species]")) return this_value.dup();
-    if (std.mem.eql(u8, name, "construct")) return builtins.reflect_proxy.reflectConstruct(ctx.runtime, args, globals);
-    if (std.mem.eql(u8, name, "get size")) {
-        const owner_class = function_object.collectionMethodOwnerClass();
-        if (owner_class == core.class.invalid_class_id) return error.TypeError;
-        const receiver = thisObject(this_value) orelse return error.TypeError;
-        if (receiver.class_id != owner_class) return error.TypeError;
-        return builtins.collection.methodCall(ctx.runtime, this_value, 14, &.{}) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    if (std.mem.eql(u8, name, "fromCharCode")) {
-        const global_object = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-        return string_ops.qjsStringFromCharCode(ctx, output, global_object, args);
-    }
-    if (std.mem.eql(u8, name, "fromCodePoint")) {
-        return builtins.string.fromCodePoint(ctx.runtime, args) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "String")) {
-        if (args.len == 0) return value_ops.createStringValue(ctx.runtime, "");
-        var buffer = std.ArrayList(u8).empty;
-        defer buffer.deinit(ctx.runtime.memory.allocator);
-        try value_ops.appendValueString(ctx.runtime, &buffer, args[0]);
-        return value_ops.createStringValue(ctx.runtime, buffer.items);
-    }
-
-    if (try constructorNameEql(ctx.runtime, function_object, "Object")) {
-        if (args.len >= 1) {
-            if (args[0].isObject()) return args[0].dup();
-            if (!args[0].isNull() and !args[0].isUndefined()) {
-                const class_id: core.class.ClassId = if (args[0].isString())
-                    core.class.ids.string
-                else if (args[0].isNumber())
-                    core.class.ids.number
-                else if (args[0].asBool() != null)
-                    core.class.ids.boolean
-                else if (args[0].isBigInt())
-                    core.class.ids.big_int
-                else if (args[0].isSymbol())
-                    core.class.ids.symbol
-                else
-                    core.class.ids.object;
-                if (class_id != core.class.ids.object) return primitiveWrapper(ctx.runtime, class_id, args[0], primitivePrototypeFromGlobal(ctx.runtime, global, class_id));
-            }
-        }
-        const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        return object.value();
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "Array")) {
-        return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, null);
-    }
-    if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*)) |native_ref| {
-        if (native_ref.domain == .date and native_ref.id == @intFromEnum(builtins.date.ConstructorMethod.construct)) {
-            return builtins.date.call(ctx.runtime, args);
-        }
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "Date")) {
-        return builtins.date.call(ctx.runtime, args);
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "RegExp")) {
-        const active_global = global orelse return error.TypeError;
-        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, args, null, null);
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "String")) {
-        if (args.len == 0) return value_ops.createStringValue(ctx.runtime, "");
-        return value_ops.toStringValue(ctx.runtime, args[0]);
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "Number")) {
-        if (args.len == 0) return core.JSValue.int32(0);
-        if (args[0].isSymbol()) return error.TypeError;
-        return value_ops.numberToValue(try value_ops.toIntegerOrInfinity(ctx.runtime, args[0]));
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "Boolean")) {
-        return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0]));
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "Symbol")) {
-        const description = if (args.len >= 1 and !args[0].isUndefined())
-            try toStringBytesForSymbol(ctx, output, global, args[0])
-        else
-            try ctx.runtime.memory.allocator.dupe(u8, builtins.symbol.undefined_description);
-        defer ctx.runtime.memory.allocator.free(description);
-        const symbol_atom = try ctx.runtime.atoms.newValueSymbol(description);
-        return core.JSValue.symbol(symbol_atom);
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "DOMException")) {
-        const active_global = global orelse function_object.functionRealmGlobalPtr() orelse return error.TypeError;
-        return call_runtime.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "BigInt")) {
-        const input = if (args.len >= 1) args[0] else core.JSValue.int32(0);
-        var bigint = try value_ops.toBigIntValue(ctx.runtime, input);
-        defer bigint.deinit();
-        return value_ops.createBigIntValue(ctx.runtime, bigint);
-    }
-    if (try constructorNameEql(ctx.runtime, function_object, "TypedArray")) return error.TypeError;
-    if (std.mem.eql(u8, name, "get description")) return symbolDescription(ctx.runtime, this_value);
-    if (std.mem.eql(u8, name, "[Symbol.toPrimitive]") and (this_value.isSymbol() or (this_value.isObject() and (try expectObjectArg(this_value)).class_id == core.class.ids.symbol))) {
-        return symbolPrimitiveValue(ctx.runtime, this_value);
-    }
-    if (std.mem.eql(u8, name, "get __proto__")) return objectProtoGetter(ctx.runtime, global, this_value);
-    if (std.mem.eql(u8, name, "set __proto__")) return objectProtoSetter(ctx.runtime, this_value, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-    if (std.mem.eql(u8, name, "DisposableStack")) return error.TypeError;
-    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return error.TypeError;
-    if (std.mem.eql(u8, name, "AggregateError")) {
-        if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-            const constructor_global = function_object.functionRealmGlobalPtr() orelse global_object;
-            return object_ops.qjsAggregateErrorConstructWithPrototype(ctx, output, constructor_global, constructorPrototype(ctx.runtime, function_object), args, null, null);
-        }
-    }
-    if (std.mem.eql(u8, name, "SuppressedError")) {
-        if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-            return object_ops.qjsSuppressedErrorConstructWithPrototype(ctx, output, global_object, constructorPrototype(ctx.runtime, function_object), args, null, null);
-        }
-    }
-    if (construct_mod.isErrorConstructorName(name)) {
-        if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-            return object_ops.qjsErrorConstructWithPrototype(ctx, output, global_object, name, constructorPrototype(ctx.runtime, function_object), args, null, null);
-        }
-        return construct_mod.constructErrorObject(ctx.runtime, name, function_object.value(), constructorPrototype(ctx.runtime, function_object), args);
-    }
-    if (std.mem.eql(u8, name, "isError")) return errorIsError(args);
-    if (std.mem.eql(u8, name, "revoke")) return revokeProxy(ctx.runtime, function_object);
-    if (std.mem.eql(u8, name, "sumPrecise")) {
-        if (global) |global_object| return math_ops.qjsMathSumPrecise(ctx, output, global_object, args, null, null);
-        return error.TypeError;
-    }
-    if (builtins.math.methodId(name)) |method| {
-        if (global) |global_object| return builtin_glue.qjsMathCall(ctx, output, global_object, method, args);
-        const number = builtins.math.call(method, args) catch return error.TypeError;
-        return value_ops.numberToValue(number);
-    }
-    if (std.mem.eql(u8, name, "parseInt")) {
-        if (global) |global_object| return builtin_glue.qjsGlobalParseInt(ctx, output, global_object, args, null, null);
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        const radix = if (args.len >= 2) args[1] else null;
-        return value_ops.numberToValue(try builtins.number.parseIntValue(ctx.runtime, input, radix));
-    }
-    if (std.mem.eql(u8, name, "parseFloat")) {
-        if (global) |global_object| return builtin_glue.qjsGlobalParseFloat(ctx, output, global_object, args, null, null);
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        return value_ops.numberToValue(try builtins.number.parseFloatValue(ctx.runtime, input));
-    }
-    if (std.mem.eql(u8, name, "isNaN")) {
-        if (thisObject(this_value)) |receiver| {
-            if (try constructorNameEql(ctx.runtime, receiver, "Number")) {
-                const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                return core.JSValue.boolean(value.isNumber() and std.math.isNan(value_ops.numberValue(value) orelse std.math.nan(f64)));
-            }
-        }
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        const number = try value_ops.toNumberValue(ctx.runtime, input);
-        defer number.free(ctx.runtime);
-        return core.JSValue.boolean(std.math.isNan(value_ops.numberValue(number) orelse std.math.nan(f64)));
-    }
-    if (std.mem.eql(u8, name, "isFinite")) {
-        if (thisObject(this_value)) |receiver| {
-            if (try constructorNameEql(ctx.runtime, receiver, "Number")) {
-                const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                return core.JSValue.boolean(value.isNumber() and std.math.isFinite(value_ops.numberValue(value) orelse std.math.nan(f64)));
-            }
-        }
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        const number = try value_ops.toNumberValue(ctx.runtime, input);
-        defer number.free(ctx.runtime);
-        return core.JSValue.boolean(std.math.isFinite(value_ops.numberValue(number) orelse std.math.nan(f64)));
-    }
-    if (std.mem.eql(u8, name, "isInteger")) {
-        const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        return core.JSValue.boolean(numberIsInteger(value));
-    }
-    if (std.mem.eql(u8, name, "isSafeInteger")) {
-        const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        if (!numberIsInteger(value)) return core.JSValue.boolean(false);
-        const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
-        return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
-    }
-    if (builtins.uri.methodId(name)) |mode| {
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        return builtins.uri.call(ctx.runtime, mode, input) catch |err| switch (err) {
-            error.TypeError, error.URIError => err,
-            else => err,
-        };
-    }
-    if (std.mem.eql(u8, name, "escape")) {
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        return builtins.uri.escape(ctx.runtime, input);
-    }
-    if (std.mem.eql(u8, name, "unescape")) {
-        const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-        return builtins.uri.unescape(ctx.runtime, input);
-    }
-    if (std.mem.eql(u8, name, "btoa")) return globalBtoa(ctx, global, args);
-    if (std.mem.eql(u8, name, "atob")) return globalAtob(ctx, global, args);
-    if (std.mem.eql(u8, name, "queueMicrotask")) return globalQueueMicrotask(ctx, global, args);
-    if (std.mem.eql(u8, name, "gc")) return globalGc(ctx);
-    if (std.mem.eql(u8, name, "get userAgent")) return value_ops.createStringValue(ctx.runtime, builtins.registry.navigator_user_agent);
-    if ((this_value.isUndefined() or this_value.isNull()) and std.mem.eql(u8, name, "isArray")) return core.JSValue.boolean(args.len >= 1 and try builtins.array.isArrayValue(args[0]));
-    if (std.mem.eql(u8, name, "from")) {
-        if (try typedArrayStaticFrom(ctx.runtime, this_value, args)) |value| return value;
-        return arrayFrom(ctx.runtime, args);
-    }
-    if (std.mem.eql(u8, name, "of")) {
-        if (try typedArrayStaticOf(ctx.runtime, this_value, args)) |value| return value;
-    }
-    if (std.mem.eql(u8, name, "for")) return symbolFor(ctx, output, global, args);
-    if (std.mem.eql(u8, name, "keyFor")) return symbolKeyFor(ctx.runtime, args);
-
-    if (thisObject(this_value)) |receiver| {
-        if (call_runtime.isCallableValue(this_value)) {
-            if (std.mem.eql(u8, name, "call")) {
-                if (args.len < 1) return error.TypeError;
-                return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, args[0], this_value, args[1..]);
-            }
-            if (std.mem.eql(u8, name, "bind")) {
-                const bound_this = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                const bound_args = if (args.len >= 1) args[1..] else &.{};
-                return createBoundFunction(ctx, output, global, globals, this_value, bound_this, bound_args);
-            }
-            if (std.mem.eql(u8, name, "hasOwnProperty")) return objectHasOwnProperty(ctx, output, global, receiver, args);
-            if (std.mem.eql(u8, name, "propertyIsEnumerable")) return objectPropertyIsEnumerable(ctx, output, global, receiver, args);
-            if (std.mem.eql(u8, name, "toString")) return functionToStringValue(ctx.runtime, this_value);
-            if (std.mem.eql(u8, name, "valueOf")) return this_value.dup();
-            if (receiver.class_id == core.class.ids.c_closure) return error.TypeError;
-            if (try constructorNameEql(ctx.runtime, receiver, "Promise")) {
-                if (builtins.promise.legacyStaticMethodId(name)) |mode| {
-                    if (mode == @intFromEnum(builtins.promise.LegacyStaticMethod.try_)) {
-                        const promise_proto = constructorPrototype(ctx.runtime, receiver);
-                        const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                        const callback_args = if (args.len >= 1) args[1..] else args[0..0];
-                        const result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), callback, callback_args) catch {
-                            const reason = core.JSValue.undefinedValue();
-                            return builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
-                        };
-                        defer result.free(ctx.runtime);
-                        return builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promise_proto);
-                    }
-                    const payload: ?core.JSValue = if (args.len >= 1) args[0] else null;
-                    return builtins.promise.staticCallWithPrototype(ctx, mode, payload, constructorPrototype(ctx.runtime, receiver), global) catch |err| switch (err) {
-                        error.TypeError => error.TypeError,
-                        else => err,
-                    };
-                }
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "BigInt")) {
-                if (builtins.bigint.staticUnsignedMode(name)) |unsigned| {
-                    if (args.len < 2) return error.TypeError;
-                    return value_ops.asN(ctx.runtime, args[0], args[1], unsigned) catch |err| switch (err) {
-                        error.TypeError, error.RangeError => err,
-                        else => err,
-                    };
-                }
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "Proxy")) {
-                if (std.mem.eql(u8, name, "revocable")) return builtins.reflect_proxy.proxyRevocable(ctx.runtime, global, args);
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "Number")) {
-                if (std.mem.eql(u8, name, "isNaN")) {
-                    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                    return core.JSValue.boolean(value.isNumber() and std.math.isNan(value_ops.numberValue(value) orelse std.math.nan(f64)));
-                }
-                if (std.mem.eql(u8, name, "isFinite")) {
-                    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                    return core.JSValue.boolean(value.isNumber() and std.math.isFinite(value_ops.numberValue(value) orelse std.math.nan(f64)));
-                }
-                if (std.mem.eql(u8, name, "isInteger")) {
-                    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                    return core.JSValue.boolean(numberIsInteger(value));
-                }
-                if (std.mem.eql(u8, name, "isSafeInteger")) {
-                    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-                    if (!numberIsInteger(value)) return core.JSValue.boolean(false);
-                    const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
-                    return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
-                }
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "Date")) {
-                if (builtins.date.staticMethodId(name)) |method| {
-                    return builtins.date.staticCall(ctx.runtime, method, args) catch |err| switch (err) {
-                        error.TypeError => error.TypeError,
-                        else => err,
-                    };
-                }
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "String")) {
-                if (std.mem.eql(u8, name, "fromCharCode")) {
-                    const global_object = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-                    return string_ops.qjsStringFromCharCode(ctx, output, global_object, args);
-                }
-                if (std.mem.eql(u8, name, "fromCodePoint")) {
-                    return builtins.string.fromCodePoint(ctx.runtime, args) catch |err| switch (err) {
-                        error.TypeError => error.TypeError,
-                        else => err,
-                    };
-                }
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "Array")) {
-                if (std.mem.eql(u8, name, "isArray")) return core.JSValue.boolean(args.len >= 1 and try builtins.array.isArrayValue(args[0]));
-                if (std.mem.eql(u8, name, "from")) return arrayFrom(ctx.runtime, args);
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "Error")) {
-                if (std.mem.eql(u8, name, "captureStackTrace")) {
-                    if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-                        return call_runtime.qjsErrorCaptureStackTrace(ctx, output, global_object, args);
-                    }
-                    return error.TypeError;
-                }
-            }
-            if (try constructorNameEql(ctx.runtime, receiver, "Map")) {
-                if (std.mem.eql(u8, name, "groupBy")) return builtins.collection.groupByWithCallbackHost(ctx.runtime, args, constructorPrototype(ctx.runtime, receiver), collection_adapter.host(globals)) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-            return error.TypeError;
-        }
-
-        if (exception_ops.isCallSiteObject(ctx.runtime, receiver)) {
-            if (try exception_ops.qjsCallSiteMethod(ctx.runtime, receiver, name)) |value| return value;
-        }
-        if (receiver.flags.is_array and isArrayMethodName(name)) {
-            return callArrayMethod(ctx.runtime, output, globals, this_value, name, args);
-        }
-        if (std.mem.eql(u8, name, "stringify")) {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const replacer = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-            const space = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-            return builtins.json.stringify(ctx.runtime, value, replacer, space) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (std.mem.eql(u8, name, "parse")) {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const parsed = try (builtins.json.parse(ctx.runtime, global, value) catch |err| switch (err) {
-                error.SyntaxError => error.SyntaxError,
-                error.TypeError => error.TypeError,
-                else => err,
-            });
-            return parsed;
-        }
-        if (std.mem.eql(u8, name, "rawJSON")) {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return builtins.json.rawJSON(ctx.runtime, value) catch |err| switch (err) {
-                error.SyntaxError => error.SyntaxError,
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (std.mem.eql(u8, name, "isRawJSON")) {
-            return core.JSValue.boolean(args.len >= 1 and builtins.json.isRawJSON(args[0]));
-        }
-        if (receiver.class_id == core.class.ids.map or receiver.class_id == core.class.ids.set or
-            receiver.class_id == core.class.ids.weakmap or receiver.class_id == core.class.ids.weakset)
-        {
-            if (builtins.collection.legacyPrototypeMethodId(name)) |method| {
-                const owner_class = function_object.collectionMethodOwnerClass();
-                if (owner_class != core.class.invalid_class_id) {
-                    if (receiver.class_id != owner_class) return error.TypeError;
-                }
-                return builtins.collection.methodCallWithCallbackHost(ctx.runtime, this_value, method, args, collection_adapter.host(globals)) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-        }
-        if (receiver.class_id == core.class.ids.weak_ref and std.mem.eql(u8, name, "deref")) {
-            return receiver.weakRefDeref(ctx.runtime);
-        }
-        if (receiver.class_id == core.class.ids.finalization_registry and std.mem.eql(u8, name, "register")) {
-            return finalizationRegistryRegister(ctx.runtime, receiver, args);
-        }
-        if (receiver.class_id == core.class.ids.finalization_registry and std.mem.eql(u8, name, "unregister")) {
-            return finalizationRegistryUnregister(ctx.runtime, receiver, args);
-        }
-        if ((receiver.class_id == core.class.ids.map_iterator or receiver.class_id == core.class.ids.set_iterator) and std.mem.eql(u8, name, "next")) {
-            return builtins.collection.methodCall(ctx.runtime, this_value, 13, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (receiver.class_id == core.class.ids.array_iterator) {
-            if (std.mem.eql(u8, name, "next")) {
-                return builtins.array.methodCall(ctx.runtime, this_value, 20, args) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-            if (std.mem.eql(u8, name, "values")) return this_value.dup();
-        }
-        if (receiver.class_id == core.class.ids.string_iterator and std.mem.eql(u8, name, "next")) {
-            return builtins.string.iteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        }
-        if (receiver.class_id == core.class.ids.string) {
-            return callStringMethod(ctx.runtime, this_value, name, args);
-        }
-        if (receiver.class_id == core.class.ids.number or receiver.class_id == core.class.ids.boolean or
-            receiver.class_id == core.class.ids.big_int or receiver.class_id == core.class.ids.symbol)
-        {
-            const primitive = (receiver.objectData() orelse return error.TypeError).dup();
-            defer primitive.free(ctx.runtime);
-            return callPrimitiveMethod(ctx.runtime, primitive, name, args);
-        }
-        regexp_dispatch: {
-            if (receiver.class_id != core.class.ids.regexp) break :regexp_dispatch;
-            if (builtins.regexp.accessorNameFromGetterName(name)) |accessor_name| {
-                return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-            if (builtins.regexp.legacyPrototypeMethodId(name)) |method| {
-                const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse break :regexp_dispatch;
-                if (native_ref.domain != .regexp) break :regexp_dispatch;
-                const native_method = builtins.regexp.decodePrototypeMethodId(native_ref.id) orelse break :regexp_dispatch;
-                if (native_method != method) break :regexp_dispatch;
-                const arg: ?core.JSValue = if (method == 1 or args.len == 0) null else args[0];
-                return builtins.regexp.methodCall(ctx.runtime, this_value, method, arg) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    else => err,
-                };
-            }
-        }
-        if (receiver.class_id == core.class.ids.dataview) {
-            if (builtins.buffer.dataViewGetMethodId(name)) |method| {
-                return builtins.buffer.dataViewGet(ctx.runtime, this_value, method, args) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    error.RangeError => error.RangeError,
-                    else => err,
-                };
-            }
-            if (builtins.buffer.dataViewSetMethodId(name)) |method| {
-                return builtins.buffer.dataViewSet(ctx.runtime, this_value, method, args) catch |err| switch (err) {
-                    error.TypeError => error.TypeError,
-                    error.RangeError => error.RangeError,
-                    else => err,
-                };
-            }
-        }
-        if (receiver.class_id == core.class.ids.promise and (std.mem.eql(u8, name, "then") or std.mem.eql(u8, name, "catch"))) {
-            return core.JSValue.undefinedValue();
-        }
-        if (std.mem.eql(u8, name, "hasOwnProperty")) return objectHasOwnProperty(ctx, output, global, receiver, args);
-        if (std.mem.eql(u8, name, "propertyIsEnumerable")) return objectPropertyIsEnumerable(ctx, output, global, receiver, args);
-        if (std.mem.eql(u8, name, "toString")) {
-            if (isFunctionClass(receiver.class_id) or receiver.class_id == core.class.ids.bytecode_function or receiver.flags.is_proxy) {
-                return functionToStringValue(ctx.runtime, this_value);
-            }
-            if (receiver.class_id == core.class.ids.error_) return errorToString(ctx.runtime, this_value);
-            return objectToString(ctx.runtime, this_value);
-        }
-        if (std.mem.eql(u8, name, "valueOf")) return this_value.dup();
-    } else if (this_value.isNumber() or this_value.isBool() or this_value.isBigInt() or this_value.isSymbol()) {
-        return callPrimitiveMethod(ctx.runtime, this_value, name, args);
-    } else if (this_value.isString()) {
-        return callStringMethod(ctx.runtime, this_value, name, args);
-    }
-
-    if (std.mem.eql(u8, name, "defineProperty")) return builtins.reflect_proxy.reflectDefineProperty(ctx.runtime, args);
-    if (std.mem.eql(u8, name, "get")) return builtins.reflect_proxy.reflectGet(ctx.runtime, args);
-    if (std.mem.eql(u8, name, "set")) return builtins.reflect_proxy.reflectSet(ctx, output, global, args);
-    if (std.mem.eql(u8, name, "has")) return builtins.reflect_proxy.reflectHas(ctx, output, global, globals, args);
+    // Every dispatchable builtin is reachable through the integer
+    // record mechanism; the legacy string-name chain that used to live
+    // here was measured cold and removed (see host_dispatch_stats).
+    host_dispatch_stats.hit(.nb_fallback_entered);
     return error.TypeError;
 }
 
@@ -2414,25 +1840,138 @@ pub fn callNativeFunctionRecord(
             if (global) |global_object| return try call_runtime.qjsAtomicsCallForNativeRecord(ctx, output, global_object, native_ref.id, args, caller_function, caller_frame);
             return error.TypeError;
         },
-        .reflect => try callReflectNativeFunctionRecord(ctx, output, global, globals, native_ref.id, args, caller_function, caller_frame),
+        .reflect => try callReflectNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
         .object => try callObjectNativeFunctionRecord(ctx, output, global, globals, this_value, native_ref.id, args, caller_function, caller_frame),
         .primitive => {
             const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
             return @as(?core.JSValue, try object_ops.qjsPrimitivePrototypeMethod(ctx, output, active_global, function_object, this_value, native_ref.id, args, caller_function, caller_frame));
         },
-        .function => try callFunctionNativeFunctionRecord(ctx, this_value, native_ref.id),
-        .error_object => try callErrorNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
+        .function => try callFunctionNativeFunctionRecord(ctx, output, global, globals, this_value, native_ref.id, args),
+        .error_object => try callErrorNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
         .iterator => try callIteratorNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
+        .host => try callHostGlobalNativeFunctionRecord(ctx, global, this_value, function_object, native_ref.id, args),
+        .promise => try callPromiseStaticNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args),
+    };
+}
+
+/// `.host` native-builtin domain: host/web globals with no spec namespace
+/// (HTML btoa/atob/queueMicrotask, the zjs `gc` helper, navigator accessors,
+/// host constructor stubs, the shared species getter, and CallSite methods).
+/// Replaces the retired string-name dispatch branches in `callNativeBuiltin`.
+fn callHostGlobalNativeFunctionRecord(
+    ctx: *core.JSContext,
+    global: ?*core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    id: u32,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    return switch (id) {
+        @intFromEnum(core.function.HostGlobalMethod.btoa) => try globalBtoa(ctx, global, args),
+        @intFromEnum(core.function.HostGlobalMethod.atob) => try globalAtob(ctx, global, args),
+        @intFromEnum(core.function.HostGlobalMethod.queue_microtask) => try globalQueueMicrotask(ctx, global, args),
+        @intFromEnum(core.function.HostGlobalMethod.gc) => globalGc(ctx),
+        @intFromEnum(core.function.HostGlobalMethod.navigator_user_agent_get) => try value_ops.createStringValue(ctx.runtime, builtins.registry.navigator_user_agent),
+        @intFromEnum(core.function.HostGlobalMethod.dom_exception_ctor_call) => {
+            const active_global = global orelse function_object.functionRealmGlobalPtr() orelse return error.TypeError;
+            return call_runtime.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
+        },
+        @intFromEnum(core.function.HostGlobalMethod.species_getter) => this_value.dup(),
+        @intFromEnum(core.function.HostGlobalMethod.callsite_get_function),
+        @intFromEnum(core.function.HostGlobalMethod.callsite_get_function_name),
+        @intFromEnum(core.function.HostGlobalMethod.callsite_get_file_name),
+        @intFromEnum(core.function.HostGlobalMethod.callsite_get_line_number),
+        @intFromEnum(core.function.HostGlobalMethod.callsite_get_column_number),
+        @intFromEnum(core.function.HostGlobalMethod.callsite_is_native),
+        => {
+            const receiver = thisObject(this_value) orelse return error.TypeError;
+            return exception_ops.qjsCallSiteMethodById(ctx.runtime, receiver, @enumFromInt(id)) orelse error.TypeError;
+        },
+        else => error.TypeError,
+    };
+}
+
+/// `.promise` native-builtin domain: the Promise static methods when invoked
+/// through the host record path. The VM keeps its own realm-aware static
+/// dispatch; this handler replaces the retired string-name fallback and so
+/// mirrors that branch exactly, including its receiver gates.
+fn callPromiseStaticNativeFunctionRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []globals_mod.Slot,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    id: u32,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    // Combinators on the realm's own Promise statics run through the
+    // capability machinery (element callbacks, custom capability support);
+    // everything else takes the prototype-directed static call below.
+    const combinator: ?PromiseCombinatorMode = switch (id) {
+        @intFromEnum(builtins.promise.LegacyStaticMethod.all) => .all,
+        @intFromEnum(builtins.promise.LegacyStaticMethod.race) => .race,
+        @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) => .all_settled,
+        @intFromEnum(builtins.promise.LegacyStaticMethod.any) => .any,
+        else => null,
+    };
+    if (combinator) |mode| {
+        const combinator_name: []const u8 = switch (mode) {
+            .all => "all",
+            .race => "race",
+            .all_settled => "allSettled",
+            .any => "any",
+        };
+        const is_static_builtin = if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object|
+            try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global_object, function_object, combinator_name)
+        else
+            false;
+        if (is_static_builtin) {
+            const combinator_receiver = thisObject(this_value) orelse return error.TypeError;
+            if (!isCallableObjectValue(this_value)) return error.TypeError;
+            if (try constructorNameEql(ctx.runtime, combinator_receiver, "Promise")) {
+                return promiseCombinatorCall(ctx, output, global, globals, this_value, combinator_receiver, args, mode);
+            }
+        }
+    }
+    const receiver = thisObject(this_value) orelse return error.TypeError;
+    if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
+    if (!try constructorNameEql(ctx.runtime, receiver, "Promise")) return error.TypeError;
+    if (id == @intFromEnum(builtins.promise.LegacyStaticMethod.try_)) {
+        const promise_proto = constructorPrototype(ctx.runtime, receiver);
+        const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        const callback_args = if (args.len >= 1) args[1..] else args[0..0];
+        const result = callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), callback, callback_args) catch {
+            const reason = core.JSValue.undefinedValue();
+            return builtins.promise.rejectedWithPrototype(ctx.runtime, reason, promise_proto);
+        };
+        defer result.free(ctx.runtime);
+        return builtins.promise.fulfilledWithPrototype(ctx.runtime, result, promise_proto);
+    }
+    const payload: ?core.JSValue = if (args.len >= 1) args[0] else null;
+    return builtins.promise.staticCallWithPrototype(ctx, id, payload, constructorPrototype(ctx.runtime, receiver), global) catch |err| switch (err) {
+        error.TypeError => error.TypeError,
+        else => err,
     };
 }
 
 fn callFunctionNativeFunctionRecord(
     ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []globals_mod.Slot,
     this_value: core.JSValue,
     id: u32,
+    args: []const core.JSValue,
 ) HostError!?core.JSValue {
     return switch (id) {
         @intFromEnum(builtins.function.PrototypeMethod.to_string) => @as(?core.JSValue, try string_ops.qjsFunctionToStringCall(ctx, this_value)),
+        @intFromEnum(builtins.function.PrototypeMethod.bind) => {
+            if (thisObject(this_value) == null or !call_runtime.isCallableValue(this_value)) return error.TypeError;
+            const bound_this = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const bound_args = if (args.len >= 1) args[1..] else args[0..0];
+            return @as(?core.JSValue, try createBoundFunction(ctx, output, global, globals, this_value, bound_this, bound_args));
+        },
         else => error.TypeError,
     };
 }
@@ -2441,6 +1980,7 @@ fn callErrorNativeFunctionRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
+    globals: []globals_mod.Slot,
     this_value: core.JSValue,
     function_object: *core.Object,
     id: u32,
@@ -2448,6 +1988,15 @@ fn callErrorNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    if (id == @intFromEnum(builtins.error_.StaticMethod.capture_stack_trace)) {
+        const receiver = thisObject(this_value) orelse return error.TypeError;
+        if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
+        if (!try constructorNameEql(ctx.runtime, receiver, "Error")) return error.TypeError;
+        if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
+            return @as(?core.JSValue, try call_runtime.qjsErrorCaptureStackTrace(ctx, output, global_object, args));
+        }
+        return error.TypeError;
+    }
     return switch (id) {
         @intFromEnum(builtins.error_.PrototypeMethod.to_string) => blk: {
             const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
@@ -2496,8 +2045,7 @@ fn callObjectNativeFunctionRecord(
     if (builtins.object.prototypeMethodOrdinal(id)) |method| {
         return objectPrototypeMethodCall(ctx, output, global, globals, method, this_value, args);
     }
-    const name = builtins.object.staticMethodName(id) orelse return error.TypeError;
-    return callObjectStatic(ctx, output, global, globals, name, args) catch |err| switch (err) {
+    return callObjectStatic(ctx, output, global, globals, id, args) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
     };
@@ -2508,11 +2056,22 @@ fn callReflectNativeFunctionRecord(
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []globals_mod.Slot,
+    this_value: core.JSValue,
+    function_object: *core.Object,
     id: u32,
     args: []const core.JSValue,
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
+    if (id == @intFromEnum(builtins.reflect_proxy.StaticMethod.proxy_revoke)) {
+        return revokeProxy(ctx.runtime, function_object);
+    }
+    if (id == @intFromEnum(builtins.reflect_proxy.StaticMethod.proxy_revocable)) {
+        const receiver = thisObject(this_value) orelse return error.TypeError;
+        if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
+        if (!try constructorNameEql(ctx.runtime, receiver, "Proxy")) return error.TypeError;
+        return builtins.reflect_proxy.proxyRevocable(ctx.runtime, global, args);
+    }
     if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
     const reflect_mod = builtins.reflect_proxy;
     return switch (id) {
@@ -2665,6 +2224,14 @@ fn callStringNativeFunctionRecord(
     caller_function: ?*const function_bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    if (id == @intFromEnum(builtins.string.PrototypeMethod.iterator_next)) {
+        const receiver = thisObject(this_value) orelse return error.TypeError;
+        if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
+        return builtins.string.iteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
     const active_global = global orelse return error.TypeError;
     return switch (id) {
         @intFromEnum(builtins.string.ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
@@ -2919,6 +2486,13 @@ fn collectionNativeRecordWithoutGlobal(
             error.TypeError => error.TypeError,
             else => err,
         },
+        @intFromEnum(builtins.collection.PrototypeMethod.iterator_next) => {
+            if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
+            return builtins.collection.methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                else => err,
+            };
+        },
         else => error.TypeError,
     };
 }
@@ -3105,48 +2679,16 @@ pub fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
 }
 
-fn callArrayMethod(
-    rt: *core.JSRuntime,
-    output: ?*std.Io.Writer,
-    globals: []globals_mod.Slot,
-    receiver: core.JSValue,
-    name: []const u8,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    if (std.mem.eql(u8, name, "toString")) return value_ops.toStringValue(rt, receiver);
-    if (std.mem.eql(u8, name, "forEach")) return forEachArrayPrint(rt, output, receiver);
-    if (std.mem.eql(u8, name, "map")) return arrayMapCallback(rt, receiver, args, globals);
-    if (std.mem.eql(u8, name, "join")) return arrayJoinCall(rt, receiver, args);
-    if (builtins.array.legacyPrototypeMethodId(name)) |method| {
-        return switch (method) {
-            1, 2, 4, 5 => builtins.array.methodCall(rt, receiver, method, &.{}),
-            else => builtins.array.methodCall(rt, receiver, method, args),
-        } catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    return error.TypeError;
-}
-
-fn isArrayMethodName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "toString") or
-        std.mem.eql(u8, name, "forEach") or
-        std.mem.eql(u8, name, "map") or
-        std.mem.eql(u8, name, "join") or
-        builtins.array.legacyPrototypeMethodId(name) != null;
-}
-
 fn callObjectStatic(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []globals_mod.Slot,
-    name: []const u8,
+    id: u32,
     args: []const core.JSValue,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    if (std.mem.eql(u8, name, "assign")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.assign)) {
         if (args.len < 1) return error.TypeError;
         const target_value = try objectStaticToObjectValue(rt, global, args[0]);
         errdefer target_value.free(rt);
@@ -3169,7 +2711,7 @@ fn callObjectStatic(
         }
         return target_value;
     }
-    if (std.mem.eql(u8, name, "create")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.create)) {
         if (args.len < 1) return error.TypeError;
         const proto: ?*core.Object = if (args[0].isNull())
             null
@@ -3183,30 +2725,30 @@ fn callObjectStatic(
         }
         return object.value();
     }
-    if (std.mem.eql(u8, name, "is")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.is)) {
         const lhs = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const rhs = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         return core.JSValue.boolean(builtins.object.sameValue(lhs, rhs));
     }
-    if (std.mem.eql(u8, name, "keys")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.keys)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
         return builtins.object.ownEntriesArray(rt, object_value, .keys);
     }
-    if (std.mem.eql(u8, name, "values")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.values)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
         return builtins.object.ownEntriesArray(rt, object_value, .values);
     }
-    if (std.mem.eql(u8, name, "entries")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.entries)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
         return builtins.object.ownEntriesArray(rt, object_value, .entries);
     }
-    if (std.mem.eql(u8, name, "getOwnPropertyDescriptor")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_descriptor)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -3219,7 +2761,7 @@ fn callObjectStatic(
         defer desc.destroy(rt);
         return descriptorObject(rt, desc);
     }
-    if (std.mem.eql(u8, name, "getOwnPropertyDescriptors")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_descriptors)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -3238,7 +2780,7 @@ fn callObjectStatic(
         }
         return out.value();
     }
-    if (std.mem.eql(u8, name, "getOwnPropertyNames")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_names)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -3256,7 +2798,7 @@ fn callObjectStatic(
         }
         return out.value();
     }
-    if (std.mem.eql(u8, name, "getOwnPropertySymbols")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_symbols)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -3271,7 +2813,7 @@ fn callObjectStatic(
         }
         return out.value();
     }
-    if (std.mem.eql(u8, name, "hasOwn")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.has_own)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -3285,7 +2827,7 @@ fn callObjectStatic(
         }
         return core.JSValue.boolean(false);
     }
-    if (std.mem.eql(u8, name, "getPrototypeOf")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.get_prototype_of)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -3293,7 +2835,7 @@ fn callObjectStatic(
         if (object.getPrototype()) |prototype| return prototype.value().dup();
         return core.JSValue.nullValue();
     }
-    if (std.mem.eql(u8, name, "setPrototypeOf")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.set_prototype_of)) {
         if (args.len < 2) return error.TypeError;
         if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
         const prototype: ?*core.Object = if (args[1].isNull())
@@ -3307,40 +2849,40 @@ fn callObjectStatic(
         };
         return args[0].dup();
     }
-    if (std.mem.eql(u8, name, "isExtensible")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.is_extensible)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return core.JSValue.boolean(false);
         return core.JSValue.boolean(object.isExtensible());
     }
-    if (std.mem.eql(u8, name, "preventExtensions")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.prevent_extensions)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return target_value.dup();
         object.preventExtensions();
         return target_value.dup();
     }
-    if (std.mem.eql(u8, name, "seal")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.seal)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return target_value.dup();
         try object.seal(rt);
         return target_value.dup();
     }
-    if (std.mem.eql(u8, name, "isSealed")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.is_sealed)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return core.JSValue.boolean(true);
         return core.JSValue.boolean(try objectIsSealed(rt, object));
     }
-    if (std.mem.eql(u8, name, "isFrozen")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.is_frozen)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return core.JSValue.boolean(true);
         return core.JSValue.boolean(try objectIsFrozen(rt, object));
     }
-    if (std.mem.eql(u8, name, "freeze")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.freeze)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return target_value.dup();
         try object.freeze(rt);
         return target_value.dup();
     }
-    if (std.mem.eql(u8, name, "defineProperty")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.define_property)) {
         if (args.len < 3) return error.TypeError;
         const object = try expectObjectArg(args[0]);
         const key = try atomFromPropertyKey(rt, args[1]);
@@ -3355,7 +2897,7 @@ fn callObjectStatic(
         };
         return object.value().dup();
     }
-    if (std.mem.eql(u8, name, "defineProperties")) {
+    if (id == @intFromEnum(builtins.object.StaticMethod.define_properties)) {
         if (args.len < 2) return error.TypeError;
         const object = try expectObjectArg(args[0]);
         try definePropertiesFromObject(rt, object, args[1]);
@@ -3605,380 +3147,12 @@ fn objectPrototypeLookupAccessor(rt: *core.JSRuntime, global: ?*core.Object, rec
     return core.JSValue.undefinedValue();
 }
 
-fn objectProtoGetter(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue) !core.JSValue {
-    const receiver_value = try objectStaticToObjectValue(rt, global, receiver);
-    defer receiver_value.free(rt);
-    const object = try expectObjectArg(receiver_value);
-    if (object.getPrototype()) |prototype| return prototype.value().dup();
-    return core.JSValue.nullValue();
-}
-
-fn objectProtoSetter(rt: *core.JSRuntime, receiver: core.JSValue, prototype_value: core.JSValue) !core.JSValue {
-    if (receiver.isNull() or receiver.isUndefined()) return error.TypeError;
-    const object = thisObject(receiver) orelse return core.JSValue.undefinedValue();
-    const prototype: ?*core.Object = if (prototype_value.isNull())
-        null
-    else
-        thisObject(prototype_value) orelse return core.JSValue.undefinedValue();
-    object.setPrototype(rt, prototype) catch |err| switch (err) {
-        error.PrototypeCycle, error.NotExtensible => return error.TypeError,
-        else => return err,
-    };
-    return core.JSValue.undefinedValue();
-}
-
 pub fn isCallableObjectValue(value: core.JSValue) bool {
     const object = thisObject(value) orelse return false;
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_closure or
         object.class_id == core.class.ids.bound_function or
         object.class_id == core.class.ids.bytecode_function;
-}
-
-fn arrayMapCallback(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
-    if (args.len != 1) return error.TypeError;
-    var rooted_receiver = receiver;
-    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var mapped_root = core.JSValue.undefinedValue();
-    var mapped_value_root = core.JSValue.undefinedValue();
-    var callback_arg_buf = [_]core.JSValue{core.JSValue.undefinedValue()};
-    var callback_args: []core.JSValue = callback_arg_buf[0..];
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-        .{ .mutable = &callback_args },
-    };
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_receiver },
-        .{ .value = &mapped_root },
-        .{ .value = &mapped_value_root },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .slices = &root_slices,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const array = builtins.array.expectArray(rooted_receiver) catch return error.TypeError;
-    const mapped = try core.Object.createArray(rt, null);
-    mapped_root = mapped.value();
-    errdefer {
-        const failed_mapped = mapped_root;
-        mapped_root = core.JSValue.undefinedValue();
-        failed_mapped.free(rt);
-    }
-    var index: u32 = 0;
-    while (index < array.length) : (index += 1) {
-        const item = array.getProperty(core.atom.atomFromUInt32(index));
-        callback_args[0] = item;
-        var item_owned = true;
-        errdefer if (item_owned) {
-            callback_args[0] = core.JSValue.undefinedValue();
-            item.free(rt);
-        };
-        const mapped_value = closure_mod.call(rt, rooted_args[0], callback_args, globals) catch {
-            callback_args[0] = core.JSValue.undefinedValue();
-            item.free(rt);
-            item_owned = false;
-            return error.TypeError;
-        };
-        callback_args[0] = core.JSValue.undefinedValue();
-        item.free(rt);
-        item_owned = false;
-        mapped_value_root = mapped_value;
-        var mapped_value_owned = true;
-        errdefer if (mapped_value_owned) {
-            mapped_value_root = core.JSValue.undefinedValue();
-            mapped_value.free(rt);
-        };
-        try mapped.defineOwnProperty(rt, core.atom.atomFromUInt32(index), core.Descriptor.data(mapped_value, true, true, true));
-        mapped_value_root = core.JSValue.undefinedValue();
-        mapped_value.free(rt);
-        mapped_value_owned = false;
-    }
-    return mapped_root;
-}
-
-fn arrayJoinCall(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    if (args.len > 1) return error.TypeError;
-    if (args.len == 1) return builtins.array.join(rt, receiver, args[0]) catch return error.TypeError;
-    const comma = try core.string.String.createUtf8(rt, ",");
-    const comma_value = comma.value();
-    defer comma_value.free(rt);
-    return builtins.array.join(rt, receiver, comma_value) catch return error.TypeError;
-}
-
-fn arrayFrom(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var out_root = core.JSValue.undefinedValue();
-    var next_root = core.JSValue.undefinedValue();
-    var value_root = core.JSValue.undefinedValue();
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &out_root },
-        .{ .value = &next_root },
-        .{ .value = &value_root },
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .slices = &root_slices,
-        .values = &root_values,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    const source = try expectObjectArg(rooted_args[0]);
-    if (source.class_id == core.class.ids.set or source.class_id == core.class.ids.map) {
-        const iterator = try builtins.collection.methodCall(rt, source.value(), if (source.class_id == core.class.ids.set) 8 else 9, &.{});
-        defer iterator.free(rt);
-        const iterator_args = [_]core.JSValue{iterator};
-        return arrayFrom(rt, &iterator_args);
-    }
-    if (source.class_id == core.class.ids.map_iterator or source.class_id == core.class.ids.set_iterator) {
-        const out = try core.Object.createArray(rt, null);
-        out_root = out.value();
-        errdefer {
-            const failed_out = out_root;
-            out_root = core.JSValue.undefinedValue();
-            failed_out.free(rt);
-        }
-        while (true) {
-            const next = try builtins.collection.methodCall(rt, source.value(), 13, &.{});
-            next_root = next;
-            var next_owned = true;
-            errdefer if (next_owned) {
-                next_root = core.JSValue.undefinedValue();
-                next.free(rt);
-            };
-            const next_object = try expectObjectArg(next);
-            const done = next_object.getProperty(core.atom.predefinedId("done", .string).?);
-            const is_done = done.asBool() == true;
-            done.free(rt);
-            if (is_done) {
-                next_root = core.JSValue.undefinedValue();
-                next.free(rt);
-                next_owned = false;
-                break;
-            }
-            const value = next_object.getProperty(core.atom.predefinedId("value", .string).?);
-            value_root = value;
-            var value_owned = true;
-            errdefer if (value_owned) {
-                value_root = core.JSValue.undefinedValue();
-                value.free(rt);
-            };
-            try out.defineOwnProperty(rt, core.atom.atomFromUInt32(out.length), core.Descriptor.data(value, true, true, true));
-            value_root = core.JSValue.undefinedValue();
-            value.free(rt);
-            value_owned = false;
-            next_root = core.JSValue.undefinedValue();
-            next.free(rt);
-            next_owned = false;
-        }
-        return out_root;
-    }
-    if (!source.flags.is_array) return error.TypeError;
-    return source.value().dup();
-}
-
-fn typedArrayStaticFrom(rt: *core.JSRuntime, this_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
-    const ctor = thisObject(this_value) orelse return null;
-    if (ctor.typedArrayElementSize() == 0 or ctor.typedArrayKind() == 0) return null;
-    const source_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const source = thisObject(source_value) orelse return try typedArrayConstructFromValues(rt, ctor, &.{});
-    const length: u32 = if (source.flags.is_array) source.length else blk: {
-        const length_value = source.getProperty(core.atom.ids.length);
-        defer length_value.free(rt);
-        const length_i32 = length_value.asInt32() orelse 0;
-        if (length_i32 < 0) return error.RangeError;
-        break :blk @intCast(length_i32);
-    };
-    var values = try rt.memory.alloc(core.JSValue, length);
-    errdefer rt.memory.free(core.JSValue, values);
-    var rooted_values: []core.JSValue = values[0..0];
-    var values_root = ValueSliceRoot{};
-    values_root.init(rt, &rooted_values);
-    defer values_root.deinit();
-    var initialized: usize = 0;
-    errdefer {
-        var i: usize = 0;
-        while (i < initialized) : (i += 1) values[i].free(rt);
-    }
-    while (initialized < length) : (initialized += 1) {
-        values[initialized] = source.getProperty(core.atom.atomFromUInt32(@intCast(initialized)));
-        rooted_values = values[0 .. initialized + 1];
-    }
-    const out = try typedArrayConstructFromValues(rt, ctor, values);
-    for (values) |*value| {
-        value.free(rt);
-        value.* = core.JSValue.undefinedValue();
-    }
-    rooted_values = &.{};
-    rt.memory.free(core.JSValue, values);
-    return out;
-}
-
-test "typedArrayStaticFrom roots collected values while reading array-like source" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const ctor_value = try builtins.function.nativeFunction(rt, "Int8Array", 3);
-    defer ctor_value.free(rt);
-    const ctor = thisObject(ctor_value) orelse return error.TypeError;
-    ctor.typedArrayElementSizeSlot().* = 1;
-    ctor.typedArrayKindSlot().* = 1;
-
-    const source = try core.Object.create(rt, core.class.ids.object, null);
-    var source_alive = true;
-    defer if (source_alive) source.value().free(rt);
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-typed-array-static-from-prefix-root");
-    try source.defineOwnProperty(rt, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.symbol(symbol_atom), true, true, true));
-    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
-    try source.defineAutoInitProperty(rt, core.atom.atomFromUInt32(1), "lazyTypedArrayFromValue", 0, core.property.Flags.data(true, true, true));
-
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
-    var probe = ActiveRootSymbolProbe{
-        .rt = rt,
-        .atom_id = symbol_atom,
-    };
-    rt.memory.trigger_gc_fn = ActiveRootSymbolProbe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
-    defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
-    }
-
-    const from_args = [_]core.JSValue{source.value()};
-    try std.testing.expectError(error.TypeError, typedArrayStaticFrom(rt, ctor_value, &from_args));
-    try std.testing.expect(!probe.trace_failed);
-    try std.testing.expect(probe.saw_symbol);
-
-    source.value().free(rt);
-    source_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-fn typedArrayStaticOf(rt: *core.JSRuntime, this_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
-    const ctor = thisObject(this_value) orelse return null;
-    if (ctor.typedArrayElementSize() == 0 or ctor.typedArrayKind() == 0) return null;
-    return try typedArrayConstructFromValues(rt, ctor, args);
-}
-
-fn typedArrayConstructFromValues(rt: *core.JSRuntime, ctor: *core.Object, values: []const core.JSValue) !core.JSValue {
-    var rooted_values_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, values);
-    defer rooted_values_buffer.deinit(rt);
-    const rooted_values = rooted_values_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_values_buffer.slice(),
-    };
-    const root_frame = core.runtime.ValueRootFrame{
-        .previous = rt.active_value_roots,
-        .slices = &root_slices,
-    };
-    rt.active_value_roots = &root_frame;
-    defer rt.active_value_roots = root_frame.previous;
-
-    if (rooted_values.len > std.math.maxInt(u32)) return error.RangeError;
-    const byte_length = try std.math.mul(u32, @intCast(rooted_values.len), ctor.typedArrayElementSize());
-    const backing_buffer = try builtins.buffer.arrayBufferConstruct(rt, core.JSValue.int32(@intCast(byte_length)));
-    defer backing_buffer.free(rt);
-    const object_value = try builtins.buffer.typedArrayConstructWithOptions(
-        rt,
-        ctor.typedArrayElementSize(),
-        ctor.typedArrayKind(),
-        backing_buffer,
-        &.{backing_buffer},
-        constructorPrototype(rt, ctor),
-    );
-    errdefer object_value.free(rt);
-    const object = try expectObjectArg(object_value);
-    for (rooted_values, 0..) |value, index| {
-        _ = try builtins.buffer.typedArraySetIndex(rt, object, @intCast(index), value);
-    }
-    return object_value;
-}
-
-test "typedArrayConstructFromValues roots direct symbol values while creating backing buffer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const ctor_value = try builtins.function.nativeFunction(rt, "Int8Array", 3);
-    defer ctor_value.free(rt);
-    const ctor = thisObject(ctor_value) orelse return error.TypeError;
-    ctor.typedArrayElementSizeSlot().* = 1;
-    ctor.typedArrayKindSlot().* = 1;
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-typed-array-construct-values-symbol");
-    const values = [_]core.JSValue{
-        core.JSValue.symbol(symbol_atom),
-    };
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    try std.testing.expectError(error.TypeError, typedArrayConstructFromValues(rt, ctor, &values));
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-fn callStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, name: []const u8, args: []const core.JSValue) !core.JSValue {
-    if (std.mem.eql(u8, name, "valueOf")) {
-        if (receiver.isObject()) {
-            const header = receiver.refHeader() orelse return error.TypeError;
-            const object: *core.Object = @fieldParentPtr("header", header);
-            if (object.class_id == core.class.ids.string) {
-                return (object.objectData() orelse return error.TypeError).dup();
-            }
-        }
-        if (receiver.isString()) return receiver.dup();
-        return error.TypeError;
-    }
-    if (std.mem.eql(u8, name, "charAt")) {
-        const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
-        return builtins.string.charAtValue(rt, receiver, index) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    if (std.mem.eql(u8, name, "[Symbol.iterator]")) {
-        return builtins.string.iterator(rt, receiver) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    if (string_ops.primitiveStringMethodId(name)) |method| {
-        return builtins.string.methodCall(rt, receiver, method, args) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    return error.TypeError;
-}
-
-fn callPrimitiveMethod(rt: *core.JSRuntime, receiver: core.JSValue, name: []const u8, args: []const core.JSValue) !core.JSValue {
-    if (receiver.isNumber() and std.mem.eql(u8, name, "toFixed")) return builtins.number.toFixed(rt, receiver, args);
-    if (receiver.isNumber() and std.mem.eql(u8, name, "toExponential")) return builtins.number.toExponential(rt, receiver, args);
-    if (receiver.isNumber() and std.mem.eql(u8, name, "toPrecision")) return builtins.number.toPrecision(rt, receiver, args);
-    if (receiver.isNumber() and std.mem.eql(u8, name, "toString")) return builtins.number.toStringMethod(rt, receiver, args);
-    if (receiver.isSymbol() and std.mem.eql(u8, name, "[Symbol.toPrimitive]")) return receiver.dup();
-    if (std.mem.eql(u8, name, "valueOf")) return receiver.dup();
-    if (args.len != 0) return error.TypeError;
-    if (std.mem.eql(u8, name, "toString")) return value_ops.toStringValue(rt, receiver);
-    return error.TypeError;
 }
 
 fn numberIsInteger(value: core.JSValue) bool {
@@ -4209,6 +3383,8 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
 
     const target = try builtins.function.nativeFunction(rt, "get [Symbol.species]", 0);
     defer target.free(rt);
+    const target_object = thisObject(target) orelse return error.TypeError;
+    target_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter));
 
     var globals = [_]globals_mod.Slot{};
     const bound_value = try createBoundFunction(
@@ -4335,67 +3511,6 @@ fn objectToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     return value_ops.createStringValue(rt, defaultObjectTag(object));
 }
 
-fn errorToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
-    const object = try expectObjectArg(receiver);
-    const name_value = object.getProperty(core.atom.ids.name);
-    defer name_value.free(rt);
-    var name_string = if (name_value.isUndefined())
-        try value_ops.createStringValue(rt, "Error")
-    else
-        try value_ops.toStringValue(rt, name_value);
-    defer name_string.free(rt);
-
-    const message_atom = core.atom.predefinedId("message", .string).?;
-    const message_value = object.getProperty(message_atom);
-    defer message_value.free(rt);
-    var message_string = if (message_value.isUndefined())
-        try value_ops.createStringValue(rt, "")
-    else
-        try value_ops.toStringValue(rt, message_value);
-    defer message_string.free(rt);
-
-    var name_bytes = std.ArrayList(u8).empty;
-    defer name_bytes.deinit(rt.memory.allocator);
-    try value_ops.appendRawString(rt, &name_bytes, name_string);
-    var message_bytes = std.ArrayList(u8).empty;
-    defer message_bytes.deinit(rt.memory.allocator);
-    try value_ops.appendRawString(rt, &message_bytes, message_string);
-
-    if (name_bytes.items.len == 0) return value_ops.createStringValue(rt, message_bytes.items);
-    if (message_bytes.items.len == 0) return value_ops.createStringValue(rt, name_bytes.items);
-
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.appendSlice(rt.memory.allocator, name_bytes.items);
-    try out.appendSlice(rt.memory.allocator, ": ");
-    try out.appendSlice(rt.memory.allocator, message_bytes.items);
-    return value_ops.createStringValue(rt, out.items);
-}
-
-fn errorIsError(args: []const core.JSValue) core.JSValue {
-    if (args.len < 1) return core.JSValue.boolean(false);
-    const object = thisObject(args[0]) orelse return core.JSValue.boolean(false);
-    return core.JSValue.boolean(object.class_id == core.class.ids.error_);
-}
-
-fn finalizationRegistryRegister(rt: *core.JSRuntime, receiver: *core.Object, args: []const core.JSValue) !core.JSValue {
-    const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    if (!builtins.symbol.canBeHeldWeakly(rt, target)) return error.TypeError;
-    if (builtins.object.sameValue(target, held_value)) return error.TypeError;
-    if (!unregister_token.isUndefined() and !builtins.symbol.canBeHeldWeakly(rt, unregister_token)) return error.TypeError;
-    if (builtins.object.sameValue(target, receiver.value())) return core.JSValue.undefinedValue();
-    try finalizationRegistryAppendCell(rt, receiver, target, held_value, unregister_token);
-    return core.JSValue.undefinedValue();
-}
-
-fn finalizationRegistryUnregister(rt: *core.JSRuntime, receiver: *core.Object, args: []const core.JSValue) !core.JSValue {
-    const token = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!builtins.symbol.canBeHeldWeakly(rt, token)) return error.TypeError;
-    return core.JSValue.boolean(receiver.unregisterFinalizationRegistryCells(rt, token));
-}
-
 fn finalizationRegistryAppendCell(
     rt: *core.JSRuntime,
     receiver: *core.Object,
@@ -4404,99 +3519,6 @@ fn finalizationRegistryAppendCell(
     unregister_token: core.JSValue,
 ) !void {
     try receiver.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
-}
-
-fn objectHasOwnProperty(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    receiver: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const rt = ctx.runtime;
-    const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const key = try atomFromPropertyKey(rt, key_value);
-    defer rt.atoms.free(key);
-    const desc = if (global) |global_object|
-        try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, receiver, key, null, null)
-    else
-        receiver.getOwnProperty(key);
-    if (desc) |own_desc| {
-        own_desc.destroy(rt);
-        return core.JSValue.boolean(true);
-    }
-    return core.JSValue.boolean(false);
-}
-
-fn objectPropertyIsEnumerable(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    receiver: *core.Object,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const rt = ctx.runtime;
-    const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const key = try atomFromPropertyKey(rt, key_value);
-    defer rt.atoms.free(key);
-    const desc = if (global) |global_object|
-        try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global_object, receiver, key, null, null)
-    else
-        receiver.getOwnProperty(key);
-    if (desc) |own_desc| {
-        defer own_desc.destroy(rt);
-        return core.JSValue.boolean(own_desc.enumerable orelse false);
-    }
-    return core.JSValue.boolean(false);
-}
-
-fn symbolFor(ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
-    const rt = ctx.runtime;
-    const key = if (args.len >= 1)
-        try toStringBytesForSymbol(ctx, output, global, args[0])
-    else
-        try rt.memory.allocator.dupe(u8, "undefined");
-    defer rt.memory.allocator.free(key);
-    const registered = try std.fmt.allocPrint(rt.memory.allocator, "{s}{s}", .{ builtins.symbol.registry_prefix, key });
-    defer rt.memory.allocator.free(registered);
-    const atom_id = try rt.atoms.internRegisteredValueSymbol(registered);
-    return core.JSValue.symbol(atom_id);
-}
-
-fn toStringBytesForSymbol(ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, value: core.JSValue) ![]u8 {
-    if (value.isSymbol()) return error.TypeError;
-    const global_object = global orelse return stringBytes(ctx.runtime, value);
-    const string_value = try string_ops.toStringForAnnexB(ctx, output, global_object, value, null, null);
-    defer string_value.free(ctx.runtime);
-    return stringBytes(ctx.runtime, string_value);
-}
-
-fn symbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const atom_id = value.asSymbolAtom() orelse return error.TypeError;
-    const key = builtins.symbol.registryKey(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
-    return value_ops.createStringValue(rt, key);
-}
-
-fn symbolDescription(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
-    const primitive = try symbolPrimitiveValue(rt, this_value);
-    defer primitive.free(rt);
-    const atom_id = primitive.asSymbolAtom() orelse return error.TypeError;
-    const desc = builtins.symbol.description(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
-    return value_ops.createStringValue(rt, desc);
-}
-
-fn symbolPrimitiveValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
-    if (this_value.isSymbol()) return this_value.dup();
-    if (!this_value.isObject()) return error.TypeError;
-    const object = try expectObjectArg(this_value);
-    if (object.class_id != core.class.ids.symbol) return error.TypeError;
-    const primitive = (object.objectData() orelse return error.TypeError).dup();
-    if (!primitive.isSymbol()) {
-        primitive.free(rt);
-        return error.TypeError;
-    }
-    return primitive;
 }
 
 fn defaultObjectTag(object: *core.Object) []const u8 {
@@ -6909,14 +5931,6 @@ fn atomFromPropertyKey(rt: *core.JSRuntime, value: core.JSValue) HostError!core.
 
 fn atomToStringValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue {
     return rt.atoms.toStringValue(rt, atom_id);
-}
-
-fn stringBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
-    if (!value.isString()) return error.TypeError;
-    var buffer = std.ArrayList(u8).empty;
-    errdefer buffer.deinit(rt.memory.allocator);
-    try value_ops.appendRawString(rt, &buffer, value);
-    return buffer.toOwnedSlice(rt.memory.allocator);
 }
 
 fn defineBoolProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: bool) !void {

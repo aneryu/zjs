@@ -979,16 +979,16 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     var prototype_raw_owned = true;
     errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, &prototype.header);
 
-    const methods = [_][]const u8{
-        "getFunction",
-        "getFunctionName",
-        "getFileName",
-        "getLineNumber",
-        "getColumnNumber",
-        "isNative",
+    const methods = [_]struct { name: []const u8, id: core.function.HostGlobalMethod }{
+        .{ .name = "getFunction", .id = .callsite_get_function },
+        .{ .name = "getFunctionName", .id = .callsite_get_function_name },
+        .{ .name = "getFileName", .id = .callsite_get_file_name },
+        .{ .name = "getLineNumber", .id = .callsite_get_line_number },
+        .{ .name = "getColumnNumber", .id = .callsite_get_column_number },
+        .{ .name = "isNative", .id = .callsite_is_native },
     };
-    for (methods) |method_name| {
-        try defineNativeDataMethod(rt, prototype, method_name, 0);
+    for (methods) |method| {
+        try builtin_glue.defineNativeDataMethodWithNativeId(rt, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
     }
     try qjsDefineToStringTag(rt, prototype, "CallSite");
 
@@ -3049,6 +3049,26 @@ pub fn qjsPrimitivePrototypeMethod(
     const tag: i32 = @intCast(id);
     const class_tag = @divTrunc(tag, 10);
     const method_tag = @mod(tag, 10);
+    // Methods 3..5 do not coerce `this` through the wrapper-prototype rules:
+    // 3 is the constructor-called-as-function path, 4/5 are the Symbol
+    // `description` getter and `[Symbol.toPrimitive]`, which validate their
+    // receiver themselves (ids: builtins.registry primitive_*_id constants).
+    switch (method_tag) {
+        3 => switch (class_tag) {
+            2 => return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0])),
+            4 => return qjsSymbolConstructorCall(ctx, output, global, args),
+            else => return error.TypeError,
+        },
+        4 => {
+            if (class_tag != 4) return error.TypeError;
+            return symbolDescriptionValue(rt, this_value);
+        },
+        5 => {
+            if (class_tag != 4) return error.TypeError;
+            return symbolPrimitiveValue(rt, this_value);
+        },
+        else => {},
+    }
     const primitive = primitivePrototypeThisValue(rt, this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object);
     defer primitive.free(rt);
     return switch (method_tag) {
@@ -3061,6 +3081,60 @@ pub fn qjsPrimitivePrototypeMethod(
         2 => primitive.dup(),
         else => error.TypeError,
     };
+}
+
+/// `Symbol(...)` called as a function (never a constructor). Mirrors the
+/// retired string-name dispatch branch in `call.zig`: coerce the optional
+/// description through the user-visible ToString path, then mint a fresh
+/// value symbol.
+fn qjsSymbolConstructorCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    const description = blk: {
+        if (args.len >= 1 and !args[0].isUndefined()) {
+            if (args[0].isSymbol()) return error.TypeError;
+            const string_value = try string_ops.toStringForAnnexB(ctx, output, global, args[0], null, null);
+            defer string_value.free(rt);
+            var buffer = std.ArrayList(u8).empty;
+            errdefer buffer.deinit(rt.memory.allocator);
+            try value_ops.appendRawString(rt, &buffer, string_value);
+            break :blk try buffer.toOwnedSlice(rt.memory.allocator);
+        }
+        break :blk try rt.memory.allocator.dupe(u8, builtins.symbol.undefined_description);
+    };
+    defer rt.memory.allocator.free(description);
+    const symbol_atom = try rt.atoms.newValueSymbol(description);
+    return core.JSValue.symbol(symbol_atom);
+}
+
+/// `get Symbol.prototype.description`: unwraps a symbol primitive or a
+/// Symbol wrapper object and returns its description string (or undefined).
+fn symbolDescriptionValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
+    const primitive = try symbolPrimitiveValue(rt, this_value);
+    defer primitive.free(rt);
+    const atom_id = primitive.asSymbolAtom() orelse return error.TypeError;
+    const desc = builtins.symbol.description(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
+    return value_ops.createStringValue(rt, desc);
+}
+
+/// `Symbol.prototype[Symbol.toPrimitive]`: returns the wrapped symbol
+/// primitive; throws TypeError for any other receiver.
+fn symbolPrimitiveValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
+    if (this_value.isSymbol()) return this_value.dup();
+    if (!this_value.isObject()) return error.TypeError;
+    const header = this_value.refHeader() orelse return error.TypeError;
+    const object: *core.Object = @fieldParentPtr("header", header);
+    if (object.class_id != core.class.ids.symbol) return error.TypeError;
+    const primitive = (object.objectData() orelse return error.TypeError).dup();
+    if (!primitive.isSymbol()) {
+        primitive.free(rt);
+        return error.TypeError;
+    }
+    return primitive;
 }
 
 pub fn throwPrimitivePrototypeTypeError(

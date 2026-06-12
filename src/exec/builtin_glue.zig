@@ -848,4 +848,17 @@ pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: [
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
 
+/// Same as `defineNativeDataMethod`, but stamps the function object with a
+/// native-builtin record id so calls dispatch through the integer record
+/// mechanism instead of the legacy name chain.
+pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
+    const atom_id = try rt.internAtom(name);
+    defer rt.atoms.free(atom_id);
+    const method = try builtins.function.nativeFunction(rt, name, length);
+    defer method.free(rt);
+    const method_object = property_ops.expectObject(method) catch return error.TypeError;
+    method_object.nativeFunctionIdSlot().* = native_builtin_id;
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+}
+
 // --- Primitive coercion moved to coercion_ops.zig ---

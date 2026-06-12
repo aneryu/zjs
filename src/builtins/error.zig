@@ -9,6 +9,12 @@ pub const PrototypeMethod = enum(u32) {
     stack_setter = 3,
 };
 
+/// Shares the `.error_object` native-builtin id space with
+/// `PrototypeMethod`; keep the values disjoint.
+pub const StaticMethod = enum(u32) {
+    capture_stack_trace = 10,
+};
+
 pub fn create(message: []const u8) ErrorObject {
     return .{ .message = message };
 }

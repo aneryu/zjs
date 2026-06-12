@@ -2938,7 +2938,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
 
     const object = try qjsIteratorPrototype(ctx.runtime, global, "String Iterator");
     errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    try defineNativeDataMethod(ctx.runtime, object, "next", 0);
+    try builtin_glue.defineNativeDataMethodWithNativeId(ctx.runtime, object, "next", 0, core.function.nativeBuiltinId(.string, @intFromEnum(builtins.string.PrototypeMethod.iterator_next)));
 
     const iterator_method = try builtins.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);

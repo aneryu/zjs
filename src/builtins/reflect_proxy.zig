@@ -45,6 +45,8 @@ pub const StaticMethod = enum(u32) {
     own_keys = 11,
     construct = 12,
     apply = 13,
+    proxy_revocable = 14,
+    proxy_revoke = 15,
 };
 
 pub fn methodId(name: []const u8) ?u32 {
@@ -322,6 +324,7 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     const revoke = try builtins.function.nativeFunction(rt, "revoke", 0);
     defer revoke.free(rt);
     const revoke_object = thisObject(revoke) orelse return error.TypeError;
+    revoke_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke));
     const empty_name = try core.string.String.createAscii(rt, "");
     const empty_name_value = empty_name.value();
     defer empty_name_value.free(rt);
@@ -463,7 +466,6 @@ fn boundFunctionTargetObject(object: *core.Object) ?*core.Object {
     const target = object.boundTarget() orelse return null;
     return thisObject(target);
 }
-
 
 fn isBuiltinConstructorName(name: []const u8) bool {
     return std.mem.eql(u8, name, "Object") or

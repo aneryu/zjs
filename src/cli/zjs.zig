@@ -151,6 +151,7 @@ fn runFileModule(
 pub fn main(init: std.process.Init) !void {
     const total_start = monotonicNanos();
     setupFusionStatsExitDump(init.environ_map);
+    setupHostDispatchStatsExitDump(init.environ_map);
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -779,6 +780,36 @@ fn dumpFusionStats(output: *std.Io.Writer) !void {
         try output.print("{s:<60} {d:>9}\n", .{ fusion_stats.tagName(index), counts[index] });
     }
     try output.print("fusions with zero hits: {d}/{d}\n", .{ zero_count, fusion_stats.fusion_count });
+
+    try dumpHostDispatchStats(output);
+}
+
+const host_dispatch_stats = engine.exec.host_dispatch_stats;
+
+/// Per-site hit table for the legacy string-name dispatch branches in
+/// `call.zig`. Only available (and only printed) when built with
+/// `-Dzjs_enable_opcode_profile=true`.
+fn dumpHostDispatchStats(output: *std.Io.Writer) !void {
+    if (comptime !host_dispatch_stats.enabled) return;
+    const counts = host_dispatch_stats.snapshot();
+    var order: [host_dispatch_stats.site_count]u16 = undefined;
+    for (&order, 0..) |*slot, index| slot.* = @intCast(index);
+    std.mem.sort(u16, &order, @as([]const u64, &counts), struct {
+        fn lessThan(c: []const u64, lhs: u16, rhs: u16) bool {
+            if (c[lhs] != c[rhs]) return c[lhs] > c[rhs];
+            return lhs < rhs;
+        }
+    }.lessThan);
+    var zero_count: usize = 0;
+    try output.print("\nHOST DISPATCH SITE                                                HITS\n", .{});
+    for (order) |index| {
+        if (counts[index] == 0) {
+            zero_count += 1;
+            continue;
+        }
+        try output.print("{s:<60} {d:>9}\n", .{ host_dispatch_stats.tagName(index), counts[index] });
+    }
+    try output.print("dispatch sites with zero hits: {d}/{d}\n", .{ zero_count, host_dispatch_stats.site_count });
 }
 
 extern "c" fn atexit(callback: *const fn () callconv(.c) void) c_int;
@@ -804,6 +835,29 @@ fn writeFusionStatsAtExit() callconv(.c) void {
     if (comptime !fusion_stats.enabled) return;
     if (fusion_stats_path_len == 0) return;
     fusion_stats.appendToFile(&fusion_stats_path_buf);
+}
+
+var host_dispatch_stats_path_buf: [512:0]u8 = undefined;
+var host_dispatch_stats_path_len: usize = 0;
+
+/// When built with `-Dzjs_enable_opcode_profile=true` and
+/// `ZJS_HOST_DISPATCH_STATS_FILE` is set, append per-site dispatch hit counts
+/// to that file when the process exits (the explicit `std.process.exit` calls
+/// skip defers, so this uses libc `atexit`).
+fn setupHostDispatchStatsExitDump(environ_map: *std.process.Environ.Map) void {
+    if (comptime !host_dispatch_stats.enabled) return;
+    const path = environ_map.get("ZJS_HOST_DISPATCH_STATS_FILE") orelse return;
+    if (path.len == 0 or path.len >= host_dispatch_stats_path_buf.len) return;
+    @memcpy(host_dispatch_stats_path_buf[0..path.len], path);
+    host_dispatch_stats_path_buf[path.len] = 0;
+    host_dispatch_stats_path_len = path.len;
+    _ = atexit(writeHostDispatchStatsAtExit);
+}
+
+fn writeHostDispatchStatsAtExit() callconv(.c) void {
+    if (comptime !host_dispatch_stats.enabled) return;
+    if (host_dispatch_stats_path_len == 0) return;
+    host_dispatch_stats.appendToFile(&host_dispatch_stats_path_buf);
 }
 
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {

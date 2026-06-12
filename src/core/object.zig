@@ -7605,6 +7605,10 @@ pub const Object = struct {
 
         const getter = function.nativeFunction(rt, "get userAgent", 0) catch return null;
         defer getter.free(rt);
+        if (getter.refHeader()) |getter_header| {
+            const getter_object: *Object = @fieldParentPtr("header", getter_header);
+            getter_object.nativeFunctionIdSlot().* = function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get));
+        }
         const user_agent = rt.internAtom("userAgent") catch return null;
         defer rt.atoms.free(user_agent);
         proto.defineOwnPropertyAssumingNew(

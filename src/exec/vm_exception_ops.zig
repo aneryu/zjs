@@ -197,15 +197,19 @@ pub fn isCallSiteObject(rt: *core.JSRuntime, object: *core.Object) bool {
     return object.isCallSite();
 }
 
-pub fn qjsCallSiteMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !?core.JSValue {
+/// CallSite prototype methods dispatched by `.host` native-record id; the
+/// receiver must be a CallSite object (the metadata lives in internal slots).
+pub fn qjsCallSiteMethodById(rt: *core.JSRuntime, object: *core.Object, id: core.function.HostGlobalMethod) ?core.JSValue {
     if (!isCallSiteObject(rt, object)) return null;
-    if (std.mem.eql(u8, name, "getFunction")) return core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, "getFunctionName")) return if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, "getFileName")) return if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue();
-    if (std.mem.eql(u8, name, "getLineNumber")) return core.JSValue.int32(object.callSiteLine());
-    if (std.mem.eql(u8, name, "getColumnNumber")) return core.JSValue.int32(object.callSiteColumn());
-    if (std.mem.eql(u8, name, "isNative")) return core.JSValue.boolean(false);
-    return null;
+    return switch (id) {
+        .callsite_get_function => core.JSValue.nullValue(),
+        .callsite_get_function_name => if (object.callSiteFunctionName()) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_file_name => if (object.callSiteFile()) |value| value.dup() else core.JSValue.nullValue(),
+        .callsite_get_line_number => core.JSValue.int32(object.callSiteLine()),
+        .callsite_get_column_number => core.JSValue.int32(object.callSiteColumn()),
+        .callsite_is_native => core.JSValue.boolean(false),
+        else => null,
+    };
 }
 
 pub fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_function_value: core.JSValue) !core.Atom {

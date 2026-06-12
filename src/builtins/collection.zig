@@ -760,7 +760,10 @@ fn createIteratorPrototype(
         owned_base = null;
     }
     try defineToStringTag(rt, specific, tag_name);
-    try function_builtin.defineNativeMethod(rt, specific, "next", 0);
+    const next = try function_builtin.nativeFunction(rt, "next", 0);
+    defer next.free(rt);
+    (try expectObject(next)).nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
+    try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
     return specific;
 }
 
@@ -2391,36 +2394,50 @@ fn collectionClassId(kind: u32) ?core.ClassId {
     };
 }
 
+/// Own-method variant used by the prototype-less legacy `construct` path:
+/// create the named method and stamp it with its `.collection` native-record
+/// id so calls dispatch through the integer record mechanism.
+fn defineNativeMethodWithRecordId(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
+    const method = try function_builtin.nativeFunction(rt, name, length);
+    defer method.free(rt);
+    const method_object = try expectObject(method);
+    const id = prototypeMethodId(name) orelse return error.TypeError;
+    method_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, id);
+    const atom_id = try rt.internAtom(name);
+    defer rt.atoms.free(atom_id);
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+}
+
 fn defineNativeMethods(rt: *core.JSRuntime, object: *core.Object, class_id: core.ClassId) !void {
     switch (class_id) {
         core.class.ids.map, core.class.ids.weakmap => {
-            try function_builtin.defineNativeMethod(rt, object, "set", 2);
-            try function_builtin.defineNativeMethod(rt, object, "get", 1);
-            try function_builtin.defineNativeMethod(rt, object, "has", 1);
-            try function_builtin.defineNativeMethod(rt, object, "delete", 1);
+            try defineNativeMethodWithRecordId(rt, object, "set", 2);
+            try defineNativeMethodWithRecordId(rt, object, "get", 1);
+            try defineNativeMethodWithRecordId(rt, object, "has", 1);
+            try defineNativeMethodWithRecordId(rt, object, "delete", 1);
             if (class_id == core.class.ids.map) {
-                try function_builtin.defineNativeMethod(rt, object, "clear", 0);
-                try function_builtin.defineNativeMethod(rt, object, "keys", 0);
-                try function_builtin.defineNativeMethod(rt, object, "values", 0);
-                try function_builtin.defineNativeMethod(rt, object, "entries", 0);
-                try function_builtin.defineNativeMethod(rt, object, "forEach", 1);
-                try function_builtin.defineNativeMethod(rt, object, "getOrInsert", 2);
-                try function_builtin.defineNativeMethod(rt, object, "getOrInsertComputed", 2);
+                try defineNativeMethodWithRecordId(rt, object, "clear", 0);
+                try defineNativeMethodWithRecordId(rt, object, "keys", 0);
+                try defineNativeMethodWithRecordId(rt, object, "values", 0);
+                try defineNativeMethodWithRecordId(rt, object, "entries", 0);
+                try defineNativeMethodWithRecordId(rt, object, "forEach", 1);
+                try defineNativeMethodWithRecordId(rt, object, "getOrInsert", 2);
+                try defineNativeMethodWithRecordId(rt, object, "getOrInsertComputed", 2);
             } else {
-                try function_builtin.defineNativeMethod(rt, object, "getOrInsert", 2);
-                try function_builtin.defineNativeMethod(rt, object, "getOrInsertComputed", 2);
+                try defineNativeMethodWithRecordId(rt, object, "getOrInsert", 2);
+                try defineNativeMethodWithRecordId(rt, object, "getOrInsertComputed", 2);
             }
         },
         core.class.ids.set, core.class.ids.weakset => {
-            try function_builtin.defineNativeMethod(rt, object, "add", 1);
-            try function_builtin.defineNativeMethod(rt, object, "has", 1);
-            try function_builtin.defineNativeMethod(rt, object, "delete", 1);
+            try defineNativeMethodWithRecordId(rt, object, "add", 1);
+            try defineNativeMethodWithRecordId(rt, object, "has", 1);
+            try defineNativeMethodWithRecordId(rt, object, "delete", 1);
             if (class_id == core.class.ids.set) {
-                try function_builtin.defineNativeMethod(rt, object, "clear", 0);
-                try function_builtin.defineNativeMethod(rt, object, "keys", 0);
-                try function_builtin.defineNativeMethod(rt, object, "values", 0);
-                try function_builtin.defineNativeMethod(rt, object, "entries", 0);
-                try function_builtin.defineNativeMethod(rt, object, "forEach", 1);
+                try defineNativeMethodWithRecordId(rt, object, "clear", 0);
+                try defineNativeMethodWithRecordId(rt, object, "keys", 0);
+                try defineNativeMethodWithRecordId(rt, object, "values", 0);
+                try defineNativeMethodWithRecordId(rt, object, "entries", 0);
+                try defineNativeMethodWithRecordId(rt, object, "forEach", 1);
             }
         },
         else => {},

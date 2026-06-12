@@ -9,6 +9,7 @@ pub const BuiltinFunction = struct {
 
 pub const PrototypeMethod = enum(u32) {
     to_string = 1,
+    bind = 2,
 };
 
 pub fn applyReturnThis(this_value: JSValue) JSValue {

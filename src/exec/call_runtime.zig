@@ -289,11 +289,22 @@ pub fn callNativeBuiltinRecordForVm(
         .uri => return try builtin_glue.qjsUriCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
         .json => return try builtin_glue.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
         .atomics => return try qjsAtomicsCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
-        .reflect => return try qjsReflectCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        .reflect => {
+            // Proxy revocable/revoke need the function object (revoke target
+            // slot) and the legacy receiver gates; delegate to the host
+            // record dispatcher which carries both.
+            if (native_ref.id == @intFromEnum(builtins.reflect_proxy.StaticMethod.proxy_revocable) or
+                native_ref.id == @intFromEnum(builtins.reflect_proxy.StaticMethod.proxy_revoke))
+            {
+                return try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame);
+            }
+            return try qjsReflectCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame);
+        },
         .object => return try object_ops.qjsObjectCallForNativeRecord(ctx, output, global, this_value, native_ref.id, args, caller_function, caller_frame),
         .primitive => return try object_ops.qjsPrimitivePrototypeMethod(ctx, output, global, function_object, this_value, native_ref.id, args, caller_function, caller_frame),
         .function => switch (native_ref.id) {
             @intFromEnum(builtins.function.PrototypeMethod.to_string) => return try string_ops.qjsFunctionToStringCall(ctx, this_value),
+            @intFromEnum(builtins.function.PrototypeMethod.bind) => return try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame),
             else => {},
         },
         .error_object => switch (native_ref.id) {
@@ -542,6 +553,15 @@ fn callValueOrBytecodeClassModeDispatch(
         if (try promise_ops.qjsAsyncDisposableStackMethodCall(ctx, output, global, this_value, function_object, args, caller_function, caller_frame)) |value| {
             return value;
         }
+        // The realm-aware Promise static dispatch must stay ahead of the
+        // generic native-record dispatch: the record handler reproduces the
+        // host-path receiver gates, while this handler also supports custom
+        // capability receivers (`Promise.resolve.call(P, ...)`).
+        if (promise_ops.qjsPromiseStaticMode(name)) |mode| {
+            if (try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global, function_object, name)) {
+                return promise_ops.qjsPromiseStaticCall(ctx, output, global, this_value, args, mode, caller_function, caller_frame);
+            }
+        }
         if (try call_mod.callNativeFunctionRecord(ctx, output, global, &.{}, this_value, function_object, args, caller_function, caller_frame)) |value| return value;
         if (try collection_vm.qjsCollectionIteratorMethodCall(ctx, global, this_value, function_object, name, args)) |value| {
             return value;
@@ -551,11 +571,6 @@ fn callValueOrBytecodeClassModeDispatch(
         }
         if (try collection_vm.qjsSetMethodCall(ctx, output, global, this_value, function_object, name, args, caller_function, caller_frame)) |value| {
             return value;
-        }
-        if (promise_ops.qjsPromiseStaticMode(name)) |mode| {
-            if (try promise_ops.qjsPromiseStaticBuiltinCallee(ctx.runtime, global, function_object, name)) {
-                return promise_ops.qjsPromiseStaticCall(ctx, output, global, this_value, args, mode, caller_function, caller_frame);
-            }
         }
         // Hot-path dispatch: a small first-byte switch routes the common
         // global builtins directly to their handlers, bypassing the long
