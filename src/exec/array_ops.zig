@@ -13,8 +13,6 @@ const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
-pub const createNamedError = exception_ops.createNamedError;
-pub const createNamedErrorWithConstructor = exception_ops.createNamedErrorWithConstructor;
 const op = bytecode.opcode.op;
 const atom_buffer = core.atom.predefinedId("buffer", .string).?;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
@@ -99,7 +97,7 @@ const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
 const simpleNumericBinary = call_runtime.simpleNumericBinary;
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
-const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
 const toNumberForDateMethod = coercion_ops.toNumberForDateMethod;
 const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
@@ -427,9 +425,9 @@ pub fn regExpLegacyNoCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, kin
 
 pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, getter_value: core.JSValue) !?core.JSValue {
     const error_value = if (objectFromValue(getter_value)) |getter_object| blk: {
-        const ctor_value = getter_object.functionRealmTypeErrorConstructor() orelse break :blk try createNamedError(ctx.runtime, global, "TypeError", "RegExp object expected");
-        break :blk try createNamedErrorWithConstructor(ctx.runtime, ctor_value, "TypeError", "RegExp object expected");
-    } else try createNamedError(ctx.runtime, global, "TypeError", "RegExp object expected");
+        const ctor_value = getter_object.functionRealmTypeErrorConstructor() orelse break :blk try exception_ops.createNamedError(ctx, global, "TypeError", "RegExp object expected");
+        break :blk try exception_ops.createNamedErrorWithConstructor(ctx, global, ctor_value, "TypeError", "RegExp object expected");
+    } else try exception_ops.createNamedError(ctx, global, "TypeError", "RegExp object expected");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -6612,7 +6610,7 @@ pub fn qjsMapGetOrInsertComputed(
         args[0].dup();
     defer key.free(ctx.runtime);
     if (receiver.class_id == core.class.ids.weakmap and !builtins.symbol.canBeHeldWeakly(ctx.runtime, key)) {
-        return @as(?core.JSValue, try call_runtime.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
+        return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
     }
 
     const has_value = try builtins.collection.methodCall(ctx.runtime, receiver_value, 3, &.{key});
@@ -6651,7 +6649,7 @@ fn canonicalizeMapKey(key: core.JSValue) core.JSValue {
 }
 
 fn throwCollectionReceiverTypeError(ctx: *core.JSContext, global: *core.Object, owner_class: core.ClassId) !core.JSValue {
-    return call_runtime.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
+    return exception_ops.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
 }
 
 fn throwCollectionMethodTypeError(
@@ -6665,15 +6663,15 @@ fn throwCollectionMethodTypeError(
         (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
         args.len >= 1 and !builtins.symbol.canBeHeldWeakly(ctx.runtime, args[0]))
     {
-        return call_runtime.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
+        return exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
     }
     if (receiver.class_id == core.class.ids.weakset and
         method == .add and
         args.len >= 1 and !builtins.symbol.canBeHeldWeakly(ctx.runtime, args[0]))
     {
-        return call_runtime.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
+        return exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
     }
-    return call_runtime.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(receiver.class_id));
+    return exception_ops.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(receiver.class_id));
 }
 
 fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {

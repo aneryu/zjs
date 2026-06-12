@@ -11,6 +11,7 @@ const unicode_lib = @import("../libs/unicode.zig");
 const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const object_ops = @import("object_ops.zig");
@@ -89,7 +90,7 @@ const stringValueContainsUnitByte = string_ops.stringValueContainsUnitByte;
 const stringValueUnitsEqualBytes = string_ops.stringValueUnitsEqualBytes;
 const surrogatePairFromCodePoint = string_ops.surrogatePairFromCodePoint;
 const throwRegExpAccessorTypeError = array_ops.throwRegExpAccessorTypeError;
-const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
 const unicodeAstralSpecialMatch = string_ops.unicodeAstralSpecialMatch;

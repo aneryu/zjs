@@ -10,9 +10,7 @@ const zjs_vm = @import("zjs_vm.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const HostError = exceptions.HostError;
-pub const createNamedError = exception_ops.createNamedError;
-pub const createNamedErrorWithConstructor = exception_ops.createNamedErrorWithConstructor;
-pub const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
+const rejectedPromiseForRuntimeError = exception_ops.rejectedPromiseForRuntimeError;
 const qjsPromiseAggregateError = exception_ops.qjsPromiseAggregateError;
 const qjsPromiseErrorValue = exception_ops.qjsPromiseErrorValue;
 const runWithArgsState = zjs_vm.runWithArgsState;
@@ -83,7 +81,7 @@ const runNextOsTimer = call_runtime.runNextOsTimer;
 const runtimeErrorValueForDisposableDispose = disposable_ops.runtimeErrorValueForDisposableDispose;
 const setGeneratorResumeCompletionType = call_runtime.setGeneratorResumeCompletionType;
 const storeRealmValue = builtin_glue.storeRealmValue;
-const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toBigIntBitsForAtomics = call_runtime.toBigIntBitsForAtomics;
 const toInt32BitsForAtomics = call_runtime.toInt32BitsForAtomics;
 const toNumberForAtomics = call_runtime.toNumberForAtomics;
@@ -1323,9 +1321,9 @@ pub fn qjsPromiseResolvingFunctionCall(
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (!reject and builtins.object.sameValue(value, target_value)) {
         const error_value = if (objectRealmGlobal(function_object)) |error_global|
-            try createNamedError(ctx.runtime, error_global, "TypeError", "")
+            try exception_ops.createNamedError(ctx, error_global, "TypeError", "")
         else
-            try createNamedErrorWithConstructor(ctx.runtime, core.JSValue.undefinedValue(), "TypeError", "");
+            try exception_ops.createNamedErrorWithConstructor(ctx, global, core.JSValue.undefinedValue(), "TypeError", "");
         defer error_value.free(ctx.runtime);
         try qjsPromiseSettleValue(ctx, global, target, error_value, true);
         return core.JSValue.undefinedValue();
@@ -1689,7 +1687,7 @@ pub fn qjsPromiseCombinatorElementCall(
             result.free(ctx.runtime);
         },
         .any_reject => {
-            const aggregate_error = try qjsPromiseAggregateError(ctx.runtime, global, values);
+            const aggregate_error = try qjsPromiseAggregateError(ctx, global, values);
             defer aggregate_error.free(ctx.runtime);
             const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error}, caller_function, caller_frame);
             result.free(ctx.runtime);
@@ -2296,7 +2294,7 @@ pub fn qjsPromiseCombinatorCall(
                     result.free(ctx.runtime);
                 },
                 .any => {
-                    const aggregate_error = try qjsPromiseAggregateError(ctx.runtime, global, values.?);
+                    const aggregate_error = try qjsPromiseAggregateError(ctx, global, values.?);
                     defer aggregate_error.free(ctx.runtime);
                     const result = try callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), capability.reject, &.{aggregate_error}, caller_function, caller_frame);
                     result.free(ctx.runtime);
@@ -2558,7 +2556,7 @@ pub fn promiseRejectionReason(ctx: *core.JSContext, global: *core.Object, err: a
         };
     }
     return .{
-        .value = createNamedError(ctx.runtime, global, if (err == error.TypeError) "TypeError" else "Error", "") catch core.JSValue.undefinedValue(),
+        .value = exception_ops.createNamedError(ctx, global, if (err == error.TypeError) "TypeError" else "Error", "") catch core.JSValue.undefinedValue(),
         .from_exception = false,
     };
 }

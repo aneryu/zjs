@@ -34,6 +34,16 @@ pub fn captureErrorStack(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
     try instance.setErrorStackSites(ctx.runtime, sites);
 }
 
+/// Value-level stack capture: attach the current VM backtrace as call sites
+/// to `value` when it is an object; non-object values are ignored. This is
+/// the seam used by the `vm_exception_ops` construction primitives, which
+/// capture the stack at error construction time (QuickJS `build_backtrace`
+/// inside `JS_ThrowError2`).
+pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
+    const object = property_ops.expectObject(value) catch return;
+    try captureErrorStack(ctx, null, global, object);
+}
+
 pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip_name: ?[]const u8) !core.JSValue {
     if (ctx.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
 

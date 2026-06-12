@@ -23,7 +23,7 @@ const pushSlotValue = array_ops.pushSlotValue;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setGlobalLexicalValue = call_runtime.setGlobalLexicalValue;
 const throwTdzReference = exception_ops.throwTdzReference;
-const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 
 const op = bytecode.opcode.op;
 

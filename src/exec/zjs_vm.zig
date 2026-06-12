@@ -117,7 +117,11 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         // Preallocate the out-of-memory catch value while the heap still has
         // room; when a memory limit is later exhausted, the catch machinery
         // can throw this object without allocating (QuickJS analogue).
-        ctx.runtime.preallocated_oom_error = exception_ops.createNamedError(
+        // Stack-less by design (the documented exemption on
+        // `createNamedErrorWithoutStack`): a backtrace captured here would
+        // describe startup, and the exhausted-heap delivery path
+        // (`tryCatchInFrame`) must not allocate one.
+        ctx.runtime.preallocated_oom_error = exception_ops.createNamedErrorWithoutStack(
             ctx.runtime,
             global_object,
             "InternalError",

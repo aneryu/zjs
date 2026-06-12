@@ -10,6 +10,7 @@ const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
 
 const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const slot_ops = @import("slot_ops.zig");
@@ -355,11 +356,11 @@ pub fn putRefValue(
                 value.free(ctx.runtime);
                 return;
             }
-            _ = call_runtime.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+            _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
             return error.TypeError;
         }
         if (cell.varRefIsConstSlot().*) {
-            _ = call_runtime.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
+            _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable") catch |err| return err;
             return error.TypeError;
         }
         var ref_slot = obj.dup();

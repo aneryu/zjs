@@ -151,7 +151,7 @@ pub const Machine = struct {
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
         if (chunk_index >= max_chunks) {
-            _ = call_runtime.throwRangeErrorMessage(self.ctx, global, "Maximum call stack size exceeded") catch |err| return err;
+            _ = exception_ops.throwRangeErrorMessage(self.ctx, global, "Maximum call stack size exceeded") catch |err| return err;
             return error.RangeError;
         }
         if (chunk_index == self.chunk_count) {

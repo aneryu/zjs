@@ -348,10 +348,8 @@ pub const JSContext = struct {
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
         const global = options.realm_global orelse try self.globalObject();
-        const error_value = try exec.exception_ops.createNamedError(self.core.runtime, global, name, message);
-        errdefer error_value.free(self.core.runtime);
-        if (options.capture_stack) try exec.call_runtime.attachStackToErrorValue(&self.core, global, error_value);
-        return error_value;
+        if (options.capture_stack) return exec.exception_ops.createNamedError(&self.core, global, name, message);
+        return exec.exception_ops.createNamedErrorWithoutStack(self.core.runtime, global, name, message);
     }
 
     pub fn throwError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {

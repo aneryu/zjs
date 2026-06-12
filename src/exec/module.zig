@@ -757,7 +757,7 @@ fn preloadFileModuleGraphInnerMode(
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
             try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
-            const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+            const error_val = try exception_ops.createNamedError(ctx, global_object, "SyntaxError", msg_buf.items);
             _ = ctx.throwValue(error_val);
         }
         return error.SyntaxError;

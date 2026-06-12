@@ -383,17 +383,13 @@ fn throwExternalHostError(call: HostCall, err: anyerror) HostError!core.JSValue 
         return externalHostError(err);
     const error_info = externalHostErrorInfo(err);
     const error_value = try hostResult(exception_ops.createNamedError(
-        call.ctx.runtime,
+        call.ctx,
         global,
         error_info.name,
         error_info.message,
     ));
-    var error_value_owned = true;
-    errdefer if (error_value_owned) error_value.free(call.ctx.runtime);
-    try hostResult(call_runtime.attachStackToErrorValue(call.ctx, global, error_value));
     if (call.ctx.hasException()) call.ctx.clearException();
     _ = call.ctx.throwValue(error_value);
-    error_value_owned = false;
     return error.JSException;
 }
 
@@ -1550,7 +1546,7 @@ fn callHostGlobalNativeFunctionRecord(
         @intFromEnum(core.function.HostGlobalMethod.navigator_user_agent_get) => try value_ops.createStringValue(ctx.runtime, builtins.registry.navigator_user_agent),
         @intFromEnum(core.function.HostGlobalMethod.dom_exception_ctor_call) => {
             const active_global = global orelse function_object.functionRealmGlobalPtr() orelse return error.TypeError;
-            return call_runtime.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
+            return exception_ops.throwTypeErrorMessage(ctx, active_global, "constructor requires 'new'");
         },
         @intFromEnum(core.function.HostGlobalMethod.species_getter) => this_value.dup(),
         @intFromEnum(core.function.HostGlobalMethod.callsite_get_function),
@@ -3578,18 +3574,19 @@ fn stringToLatin1Bytes(rt: *core.JSRuntime, value: core.JSValue, max_unit: u16) 
 
 fn throwInvalidCharacter(ctx: *core.JSContext, global: ?*core.Object, message: []const u8) !core.JSValue {
     const error_global = global orelse ctx.global orelse return error.TypeError;
-    const error_value = try createDOMExceptionValue(ctx.runtime, error_global, "InvalidCharacterError", message);
+    const error_value = try createDOMExceptionValue(ctx, error_global, "InvalidCharacterError", message);
     _ = ctx.throwValue(error_value);
     return error.InvalidCharacterError;
 }
 
-fn createDOMExceptionValue(rt: *core.JSRuntime, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+fn createDOMExceptionValue(ctx: *core.JSContext, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
+    const rt = ctx.runtime;
     const ctor_key = try rt.internAtom("DOMException");
     defer rt.atoms.free(ctor_key);
     const ctor_value = global.getProperty(ctor_key);
     defer ctor_value.free(rt);
-    if (!ctor_value.isObject()) return try hostResult(exception_ops.createNamedError(rt, global, name, message));
-    const proto_value = expectObjectArg(ctor_value) catch return try hostResult(exception_ops.createNamedError(rt, global, name, message));
+    if (!ctor_value.isObject()) return try hostResult(exception_ops.createNamedError(ctx, global, name, message));
+    const proto_value = expectObjectArg(ctor_value) catch return try hostResult(exception_ops.createNamedError(ctx, global, name, message));
     const prototype_value = proto_value.getProperty(core.atom.ids.prototype);
     defer prototype_value.free(rt);
     const prototype = if (prototype_value.isObject()) expectObjectArg(prototype_value) catch null else null;
@@ -3603,7 +3600,7 @@ fn createDOMExceptionValue(rt: *core.JSRuntime, global: *core.Object, name: []co
 fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JSValue) !core.JSValue {
     const active_global = global orelse ctx.global orelse return error.TypeError;
     const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!call_runtime.isCallableValue(callback)) return try hostResult(call_runtime.throwTypeErrorMessage(ctx, active_global, "not a function"));
+    if (!call_runtime.isCallableValue(callback)) return try hostResult(exception_ops.throwTypeErrorMessage(ctx, active_global, "not a function"));
     try hostResult(call_runtime.enqueuePendingMicrotask(ctx, callback));
     return core.JSValue.undefinedValue();
 }

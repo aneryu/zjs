@@ -208,7 +208,7 @@ pub fn evalFileModuleGraphWithHostHooks(
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(runtime.memory.allocator);
             try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalFileModuleGraphWithHostHooks {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
-            const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+            const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
             _ = context.throwValue(error_val);
             return error.SyntaxError;
         }
@@ -315,7 +315,7 @@ fn evalPreloadedFileModuleStep(
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
         try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in evalPreloadedFileModuleStep {s}:{d}:{d} - {s}", .{ filename, err.position.line, err.position.column, err.message });
-        const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+        const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return error.SyntaxError;
     }
@@ -329,7 +329,7 @@ fn evalPreloadedFileModuleStep(
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
         try msg_buf.print(runtime.memory.allocator, "LINK ERROR in evalPreloadedFileModuleStep for module {s}: {s}", .{ filename, @errorName(err) });
-        const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+        const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return moduleResolutionError(err);
     };
@@ -641,7 +641,7 @@ fn preloadFileModuleGraphWithHostHooksInner(
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(runtime.memory.allocator);
         try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in preloadFileModuleGraphWithHostHooksInner {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
-        const error_val = try exception_ops.createNamedError(runtime, global_object, "SyntaxError", msg_buf.items);
+        const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return error.SyntaxError;
     }

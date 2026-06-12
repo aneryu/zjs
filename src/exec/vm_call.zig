@@ -8,6 +8,7 @@ const frame_mod = @import("frame.zig");
 const collection_vm = @import("array_ops.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const class_init_ops = @import("class_init_ops.zig");
 const forof_ops = @import("forof_ops.zig");
@@ -77,7 +78,7 @@ pub const CallProfileGuard = struct {
 
 pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuard {
     if (ctx.native_call_depth >= maxNativeJsCallDepth(ctx) or ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
-        _ = call_runtime.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
+        _ = exception_ops.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
         return error.RangeError;
     }
     ctx.call_depth += 1;
@@ -88,7 +89,7 @@ pub fn enterCallDepth(ctx: *core.JSContext, global: *core.Object) !CallDepthGuar
 /// Depth accounting for inline (same interpreter loop) call frames.
 pub fn enterInlineCallDepth(ctx: *core.JSContext, global: *core.Object) !void {
     if (ctx.call_depth >= maxLogicalJsCallDepth(ctx)) {
-        _ = call_runtime.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
+        _ = exception_ops.throwRangeErrorMessage(ctx, global, "Maximum call stack size exceeded") catch |err| return err;
         return error.RangeError;
     }
     ctx.call_depth += 1;

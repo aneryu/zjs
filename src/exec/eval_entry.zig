@@ -43,7 +43,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         var msg_buf = std.ArrayList(u8).empty;
         defer msg_buf.deinit(rt.memory.allocator);
         try msg_buf.print(rt.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ options.filename, err.position.line, err.position.column, err.message });
-        const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
+        const error_val = try exception_ops.createNamedError(ctx, global, "SyntaxError", msg_buf.items);
         _ = ctx.throwValue(error_val);
         return error.SyntaxError;
     }
@@ -68,7 +68,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             var msg_buf = std.ArrayList(u8).empty;
             defer msg_buf.deinit(rt.memory.allocator);
             try msg_buf.print(rt.memory.allocator, "LINK ERROR for module {s}: {s}", .{ options.filename, @errorName(err) });
-            const error_val = try exception_ops.createNamedError(rt, global, "SyntaxError", msg_buf.items);
+            const error_val = try exception_ops.createNamedError(ctx, global, "SyntaxError", msg_buf.items);
             _ = ctx.throwValue(error_val);
             return moduleResolutionError(err);
         };

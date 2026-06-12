@@ -13,7 +13,6 @@ const value_ops = @import("value_ops.zig");
 const value_vm = @import("vm_value.zig");
 const stack_mod = @import("stack.zig");
 const HostError = exceptions.HostError;
-pub const createNamedError = exception_ops.createNamedError;
 const op = bytecode.opcode.op;
 const atom_buffer = core.atom.predefinedId("buffer", .string).?;
 const atom_byte_length = core.atom.predefinedId("byteLength", .string).?;
@@ -137,10 +136,10 @@ const storeRealmValue = builtin_glue.storeRealmValue;
 const stringObjectHasIndexProperty = string_ops.stringObjectHasIndexProperty;
 const stringSliceValue = string_ops.stringSliceValue;
 const throwPrivateBrandTypeError = call_runtime.throwPrivateBrandTypeError;
-const throwRangeErrorMessage = call_runtime.throwRangeErrorMessage;
+const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const throwSetFailureTypeError = call_runtime.throwSetFailureTypeError;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
-const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
 const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
 const toPrimitiveForString = string_ops.toPrimitiveForString;
@@ -3142,7 +3141,7 @@ pub fn throwPrimitivePrototypeTypeError(
     function_object: *core.Object,
 ) !core.JSValue {
     const error_global = objectRealmGlobal(function_object) orelse global;
-    const error_value = try createNamedError(ctx.runtime, error_global, "TypeError", "");
+    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }

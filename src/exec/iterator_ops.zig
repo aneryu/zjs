@@ -7,6 +7,7 @@ const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
+const exception_ops = @import("vm_exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const coercion_ops = @import("coercion_ops.zig");
@@ -110,7 +111,7 @@ pub fn forOfStart(
         const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, iterable);
         defer iterator_method.free(ctx.runtime);
         if (!call_runtime.isCallableValue(iterator_method)) {
-            _ = call_runtime.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
+            _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
             return error.TypeError;
         }
         iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, function, frame);

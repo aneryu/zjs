@@ -3210,6 +3210,55 @@ test "Error stack preserves construction frames across delayed access" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "eval SyntaxError carries construction stack" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Pins the createNamedError stack capture: the SyntaxError materialized
+    // for a failed `eval` parse used to carry no call sites, so a delayed
+    // `.stack` read fell back to the reader's frames and lost the
+    // construction frame ("at evalThrower" was absent before the fix).
+    const result = try js.eval(
+        \\function evalThrower() {
+        \\    try { eval("]"); } catch (e) { return e; }
+        \\    return null;
+        \\}
+        \\var evalErr = evalThrower();
+        \\assert.sameValue(evalErr instanceof SyntaxError, true);
+        \\var evalStack = evalErr.stack;
+        \\assert.sameValue(typeof evalStack, "string");
+        \\assert.sameValue(evalStack.length > 0, true);
+        \\assert.sameValue(evalStack.indexOf("at evalThrower") >= 0, true);
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "TypeError thrown via message helper carries stack exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Pins the throw*Message relocation: the TypeError thrown for calling a
+    // non-callable keeps its construction stack ("at typeThrower"), and the
+    // frame appears exactly once (no double attach from the former
+    // shell-level capture plus the primitive-level capture).
+    const result = try js.eval(
+        \\function typeThrower() {
+        \\    try { (0)(); } catch (e) { return e; }
+        \\    return null;
+        \\}
+        \\var typeErr = typeThrower();
+        \\assert.sameValue(typeErr instanceof TypeError, true);
+        \\var typeStack = typeErr.stack;
+        \\assert.sameValue(typeof typeStack, "string");
+        \\assert.sameValue(typeStack.length > 0, true);
+        \\assert.sameValue(typeStack.indexOf("at typeThrower") >= 0, true);
+        \\assert.sameValue(typeStack.indexOf("at typeThrower"), typeStack.lastIndexOf("at typeThrower"));
+    );
+    defer result.free(js.runtime);
+    try std.testing.expect(result.isUndefined());
+}
+
 test "Error prepareStackTrace formats captured frames lazily" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

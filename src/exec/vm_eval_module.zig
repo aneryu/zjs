@@ -206,7 +206,7 @@ fn pushRejectedTypeError(
     prototype: ?*core.Object,
     message: []const u8,
 ) !void {
-    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "TypeError", message);
+    const error_value = try exception_ops.createNamedError(ctx, global, "TypeError", message);
     defer error_value.free(ctx.runtime);
     const promise = try builtins.promise.rejectedWithPrototype(ctx.runtime, error_value, prototype);
     errdefer promise.free(ctx.runtime);

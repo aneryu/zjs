@@ -234,10 +234,13 @@ pub fn tryCatchInFrame(
     var catch_value: core.JSValue = if (is_pending_exception)
         ctx.takeException()
     else
-        exception_ops.createNamedError(ctx.runtime, global, error_info.?.name, error_info.?.message) catch |create_err| blk: {
+        exception_ops.createNamedError(ctx, global, error_info.?.name, error_info.?.message) catch |create_err| blk: {
             // A fully exhausted heap cannot materialize a fresh error object;
             // fall back to the preallocated out-of-memory exception so the
-            // JS catch handler still runs (allocation-free dup).
+            // JS catch handler still runs (allocation-free dup). This is the
+            // delivery point of the documented no-stack exemption: the
+            // preallocated error is dup()ed, never rebuilt, so no stack can
+            // be captured here.
             if (create_err == error.OutOfMemory) {
                 if (ctx.runtime.preallocated_oom_error) |prealloc| break :blk prealloc.dup();
             }
@@ -346,9 +349,7 @@ pub fn callNativeBuiltinRecordForVm(
 pub fn throwRuntimeErrorForGlobal(ctx: *core.JSContext, global: *core.Object, err: anytype) !void {
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return;
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return;
-    const error_value = try exception_ops.createNamedError(ctx.runtime, global, error_info.name, error_info.message);
-    errdefer error_value.free(ctx.runtime);
-    try attachStackToErrorValue(ctx, global, error_value);
+    const error_value = try exception_ops.createNamedError(ctx, global, error_info.name, error_info.message);
     if (ctx.hasException()) ctx.clearException();
     _ = ctx.throwValue(error_value);
 }
@@ -578,7 +579,7 @@ fn callValueOrBytecodeClassModeDispatch(
             switch (name[0]) {
                 'A' => if (std.mem.eql(u8, name, "Array")) {
                     return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) catch |err| switch (err) {
-                        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array length"),
+                        error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array length"),
                         else => err,
                     };
                 },
@@ -632,7 +633,7 @@ fn callValueOrBytecodeClassModeDispatch(
         if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Object")) return construct_mod.constructValue(ctx.runtime, func, args, &.{});
         if (std.mem.eql(u8, name, "Array")) return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) catch |err| switch (err) {
-            error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array length"),
+            error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array length"),
             else => err,
         };
         if (std.mem.eql(u8, name, "String")) return string_ops.qjsStringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
@@ -929,7 +930,7 @@ fn callValueOrBytecodeClassModeDispatch(
             return builtins.uri.unescape(ctx.runtime, string_value);
         }
     }
-    if (!isCallableValue(func)) return throwTypeErrorMessage(ctx, global, "not a function");
+    if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
 }
 
@@ -1361,7 +1362,7 @@ pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, f
 
 pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object, message: []const u8) !core.JSValue {
     const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    const error_value = try exception_ops.createNamedError(ctx.runtime, error_global, "TypeError", message);
+    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", message);
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -1413,7 +1414,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
                 }
             }
             if (array_ops.qjsTypedArrayConstructVm(ctx, output, global, func, function_object, args, caller_function, caller_frame) catch |err| switch (err) {
-                error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array index"),
+                error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array index"),
                 else => return err,
             }) |value| return value;
             return construct_mod.constructValue(ctx.runtime, func, args, &.{});
@@ -1495,7 +1496,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         if (std.mem.eql(u8, name, "Array")) {
             const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
             return builtins.array.constructConstructorWithPrototype(ctx.runtime, args, prototype) catch |err| switch (err) {
-                error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid array length"),
+                error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array length"),
                 else => err,
             };
         }
@@ -1521,7 +1522,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
         }
         if (std.mem.eql(u8, name, "Proxy")) {
             return construct_mod.constructValue(ctx.runtime, func, args, &.{}) catch |err| switch (err) {
-                error.TypeError => return throwTypeErrorMessage(ctx, global, "not an object"),
+                error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not an object"),
                 else => err,
             };
         }
@@ -1608,7 +1609,7 @@ pub fn constructValueOrBytecodeWithNewTarget(
     }
     if (object_ops.objectFromValue(func)) |object| {
         if (object.class_id == core.class.ids.object and object.proxyTarget() == null) {
-            return throwTypeErrorMessage(ctx, global, "not a constructor");
+            return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
         }
     }
     return construct_mod.constructValue(ctx.runtime, func, args, &.{});
@@ -1859,7 +1860,7 @@ pub fn constructDynamicFunctionFromSource(
     }
     const function_global = dynamicFunctionRealmGlobal(constructor) orelse global;
     if ((kind == .async_function or kind == .async_generator) and try promise_ops.parameterSourceContainsAwait(ctx.runtime, params.items)) {
-        return throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
+        return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
     }
 
     var source = std.ArrayList(u8).empty;
@@ -1890,7 +1891,7 @@ pub fn constructDynamicFunctionFromSource(
     };
     var compiled = try frontend.parser.parse(ctx.runtime, source.items, .{ .mode = .eval_direct, .filename = filename, .strict = false });
     defer compiled.deinit();
-    if (compiled.syntax_error != null) return throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
+    if (compiled.syntax_error != null) return exception_ops.throwSyntaxErrorMessage(ctx, function_global, "invalid syntax");
     var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stack_size);
     defer nested_stack.deinit(ctx.runtime);
     const result = try runWithArgs(ctx, &nested_stack, &compiled.function, function_global.value(), &.{}, &.{}, output, function_global, true, false, false, &.{}, &.{}, &.{}, &.{});
@@ -2366,7 +2367,7 @@ pub fn qjsDestructuringRequireIterator(
     const source = property_ops.expectObject(args[0]) catch {
         const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
         defer iterator_method.free(ctx.runtime);
-        if (!isCallableValue(iterator_method)) return throwTypeErrorMessage(ctx, global, "value is not iterable");
+        if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
         iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
         _ = try property_ops.expectObject(iterator_value);
         try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
@@ -2381,7 +2382,7 @@ pub fn qjsDestructuringRequireIterator(
     }
     const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
     defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return throwTypeErrorMessage(ctx, global, "value is not iterable");
+    if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
     iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
     _ = try property_ops.expectObject(iterator_value);
     try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
@@ -2420,7 +2421,7 @@ pub fn iteratorForValue(
     }
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
     defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return throwTypeErrorMessage(ctx, global, "value is not iterable");
+    if (!isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
     const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
     errdefer iterator_value.free(ctx.runtime);
     _ = property_ops.expectObject(iterator_value) catch return error.TypeError;
@@ -2535,7 +2536,7 @@ pub fn appendIteratorValues(
         const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
         defer iterator_method.free(ctx.runtime);
         if (!isCallableValue(iterator_method)) {
-            _ = throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
+            _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
             return error.TypeError;
         }
         break :blk try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
@@ -6093,7 +6094,7 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
 
 pub fn qjsThrowTypeErrorIntrinsic(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
     const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    const error_value = try exception_ops.createNamedError(ctx.runtime, error_global, "TypeError", "invalid property access");
+    const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", "invalid property access");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -6205,7 +6206,7 @@ pub fn throwPrivateBrandTypeError(
         .{atom_name},
     );
     defer ctx.runtime.memory.allocator.free(message);
-    return throwTypeErrorMessage(ctx, error_global, message);
+    return exception_ops.throwTypeErrorMessage(ctx, error_global, message);
 }
 
 pub const SetFailureError = error{
@@ -6222,14 +6223,14 @@ pub fn throwSetFailureTypeError(ctx: *core.JSContext, global: *core.Object, atom
         error.NotExtensible => "object is not extensible",
         else => null,
     };
-    if (static_message) |message| return throwTypeErrorMessage(ctx, global, message);
+    if (static_message) |message| return exception_ops.throwTypeErrorMessage(ctx, global, message);
 
     if (ctx.runtime.atoms.name(atom_id)) |name| {
         const message = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "'{s}' is read-only", .{name});
         defer ctx.runtime.memory.allocator.free(message);
-        return throwTypeErrorMessage(ctx, global, message);
+        return exception_ops.throwTypeErrorMessage(ctx, global, message);
     }
-    return throwTypeErrorMessage(ctx, global, "property is read-only");
+    return exception_ops.throwTypeErrorMessage(ctx, global, "property is read-only");
 }
 
 pub fn setFailureShouldThrow(caller_function: ?*const bytecode.Bytecode) bool {
@@ -6348,7 +6349,7 @@ pub fn qjsDefinePropertiesCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
-    const target = property_ops.expectObject(args[0]) catch return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
+    const target = property_ops.expectObject(args[0]) catch return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object"));
     try qjsDefinePropertiesOnTarget(ctx, output, global, target, args[1], caller_function, caller_frame);
     return args[0].dup();
 }
@@ -6536,7 +6537,7 @@ pub fn qjsReflectApplyCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (args.len < 1 or !isCallableValue(args[0])) return throwTypeErrorMessage(ctx, global, "not a function");
+    if (args.len < 1 or !isCallableValue(args[0])) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
     if (args.len < 3) return error.TypeError;
     var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, args[2], caller_function, caller_frame);
     defer freeArgs(ctx.runtime, apply_args);
@@ -6860,7 +6861,7 @@ pub fn inOp(
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
     const object = property_ops.expectObject(rhs) catch {
-        _ = throwTypeErrorMessage(ctx, global, "invalid 'in' operand") catch |err| return err;
+        _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'in' operand") catch |err| return err;
         return error.TypeError;
     };
     const key = try object_ops.toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
@@ -6886,7 +6887,7 @@ pub fn instanceofOp(
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
     const ctor = property_ops.expectObject(rhs) catch {
-        _ = throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
+        _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     };
     const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.TypeError;
@@ -6899,7 +6900,7 @@ pub fn instanceofOp(
         return;
     }
     if (!isCallableValue(rhs)) {
-        _ = throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
+        _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     }
     if (!lhs.isObject()) {
@@ -7276,58 +7277,13 @@ pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_
     return true;
 }
 
-pub fn throwTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "TypeError", message);
-    var error_value_owned = true;
-    errdefer if (error_value_owned) error_value.free(ctx.runtime);
-    try attachStackToErrorValue(ctx, global, error_value);
-    _ = ctx.throwValue(error_value);
-    error_value_owned = false;
-    return error.TypeError;
-}
-
-pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "RangeError", message);
-    var error_value_owned = true;
-    errdefer if (error_value_owned) error_value.free(ctx.runtime);
-    try attachStackToErrorValue(ctx, global, error_value);
-    _ = ctx.throwValue(error_value);
-    error_value_owned = false;
-    return error.RangeError;
-}
-
-pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "ReferenceError", message);
-    var error_value_owned = true;
-    errdefer if (error_value_owned) error_value.free(ctx.runtime);
-    try attachStackToErrorValue(ctx, global, error_value);
-    _ = ctx.throwValue(error_value);
-    error_value_owned = false;
-    return error.ReferenceError;
-}
-
-pub fn throwSyntaxErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
-    const error_value = try exception_ops.createNamedError(ctx.runtime, global, "SyntaxError", message);
-    var error_value_owned = true;
-    errdefer if (error_value_owned) error_value.free(ctx.runtime);
-    try attachStackToErrorValue(ctx, global, error_value);
-    _ = ctx.throwValue(error_value);
-    error_value_owned = false;
-    return error.SyntaxError;
-}
-
-pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
-    const object = property_ops.expectObject(value) catch return;
-    try error_stack_ops.captureErrorStack(ctx, null, global, object);
-}
-
 pub fn qjsErrorCaptureStackTrace(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    if (args.len < 1 or !args[0].isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
+    if (args.len < 1 or !args[0].isObject()) return exception_ops.throwTypeErrorMessage(ctx, global, "not an object");
     const target = try property_ops.expectObject(args[0]);
     const skip_name = if (args.len >= 2 and isCallableValue(args[1]))
         try exception_ops.functionNameBytes(ctx.runtime, args[1])

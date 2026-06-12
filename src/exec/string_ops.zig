@@ -349,8 +349,8 @@ const singleLowSurrogateLiteralSource = regexp_fastpath.singleLowSurrogateLitera
 const standaloneCharacterClassSource = regexp_fastpath.standaloneCharacterClassSource;
 const surrogatePairClassAt = regexp_fastpath.surrogatePairClassAt;
 
-const throwRangeErrorMessage = call_runtime.throwRangeErrorMessage;
-const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
+const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
 const toLengthNumber = coercion_ops.toLengthNumber;
 const toNumberLikeArgument = builtin_glue.toNumberLikeArgument;

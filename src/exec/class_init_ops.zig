@@ -54,7 +54,7 @@ const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const remapPrivateAtomForOperation = call_runtime.remapPrivateAtomForOperation;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const slotValueDup = slot_ops.slotValueDup;
-const throwRangeErrorMessage = call_runtime.throwRangeErrorMessage;
+const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
 const varRefCellFromValue = slot_ops.varRefCellFromValue;
 

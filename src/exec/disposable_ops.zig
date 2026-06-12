@@ -11,7 +11,6 @@ const callValueOrBytecode = call_runtime.callValueOrBytecode;
 const objectFromValue = object_ops.objectFromValue;
 const isCallableValue = call_runtime.isCallableValue;
 const getValueProperty = object_ops.getValueProperty;
-const createNamedError = exception_ops.createNamedError;
 const qjsDisposableStackConstructWithPrototype = object_ops.qjsDisposableStackConstructWithPrototype;
 const qjsSuppressedErrorConstructWithPrototype = object_ops.qjsSuppressedErrorConstructWithPrototype;
 
@@ -264,7 +263,7 @@ pub fn runtimeErrorValueForDisposableDispose(
     if (exception_ops.pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     if (ctx.hasException()) ctx.clearException();
     const error_info = exception_ops.runtimeErrorInfo(err) orelse return err;
-    return createNamedError(ctx.runtime, global, error_info.name, error_info.message);
+    return exception_ops.createNamedError(ctx, global, error_info.name, error_info.message);
 }
 
 pub fn qjsSuppressedErrorForDispose(
