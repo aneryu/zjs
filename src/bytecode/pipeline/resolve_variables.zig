@@ -76,10 +76,12 @@ pub const JSContext = struct {
 ///
 /// Full QuickJS alignment (closure variables, TDZ, eval) will be added
 /// when FunctionDef is integrated into the parser.
-/// Total byte length (opcode + operands) for `op_id`, driven by the
-/// comptime-baked `opcode.opcode_size` table. Returns 1 for ids with
-/// no table entry so callers can safely fall through unknown opcodes
-/// one byte at a time (matching QuickJS's unknown-op pass-through).
+/// Total byte length (opcode + operands) for `op_id` in final-form
+/// (non-temp) encoding, from the generated metadata table. Returns 1
+/// for ids with no table entry so callers can safely fall through
+/// unknown opcodes one byte at a time (matching QuickJS's unknown-op
+/// pass-through). Temp opcodes this pass consumes are special-cased
+/// at each walk site (or use `inputInstrSizeForRefTailScan`).
 fn instrSize(op_id: u8) usize {
     const total = opcode.sizeOf(op_id);
     return if (total == 0) 1 else total;
@@ -790,22 +792,14 @@ fn decodeGlobalRefPutTail(code: []const u8, pc: usize) ?GlobalRefPutTail {
     };
 }
 
+/// Instruction size for the Phase 1 input stream this pass consumes:
+/// temp opcodes in the overlap range size as their temp forms
+/// (`opcode.sizeOfPhase1`). Returns null when the stream cannot be
+/// decoded, stopping the tail scan.
 fn inputInstrSizeForRefTailScan(code: []const u8, pc: usize) ?usize {
     if (pc >= code.len) return null;
-    const op_id = code[pc];
-    const size: usize = if (op_id == opcode.op.eval)
-        5
-    else if (op_id == opcode.op.apply_eval)
-        2
-    else if (op_id == opcode.op.scope_make_ref)
-        11
-    else if (isScopeVarOp(op_id) or isScopeRefOp(op_id) or isScopePrivateFieldOp(op_id))
-        7
-    else if (op_id == opcode.op.enter_scope or op_id == opcode.op.leave_scope)
-        3
-    else
-        instrSize(op_id);
-    if (pc + size > code.len) return null;
+    const size: usize = opcode.sizeOfPhase1(code[pc]);
+    if (size == 0 or pc + size > code.len) return null;
     return size;
 }
 

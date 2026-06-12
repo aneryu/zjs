@@ -2734,29 +2734,6 @@ fn classifyLhs(
     return .none;
 }
 
-fn codeRangeContainsOpcode(code: []const u8, start: usize, needle: u8) bool {
-    var pc = start;
-    while (pc < code.len) {
-        const op_id = code[pc];
-        if (op_id == needle) return true;
-        const size = parserEmittedOpcodeSize(op_id);
-        if (size == 0) return false;
-        pc += size;
-    }
-    return false;
-}
-
-fn parserEmittedOpcodeSize(op_id: u8) u8 {
-    return switch (op_id) {
-        opcode.op.scope_get_var,
-        opcode.op.scope_put_var,
-        opcode.op.scope_get_var_undef,
-        opcode.op.scope_put_var_init,
-        => 7,
-        else => opcode.opcode_size[op_id],
-    };
-}
-
 fn emitPutRefValue(s: *ParseState, result_needed: bool) Error!void {
     if (result_needed) {
         try s.emitOp(opcode.op.insert3);
@@ -6522,9 +6499,15 @@ fn hasJumpToCurrentEnd(code: []const u8, include_conditional: bool) bool {
     var pc: usize = 0;
     while (pc < code.len) {
         const op_id = code[pc];
-        const size = opcode.sizeOf(op_id);
-        // This scan runs before all temporary opcodes are resolved. If it
-        // cannot prove the path is linear, keep tail-call rewriting disabled.
+        // `scope_make_ref` embeds a label operand this scan does not
+        // track, and id 192 is ambiguous in phase-1 streams
+        // (`push_empty_string` vs `scope_in_private_field`). Answer
+        // conservatively in both cases.
+        if (op_id == opcode.op.scope_make_ref or op_id == opcode.op.scope_in_private_field) return true;
+        // This scan runs on Phase 1 code, before temporary opcodes are
+        // resolved: size through the phase-1 view. If the walk cannot
+        // prove the path is linear, answer conservatively.
+        const size = opcode.sizeOfPhase1(op_id);
         if (size == 0 or pc + size > code.len) return true;
         if (op_id == opcode.op.goto or
             (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))
@@ -11730,35 +11713,24 @@ const TrailingScan = struct { last_op_index: usize, jump_to_end: bool };
 
 /// Decode the current (Phase 1) code linearly to find the last
 /// instruction boundary and whether any jump targets the current end.
-/// Temp opcodes (`scope_get_var`, `enter_scope`, `label`, ...) overlap
-/// the short-opcode id range, so `opcode.sizeOf` (which favors the
-/// lowered short forms) would desynchronize the walk; only ids whose
-/// Phase 1 encoding is known here are decoded. Returns null when the
-/// stream cannot be decoded, keeping tail-call rewriting disabled.
+/// Sizes come from the phase-1 metadata view (`opcode.sizeOfPhase1`),
+/// which resolves the temp/short id overlap to the temp forms the
+/// parser actually emits. Returns null when the stream cannot be
+/// decoded, keeping tail-call rewriting disabled.
 fn scanTrailingCode(code: []const u8, include_conditional: bool) ?TrailingScan {
     var pc: usize = 0;
     var last_op_index: usize = 0;
     var jump_to_end = false;
     while (pc < code.len) {
         const op_id = code[pc];
-        const size: usize = switch (op_id) {
-            opcode.op.scope_get_var,
-            opcode.op.scope_put_var,
-            opcode.op.scope_get_var_undef,
-            opcode.op.scope_put_var_init,
-            => 7,
-            opcode.op.enter_scope, opcode.op.leave_scope => 3,
-            opcode.op.label => 5,
-            else => blk: {
-                // Remaining ids in the temp/short overlap range (scope
-                // refs, private-field temps) embed label offsets this scan
-                // does not track; bail out rather than misdecode. Short
-                // opcodes sharing these ids only exist after
-                // `resolve_labels`, never in the parser's stream.
-                if (op_id >= 176 and op_id <= 196) return null;
-                break :blk opcode.opcode_size[op_id];
-            },
-        };
+        // `scope_make_ref` embeds a label operand this scan does not
+        // track; bail out rather than miss a jump to the current end.
+        if (op_id == opcode.op.scope_make_ref) return null;
+        // Id 192 is ambiguous in phase-1 streams (`push_empty_string`
+        // short form vs `scope_in_private_field` temp); it cannot be
+        // sized from the id alone.
+        if (op_id == opcode.op.scope_in_private_field) return null;
+        const size: usize = opcode.sizeOfPhase1(op_id);
         if (size == 0 or pc + size > code.len) return null;
         if (op_id == opcode.op.goto or
             (include_conditional and (op_id == opcode.op.if_false or op_id == opcode.op.if_true)))

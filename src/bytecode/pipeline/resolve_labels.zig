@@ -68,10 +68,14 @@ pub const JSContext = struct {
 ///
 /// Full QuickJS alignment (prologue, jump rewriting, short-form selection,
 /// coalescing) will be added when FunctionDef is integrated into the parser.
-/// Total byte length (opcode + operands) for `op_id`. Driven by the
-/// comptime-baked `opcode.opcode_size` table so every opcode in
-/// `quickjs-opcode.h` is recognised. Unknown ids fall back to 1 to
-/// keep the walker progressing.
+/// Total byte length (opcode + operands) for `op_id` in final-form
+/// (non-temp) encoding, from the generated metadata table. This pass's
+/// input contains no temp opcode except `label` (resolve_variables
+/// erased the rest), and `label` is special-cased at each walk site,
+/// so the final view is the correct one here — phase-2 streams may
+/// already carry final-form ids like `fclosure8` whose temp-view size
+/// would differ. Unknown ids fall back to 1 to keep the walker
+/// progressing.
 fn instrSize(op_id: u8) usize {
     const total = opcode.sizeOf(op_id);
     return if (total == 0) 1 else total;

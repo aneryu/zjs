@@ -1,37 +1,19 @@
 const std = @import("std");
 
-pub const Format = enum {
-    none,
-    none_int,
-    none_loc,
-    none_arg,
-    none_var_ref,
-    u8,
-    i8,
-    loc8,
-    const8,
-    label8,
-    u16,
-    i16,
-    label16,
-    npop,
-    npopx,
-    npop_u16,
-    loc,
-    arg,
-    var_ref,
-    u32,
-    u32x2,
-    i32,
-    @"const",
-    label,
-    atom,
-    atom_u8,
-    atom_u16,
-    atom_label_u8,
-    atom_label_u16,
-    label_u16,
-};
+const generated = @import("opcodes_generated.zig");
+
+/// Operand format tags (generated from the FMT() list in
+/// quickjs-opcode.h).
+pub const Format = generated.Format;
+
+/// One row of opcode metadata (QuickJS `JSOpCode`).
+pub const Info = generated.Info;
+
+/// Merged metadata table in quickjs-opcode.h file order: normal
+/// opcodes at their id, temp opcodes at their id (overlap range),
+/// short opcodes shifted `op.op_temp_count` slots past their id.
+/// Prefer the view functions below over raw indexing.
+pub const opcode_info = generated.opcode_info;
 
 pub const Kind = enum {
     normal,
@@ -53,8 +35,8 @@ pub const Metadata = struct {
     }
 };
 
-/// Import auto-generated opcode constants from quickjs-opcode.h.
-pub const op = @import("opcodes_generated.zig").op;
+/// Auto-generated opcode id constants (source: quickjs-opcode.h).
+pub const op = generated.op;
 
 pub const special_object_subtype = struct {
     pub const arguments: u8 = 0;
@@ -79,131 +61,93 @@ pub const special_object_subtype = struct {
     pub const using_dispose_async_stack_for_throw: u8 = 21;
 };
 
-/// Baked opcode-size table generated from `quickjs-opcode.h`. Index is
-/// the opcode id (u8); value is the total instruction size in bytes
-/// (opcode byte + operand bytes). Temp opcodes take priority over
-/// short opcodes in the 179..196 overlap range because the pipeline
-/// consumes Phase 1 bytecode before `resolve_labels` lowers temps
-/// away.
-pub const opcode_size: [256]u8 = @import("opcodes_generated.zig").opcode_size;
-pub const opcode_n_pop: [256]u8 = @import("opcodes_generated.zig").opcode_n_pop;
-pub const opcode_n_push: [256]u8 = @import("opcodes_generated.zig").opcode_n_push;
+/// Final-view lookup, for bytecode after `resolve_labels`: ids in the
+/// temp/short overlap range (op_temp_start..op_temp_end-1) resolve to
+/// the SHORT opcode entry, stored `op.op_temp_count` slots past the
+/// id. Mirrors QuickJS `short_opcode_info` (quickjs.c:21842). Returns
+/// null for ids no opcode claims (op.op_count..255).
+fn finalInfo(op_id: u8) ?*const Info {
+    if (op_id >= op.op_count) return null;
+    const index: usize = if (op_id >= op.op_temp_start)
+        @as(usize, op_id) + op.op_temp_count
+    else
+        op_id;
+    return &opcode_info[index];
+}
 
-/// Baked opcode-format table. Maps opcode id → `Format` enum tag,
-/// derived from `quickjs-opcode.h`. Callers should use `formatOf`
-/// which converts from the generated string form.
-pub const opcode_format_table: [256]Format = blk: {
-    @setEvalBranchQuota(200000);
-    const names = @import("opcodes_generated.zig").opcode_format_name;
-    var formats = [_]Format{.none} ** 256;
-    for (names, 0..) |name, i| {
-        formats[i] = std.meta.stringToEnum(Format, name) orelse .none;
-    }
-    break :blk formats;
-};
+/// Phase-1-view lookup, for parser-emitted streams before
+/// `resolve_labels`: ids in the temp/short overlap range resolve to
+/// the TEMP opcode entry at its id position. Mirrors QuickJS's bare
+/// `opcode_info[op]` indexing (quickjs.c:21826). zjs deviation: the
+/// parser also emits some final-form opcodes above the overlap range
+/// in phase 1 (`get_length`, `if_false8`, `is_undefined`, ...), so
+/// ids outside the overlap fall through to the final view (the two
+/// views agree everywhere but the overlap).
+///
+/// Caveat: id 192 is genuinely ambiguous in phase-1 streams — the
+/// parser emits both `push_empty_string` (short form, 1 byte) and
+/// `scope_in_private_field` (temp, 7 bytes). This view reports the
+/// temp entry; scanners that may encounter both must disambiguate
+/// from context or bail out.
+fn phase1Info(op_id: u8) ?*const Info {
+    if (op_id >= op.op_temp_start and op_id < op.op_temp_end)
+        return &opcode_info[op_id];
+    return finalInfo(op_id);
+}
 
-/// Returns the total byte length (opcode + operands) for the given
-/// opcode id, or 0 if no opcode occupies that id.
+/// Total byte length (opcode + operands) in final-form bytecode, or 0
+/// if no opcode claims that id.
 pub fn sizeOf(op_id: u8) u8 {
-    if (op_id >= 176 and op_id <= 196) {
-        return switch (op_id) {
-            176 => 1,       // private_in
-            177 => 5,       // push_bigint_i32
-            178 => 1,       // nop
-            179...187 => 1, // push_minus1..push_7
-            188 => 2,       // push_i8
-            189 => 3,       // push_i16
-            190 => 2,       // push_const8
-            191 => 2,       // fclosure8
-            192 => 1,       // push_empty_string
-            193...195 => 2, // get_loc8..set_loc8
-            196 => 1,       // get_loc0_loc1
-            else => unreachable,
-        };
-    }
-    return opcode_size[op_id];
+    return if (finalInfo(op_id)) |info| info.size else 0;
 }
 
-/// Returns the operand format for the given opcode id (temp takes
-/// precedence in the 179..196 overlap range).
+/// Total byte length (opcode + operands) in phase-1 streams (temp
+/// opcodes take the overlap range), or 0 if no opcode claims that id.
+pub fn sizeOfPhase1(op_id: u8) u8 {
+    return if (phase1Info(op_id)) |info| info.size else 0;
+}
+
+/// Operand format in final-form bytecode (short forms in the overlap
+/// range).
 pub fn formatOf(op_id: u8) Format {
-    if (op_id >= 176 and op_id <= 196) {
-        return switch (op_id) {
-            176 => .none,
-            177 => .i32,
-            178 => .none,
-            179...187 => .none_int,
-            188 => .i8,
-            189 => .i16,
-            190...191 => .const8,
-            192 => .none,
-            193...195 => .loc8,
-            196 => .none_loc,
-            else => unreachable,
-        };
-    }
-    return opcode_format_table[op_id];
+    return if (finalInfo(op_id)) |info| info.fmt else .none;
 }
 
-pub const opcode_name: [256][]const u8 = @import("opcodes_generated.zig").opcode_name;
+/// Operand format in phase-1 streams (temp forms in the overlap
+/// range).
+pub fn formatOfPhase1(op_id: u8) Format {
+    return if (phase1Info(op_id)) |info| info.fmt else .none;
+}
 
-/// Returns the QuickJS opcode name for the given id, or "" if no
-/// `DEF` entry claims that id.
+/// Opcode name in final-form bytecode, or "" if no opcode claims that
+/// id.
 pub fn nameOf(op_id: u8) []const u8 {
-    if (op_id >= 176 and op_id <= 196) {
-        return switch (op_id) {
-            176 => "private_in",
-            177 => "push_bigint_i32",
-            178 => "nop",
-            179 => "push_minus1",
-            180 => "push_0",
-            181 => "push_1",
-            182 => "push_2",
-            183 => "push_3",
-            184 => "push_4",
-            185 => "push_5",
-            186 => "push_6",
-            187 => "push_7",
-            188 => "push_i8",
-            189 => "push_i16",
-            190 => "push_const8",
-            191 => "fclosure8",
-            192 => "push_empty_string",
-            193 => "get_loc8",
-            194 => "put_loc8",
-            195 => "set_loc8",
-            196 => "get_loc0_loc1",
-            else => unreachable,
-        };
-    }
-    return opcode_name[op_id];
+    return if (finalInfo(op_id)) |info| info.name else "";
 }
 
+/// Opcode name in phase-1 streams (temp names in the overlap range).
+pub fn nameOfPhase1(op_id: u8) []const u8 {
+    return if (phase1Info(op_id)) |info| info.name else "";
+}
+
+/// Stack pop count in final-form bytecode.
 pub fn nPopOf(op_id: u8) u8 {
-    if (op_id >= 176 and op_id <= 196) {
-        return switch (op_id) {
-            176 => 2,
-            177...193 => 0,
-            194...195 => 1,
-            196 => 0,
-            else => unreachable,
-        };
-    }
-    return opcode_n_pop[op_id];
+    return if (finalInfo(op_id)) |info| info.n_pop else 0;
 }
 
+/// Stack pop count in phase-1 streams.
+pub fn nPopOfPhase1(op_id: u8) u8 {
+    return if (phase1Info(op_id)) |info| info.n_pop else 0;
+}
+
+/// Stack push count in final-form bytecode.
 pub fn nPushOf(op_id: u8) u8 {
-    if (op_id >= 176 and op_id <= 196) {
-        return switch (op_id) {
-            176 => 1,
-            177...193 => 1,
-            194 => 0,
-            195 => 1,
-            196 => 2,
-            else => unreachable,
-        };
-    }
-    return opcode_n_push[op_id];
+    return if (finalInfo(op_id)) |info| info.n_push else 0;
+}
+
+/// Stack push count in phase-1 streams.
+pub fn nPushOfPhase1(op_id: u8) u8 {
+    return if (phase1Info(op_id)) |info| info.n_push else 0;
 }
 
 test "opcode metadata exposes size format and stack effects" {
@@ -222,6 +166,46 @@ test "opcode metadata exposes size format and stack effects" {
 
     try std.testing.expectEqual(Format.none_int, formatOf(op.push_0));
     try std.testing.expectEqual(@as(u8, 1), sizeOf(op.push_0));
+}
+
+test "final view resolves short forms in the temp overlap range" {
+    // push_minus1..push_7 share ids with enter_scope..scope_get_ref.
+    try std.testing.expectEqual(@as(u8, 1), sizeOf(op.push_minus1));
+    try std.testing.expectEqualStrings("push_minus1", nameOf(op.push_minus1));
+    try std.testing.expectEqual(@as(u8, 2), sizeOf(op.push_i8));
+    try std.testing.expectEqual(@as(u8, 3), sizeOf(op.push_i16));
+    try std.testing.expectEqual(@as(u8, 2), sizeOf(op.fclosure8));
+    try std.testing.expectEqual(@as(u8, 2), sizeOf(op.get_loc8));
+    try std.testing.expectEqual(Format.loc8, formatOf(op.set_loc8));
+    try std.testing.expectEqual(@as(u8, 1), sizeOf(op.get_loc0_loc1));
+    try std.testing.expectEqual(@as(u8, 2), nPushOf(op.get_loc0_loc1));
+    // Unclaimed ids report no entry.
+    try std.testing.expectEqual(@as(u8, 0), sizeOf(255));
+    try std.testing.expectEqualStrings("", nameOf(255));
+}
+
+test "phase-1 view resolves temp forms in the overlap range" {
+    try std.testing.expectEqual(@as(u8, 3), sizeOfPhase1(op.enter_scope));
+    try std.testing.expectEqual(@as(u8, 3), sizeOfPhase1(op.leave_scope));
+    try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.label));
+    try std.testing.expectEqual(@as(u8, 7), sizeOfPhase1(op.scope_get_var));
+    try std.testing.expectEqual(@as(u8, 7), sizeOfPhase1(op.scope_put_var_init));
+    try std.testing.expectEqual(@as(u8, 11), sizeOfPhase1(op.scope_make_ref));
+    try std.testing.expectEqual(@as(u8, 7), sizeOfPhase1(op.scope_in_private_field));
+    try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.get_field_opt_chain));
+    try std.testing.expectEqual(@as(u8, 9), sizeOfPhase1(op.source_loc));
+    try std.testing.expectEqualStrings("scope_get_var", nameOfPhase1(op.scope_get_var));
+    try std.testing.expectEqual(Format.atom_u16, formatOfPhase1(op.scope_get_var));
+    try std.testing.expectEqual(Format.atom_label_u16, formatOfPhase1(op.scope_make_ref));
+    // Outside the overlap range the two views agree; the parser emits
+    // some final-form opcodes (and normal ones) in phase 1 too.
+    try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.push_bigint_i32));
+    try std.testing.expectEqual(@as(u8, 5), sizeOfPhase1(op.eval));
+    try std.testing.expectEqual(@as(u8, 3), sizeOfPhase1(op.apply_eval));
+    try std.testing.expectEqual(@as(u8, 10), sizeOfPhase1(op.with_get_var));
+    try std.testing.expectEqual(sizeOf(op.get_length), sizeOfPhase1(op.get_length));
+    try std.testing.expectEqual(sizeOf(op.if_false8), sizeOfPhase1(op.if_false8));
+    try std.testing.expectEqual(sizeOf(op.is_undefined), sizeOfPhase1(op.is_undefined));
 }
 
 test "QuickJS opcode table has no host print opcode names" {
