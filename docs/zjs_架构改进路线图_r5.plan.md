@@ -4,19 +4,19 @@ overview: 第五轮架构审视（grill 会话，2026-06-13）的落地路线：
 todos:
   - id: pre-worker-removal
     content: "迁移前: QjsWorker 死簇整体删除（含公共符号 cleanupWorkersForRuntime 与 4 层转发链、3 个字符串分发点、object_ops worker parent 簇、root.zig hasDecl 测试），API 快照再生"
-    status: pending
+    status: completed
   - id: pre-throw-stack
     content: "迁移前: stack 附加收进 createNamedError 原语（预分配 OOM 零分配豁免）；throw*Message 家族迁回 vm_exception_ops；删便利 re-export"
-    status: pending
+    status: completed
   - id: pre-oom-infra
     content: "迁移前: OOM 五件套基建——静态 no-panic 规则进 architecture-check、test-oom 重生（corpus×checkAllAllocationFailures+恢复金丝雀）、-Dzjs_oom_coverage 覆盖率批评家、8MB cap 行为 fixture、预分配投递单测"
-    status: pending
+    status: completed
   - id: pre-regexp-libs
     content: "迁移前: regexp 字面量校验搬 src/libs（执行既定 exit_milestone，对齐 QuickJS libregexp），deps-allowlist 清零"
-    status: pending
+    status: completed
   - id: pre-small-items
     content: "迁移前: 小项——architecture_review.md 撤幽灵 bytecode/ic.zig 表述；LIMITATIONS.md 记 PTC 排除与失败形态；双值表示平台理由注记"
-    status: pending
+    status: completed
   - id: p6-record-table
     content: "Phase 6: comptime internal record 表机制落地（fn 指针类型与 id 命名空间留 core/host_function.zig，builtins 侧构建表，JSRuntime 持指针，exec 经 rt.internal_builtins[id] 分发）"
     status: pending
@@ -49,7 +49,8 @@ isProject: false
 
 # zjs 架构改进路线图 R5（builtins 翻转轮）
 
-接替已全部完成的 R4 路线图（`zjs_架构改进路线图_cd73a21f.plan.md`）。本文是
+接替已全部完成的 R4 路线图（`zjs_架构改进路线图_cd73a21f.plan.md`，已按
+完成惯例移出活动树，git 历史可找回）。本文是
 2026-06-13 grill 会话的裁决记录与执行路线；前提事实均已核实并标注出处，
 未来会话不应重新推导。
 

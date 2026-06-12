@@ -59,6 +59,28 @@ are supported within the local validation boundary. CommonJS `require`,
 `node_modules` resolution, package exports/import maps, and hybrid Node-style
 module loading are not supported.
 
+## Proper Tail Calls
+
+- Plain `tail_call` sites (including tail-position direct `eval` calls that do
+  not resolve to %eval%) run as real tail-call optimization through frame
+  reuse: logical call depth stays constant. `test262.conf` enables the
+  `tail-call-optimization` feature.
+- Tail targets that still take the recursive slow path, where deep tail
+  recursion grows the native stack: L0 frames (generator/eval shells),
+  arrow / class-constructor / cross-realm callees, and `tail_call_method`.
+  Arrow inlining and `tail_call_method` frame reuse are scheduled as R5
+  roadmap Phase 7. The class-constructor exclusion is spec-correct: calling a
+  class constructor without `new` throws TypeError, so no deep recursion
+  exists there.
+- Failure shape: the recursive path is protected by the dual depth guard
+  (native depth `max(16, stack_limit / 16384)` plus the logical depth limit)
+  and throws RangeError when exceeded — it is not a crash. The consequence is
+  that spec-legal deep tail recursion in method/arrow position hits RangeError
+  early, deviating from PTC's constant-stack semantics.
+- Note: test262 has no coverage for deep tail recursion in method/arrow
+  position (`tco-member-args.js` actually contains a plain call), so a green
+  gate is not evidence for those shapes.
+
 ## Performance
 
 Performance is uneven by subsystem. The checked performance gate is a ZJS
