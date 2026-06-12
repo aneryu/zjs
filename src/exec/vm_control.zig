@@ -1,3 +1,4 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -76,8 +77,7 @@ pub fn jump8(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) void {
 }
 
 pub fn tryFuseGoto8LocalLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
-    return tryFuseGoto8LocalInt32LessThanFalseBranch(function, frame) or
-        tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function, frame);
+    return fusion_stats.counted(.tryFuseGoto8LocalInt32LessThanFalseBranch, tryFuseGoto8LocalInt32LessThanFalseBranch(function, frame));
 }
 
 pub fn branch32(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.Bytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
@@ -209,34 +209,6 @@ fn tryFuseGoto8LocalInt32LessThanFalseBranch(function: *const bytecode.Bytecode,
     if (frame.localIsUninitialized(idx)) return false;
     const lhs = frame.locals[idx].asInt32() orelse return false;
     const rhs = readInt(i32, code[target_pc + 4 ..][0..4]);
-    const branch_operand_pc = target_pc + 10;
-    const branch_diff: i8 = @bitCast(code[branch_operand_pc]);
-    frame.pc = if (lhs < rhs)
-        target_pc + 11
-    else
-        relativePc(branch_operand_pc, branch_diff);
-    return true;
-}
-
-fn tryFuseGoto8LocalShortBigIntLessThanFalseBranch(function: *const bytecode.Bytecode, frame: *frame_mod.Frame) bool {
-    const operand_pc = frame.pc;
-    if (operand_pc >= function.code.len) return false;
-    const diff: i8 = @bitCast(function.code[operand_pc]);
-    if (diff >= 0) return false;
-    const target_pc = relativePc(operand_pc, diff);
-    if (target_pc + 11 > function.code.len) return false;
-
-    const code = function.code;
-    if (code[target_pc] != op.get_loc_check) return false;
-    if (code[target_pc + 3] != op.push_bigint_i32) return false;
-    if (code[target_pc + 8] != op.lt) return false;
-    if (code[target_pc + 9] != op.if_false8) return false;
-
-    const idx = readInt(u16, code[target_pc + 1 ..][0..2]);
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(idx)) return false;
-    const lhs = frame.locals[idx].asShortBigInt() orelse return false;
-    const rhs: i64 = readInt(i32, code[target_pc + 4 ..][0..4]);
     const branch_operand_pc = target_pc + 10;
     const branch_diff: i8 = @bitCast(code[branch_operand_pc]);
     frame.pc = if (lhs < rhs)

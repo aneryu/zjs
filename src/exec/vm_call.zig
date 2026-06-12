@@ -1,3 +1,4 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -215,7 +216,7 @@ pub fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    if (try tryFuseImmediateSimpleArrayMapClosure(ctx, output, global, stack, function, frame, catch_target, index, handleCatchableRuntimeError)) |step| return step;
+    if (fusion_stats.counted(.tryFuseImmediateSimpleArrayMapClosure, try tryFuseImmediateSimpleArrayMapClosure(ctx, output, global, stack, function, frame, catch_target, index, handleCatchableRuntimeError))) |step| return step;
     try pushFunctionClosure(ctx, frame, stack, function, global, index, opc, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs);
     return .done;
 }
@@ -1380,17 +1381,15 @@ pub fn constructor(
     defer new_target.free(ctx.runtime);
     defer func.free(ctx.runtime);
     _ = popDuplicateConstructorTarget;
-    const fused_typed_array_result = shared_vm.tryFuseTypedArrayFromArrayBufferConstructorSequence(
+    const fused_typed_array_result = fusion_stats.counted(.tryFuseTypedArrayFromArrayBufferConstructorSequence, shared_vm.tryFuseTypedArrayFromArrayBufferConstructorSequence(
         ctx,
-        output,
-        global,
         stack,
         function,
         frame,
         func,
         new_target,
         args_buf,
-    ) catch |err| {
+    )) catch |err| {
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };

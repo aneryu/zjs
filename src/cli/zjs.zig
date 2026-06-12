@@ -150,6 +150,7 @@ fn runFileModule(
 
 pub fn main(init: std.process.Init) !void {
     const total_start = monotonicNanos();
+    setupFusionStatsExitDump(init.environ_map);
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -748,6 +749,61 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
         try output.print("{s:<20} {d:>9} {d:>13} {d:>12} {d:>10}\n", .{ display_name, row.count, row.nanos, avg, profile.slow_count[row.opcode] });
     }
+
+    try dumpFusionStats(output);
+}
+
+const fusion_stats = engine.exec.fusion_stats;
+
+/// Per-fusion hit table for the hand-written `tryFuse*` fast paths. Only
+/// available (and only printed) when built with
+/// `-Dzjs_enable_opcode_profile=true`.
+fn dumpFusionStats(output: *std.Io.Writer) !void {
+    if (comptime !fusion_stats.enabled) return;
+    const counts = fusion_stats.snapshot();
+    var order: [fusion_stats.fusion_count]u16 = undefined;
+    for (&order, 0..) |*slot, index| slot.* = @intCast(index);
+    std.mem.sort(u16, &order, @as([]const u64, &counts), struct {
+        fn lessThan(c: []const u64, lhs: u16, rhs: u16) bool {
+            if (c[lhs] != c[rhs]) return c[lhs] > c[rhs];
+            return lhs < rhs;
+        }
+    }.lessThan);
+    var zero_count: usize = 0;
+    try output.print("\nFUSION                                                            HITS\n", .{});
+    for (order) |index| {
+        if (counts[index] == 0) {
+            zero_count += 1;
+            continue;
+        }
+        try output.print("{s:<60} {d:>9}\n", .{ fusion_stats.tagName(index), counts[index] });
+    }
+    try output.print("fusions with zero hits: {d}/{d}\n", .{ zero_count, fusion_stats.fusion_count });
+}
+
+extern "c" fn atexit(callback: *const fn () callconv(.c) void) c_int;
+
+var fusion_stats_path_buf: [512:0]u8 = undefined;
+var fusion_stats_path_len: usize = 0;
+
+/// When built with `-Dzjs_enable_opcode_profile=true` and
+/// `ZJS_FUSION_STATS_FILE` is set, append per-fusion hit counts to that file
+/// when the process exits (the explicit `std.process.exit` calls skip defers,
+/// so this uses libc `atexit`).
+fn setupFusionStatsExitDump(environ_map: *std.process.Environ.Map) void {
+    if (comptime !fusion_stats.enabled) return;
+    const path = environ_map.get("ZJS_FUSION_STATS_FILE") orelse return;
+    if (path.len == 0 or path.len >= fusion_stats_path_buf.len) return;
+    @memcpy(fusion_stats_path_buf[0..path.len], path);
+    fusion_stats_path_buf[path.len] = 0;
+    fusion_stats_path_len = path.len;
+    _ = atexit(writeFusionStatsAtExit);
+}
+
+fn writeFusionStatsAtExit() callconv(.c) void {
+    if (comptime !fusion_stats.enabled) return;
+    if (fusion_stats_path_len == 0) return;
+    fusion_stats.appendToFile(&fusion_stats_path_buf);
 }
 
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {

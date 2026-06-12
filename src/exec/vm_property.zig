@@ -1,3 +1,4 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
@@ -464,52 +465,6 @@ fn varRefGlobalLexicalWritable(
     const env = shared_vm.existingGlobalLexicalEnv(ctx) orelse return false;
     const desc = env.getOwnProperty(function.var_ref_names[var_ref_idx]) orelse return false;
     return desc.kind == .data and (desc.writable orelse false);
-}
-
-pub fn tryFuseCallResultAddGlobalStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    call_pc: usize,
-    result: core.JSValue,
-    result_owned: *bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    const add_pc = call_pc + 1;
-    if (add_pc >= function.code.len or function.code[add_pc] != op.add) return false;
-
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < function.code.len and function.code[store_pc] == op.dup) {
-        store_pc += 1;
-        const decoded_store = decodeGlobalPut(function.code, store_pc) orelse return false;
-        if (decoded_store.next_pc >= function.code.len or function.code[decoded_store.next_pc] != op.drop) return false;
-        drop_pc = decoded_store.next_pc;
-    }
-    const store = decodeGlobalPut(function.code, store_pc) orelse return false;
-    if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom)) return false;
-
-    const lhs = stack.peekBorrowed() orelse return false;
-    if (!lhs.isNumber() or !result.isNumber()) return false;
-
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
-    errdefer updated.free(ctx.runtime);
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, updated)) {
-        updated.free(ctx.runtime);
-        return false;
-    }
-
-    const lhs_owned = try stack.pop();
-    defer lhs_owned.free(ctx.runtime);
-    result_owned.* = false;
-    defer result.free(ctx.runtime);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.next_pc;
-    return true;
 }
 
 pub fn decodeVarRefPut(code: []const u8, pc: usize) ?VarRefPut {
@@ -993,21 +948,6 @@ pub const StringNumberConstArg = struct {
     next_pc: usize,
 };
 
-pub fn pushBorrowedValueOrFuseLocalAdd(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    value: core.JSValue,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !void {
-    if (try tryFuseLocalAddWithValue(ctx, stack, function, global, frame, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-    try stack.push(value);
-}
-
 pub fn fastGlobalDataValueForAtomAtPc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -1205,7 +1145,7 @@ pub fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
     try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = target_pc;
-    _ = tryFuseLocalInt32LessThanArgFalseBranchAtPc(function, frame, target_pc);
+    _ = fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchAtPc, tryFuseLocalInt32LessThanArgFalseBranchAtPc(function, frame, target_pc));
     return true;
 }
 
@@ -1221,7 +1161,7 @@ pub fn tryFuseDroppedLocalPostUpdateGoto8AtPc(
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const get = decodeLocalGet(function.code, pc) orelse return false;
-    return try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, get.idx, get.next_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    return fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, get.idx, get.next_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
 }
 
 fn tryFuseLocalInt32LessThanArgFalseBranchAtPc(
@@ -1230,7 +1170,7 @@ fn tryFuseLocalInt32LessThanArgFalseBranchAtPc(
     pc: usize,
 ) bool {
     const get = decodeLocalGet(function.code, pc) orelse return false;
-    return tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, get.idx, get.next_pc, get.checked);
+    return fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, get.idx, get.next_pc, get.checked));
 }
 
 pub fn tryFuseLocalInt32LessThanArgFalseBranchFromGet(
@@ -1370,7 +1310,6 @@ pub const withGetOrDelete = vm_property_ref.withGetOrDelete;
 pub const makeSlotRef = vm_property_ref.makeSlotRef;
 pub const makeVarRef = vm_property_ref.makeVarRef;
 pub const makeVarRefVm = vm_property_ref.makeVarRefVm;
-pub const tryFuseMakeVarRefPercentHexGlobalStringAssignment = vm_property_ref.tryFuseMakeVarRefPercentHexGlobalStringAssignment;
 pub const getRefValue = vm_property_ref.getRefValue;
 pub const getRefValueVm = vm_property_ref.getRefValueVm;
 pub const putRefValue = vm_property_ref.putRefValue;
@@ -1411,83 +1350,6 @@ pub const putPrivateFieldVm = vm_property_private.putPrivateFieldVm;
 pub const definePrivateField = vm_property_private.definePrivateField;
 pub const definePrivateFieldVm = vm_property_private.definePrivateFieldVm;
 
-pub fn tryFuseStringFromCharCodeInt32LocalAppend(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    char_code: i32,
-    add_pc: usize,
-    receiver_on_stack: bool,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const unit: u16 = @intCast(@as(u32, @bitCast(char_code)) & 0xffff);
-    if (unit > 0xff) return false;
-    const code = function.code;
-    if (add_pc >= code.len or code[add_pc] != op.add) return false;
-
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const candidate_store = decodeLocalPut(code, store_pc) orelse return false;
-        const candidate_drop_pc = candidate_store.operand_pc + candidate_store.consume;
-        if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    const idx = store.idx;
-    if (idx >= frame.locals.len or idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(idx)) return false;
-    if (idx < function.var_is_const.len and function.var_is_const[idx]) return false;
-    const required_stack: usize = if (receiver_on_stack) 2 else 1;
-    if (stack.values.len < required_stack) return false;
-
-    const lhs_index = stack.values.len - required_stack;
-    const lhs = stack.values[lhs_index];
-    if (!frame.locals[idx].same(lhs)) return false;
-    const has_global_sync_mirror =
-        sync_global_lexical_locals and
-        frame.global_lexical_sync_checked and
-        idx < frame.global_lexical_sync_slots.len and
-        frame.global_lexical_sync_slots[idx];
-    const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
-    const lhs_string = stringFromValue(lhs) orelse return false;
-    if (lhs_string.isRope()) return false;
-    const byte: u8 = @intCast(unit);
-    const lhs_header = lhs.refHeader() orelse return false;
-    const appended_in_place = @as(usize, @intCast(lhs_header.rc)) <= max_ref_count and
-        try lhs_string.appendLatin1InPlace(ctx.runtime, &.{byte});
-    var replacement = core.JSValue.undefinedValue();
-    var replacement_owned = false;
-    errdefer if (replacement_owned) replacement.free(ctx.runtime);
-    if (!appended_in_place) {
-        const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
-        replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
-        replacement_owned = true;
-    }
-
-    if (receiver_on_stack) {
-        const receiver_owned = try stack.pop();
-        receiver_owned.free(ctx.runtime);
-    }
-    const lhs_owned = try stack.pop();
-    lhs_owned.free(ctx.runtime);
-    if (replacement_owned) {
-        try setSlotValue(ctx, &frame.locals[idx], replacement);
-        replacement_owned = false;
-    }
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
-    _ = try tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(ctx, function, global, frame, idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    _ = try tryFuseDroppedLocalPostUpdateGoto8AtPc(ctx, function, global, frame, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
 pub fn tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -1500,7 +1362,7 @@ pub fn tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(
 ) !bool {
     const get = decodeLocalGet(function.code, frame.pc) orelse return false;
     if (get.checked or get.idx != local_idx) return false;
-    return try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, local_idx, get.next_pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    return fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, local_idx, get.next_pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
 }
 
 const StringSliceConstLocalStore = struct {
@@ -1915,74 +1777,6 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
     return null;
 }
 
-pub fn tryFuseLocalAddWithValue(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    rhs: core.JSValue,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    if (frame.pc + 2 > function.code.len) return false;
-    if (function.code[frame.pc] != op.add) return false;
-    const lhs = stack.peekBorrowed() orelse return false;
-    const store = decodeLocalPut(function.code, frame.pc + 1);
-    const var_ref_store = if (store == null) decodeVarRefPut(function.code, frame.pc + 1) else null;
-    if (store == null and var_ref_store == null) return false;
-
-    if (store) |local_store| {
-        if (local_store.idx >= frame.locals.len or local_store.idx >= frame.locals_uninit.len) return false;
-        if (frame.localIsUninitialized(local_store.idx)) return false;
-        if (local_store.checked and local_store.idx < function.var_is_const.len and function.var_is_const[local_store.idx]) return false;
-        if (!frame.locals[local_store.idx].same(lhs)) return false;
-    } else if (var_ref_store) |ref_store| {
-        if (!varRefStoreWritableForFastPath(ctx, function, global, frame, ref_store)) return false;
-        const stored = varRefReadableBorrowed(frame, ref_store.idx) orelse return false;
-        if (!stored.same(lhs)) return false;
-    }
-
-    const updated = blk: {
-        if (lhs.asInt32()) |lhs_int| {
-            if (rhs.asInt32()) |rhs_int| break :blk fastInt32Add(lhs_int, rhs_int);
-        }
-        if (lhs.asShortBigInt()) |lhs_bigint| {
-            if (rhs.asShortBigInt()) |rhs_bigint| {
-                if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |fast| break :blk fast;
-            }
-        }
-        if (lhs.isString() and rhs.isString()) {
-            const has_global_sync_mirror =
-                sync_global_lexical_locals and
-                frame.global_lexical_sync_checked and
-                (if (store) |local_store| local_store.idx < frame.global_lexical_sync_slots.len and frame.global_lexical_sync_slots[local_store.idx] else false);
-            const max_ref_count: usize = if (has_global_sync_mirror) 3 else 2;
-
-            if (try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, max_ref_count)) {
-                break :blk lhs.dup();
-            } else {
-                break :blk try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
-            }
-        }
-        if (!lhs.isNumber() or !rhs.isNumber()) return false;
-        break :blk try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
-    };
-
-    const lhs_owned = try stack.pop();
-    lhs_owned.free(ctx.runtime);
-    if (store) |local_store| {
-        try setSlotValue(ctx, &frame.locals[local_store.idx], updated);
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_store.idx, sync_global_lexical_locals);
-        frame.pc = local_store.operand_pc + local_store.consume;
-    } else if (var_ref_store) |ref_store| {
-        try setSlotValue(ctx, &frame.var_refs[ref_store.idx], updated);
-        frame.pc = ref_store.operand_pc + ref_store.consume;
-    }
-    return true;
-}
-
 pub fn fastInt32Add(lhs: i32, rhs: i32) core.JSValue {
     const result = @addWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
@@ -2113,7 +1907,6 @@ pub const arg = vm_property_locals.arg;
 pub const checkedLocVm = vm_property_locals.checkedLocVm;
 pub const varRef = vm_property_locals.varRef;
 pub const varRefVm = vm_property_locals.varRefVm;
-pub const tryFuseCheckedLocalFastPath = vm_property_locals.tryFuseCheckedLocalFastPath;
 pub const closeLoc = vm_property_locals.closeLoc;
 
 // --- Property field and array-element opcode handlers moved to vm_property_field.zig ---

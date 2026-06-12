@@ -414,7 +414,6 @@ pub const stableSortTieBreak = array_ops.stableSortTieBreak;
 pub const throwRegExpAccessorTypeError = array_ops.throwRegExpAccessorTypeError;
 pub const toIntegerOrInfinityForArrayByCopy = array_ops.toIntegerOrInfinityForArrayByCopy;
 pub const toIntegerOrInfinityForArrayMethod = array_ops.toIntegerOrInfinityForArrayMethod;
-pub const tryFuseTypedArrayConstructLengthPrint = array_ops.tryFuseTypedArrayConstructLengthPrint;
 pub const tryFuseTypedArrayFromArrayBufferConstructorSequence = array_ops.tryFuseTypedArrayFromArrayBufferConstructorSequence;
 pub const typedArrayArrayLikeOwnDataFastPathUsable = array_ops.typedArrayArrayLikeOwnDataFastPathUsable;
 pub const typedArrayCanonicalDelete = array_ops.typedArrayCanonicalDelete;

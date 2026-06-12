@@ -7,6 +7,7 @@
 //! The dispatcher handles QuickJS-format opcodes emitted by the parser after
 //! the bytecode pipeline has removed temporary opcodes.
 
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -503,7 +504,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             op.get_arg, op.put_arg, op.set_arg, op.get_arg0, op.get_arg1, op.get_arg2, op.get_arg3, op.put_arg0, op.put_arg1, op.put_arg2, op.put_arg3, op.set_arg0, op.set_arg1, op.set_arg2, op.set_arg3 => try property_vm.arg(ctx, function, frame, stack, opc, execGetArg, execPutArg, execSetArg),
 
             op.get_var_ref, op.get_var_ref_check, op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init, op.set_var_ref, op.get_var_ref0, op.get_var_ref1, op.get_var_ref2, op.get_var_ref3, op.put_var_ref0, op.put_var_ref1, op.put_var_ref2, op.put_var_ref3, op.set_var_ref0, op.set_var_ref1, op.set_var_ref2, op.set_var_ref3 => {
-                switch (try property_vm.varRefVm(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, stop_before_pc == null, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, execGetVarRefMaybeTdz, execPutVarRef, execSetVarRef, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal, handleCatchableRuntimeError)) {
+                switch (try property_vm.varRefVm(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object, execGetVarRefMaybeTdz, execPutVarRef, execSetVarRef, globalLexicalValue, handleCatchableRuntimeError)) {
                     .done => {},
                     .continue_loop => continue,
                 }
@@ -574,15 +575,11 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Binary arithmetic ----
             op.add, op.sub, op.mul, op.div, op.mod, op.pow, op.shl, op.sar, op.shr, op.@"and", op.@"or", op.xor => {
-                if (opc == op.add or opc == op.sub or opc == op.mul) {
-                    if (try arith_vm.tryFuseLocalNumericBinary(ctx, stack, function, global, frame, opc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) {
-                        continue;
-                    }
-                }
-                if (opc == op.add and try arith_vm.tryFuseLocalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals, syncTopLevelGlobalLexicalLocal)) {
+                if (opc == op.add or opc == op.sub or opc == op.mul) {}
+                if (opc == op.add and fusion_stats.counted(.tryFuseLocalStringAppend, try arith_vm.tryFuseLocalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals, syncTopLevelGlobalLexicalLocal))) {
                     continue;
                 }
-                if (opc == op.add and try arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
+                if (opc == op.add and fusion_stats.counted(.tryFuseGlobalDataAdd, try arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object))) {
                     continue;
                 }
                 switch (try arith_vm.binaryVm(ctx, stack, frame, catch_target, opc, output, global, toPrimitiveForAddition, toPrimitiveForNumber, handleCatchableRuntimeError)) {
@@ -632,17 +629,16 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
 
             // ---- Control flow ----
             op.goto => {
-                if (stop_before_pc == null and property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object)) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump32(function, frame);
             },
             op.goto16 => {
-                if (stop_before_pc == null and property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object)) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto16, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump16(function, frame);
             },
             op.goto8 => {
-                if (stop_before_pc == null and regexp_vm.tryFuseGoto8LiteralAssignmentLoop(ctx, global, function, frame)) continue;
-                if (stop_before_pc == null and control_vm.tryFuseGoto8LocalLessThanFalseBranch(function, frame)) continue;
-                if (stop_before_pc == null and property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object)) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseGoto8LocalLessThanFalseBranch, control_vm.tryFuseGoto8LocalLessThanFalseBranch(function, frame))) continue;
+                if (stop_before_pc == null and fusion_stats.counted(.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch, property_vm.tryFuseBackwardGotoGlobalDataInt32CompareFalseBranch(ctx, global, function, frame, op.goto8, eval_local_names, eval_var_ref_names, eval_with_object))) continue;
                 control_vm.jump8(function, frame);
             },
             op.if_false => try control_vm.branch32(ctx, stack, function, frame, false),
@@ -694,7 +690,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Object properties ----
-            op.get_field, op.get_field2, op.put_field => switch (try property_vm.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_var_refs, eval_with_object, getValueProperty, setValueProperty, setSlotValue, syncTopLevelGlobalLexicalLocal, closeStackTopForOfIteratorForPendingErrorWithFrame, handleCatchableRuntimeError)) {
+            op.get_field, op.get_field2, op.put_field => switch (try property_vm.field(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, getValueProperty, setValueProperty, setSlotValue, syncTopLevelGlobalLexicalLocal, closeStackTopForOfIteratorForPendingErrorWithFrame, handleCatchableRuntimeError)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -718,7 +714,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Array elements ----
-            op.get_array_el, op.get_array_el2, op.put_array_el => switch (try property_vm.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc, sync_global_lexical_locals, toPropertyKeyAtom, toPropertyKeyValue, getValueProperty, setValueProperty, putDenseArrayElementFast, setSlotValue, syncTopLevelGlobalLexicalLocal, throwNullishComputedPropertyTypeError, handleCatchableRuntimeError)) {
+            op.get_array_el, op.get_array_el2, op.put_array_el => switch (try property_vm.arrayElement(ctx, output, global, stack, function, frame, catch_target, opc, toPropertyKeyAtom, toPropertyKeyValue, getValueProperty, setValueProperty, putDenseArrayElementFast, throwNullishComputedPropertyTypeError, handleCatchableRuntimeError)) {
                 .done => {},
                 .continue_loop => continue,
             },
@@ -747,11 +743,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         };
                         continue;
                     },
-                }
-                if (frame.pc < function.code.len and function.code[frame.pc] == op.add and
-                    try arith_vm.tryFuseLocalAddWithTopValue(ctx, stack, function, global, frame, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))
-                {
-                    continue;
                 }
             },
             op.tail_call => switch (try call_vm.tailCall(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0, execCall)) {
@@ -807,8 +798,8 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             },
 
             // ---- Object/array literals ----
-            op.object => try literal_vm.object(ctx, output, stack, function, frame, global, eval_local_names, eval_var_ref_names, eval_with_object, objectPrototypeFromGlobal, globalLexicalValue),
-            op.array_from => try literal_vm.arrayFrom(ctx, output, stack, function, frame, global, arrayPrototypeFromGlobal),
+            op.object => try literal_vm.object(ctx, stack, global, objectPrototypeFromGlobal),
+            op.array_from => try literal_vm.arrayFrom(ctx, stack, function, frame, global, arrayPrototypeFromGlobal),
             op.define_field => switch (try literal_vm.defineField(ctx, output, global, stack, function, frame, catch_target, remapPrivateAtomForOperation, defineClassFieldDataProperty, createDataPropertyOrThrow, handleCatchableRuntimeError)) {
                 .done => {},
                 .continue_loop => continue,
@@ -973,12 +964,6 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 .continue_loop => continue,
             },
             op.post_inc, op.post_dec => {
-                if (try arith_vm.tryFuseDroppedLocalPostUpdate(ctx, stack, function, global, frame, opc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) {
-                    continue;
-                }
-                if (try arith_vm.tryFuseDroppedGlobalDataPostUpdate(ctx, stack, function, global, frame, opc, eval_local_names, eval_var_ref_names, eval_with_object)) {
-                    continue;
-                }
                 switch (try arith_vm.postUpdateVm(ctx, stack, frame, catch_target, opc, output, global, toPrimitiveForNumber, handleCatchableRuntimeError)) {
                     .done => {},
                     .continue_loop => continue,

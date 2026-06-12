@@ -31,11 +31,27 @@ pub fn main(init: std.process.Init) !void {
     };
     defer summary.deinit(init.gpa);
 
+    dumpFusionStats(init.environ_map);
     try printSummary(io, summary);
     const baseline_gate = config.regression_baseline != null;
     const has_unexpected = !baseline_gate and (summary.failed != 0 or summary.fixed != 0);
     const has_regression = summary.regressions != 0;
     std.process.exit(if (has_unexpected or has_regression) 1 else 0);
+}
+
+/// The default execution path evaluates tests in-process, so the engine's
+/// per-fusion hit counters accumulate inside this runner. When built with
+/// `-Dzjs_enable_opcode_profile=true` and `ZJS_FUSION_STATS_FILE` is set,
+/// append the totals so fusion measurement runs can include test262 slices.
+fn dumpFusionStats(environ_map: *std.process.Environ.Map) void {
+    const fusion_stats = test262_root.exec.fusion_stats;
+    if (comptime !fusion_stats.enabled) return;
+    const path = environ_map.get("ZJS_FUSION_STATS_FILE") orelse return;
+    var path_buf: [512:0]u8 = undefined;
+    if (path.len == 0 or path.len >= path_buf.len) return;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+    fusion_stats.appendToFile(&path_buf);
 }
 
 fn argsToSlice(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {

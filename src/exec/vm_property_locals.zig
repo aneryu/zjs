@@ -1,5 +1,6 @@
 //! Local/arg/var-ref slot opcode handlers (get/put/set_loc, get/put_arg, var_ref forms, close_loc).
 
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
@@ -84,7 +85,6 @@ const storeLocalCompletionBorrowedValue = property_vm.storeLocalCompletionBorrow
 const storeStringSliceConstLocal = property_vm.storeStringSliceConstLocal;
 const stringFromCharCodeInt32Arg = property_vm.stringFromCharCodeInt32Arg;
 const stringFromValue = property_vm.stringFromValue;
-const tryFuseCallResultAddGlobalStore = property_vm.tryFuseCallResultAddGlobalStore;
 const tryFuseDroppedLocalPostUpdateGoto8AtPc = property_vm.tryFuseDroppedLocalPostUpdateGoto8AtPc;
 const tryFuseDroppedLocalPostUpdateGoto8FromGet = property_vm.tryFuseDroppedLocalPostUpdateGoto8FromGet;
 const tryFuseFollowingLocalStringLengthGtConstSliceConstBranch = property_vm.tryFuseFollowingLocalStringLengthGtConstSliceConstBranch;
@@ -131,11 +131,10 @@ pub fn loc(
     switch (opc) {
         op.get_loc => {
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
-            if (try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 2, false)) return;
-            if (try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 2, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringSliceConstLocalStoreFromGet(ctx, function, global, frame, idx, frame.pc + 2, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 2, false))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 2, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
             try execGetLoc(ctx, frame, stack, idx, 2, opc);
         },
         op.put_loc => try execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
@@ -143,61 +142,52 @@ pub fn loc(
 
         op.get_loc8 => {
             const idx = function.code[frame.pc];
-            if (try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 1, false)) return;
-            if (try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 1, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringSliceConstLocalStoreFromGet(ctx, function, global, frame, idx, frame.pc + 1, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 1, false))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 1, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
             try execGetLoc(ctx, frame, stack, idx, 1, opc);
         },
         op.put_loc8 => try execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
         op.set_loc8 => try execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
 
         op.get_loc0 => {
-            if (try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 0, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 0, false, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 0, frame.pc, false)) return;
-            if (try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 0, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringSliceConstLocalStoreFromGet(ctx, function, global, frame, 0, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalFieldGet(ctx, function, frame, stack, 0, frame.pc, false)) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 0, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 0, frame.pc, false))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 0, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 0, frame.pc, false))) return;
             try execGetLoc(ctx, frame, stack, 0, 0, opc);
         },
         op.get_loc1 => {
-            if (try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocal0Local1Int32ArithmeticStoreRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 1, false, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 1, frame.pc, false)) return;
-            if (try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 1, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringSliceConstLocalStoreFromGet(ctx, function, global, frame, 1, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalFieldGet(ctx, function, frame, stack, 1, frame.pc, false)) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocal0Local1Int32ArithmeticStoreRange, try tryFuseShortLocal0Local1Int32ArithmeticStoreRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange, try tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 1, frame.pc, false))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 1, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 1, frame.pc, false))) return;
             try execGetLoc(ctx, frame, stack, 1, 0, opc);
         },
         op.get_loc2 => {
-            if (try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocalObjectFieldUpdateAccumulateRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 2, false, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 2, frame.pc, false)) return;
-            if (try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 2, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringSliceConstLocalStoreFromGet(ctx, function, global, frame, 2, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalFieldGet(ctx, function, frame, stack, 2, frame.pc, false)) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalObjectFieldUpdateAccumulateRange, try tryFuseShortLocalObjectFieldUpdateAccumulateRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 2, frame.pc, false))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 2, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 2, frame.pc, false))) return;
             try execGetLoc(ctx, frame, stack, 2, 0, opc);
         },
         op.get_loc3 => {
-            if (try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 3, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 3, false, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 3, frame.pc, false)) return;
-            if (try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 3, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalStringSliceConstLocalStoreFromGet(ctx, function, global, frame, 3, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return;
-            if (try tryFuseLocalFieldGet(ctx, function, frame, stack, 3, frame.pc, false)) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 3, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 3, frame.pc, false))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 3, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 3, frame.pc, false))) return;
             try execGetLoc(ctx, frame, stack, 3, 0, opc);
         },
         op.put_loc0 => try execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
@@ -209,8 +199,7 @@ pub fn loc(
         op.set_loc2 => try execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
         op.set_loc3 => try execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
         op.get_loc0_loc1 => {
-            if (try tryFuseLocal0Local1DenseArrayIndexedAppend(ctx, function, frame)) return;
-            if (tryFuseLocal0Local1Int32ArithmeticStore(function, frame)) return;
+            if (fusion_stats.counted(.tryFuseLocal0Local1DenseArrayIndexedAppend, try tryFuseLocal0Local1DenseArrayIndexedAppend(ctx, function, frame))) return;
             try execGetLoc(ctx, frame, stack, 0, 0, opc);
             try execGetLoc(ctx, frame, stack, 1, 0, opc);
         },
@@ -286,7 +275,7 @@ pub fn checkedLocVm(
                 }
             }
             if ((frame.pc >= function.code.len or function.code[frame.pc] != op.call0) and
-                try tryFuseCheckedLocalFastPath(ctx, function, global, frame, stack, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .continue_loop;
+                fusion_stats.counted(.tryFuseCheckedLocalFastPath, try tryFuseCheckedLocalFastPath(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return .continue_loop;
             try pushSlotValue(stack, frame.locals[idx]);
         },
         op.put_loc_check => {
@@ -362,8 +351,6 @@ pub fn varRef(
     catch_target: *?usize,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
@@ -371,8 +358,6 @@ pub fn varRef(
     comptime execPutVarRef: anytype,
     comptime execSetVarRef: anytype,
     comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !Step {
     switch (opc) {
         op.get_var_ref, op.get_var_ref_check => {
@@ -380,10 +365,7 @@ pub fn varRef(
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
             const next_pc = frame.pc + 2;
             if (!canStartLongVarRefGetFusion(opc, function.code, next_pc) and try tryFastDirectVarRefGet(frame, stack, idx, 2)) return .done;
-            if (opc == op.get_var_ref_check and canStartVarRefOrLocalGet(function.code, next_pc) and try tryFuseDroppedVarRefNumericAdd(ctx, function, global, frame, idx, 2, setSlotValue)) return .done;
-            if (canStartBorrowedSimpleCallable(function.code, next_pc) and try tryFuseVarRefAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, idx, 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
-            if (canStartGlobalCall1(function.code, next_pc) and try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, idx, 2, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) return .done;
-            if (canStartBorrowedSimpleCallArg(function.code, next_pc) and try tryFuseVarRefSimpleNumericCall(ctx, function, global, frame, stack, idx, 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
+            if (canStartGlobalCall1(function.code, next_pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, idx, 2, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
             if (try execGetVarRefMaybeTdz(ctx, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
@@ -397,30 +379,22 @@ pub fn varRef(
 
         op.get_var_ref0 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 0, 0)) return .done;
-            if (canStartBorrowedSimpleCallable(function.code, frame.pc) and try tryFuseVarRefAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 0, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 0, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) return .done;
-            if (canStartBorrowedSimpleCallArg(function.code, frame.pc) and try tryFuseVarRefSimpleNumericCall(ctx, function, global, frame, stack, 0, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 0, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
             if (try execGetVarRefMaybeTdz(ctx, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 1, 0)) return .done;
-            if (canStartBorrowedSimpleCallable(function.code, frame.pc) and try tryFuseVarRefAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 1, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 1, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) return .done;
-            if (canStartBorrowedSimpleCallArg(function.code, frame.pc) and try tryFuseVarRefSimpleNumericCall(ctx, function, global, frame, stack, 1, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 1, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
             if (try execGetVarRefMaybeTdz(ctx, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 2, 0)) return .done;
-            if (canStartBorrowedSimpleCallable(function.code, frame.pc) and try tryFuseVarRefAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 2, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 2, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) return .done;
-            if (canStartBorrowedSimpleCallArg(function.code, frame.pc) and try tryFuseVarRefSimpleNumericCall(ctx, function, global, frame, stack, 2, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 2, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
             if (try execGetVarRefMaybeTdz(ctx, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 3, 0)) return .done;
-            if (canStartBorrowedSimpleCallable(function.code, frame.pc) and try tryFuseVarRefAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, 3, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 3, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) return .done;
-            if (canStartBorrowedSimpleCallArg(function.code, frame.pc) and try tryFuseVarRefSimpleNumericCall(ctx, function, global, frame, stack, 3, 0, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return .done;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 3, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
             if (try execGetVarRefMaybeTdz(ctx, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref0 => try execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
@@ -446,8 +420,6 @@ pub fn varRefVm(
     catch_target: *?usize,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
@@ -455,11 +427,9 @@ pub fn varRefVm(
     comptime execPutVarRef: anytype,
     comptime execSetVarRef: anytype,
     comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
     comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, execGetVarRefMaybeTdz, execPutVarRef, execSetVarRef, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal) catch |err| {
+    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object, execGetVarRefMaybeTdz, execPutVarRef, execSetVarRef, globalLexicalValue) catch |err| {
         if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
@@ -530,144 +500,6 @@ const InvariantInt32Load = struct {
     value: i32,
     next_pc: usize,
 };
-
-fn tryFuseVarRefSimpleNumericCall(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    func_idx: u16,
-    consume: u8,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const arg0_pc = frame.pc + consume;
-    if (arg0_pc >= function.code.len) return false;
-
-    const func = varRefReadableBorrowed(frame, func_idx) orelse return false;
-    const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, arg0_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-    if (arg0.next_pc >= function.code.len) return false;
-
-    var args_buf: [2]core.JSValue = undefined;
-    args_buf[0] = arg0.value;
-    var argc: usize = 1;
-    var call_pc = arg0.next_pc;
-    switch (function.code[call_pc]) {
-        op.call1 => {},
-        else => {
-            const arg1 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, arg0.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-            if (arg1.next_pc >= function.code.len or function.code[arg1.next_pc] != op.call2) return false;
-            args_buf[1] = arg1.value;
-            argc = 2;
-            call_pc = arg1.next_pc;
-        },
-    }
-
-    const result = try simpleNumericFunctionResult(ctx.runtime, func, args_buf[0..argc]) orelse return false;
-    var result_owned = true;
-    errdefer if (result_owned) result.free(ctx.runtime);
-    if (try tryFuseVarRefCallResultAddStore(ctx, function, global, frame, stack, call_pc, result, &result_owned, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCallResultAddGlobalStore(ctx, function, global, frame, stack, call_pc, result, &result_owned, eval_local_names, eval_var_ref_names, eval_with_object)) return true;
-    try stack.pushOwned(result);
-    result_owned = false;
-    frame.pc = call_pc + 1;
-    return true;
-}
-
-fn tryFuseVarRefAccumulatorSimpleNumericCallAddStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    accumulator_idx: u16,
-    consume: u8,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    var callee_pc = frame.pc + consume;
-    if (callee_pc < function.code.len and function.code[callee_pc] == op.dup) callee_pc += 1;
-    const callee = borrowedSimpleCallable(ctx, function, global, frame, callee_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-    const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, callee.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-    if (arg0.next_pc >= function.code.len) return false;
-
-    var args_buf: [2]core.JSValue = undefined;
-    args_buf[0] = arg0.value;
-    var argc: usize = 1;
-    var call_pc = arg0.next_pc;
-    switch (function.code[call_pc]) {
-        op.call1 => {},
-        else => {
-            const arg1 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, arg0.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-            if (arg1.next_pc >= function.code.len or function.code[arg1.next_pc] != op.call2) return false;
-            args_buf[1] = arg1.value;
-            argc = 2;
-            call_pc = arg1.next_pc;
-        },
-    }
-
-    const add_pc = call_pc + 1;
-    if (add_pc >= function.code.len or function.code[add_pc] != op.add) return false;
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < function.code.len and function.code[store_pc] == op.dup) {
-        store_pc += 1;
-        const decoded_store = decodeVarRefPut(function.code, store_pc) orelse return false;
-        const candidate_drop_pc = decoded_store.operand_pc + decoded_store.consume;
-        if (candidate_drop_pc >= function.code.len or function.code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const store = decodeVarRefPut(function.code, store_pc) orelse return false;
-    if (store.idx != accumulator_idx) return false;
-    if (!varRefStoreWritableForFastPath(ctx, function, global, frame, store)) return false;
-
-    const lhs = varRefReadableBorrowed(frame, accumulator_idx) orelse return false;
-    if (!lhs.isNumber()) return false;
-    const result = try simpleNumericFunctionResult(ctx.runtime, callee.value, args_buf[0..argc]) orelse return false;
-    defer result.free(ctx.runtime);
-    if (!result.isNumber()) return false;
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
-    errdefer updated.free(ctx.runtime);
-
-    try setSlotValue(ctx, &frame.var_refs[store.idx], updated);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn borrowedSimpleCallableNoGlobal(
-    frame: *const frame_mod.Frame,
-    function: *const bytecode.Bytecode,
-    pc: usize,
-) ?BorrowedCallable {
-    if (pc >= function.code.len) return null;
-    const code = function.code;
-    if (decodeVarRefGet(code, pc)) |get| {
-        return .{
-            .value = varRefReadableBorrowed(frame, get.idx) orelse return null,
-            .next_pc = get.next_pc,
-        };
-    }
-    if (decodeLocalGet(code, pc)) |get| {
-        return .{
-            .value = localReadableBorrowed(frame, get.idx, get.checked) orelse return null,
-            .next_pc = get.next_pc,
-        };
-    }
-    return null;
-}
 
 fn getConditionPc(code: []const u8, pc: usize, induction_idx: u16) ?usize {
     if (pc >= 1) {
@@ -867,259 +699,6 @@ fn storeLocalOwnedValueWithCompletion(
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
-fn tryFuseCheckedLocalSimpleNumericCallAddStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    func_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    if (func_idx >= frame.locals.len or func_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(func_idx)) return false;
-    const func = slotValueBorrowed(frame.locals[func_idx]);
-    if (func.isUninitialized()) return false;
-
-    const arg0 = borrowedSimpleCallArg(frame, function, frame.pc) orelse return false;
-    if (arg0.next_pc >= function.code.len) return false;
-    var args_buf: [2]core.JSValue = undefined;
-    args_buf[0] = arg0.value;
-    var argc: usize = 1;
-    var call_pc = arg0.next_pc;
-    switch (function.code[call_pc]) {
-        op.call1 => {},
-        else => {
-            const arg1 = borrowedSimpleCallArg(frame, function, arg0.next_pc) orelse return false;
-            if (arg1.next_pc >= function.code.len or function.code[arg1.next_pc] != op.call2) return false;
-            args_buf[1] = arg1.value;
-            argc = 2;
-            call_pc = arg1.next_pc;
-        },
-    }
-
-    const result = try simpleNumericFunctionResult(ctx.runtime, func, args_buf[0..argc]) orelse return false;
-    var result_owned = true;
-    errdefer if (result_owned) result.free(ctx.runtime);
-    if (try tryFuseVarRefCallResultAddStore(ctx, function, global, frame, stack, call_pc, result, &result_owned, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    result.free(ctx.runtime);
-    result_owned = false;
-    return false;
-}
-
-fn tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    accumulator_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    var callee_pc = frame.pc;
-    if (callee_pc < function.code.len and function.code[callee_pc] == op.dup) callee_pc += 1;
-    const callee = borrowedSimpleCallable(ctx, function, global, frame, callee_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-
-    var args_buf: [2]core.JSValue = undefined;
-    var argc: usize = 0;
-    var call_pc = callee.next_pc;
-    if (call_pc >= function.code.len) return false;
-    if (function.code[call_pc] != op.call0) {
-        const arg0 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, callee.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-        if (arg0.next_pc >= function.code.len) return false;
-        args_buf[0] = arg0.value;
-        argc = 1;
-        call_pc = arg0.next_pc;
-        switch (function.code[call_pc]) {
-            op.call1 => {},
-            else => {
-                const arg1 = borrowedSimpleCallArgWithContext(ctx, function, global, frame, arg0.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-                if (arg1.next_pc >= function.code.len or function.code[arg1.next_pc] != op.call2) return false;
-                args_buf[1] = arg1.value;
-                argc = 2;
-                call_pc = arg1.next_pc;
-            },
-        }
-    }
-
-    const add_pc = call_pc + 1;
-    if (add_pc >= function.code.len or function.code[add_pc] != op.add) return false;
-    const store_tail = decodeOptionalLocalStoreTail(function, frame, add_pc + 1) orelse return false;
-    const store = decodeLocalPut(function.code, store_tail.store_pc) orelse return false;
-    if (store.idx != accumulator_idx) return false;
-    if (store.idx >= frame.locals.len or store.idx >= frame.locals_uninit.len) return false;
-    if (store.checked) {
-        if (frame.localIsUninitialized(store.idx)) return false;
-        if (store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return false;
-    }
-
-    const lhs = localReadableBorrowed(frame, accumulator_idx, true) orelse return false;
-    if (!lhs.isNumber()) return false;
-    const result = try simpleNumericFunctionResult(ctx.runtime, callee.value, args_buf[0..argc]) orelse return false;
-    defer result.free(ctx.runtime);
-    if (!result.isNumber()) return false;
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
-    errdefer updated.free(ctx.runtime);
-
-    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, store.idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) frame.clearLocalUninitialized(store.idx);
-    frame.pc = store_tail.tail_pc orelse store.operand_pc + store.consume;
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseLocalAccumulatorSimpleNumericCallAddStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    accumulator_idx: u16,
-    checked: bool,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    var callee_pc = frame.pc;
-    if (callee_pc < function.code.len and function.code[callee_pc] == op.dup) callee_pc += 1;
-    const callee = borrowedSimpleCallableNoGlobal(frame, function, callee_pc) orelse return false;
-    const arg0 = borrowedSimpleCallArg(frame, function, callee.next_pc) orelse return false;
-    if (arg0.next_pc >= function.code.len) return false;
-
-    var args_buf: [2]core.JSValue = undefined;
-    args_buf[0] = arg0.value;
-    var argc: usize = 1;
-    var call_pc = arg0.next_pc;
-    switch (function.code[call_pc]) {
-        op.call1 => {},
-        else => {
-            const arg1 = borrowedSimpleCallArg(frame, function, arg0.next_pc) orelse return false;
-            if (arg1.next_pc >= function.code.len or function.code[arg1.next_pc] != op.call2) return false;
-            args_buf[1] = arg1.value;
-            argc = 2;
-            call_pc = arg1.next_pc;
-        },
-    }
-
-    const add_pc = call_pc + 1;
-    if (add_pc >= function.code.len or function.code[add_pc] != op.add) return false;
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < function.code.len and function.code[store_pc] == op.dup) {
-        store_pc += 1;
-        const decoded_store = decodeLocalPut(function.code, store_pc) orelse return false;
-        const candidate_drop_pc = decoded_store.operand_pc + decoded_store.consume;
-        if (candidate_drop_pc >= function.code.len or function.code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const store = decodeLocalPut(function.code, store_pc) orelse return false;
-    if (store.idx != accumulator_idx) return false;
-    if (store.idx >= frame.locals.len or store.idx >= frame.locals_uninit.len) return false;
-    if (store.checked) {
-        if (frame.localIsUninitialized(store.idx)) return false;
-        if (store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return false;
-    }
-
-    const lhs = localReadableBorrowed(frame, accumulator_idx, checked) orelse return false;
-    if (!lhs.isNumber()) return false;
-    const result = try simpleNumericFunctionResult(ctx.runtime, callee.value, args_buf[0..argc]) orelse return false;
-    defer result.free(ctx.runtime);
-    if (!result.isNumber()) return false;
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
-    errdefer updated.free(ctx.runtime);
-
-    try setSlotValue(ctx, &frame.locals[store.idx], updated);
-    if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
-        frame.clearLocalUninitialized(store.idx);
-    }
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, store.idx, sync_global_lexical_locals);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseVarRefCallResultAddStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    call_pc: usize,
-    result: core.JSValue,
-    result_owned: *bool,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const add_pc = call_pc + 1;
-    if (add_pc >= function.code.len or function.code[add_pc] != op.add) return false;
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < function.code.len and function.code[store_pc] == op.dup) {
-        store_pc += 1;
-        const candidate_drop_pc = if (decodeVarRefPut(function.code, store_pc)) |decoded_store|
-            decoded_store.operand_pc + decoded_store.consume
-        else if (decodeLocalPut(function.code, store_pc)) |decoded_store|
-            decoded_store.operand_pc + decoded_store.consume
-        else
-            return false;
-        if (candidate_drop_pc >= function.code.len or function.code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const lhs = stack.peekBorrowed() orelse return false;
-    if (!lhs.isNumber() or !result.isNumber()) return false;
-
-    const var_ref_store = decodeVarRefPut(function.code, store_pc);
-    const local_store = if (var_ref_store == null) decodeLocalPut(function.code, store_pc) else null;
-    if (var_ref_store) |store| {
-        if (!varRefStoreWritableForFastPath(ctx, function, global, frame, store)) return false;
-    } else if (local_store) |store| {
-        if (store.idx >= frame.locals.len or store.idx >= frame.locals_uninit.len) return false;
-        if (store.checked) {
-            if (frame.localIsUninitialized(store.idx)) return false;
-            if (store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return false;
-        }
-    } else return false;
-
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, result);
-    errdefer updated.free(ctx.runtime);
-    if (var_ref_store) |store| {
-        const lhs_owned = try stack.pop();
-        defer lhs_owned.free(ctx.runtime);
-        result_owned.* = false;
-        defer result.free(ctx.runtime);
-        try setSlotValue(ctx, &frame.var_refs[store.idx], updated);
-        frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-        _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-        return true;
-    }
-    if (local_store) |store| {
-        const lhs_owned = try stack.pop();
-        defer lhs_owned.free(ctx.runtime);
-        result_owned.* = false;
-        defer result.free(ctx.runtime);
-        try setSlotValue(ctx, &frame.locals[store.idx], updated);
-        if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
-            frame.clearLocalUninitialized(store.idx);
-        }
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, store.idx, sync_global_lexical_locals);
-        frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-        _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-        return true;
-    }
-    unreachable;
-}
-
 fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {
     if (pc + 6 > code.len or code[pc] != op.push_atom_value) return null;
     const prefix_atom = readInt(u32, code[pc + 1 ..][0..4]);
@@ -1232,64 +811,6 @@ fn canStartBorrowedSimpleCallArg(code: []const u8, pc: usize) bool {
 
 fn canStartGlobalCall1(code: []const u8, pc: usize) bool {
     return pc + 6 <= code.len and (code[pc] == op.get_var or code[pc] == op.get_var_undef) and code[pc + 5] == op.call1;
-}
-
-fn borrowedVarRefOrLocalRhs(frame: *const frame_mod.Frame, code: []const u8, pc: usize) ?struct { value: core.JSValue, next_pc: usize } {
-    if (decodeVarRefGet(code, pc)) |rhs| {
-        return .{
-            .value = varRefReadableBorrowed(frame, rhs.idx) orelse return null,
-            .next_pc = rhs.next_pc,
-        };
-    }
-    if (decodeLocalGet(code, pc)) |rhs| {
-        return .{
-            .value = localReadableBorrowed(frame, rhs.idx, rhs.checked) orelse return null,
-            .next_pc = rhs.next_pc,
-        };
-    }
-    return null;
-}
-
-fn fastNumericAddBorrowed(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue) !?core.JSValue {
-    if (lhs.asInt32()) |lhs_int| {
-        if (rhs.asInt32()) |rhs_int| return fastInt32Add(lhs_int, rhs_int);
-    }
-    if (lhs.asShortBigInt()) |lhs_bigint| {
-        if (rhs.asShortBigInt()) |rhs_bigint| {
-            return value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint);
-        }
-    }
-    if (!lhs.isNumber() or !rhs.isNumber()) return null;
-    return try value_ops.binary(rt, op.add, lhs, rhs);
-}
-
-fn tryFuseDroppedVarRefNumericAdd(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    lhs_idx: u16,
-    consume: u8,
-    comptime setSlotValue: anytype,
-) !bool {
-    const pc = frame.pc + consume;
-    const code = function.code;
-    const rhs = borrowedVarRefOrLocalRhs(frame, code, pc) orelse return false;
-    if (rhs.next_pc + 2 > code.len or code[rhs.next_pc] != op.add or code[rhs.next_pc + 1] != op.dup) return false;
-
-    const store = decodeVarRefPut(code, rhs.next_pc + 2) orelse return false;
-    if (store.idx != lhs_idx) return false;
-    const drop_pc = store.operand_pc + store.consume;
-    if (drop_pc >= code.len or code[drop_pc] != op.drop) return false;
-    if (!varRefStoreWritableForFastPath(ctx, function, global, frame, store)) return false;
-
-    const lhs = varRefReadableBorrowed(frame, lhs_idx) orelse return false;
-    const updated = try fastNumericAddBorrowed(ctx.runtime, lhs, rhs.value) orelse return false;
-    errdefer updated.free(ctx.runtime);
-
-    try setSlotValue(ctx, &frame.var_refs[store.idx], updated);
-    frame.pc = drop_pc + 1;
-    return true;
 }
 
 fn simpleNumericArg0ConstCallable(func: core.JSValue) ?SimpleNumericArg0ConstCall {
@@ -1610,7 +1131,6 @@ pub fn tryFuseCheckedLocalFastPath(
     function: *const bytecode.Bytecode,
     global: *core.Object,
     frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
     idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
@@ -1631,7 +1151,7 @@ pub fn tryFuseCheckedLocalFastPath(
     if (fusion_site < fusion_cold.len and fusion_cold[fusion_site] >= fusion_cold_threshold) return false;
 
     if (allow_loop_tail_fusion and
-        try tryFuseCheckedLocalEmptyInt32Range(ctx, function, global, frame, idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+        fusion_stats.counted(.tryFuseCheckedLocalEmptyInt32Range, try tryFuseCheckedLocalEmptyInt32Range(ctx, function, global, frame, idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
 
     const code = function.code;
     if (frame.pc < code.len) {
@@ -1641,18 +1161,17 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 5] == op.lt and
                     (code[frame.pc + 6] == op.if_false8 or code[frame.pc + 6] == op.if_false))
                 {
-                    if (try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalRegExpTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalSimpleNumericCallAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalSimpleNumericCallAddRange, try tryFuseCheckedLocalSimpleNumericCallAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInductionInt32AddRange, try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantBindingInt32AddRange, try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantInt32LoadAddRange, try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayModFieldInt32AddRange, try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
                 }
             },
             op.push_i16 => {
@@ -1660,19 +1179,19 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 3] == op.lt and
                     (code[frame.pc + 4] == op.if_false8 or code[frame.pc + 4] == op.if_false))
                 {
-                    if (try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalArrayMapSimpleCallbackRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantBindingInt32AddRange, try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInductionInt32AddRange, try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantInt32LoadAddRange, try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayModFieldInt32AddRange, try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMapSetLatin1PrefixInt32Range, try tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange, try tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayMapSimpleCallbackRange, try tryFuseCheckedLocalArrayMapSimpleCallbackRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
                 }
             },
             op.push_i8 => {
@@ -1680,12 +1199,12 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 2] == op.lt and
                     (code[frame.pc + 3] == op.if_false8 or code[frame.pc + 3] == op.if_false))
                 {
-                    if (try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                    if (try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
                 }
             },
             op.push_bigint_i32 => {
@@ -1693,33 +1212,26 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 5] == op.lt and
                     (code[frame.pc + 6] == op.if_false8 or code[frame.pc + 6] == op.if_false))
                 {
-                    if (try tryFuseCheckedLocalShortBigIntInductionAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalShortBigIntInductionAddRange, try tryFuseCheckedLocalShortBigIntInductionAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
                 }
             },
             else => {},
         }
     }
 
-    if (try tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCheckedLocalAccumulatorSimpleNumericCallAddStore(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (frame.pc + 4 <= code.len and
-        code[frame.pc] == op.get_loc_check and
-        code[frame.pc + 3] == op.call1 and
-        try tryFuseCheckedLocalSimpleNumericCallAddStore(ctx, function, global, frame, stack, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCheckedLocalDenseArrayMaskedInt32OverwriteRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCheckedLocalDenseArrayInt32AppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCheckedLocalDenseArrayIndexedAppend(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (try tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-    if (tryFuseLocalInt32CompareBranch(function, frame, idx)) return true;
-    if (tryFuseLocalShortBigIntCompareBranch(function, frame, idx)) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalSparseArrayLiteralLengthAddRange, try tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayInt32AppendRange, try tryFuseCheckedLocalDenseArrayInt32AppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange, try tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+    if (fusion_stats.counted(.tryFuseLocalInt32CompareBranch, tryFuseLocalInt32CompareBranch(function, frame, idx))) return true;
+    if (fusion_stats.counted(.tryFuseLocalShortBigIntCompareBranch, tryFuseLocalShortBigIntCompareBranch(function, frame, idx))) return true;
 
     if (frame.pc < code.len) {
         switch (code[frame.pc]) {
             op.post_inc, op.post_dec => {
                 if (allow_loop_tail_fusion and
-                    try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                if (try arith_vm.tryFuseDroppedCheckedLocalPostUpdateRead(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                    fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                if (fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateRead, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateRead(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
             },
             else => {},
         }
@@ -1727,26 +1239,16 @@ pub fn tryFuseCheckedLocalFastPath(
 
     if (frame.pc < code.len) {
         switch (code[frame.pc]) {
-            op.get_var, op.get_var_undef => {
-                if (try tryFuseCheckedLocalMathMinMaxAdd(ctx, function, global, frame, idx, eval_local_names, eval_var_ref_names, eval_with_object, allow_loop_tail_fusion, sync_global_lexical_locals, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                if (try tryFuseCheckedLocalCachedGlobalInt32Add(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-            },
+            op.get_var, op.get_var_undef => {},
             op.get_loc_check => {
                 if (frame.pc + 4 <= code.len) {
                     switch (code[frame.pc + 3]) {
                         op.add => {
-                            if (try tryFuseCheckedLocalCheckedLocalNumericAdd(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
+                            if (fusion_stats.counted(.tryFuseCheckedLocalCheckedLocalNumericAdd, try tryFuseCheckedLocalCheckedLocalNumericAdd(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
                         },
-                        op.get_field => {
-                            if (try tryFuseCheckedLocalFieldInt32Add(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                        },
-                        op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 => {
-                            if (try tryFuseCheckedLocalDenseArrayConstInt32Add(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                        },
-                        op.get_loc_check => {
-                            if (try tryFuseCheckedLocalDenseArrayIndexedInt32Add(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                            if (try tryFuseCheckedLocalDenseArrayModFieldInt32Add(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) return true;
-                        },
+                        op.get_field => {},
+                        op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 => {},
+                        op.get_loc_check => {},
                         else => {},
                     }
                 }
@@ -1757,158 +1259,6 @@ pub fn tryFuseCheckedLocalFastPath(
 
     if (fusion_site < fusion_cold.len) fusion_cold[fusion_site] +|= 1;
     return false;
-}
-
-fn tryFuseCheckedLocalCachedGlobalInt32Add(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 8 > code.len) return false;
-    const global_read_op = code[pc];
-    if (global_read_op != op.get_var and global_read_op != op.get_var_undef) return false;
-    if (code[pc + 5] != op.add) return false;
-    var store_pc = pc + 6;
-    var drop_pc: ?usize = null;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const decoded_store = decodeLocalPut(code, store_pc) orelse return false;
-        const candidate_drop_pc = decoded_store.operand_pc + decoded_store.consume;
-        if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx)) return false;
-    if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
-
-    const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
-    if (ctx.lexicals != null) {
-        if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
-            lexical_value.free(ctx.runtime);
-            return false;
-        }
-    }
-    const cached_value = globalDataPropertyValueForFastPath(ctx.runtime, global, function, pc, atom_id) orelse return false;
-    const lhs = frame.locals[local_idx].asInt32() orelse return false;
-    const rhs = cached_value.asInt32() orelse return false;
-
-    if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
-    try setSlotValue(ctx, &frame.locals[local_idx], fastInt32Add(lhs, rhs));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseCheckedLocalRegExpTestConstStringCountRange(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    induction_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
-    if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(induction_idx)) return false;
-
-    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
-    const pc = frame.pc;
-    const code = function.code;
-    const limit_operand = immediateInt32Operand(code, pc) orelse return false;
-    if (limit_operand.next_pc >= code.len or code[limit_operand.next_pc] != op.lt) return false;
-    const exit_branch = decodeFalseBranch(code, limit_operand.next_pc + 1) orelse return false;
-    const limit = limit_operand.value;
-    const current_i_value = localReadableBorrowed(frame, induction_idx, true) orelse return false;
-    const current_i = current_i_value.asInt32() orelse return false;
-    if (current_i >= limit) {
-        frame.pc = exit_branch.false_pc;
-        return true;
-    }
-    const iteration_count_i64 = @as(i64, limit) - @as(i64, current_i);
-    if (iteration_count_i64 <= 0 or iteration_count_i64 > std.math.maxInt(i32)) return false;
-    const iteration_count: i32 = @intCast(iteration_count_i64);
-
-    const receiver_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
-    if (receiver_get.next_pc + 11 > code.len or code[receiver_get.next_pc] != op.get_field2) return false;
-    const method_atom = readInt(u32, code[receiver_get.next_pc + 1 ..][0..4]);
-    if (!value_ops.atomNameEql(ctx.runtime, method_atom, "test")) return false;
-    const input_pc = receiver_get.next_pc + 5;
-    if (code[input_pc] != op.push_atom_value) return false;
-    const input_atom = readInt(u32, code[input_pc + 1 ..][0..4]);
-    const call_pc = input_pc + 5;
-    if (call_pc + 4 > code.len or code[call_pc] != op.call_method or readInt(u16, code[call_pc + 1 ..][0..2]) != 1) return false;
-    const test_branch = decodeFalseBranch(code, call_pc + 3) orelse return false;
-
-    const counter_get = decodeBindingGet(code, test_branch.true_pc) orelse return false;
-    if (counter_get.next_pc >= code.len or code[counter_get.next_pc] != op.post_inc) return false;
-    const counter_put = decodeBindingPut(code, counter_get.next_pc + 1) orelse return false;
-    if (counter_put.idx != counter_get.idx or counter_put.is_var_ref != counter_get.is_var_ref) return false;
-    const counter_drop_pc = counter_put.operand_pc + counter_put.consume;
-    if (counter_drop_pc >= code.len or code[counter_drop_pc] != op.drop) return false;
-    if (counter_drop_pc + 1 != test_branch.false_pc) return false;
-
-    const tail_get = decodeLocalGet(code, test_branch.false_pc) orelse return false;
-    if (tail_get.idx != induction_idx) return false;
-    if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
-    const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (tail_put.idx != induction_idx) return false;
-    const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
-    if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
-    const goto_pc = tail_drop_pc + 1;
-    if (goto_pc + 2 > code.len or code[goto_pc] != op.goto8) return false;
-    const goto_operand_pc = goto_pc + 1;
-    const goto_diff: i8 = @bitCast(code[goto_operand_pc]);
-    const goto_target_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
-    if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
-
-    const receiver = bindingReadableBorrowed(frame, receiver_get) orelse return false;
-    const regexp_object = objectFromValue(receiver) orelse return false;
-    if (regexp_object.class_id != core.class.ids.regexp) return false;
-    if (!fastRegExpPrototypeMethodIsDefault(ctx.runtime, receiver, method_atom, @intFromEnum(builtins.regexp.PrototypeMethod.test_))) return false;
-    const input_value = (try atomStringValueForFastPath(ctx.runtime, input_atom)) orelse return false;
-    defer input_value.free(ctx.runtime);
-    const matched = try shared_vm.qjsRegExpTestFastNoResult(ctx, regexp_object, input_value) orelse return false;
-
-    if (counter_put.is_var_ref) {
-        if (counter_put.idx >= frame.var_refs.len) return false;
-        if (varRefCellFromValue(frame.var_refs[counter_put.idx])) |cell| {
-            if (cell.varRefIsDeletedSlot().* or cell.varRefIsFunctionNameSlot().* or cell.varRefIsConstSlot().*) return false;
-        }
-    } else {
-        if (counter_put.idx >= frame.locals.len or counter_put.idx >= frame.locals_uninit.len) return false;
-        if (frame.localIsUninitialized(counter_put.idx)) return false;
-        if (counter_put.idx < function.var_is_const.len and function.var_is_const[counter_put.idx]) return false;
-    }
-    if (matched) {
-        const current_count = (bindingReadableBorrowed(frame, counter_get) orelse return false).asInt32() orelse return false;
-        const next_count_i64 = @as(i64, current_count) + @as(i64, iteration_count);
-        if (next_count_i64 < std.math.minInt(i32) or next_count_i64 > std.math.maxInt(i32)) return false;
-        if (counter_get.is_var_ref) {
-            try setSlotValue(ctx, &frame.var_refs[counter_get.idx], core.JSValue.int32(@intCast(next_count_i64)));
-        } else {
-            try setSlotValue(ctx, &frame.locals[counter_get.idx], core.JSValue.int32(@intCast(next_count_i64)));
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, counter_get.idx, sync_global_lexical_locals);
-        }
-    }
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
-    frame.pc = exit_branch.false_pc;
-    return true;
 }
 
 fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
@@ -2856,7 +2206,7 @@ fn tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
-    return try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    return fusion_stats.counted(.tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt, try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
 }
 
 fn tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(
@@ -2871,7 +2221,7 @@ fn tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(
     comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const condition_pc = if (frame.pc >= 1) frame.pc - 1 else return false;
-    return try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    return fusion_stats.counted(.tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt, try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
 }
 
 fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
@@ -3460,47 +2810,6 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     return true;
 }
 
-fn tryFuseCheckedLocalFieldInt32Add(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 12 > code.len) return false;
-    if (code[pc] != op.get_loc_check) return false;
-    const object_idx = readInt(u16, code[pc + 1 ..][0..2]);
-    if (code[pc + 3] != op.get_field) return false;
-    if (code[pc + 8] != op.add) return false;
-    const store_tail = decodeOptionalLocalStoreTail(function, frame, pc + 9) orelse return false;
-    const store_pc = store_tail.store_pc;
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (object_idx >= frame.locals.len or object_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(object_idx)) return false;
-    if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
-    const object_slot = frame.locals[object_idx];
-    if (varRefCellFromValue(object_slot) != null) return false;
-
-    const lhs = frame.locals[local_idx].asInt32() orelse return false;
-    const atom_id = readInt(u32, code[pc + 4 ..][0..4]);
-    const value = ordinaryDataPropertyBorrowedValueForFastPath(ctx.runtime, object_slot, atom_id) orelse return false;
-    const rhs = value.asInt32() orelse return false;
-
-    const updated = fastInt32Add(lhs, rhs);
-    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, local_idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    frame.pc = store_tail.tail_pc orelse localPutNextPc(store);
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
 fn tryFuseCheckedLocalCheckedLocalNumericAdd(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -3544,156 +2853,7 @@ fn tryFuseCheckedLocalCheckedLocalNumericAdd(
     errdefer updated.free(ctx.runtime);
     try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, local_idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
     frame.pc = store_tail.tail_pc orelse localPutNextPc(store);
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseCheckedLocalDenseArrayConstInt32Add(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 9 > code.len) return false;
-    if (code[pc] != op.get_loc_check) return false;
-    const array_idx = readInt(u16, code[pc + 1 ..][0..2]);
-    const index = smallPushOpcodeIndex(code[pc + 3]) orelse return false;
-    if (code[pc + 4] != op.get_array_el or code[pc + 5] != op.add) return false;
-    const store_tail = decodeOptionalLocalStoreTail(function, frame, pc + 6) orelse return false;
-    const store_pc = store_tail.store_pc;
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(array_idx)) return false;
-    if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
-
-    const array_slot = frame.locals[array_idx];
-    if (varRefCellFromValue(array_slot) != null) return false;
-    const array_object = objectFromValue(array_slot) orelse return false;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
-    if (index >= @as(usize, @intCast(array_object.length))) return false;
-    const elements = array_object.arrayElements();
-    if (index >= elements.len) return false;
-    const element = elements[index] orelse return false;
-
-    const lhs = frame.locals[local_idx].asInt32() orelse return false;
-    const rhs = element.asInt32() orelse return false;
-    const updated = fastInt32Add(lhs, rhs);
-    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, local_idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    frame.pc = store_tail.tail_pc orelse localPutNextPc(store);
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseCheckedLocalDenseArrayIndexedInt32Add(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 9 > code.len) return false;
-    if (code[pc] != op.get_loc_check) return false;
-    const array_idx = readInt(u16, code[pc + 1 ..][0..2]);
-    if (code[pc + 3] != op.get_loc_check) return false;
-    const index_idx = readInt(u16, code[pc + 4 ..][0..2]);
-    if (code[pc + 6] != op.get_array_el or code[pc + 7] != op.add) return false;
-    const store_tail = decodeOptionalLocalStoreTail(function, frame, pc + 8) orelse return false;
-    const store_pc = store_tail.store_pc;
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return false;
-    if (index_idx >= frame.locals.len or index_idx >= frame.locals_uninit.len) return false;
-    if (store.idx >= frame.locals.len or store.idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(array_idx) or frame.localIsUninitialized(index_idx)) return false;
-    if (store.checked and store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return false;
-
-    const array_slot = slotValueBorrowed(frame.locals[array_idx]);
-    if (array_slot.isUninitialized()) return false;
-    const array_object = objectFromValue(array_slot) orelse return false;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
-
-    const index_value = slotValueBorrowed(frame.locals[index_idx]);
-    const index_i32 = index_value.asInt32() orelse return false;
-    if (index_i32 < 0) return false;
-    const element_index: usize = @intCast(index_i32);
-    const elements = array_object.arrayElements();
-    if (element_index >= elements.len) return false;
-    const rhs = elements[element_index] orelse return false;
-
-    const lhs = slotValueBorrowed(frame.locals[local_idx]);
-    if (!lhs.isNumber() or !rhs.isNumber()) return false;
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, rhs);
-    errdefer updated.free(ctx.runtime);
-    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, store.idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
-        frame.clearLocalUninitialized(store.idx);
-    }
-    frame.pc = store_tail.tail_pc orelse localPutNextPc(store);
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseCheckedLocalDenseArrayIndexedAppend(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    array_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    const index_get = decodeLocalGet(code, pc) orelse return false;
-    if (!index_get.checked) return false;
-    const value_get = decodeLocalGet(code, index_get.next_pc) orelse return false;
-    if (!value_get.checked) return false;
-    const index_idx = index_get.idx;
-    const value_idx = value_get.idx;
-
-    if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return false;
-    if (index_idx >= frame.locals.len or index_idx >= frame.locals_uninit.len) return false;
-    if (value_idx >= frame.locals.len or value_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(array_idx) or frame.localIsUninitialized(index_idx) or frame.localIsUninitialized(value_idx)) return false;
-
-    const array_slot = slotValueBorrowed(frame.locals[array_idx]);
-    if (array_slot.isUninitialized()) return false;
-    const array_object = objectFromValue(array_slot) orelse return false;
-
-    const index_value = slotValueBorrowed(frame.locals[index_idx]);
-    const index_i32 = index_value.asInt32() orelse return false;
-    if (index_i32 < 0) return false;
-    const index: u32 = @intCast(index_i32);
-    if (index > core.atom.max_int_atom) return false;
-
-    const append_value = denseArrayAppendValueFromBytecode(frame, function, value_idx, value_get.next_pc) orelse return false;
-    const put_tail = decodeDenseArrayPutTail(function, frame, append_value.next_pc) orelse return false;
-    if (!try array_object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), append_value.value)) return false;
-    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, put_tail.completion_put, append_value.value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-
-    frame.pc = put_tail.tail_pc;
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    _ = fusion_stats.counted(.tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition, try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
     return true;
 }
 
@@ -3722,41 +2882,6 @@ fn tryFuseLocal0Local1DenseArrayIndexedAppend(
     if (!try array_object.appendDenseArrayIndex(ctx.runtime, index, core.atom.atomFromUInt32(index), append_value.value)) return false;
 
     frame.pc = append_value.next_pc + 1;
-    return true;
-}
-
-fn tryFuseLocal0Local1Int32ArithmeticStore(
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-) bool {
-    const code = function.code;
-    const multiplier = immediateInt32Operand(code, frame.pc) orelse return false;
-    if (multiplier.next_pc >= code.len or code[multiplier.next_pc] != op.mul) return false;
-    const induction_get = decodeLocalGet(code, multiplier.next_pc + 1) orelse return false;
-    if (induction_get.idx != 1) return false;
-    const shift = immediateInt32Operand(code, induction_get.next_pc) orelse return false;
-    if (shift.next_pc + 4 > code.len or code[shift.next_pc] != op.shr or code[shift.next_pc + 1] != op.xor or code[shift.next_pc + 2] != op.add) return false;
-    const or_mask = immediateInt32Operand(code, shift.next_pc + 3) orelse return false;
-    if (or_mask.next_pc >= code.len or code[or_mask.next_pc] != op.@"or") return false;
-    const store = decodeLocalPut(code, or_mask.next_pc + 1) orelse return false;
-    if (store.idx != 0) return false;
-    if (store.checked or (store.idx < function.var_is_const.len and function.var_is_const[store.idx])) return false;
-
-    if (frame.locals.len < 2 or frame.locals_uninit.len < 2) return false;
-    if (frame.localIsUninitialized(0) or frame.localIsUninitialized(1)) return false;
-    const accumulator = slotValueBorrowed(frame.locals[0]).asInt32() orelse return false;
-    const induction = slotValueBorrowed(frame.locals[1]).asInt32() orelse return false;
-
-    const product_exact = @as(i128, induction) * @as(i128, multiplier.value);
-    // Outside this range JS multiplication may round before bitwise ToInt32.
-    if (!safeIntegerI128(product_exact)) return false;
-    const product: i32 = @truncate(product_exact);
-    const logical_shift: i32 = @bitCast(@as(u32, @bitCast(induction)) >> @intCast(shift.value & 31));
-    const term = product ^ logical_shift;
-    const updated = (accumulator +% term) | or_mask.value;
-
-    frame.locals[0] = core.JSValue.int32(updated);
-    frame.pc = store.operand_pc + store.consume;
     return true;
 }
 
@@ -4231,81 +3356,6 @@ fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
     return true;
 }
 
-fn tryFuseCheckedLocalDenseArrayMaskedInt32OverwriteRange(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    induction_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
-    if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(induction_idx)) return false;
-    if (induction_idx < function.var_is_const.len and function.var_is_const[induction_idx]) return false;
-
-    const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
-    const pc = frame.pc;
-    const code = function.code;
-    const limit_operand = immediateInt32Operand(code, pc) orelse return false;
-    if (limit_operand.next_pc >= code.len or code[limit_operand.next_pc] != op.lt) return false;
-    const exit_branch = decodeFalseBranch(code, limit_operand.next_pc + 1) orelse return false;
-
-    const current_i = frame.locals[induction_idx].asInt32() orelse return false;
-    const limit = limit_operand.value;
-    if (current_i >= limit) {
-        frame.pc = exit_branch.false_pc;
-        return true;
-    }
-    if (current_i < 0 or limit < 0) return false;
-
-    const array_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
-    const array_value = bindingReadableBorrowed(frame, array_get) orelse return false;
-    const array_object = objectFromValue(array_value) orelse return false;
-
-    const index_get = decodeLocalGet(code, array_get.next_pc) orelse return false;
-    if (index_get.idx != induction_idx) return false;
-    const mask_operand = immediateInt32Operand(code, index_get.next_pc) orelse return false;
-    if (mask_operand.value < 0) return false;
-    if (mask_operand.next_pc >= code.len or code[mask_operand.next_pc] != op.@"and") return false;
-    const value_get = decodeLocalGet(code, mask_operand.next_pc + 1) orelse return false;
-    if (value_get.idx != induction_idx) return false;
-    const put_tail = decodeDenseArrayPutTail(function, frame, value_get.next_pc) orelse return false;
-
-    var tail_pc = put_tail.tail_pc;
-    if (tail_pc < code.len and code[tail_pc] == op.close_loc) {
-        if (tail_pc + 3 > code.len) return false;
-        const close_idx = readInt(u16, code[tail_pc + 1 ..][0..2]);
-        if (close_idx != induction_idx) return false;
-        if (varRefCellFromValue(frame.locals[induction_idx]) != null) return false;
-        tail_pc += 3;
-    }
-    const tail_get = decodeLocalGet(code, tail_pc) orelse return false;
-    if (tail_get.idx != induction_idx) return false;
-    if (tail_get.next_pc >= code.len or code[tail_get.next_pc] != op.post_inc) return false;
-    const tail_put = decodeLocalPut(code, tail_get.next_pc + 1) orelse return false;
-    if (tail_put.idx != induction_idx) return false;
-    const tail_drop_pc = tail_put.operand_pc + tail_put.consume;
-    if (tail_drop_pc >= code.len or code[tail_drop_pc] != op.drop) return false;
-    const goto_pc = tail_drop_pc + 1;
-    if (goto_pc + 2 > code.len or code[goto_pc] != op.goto8) return false;
-    const goto_operand_pc = goto_pc + 1;
-    const goto_diff: i8 = @bitCast(code[goto_operand_pc]);
-    const goto_target_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
-    if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
-
-    if (!try array_object.overwriteDenseArrayInt32MaskedIndexRange(ctx.runtime, @intCast(current_i), @intCast(limit), @intCast(mask_operand.value))) return false;
-
-    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, put_tail.completion_put, core.JSValue.int32(limit - 1), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
-    frame.pc = exit_branch.false_pc;
-    return true;
-}
-
 fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -4484,104 +3534,6 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
     return true;
 }
 
-fn tryFuseCheckedLocalMathMinMaxAdd(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 5 > code.len) return false;
-    const global_op = code[pc];
-    if (global_op != op.get_var and global_op != op.get_var_undef) return false;
-    const global_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (global_atom != atom_math) return false;
-
-    const field_pc = pc + 5;
-    if (field_pc + 5 > code.len or code[field_pc] != op.get_field2) return false;
-    const method_atom = readInt(u32, code[field_pc + 1 ..][0..4]);
-    const arg0 = borrowedSimpleCallArg(frame, function, field_pc + 5) orelse return false;
-    const arg1 = borrowedSimpleCallArg(frame, function, arg0.next_pc) orelse return false;
-    const call_pc = arg1.next_pc;
-    if (call_pc + 4 > code.len or code[call_pc] != op.call_method) return false;
-    if (readInt(u16, code[call_pc + 1 ..][0..2]) != 2) return false;
-    const add_pc = call_pc + 3;
-    if (code[add_pc] != op.add) return false;
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const decoded_store = decodeLocalPut(code, store_pc) orelse return false;
-        const candidate_drop_pc = decoded_store.operand_pc + decoded_store.consume;
-        if (candidate_drop_pc >= code.len or code[candidate_drop_pc] != op.drop) return false;
-        drop_pc = candidate_drop_pc;
-    }
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (store.idx >= frame.locals.len or store.idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx)) return false;
-    if (store.checked and store.idx < function.var_is_const.len and function.var_is_const[store.idx]) return false;
-
-    const math_value = fastGlobalDataValueForAtom(ctx, function, global, frame, global_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-    const method_value = ordinaryDataPropertyBorrowedValueForFastPath(ctx.runtime, math_value, method_atom) orelse return false;
-    const function_object = objectFromValue(method_value) orelse return false;
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return false;
-    if (native_ref.domain != .math) return false;
-    const is_max = switch (native_ref.id) {
-        7 => false,
-        8 => true,
-        else => return false,
-    };
-
-    const math_number = mathMinMaxPrimitive2(arg0.value, arg1.value, is_max) orelse return false;
-    const rhs = value_ops.numberToValue(math_number);
-    const lhs = slotValueBorrowed(frame.locals[local_idx]);
-    if (!lhs.isNumber()) return false;
-    const updated = try simpleNumericBinary(ctx.runtime, op.add, lhs, rhs);
-    errdefer updated.free(ctx.runtime);
-
-    if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
-    try setSlotValue(ctx, &frame.locals[store.idx], updated);
-    if (!store.checked and store.idx < function.var_is_lexical.len and function.var_is_lexical[store.idx]) {
-        frame.clearLocalUninitialized(store.idx);
-    }
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, store.idx, sync_global_lexical_locals);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn fastGlobalDataValueForAtom(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    atom_id: core.Atom,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-) ?core.JSValue {
-    if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
-        lexical_value.free(ctx.runtime);
-        return null;
-    }
-    return globalOwnDataPropertyValue(global, atom_id);
-}
-
 fn fastGlobalDataValueForRange(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
@@ -4635,69 +3587,11 @@ fn tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(
     if (update_op != op.post_inc and update_op != op.post_dec) return false;
 
     frame.pc = saved_pc + 3;
-    if (try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, loop_idx, update_op, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal)) {
+    if (fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, loop_idx, update_op, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) {
         return true;
     }
     frame.pc = saved_pc;
     return false;
-}
-
-fn tryFuseCheckedLocalDenseArrayModFieldInt32Add(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    allow_loop_tail_fusion: bool,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const pc = frame.pc;
-    const code = function.code;
-    if (pc + 16 > code.len) return false;
-    if (code[pc] != op.get_loc_check) return false;
-    const array_idx = readInt(u16, code[pc + 1 ..][0..2]);
-    if (code[pc + 3] != op.get_loc_check) return false;
-    const index_idx = readInt(u16, code[pc + 4 ..][0..2]);
-    const modulus = smallPushOpcodeIndex(code[pc + 6]) orelse return false;
-    if (modulus == 0) return false;
-    if (code[pc + 7] != op.mod or code[pc + 8] != op.get_array_el or code[pc + 9] != op.get_field) return false;
-    if (code[pc + 14] != op.add) return false;
-    const store_tail = decodeOptionalLocalStoreTail(function, frame, pc + 15) orelse return false;
-    const store_pc = store_tail.store_pc;
-    const store = decodeLocalPut(code, store_pc) orelse return false;
-    if (store.idx != local_idx) return false;
-    if (local_idx >= frame.locals.len or local_idx >= frame.locals_uninit.len) return false;
-    if (array_idx >= frame.locals.len or array_idx >= frame.locals_uninit.len) return false;
-    if (index_idx >= frame.locals.len or index_idx >= frame.locals_uninit.len) return false;
-    if (frame.localIsUninitialized(local_idx) or frame.localIsUninitialized(array_idx) or frame.localIsUninitialized(index_idx)) return false;
-    if (local_idx < function.var_is_const.len and function.var_is_const[local_idx]) return false;
-
-    const array_slot = frame.locals[array_idx];
-    if (varRefCellFromValue(array_slot) != null) return false;
-    const array_object = objectFromValue(array_slot) orelse return false;
-    if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
-    if (!array_object.flags.is_array or array_object.arrayElementStorageMode() != .dense) return false;
-
-    const index_value = frame.locals[index_idx].asInt32() orelse return false;
-    if (index_value < 0) return false;
-    const element_index: usize = @intCast(@rem(index_value, @as(i32, @intCast(modulus))));
-    if (element_index >= @as(usize, @intCast(array_object.length))) return false;
-    const elements = array_object.arrayElements();
-    if (element_index >= elements.len) return false;
-    const element = elements[element_index] orelse return false;
-
-    const field_atom = readInt(u32, code[pc + 10 ..][0..4]);
-    const field_value = ordinaryDataPropertyBorrowedValueForFastPath(ctx.runtime, element, field_atom) orelse return false;
-    const lhs = frame.locals[local_idx].asInt32() orelse return false;
-    const rhs = field_value.asInt32() orelse return false;
-
-    const updated = fastInt32Add(lhs, rhs);
-    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, local_idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    frame.pc = store_tail.tail_pc orelse localPutNextPc(store);
-    _ = try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
 }
 
 fn smallPushOpcodeIndex(opc: u8) ?usize {
@@ -4739,101 +3633,14 @@ fn tryFuseVarRefSimpleStringCall1GlobalIntArgument(
     const arg_atom = readInt(u32, code[arg_pc + 1 ..][0..4]);
     const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, arg_pc, arg_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
     const arg_i32 = arg_value.asInt32() orelse return false;
-    if (kind == .percent_hex_byte and
-        try tryFuseStackAddPercentHexGlobalStore(ctx, function, global, frame, stack, arg_i32, arg_pc + 6, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))
-    {
-        return true;
-    }
 
     const result = try simpleStringCallResultFromInt32(ctx.runtime, kind, arg_i32) orelse return false;
     var result_owned = true;
     errdefer if (result_owned) result.free(ctx.runtime);
 
     frame.pc = arg_pc + 6;
-    if (try tryFuseStackAddGlobalStore(ctx, function, global, frame, stack, result, &result_owned, eval_local_names, eval_var_ref_names, eval_with_object)) return true;
     try stack.pushOwned(result);
     result_owned = false;
-    return true;
-}
-
-fn tryFuseStackAddPercentHexGlobalStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    byte_i32: i32,
-    add_pc: usize,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-) !bool {
-    const code = function.code;
-    if (add_pc >= code.len or code[add_pc] != op.add) return false;
-    var store_pc = add_pc + 1;
-    var drop_pc: ?usize = null;
-    if (store_pc < code.len and code[store_pc] == op.dup) {
-        store_pc += 1;
-        const candidate = decodeGlobalPut(code, store_pc) orelse return false;
-        if (candidate.next_pc >= code.len or code[candidate.next_pc] != op.drop) return false;
-        drop_pc = candidate.next_pc;
-    }
-    const store = decodeGlobalPut(code, store_pc) orelse return false;
-    if (!canFuseGlobalDataWrite(function, frame, store.atom, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (!globalWritableDataStoreAvailableForFastPath(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom)) return false;
-
-    const lhs = stack.peekBorrowed() orelse return false;
-    const lhs_string = stringFromValue(lhs) orelse return false;
-    if (lhs_string.isRope()) return false;
-    const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
-    const suffix_string = try ctx.runtime.percentHexString(@truncate(@as(u32, @bitCast(byte_i32))));
-    const suffix_bytes = suffix_string.borrowLatin1() orelse return false;
-
-    const updated_string = try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, suffix_bytes);
-    var updated_owned = true;
-    errdefer if (updated_owned) updated_string.value().free(ctx.runtime);
-    if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, updated_string.value())) {
-        updated_string.value().free(ctx.runtime);
-        return false;
-    }
-    updated_owned = false;
-
-    const lhs_owned = try stack.pop();
-    lhs_owned.free(ctx.runtime);
-    frame.pc = if (drop_pc) |drop| drop + 1 else store.next_pc;
-    _ = tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue);
-    return true;
-}
-
-fn tryFuseStackAddGlobalStore(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    rhs: core.JSValue,
-    rhs_owned: *bool,
-    eval_local_names: []const core.Atom,
-    eval_var_ref_names: []const core.Atom,
-    eval_with_object: core.JSValue,
-) !bool {
-    if (frame.pc + 6 > function.code.len or function.code[frame.pc] != op.add or function.code[frame.pc + 1] != op.put_var) return false;
-    const store_atom = readInt(u32, function.code[frame.pc + 2 ..][0..4]);
-    if (!canUseFastGlobalVarLookup(function, store_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    const lhs = stack.peekBorrowed() orelse return false;
-    if (!lhs.isString() and !rhs.isString()) return false;
-
-    const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
-    errdefer updated.free(ctx.runtime);
-    const store_pc = frame.pc + 1;
-    const stored = setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store_atom, updated);
-    if (!stored) return false;
-    const lhs_owned = try stack.pop();
-    defer lhs_owned.free(ctx.runtime);
-    rhs_owned.* = false;
-    defer rhs.free(ctx.runtime);
-    frame.pc += 6;
     return true;
 }
 
@@ -4954,28 +3761,8 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     }
     try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    _ = try tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(ctx, function, global, frame, local_idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    _ = try tryFuseDroppedLocalPostUpdateGoto8AtPc(ctx, function, global, frame, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    return true;
-}
-
-fn tryFuseLocalStringSliceConstLocalStoreFromGet(
-    ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    local_idx: u16,
-    field_pc: usize,
-    sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-) !bool {
-    const code = function.code;
-    if (field_pc + 5 > code.len or code[field_pc] != op.get_field2) return false;
-    const receiver = localReadableBorrowed(frame, local_idx, false) orelse return false;
-    const atom_id = readInt(u32, code[field_pc + 1 ..][0..4]);
-    const decoded = decodeStringSliceConstLocalStore(ctx, function, global, frame, receiver, atom_id, field_pc + 5) orelse return false;
-    try storeStringSliceConstLocal(ctx, function, global, frame, receiver, decoded, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    _ = fusion_stats.counted(.tryFuseFollowingLocalStringLengthGtConstSliceConstBranch, try tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(ctx, function, global, frame, local_idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    _ = fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8AtPc, try tryFuseDroppedLocalPostUpdateGoto8AtPc(ctx, function, global, frame, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
     return true;
 }
 

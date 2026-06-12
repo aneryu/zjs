@@ -1,3 +1,4 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
@@ -531,8 +532,6 @@ pub fn constructArrayBufferNativeRecord(
 
 pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
     stack: *stack_mod.Stack,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
@@ -576,16 +575,6 @@ pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     const buffer_prototype = buffer_constructor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
     const typed_array_prototype = typed_array_constructor_object.getOwnDataObjectBorrowed(core.atom.ids.prototype) orelse return null;
 
-    if (try tryFuseTypedArrayConstructLengthPrint(
-        ctx,
-        output,
-        global,
-        stack,
-        function,
-        frame,
-        typed_length,
-    )) |value| return value;
-
     const backing_buffer = if (shared)
         try builtins.buffer.sharedArrayBufferConstructLength(ctx.runtime, byte_length, null, buffer_prototype)
     else
@@ -603,39 +592,6 @@ pub fn tryFuseTypedArrayFromArrayBufferConstructorSequence(
     dropped_new_target.free(ctx.runtime);
     dropped_constructor.free(ctx.runtime);
     return result;
-}
-
-pub fn tryFuseTypedArrayConstructLengthPrint(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.Bytecode,
-    frame: *frame_mod.Frame,
-    typed_length: usize,
-) !?core.JSValue {
-    if (typed_length > @as(usize, @intCast(std.math.maxInt(i32)))) return null;
-    const code = function.code;
-    var pc = frame.pc + 3;
-    const store = decodeTypedArrayLengthPrintStore(code, pc) orelse return null;
-    pc = store.next_pc;
-    if (pc + 5 > code.len or code[pc] != op.get_var) return null;
-    const print_atom = readInt(u32, code[pc + 1 ..][0..4]);
-    if (print_atom != core.atom.predefinedId("print", .string).?) return null;
-    if (!globalHostOutputAutoInit(ctx.runtime, global, print_atom)) return null;
-    pc += 5;
-    const local_get = decodeTypedArrayLengthPrintLocalGet(code, pc) orelse return null;
-    if (local_get.idx != store.local_index) return null;
-    pc = local_get.next_pc;
-    if (pc + 4 > code.len or code[pc] != op.get_length or code[pc + 1] != op.call1 or code[pc + 2] != op.drop or code[pc + 3] != op.return_undef) return null;
-
-    try printHostOutputArgs(ctx.runtime, output, &.{core.JSValue.int32(@intCast(typed_length))});
-    const dropped_new_target = try stack.pop();
-    const dropped_constructor = try stack.pop();
-    frame.pc = pc + 4;
-    dropped_new_target.free(ctx.runtime);
-    dropped_constructor.free(ctx.runtime);
-    return core.JSValue.undefinedValue();
 }
 
 pub const TypedArrayLengthPrintStore = struct {

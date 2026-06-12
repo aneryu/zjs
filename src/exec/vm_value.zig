@@ -1,3 +1,4 @@
+const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 
 const bytecode = @import("../bytecode/root.zig");
@@ -57,7 +58,7 @@ pub fn pushI16OperandVm(
     comptime tryFuseGlobalInt32PrefixTermsStore: anytype,
     comptime globalLexicalValue: anytype,
 ) !void {
-    if (tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object, globalLexicalValue)) return;
+    if (fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object, globalLexicalValue))) return;
     try pushI16Operand(stack, function, frame);
 }
 
@@ -268,8 +269,8 @@ pub fn pushAtomValueVm(
     comptime globalLexicalValue: anytype,
 ) !void {
     const global_env = fast_paths.global_env;
-    if (try tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object, globalLexicalValue)) return;
-    if (ctx.runtime.opcode_profile == null and try tryPushRegexpLiteralFromAtomPair(ctx, global_env.global, stack, function, frame, fast_paths.regexp_prototype)) return;
+    if (fusion_stats.counted(.tryFuseAtomPercentHexGlobalStringStore, try tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object, globalLexicalValue))) return;
+    if (ctx.runtime.opcode_profile == null and try tryPushRegexpLiteralFromAtomPair(ctx, stack, function, frame, fast_paths.regexp_prototype)) return;
     try pushAtomValue(ctx, stack, function, frame);
 }
 

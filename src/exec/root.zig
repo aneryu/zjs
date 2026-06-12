@@ -27,6 +27,7 @@ pub const globals = @import("globals.zig");
 pub const closure = @import("closure.zig");
 pub const collection_adapter = @import("collection_adapter.zig");
 pub const shared = @import("shared.zig");
+pub const fusion_stats = @import("vm_fusion_stats.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {
     return bytecode.opcode.nameOf(opcode);
