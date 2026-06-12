@@ -85,11 +85,14 @@ available only through git history.
   iterating, and save the full Debug suite for meaningful checkpoints or before
   handing off substantial code changes)
 - `zig build test -Doptimize=ReleaseSafe --summary all` (ReleaseSafe verification; run ONLY once as a final gate before final commits or CI gates to ensure optimized loop safety)
-- `zig build test-nanbox --summary all` (NaN-boxed JSValue mode guard. REQUIRED
+- `zig build test-altrepr --summary all` (alternate JSValue representation
+  guard: runs the suite with the non-default 16-byte layout. REQUIRED
   whenever a change touches `src/core/value.zig` or value-representation
   semantics; for such changes also run the test262 gate once with
-  `-Dzjs_nan_boxing=true` at stage close. The 8-byte mode is kept as the
-  wasm32/32-bit migration path and must not rot.)
+  `-Dzjs_nan_boxing=false` at stage close. The default is the 8-byte
+  NaN-boxed layout — compute parity, ~10% lower RSS on value-dense heaps —
+  and the 16-byte layout stays as the reference representation; neither
+  mode may rot.)
 - `zig build test-oom --summary all` (不再执行 / No longer executed)
 - `zig build test-oom-exhaustive --summary all` (不再执行 / No longer executed)
 

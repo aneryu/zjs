@@ -16,7 +16,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const zjs_enable_ic = b.option(bool, "zjs_enable_ic", "Enable shape-keyed inline caches") orelse true;
     const zjs_enable_opcode_profile = b.option(bool, "zjs_enable_opcode_profile", "Enable per-opcode profiling scopes") orelse false;
-    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse false;
+    // Default flipped after the 30-iter measurement run: compute parity with
+    // the 16-byte layout, ~10% lower RSS on value-dense heaps, slightly
+    // faster startup. The 16-byte representation stays selectable (and
+    // guarded by the test-altrepr step) as the reference layout.
+    const zjs_nan_boxing = b.option(bool, "zjs_nan_boxing", "Use the 8-byte NaN-boxed JSValue representation") orelse true;
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "zjs_enable_ic", zjs_enable_ic);
     engine_options.addOption(bool, "zjs_enable_opcode_profile", zjs_enable_opcode_profile);
@@ -469,15 +473,16 @@ pub fn build(b: *std.Build) void {
     const smoke_step = b.step("smoke", "Run JavaScript smoke fixtures against zjs");
     smoke_step.dependOn(&run_smoke_tests.step);
 
-    // NaN-boxed JSValue mode guard: runs the unified suite in a nested build
-    // with -Dzjs_nan_boxing=true (a full second build graph, so the plugin
-    // fixtures recompile with a matching ABI fingerprint). Required for any
-    // change touching core/value.zig or value-representation semantics.
-    const nanbox_tests = b.addSystemCommand(&.{
-        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=true", "--summary", "all",
+    // Alternate JSValue representation guard: runs the unified suite in a
+    // nested build with the non-default representation (a full second build
+    // graph, so the plugin fixtures recompile with a matching ABI
+    // fingerprint). Required for any change touching core/value.zig or
+    // value-representation semantics.
+    const altrepr_tests = b.addSystemCommand(&.{
+        b.graph.zig_exe, "build", "test", "-Dzjs_nan_boxing=false", "--summary", "all",
     });
-    const nanbox_step = b.step("test-nanbox", "Run the unified tests with the NaN-boxed JSValue representation");
-    nanbox_step.dependOn(&nanbox_tests.step);
+    const altrepr_step = b.step("test-altrepr", "Run the unified tests with the non-default (16-byte) JSValue representation");
+    altrepr_step.dependOn(&altrepr_tests.step);
 
     // User-facing steps to expose
     const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
