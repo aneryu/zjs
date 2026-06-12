@@ -188,7 +188,6 @@ pub fn borrowedSimpleCallable(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?BorrowedCallable {
     if (pc >= function.code.len) return null;
     const code = function.code;
@@ -206,7 +205,7 @@ pub fn borrowedSimpleCallable(
         op.get_var, op.get_var_undef => blk: {
             if (pc + 5 > code.len) return null;
             const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
-            const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+            const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
             break :blk .{ .value = value, .next_pc = pc + 5 };
         },
         else => if (decodeLocalGet(code, pc)) |get| blk: {
@@ -428,14 +427,12 @@ pub fn storeBindingOwnedValue(
     binding: BindingPut,
     value: core.JSValue,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (binding.is_var_ref) {
-        try setSlotValue(ctx, &frame.var_refs[binding.idx], value);
+        try shared_vm.setSlotValue(ctx, &frame.var_refs[binding.idx], value);
     } else {
-        try setSlotValue(ctx, &frame.locals[binding.idx], value);
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[binding.idx], value);
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
@@ -447,12 +444,10 @@ pub fn storeLocalCompletionBorrowedValue(
     completion_put: ?LocalPut,
     value: core.JSValue,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (completion_put) |completion| {
-        try setSlotValue(ctx, &frame.locals[completion.idx], value.dup());
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], value.dup());
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
     }
 }
 
@@ -607,14 +602,13 @@ pub fn borrowedSimpleCallArgWithContext(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?BorrowedArg {
     if (pc >= function.code.len) return null;
     const code = function.code;
     if (code[pc] == op.get_var or code[pc] == op.get_var_undef) {
         if (pc + 5 > code.len) return null;
         const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
-        const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+        const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
         return .{ .value = value, .next_pc = pc + 5 };
     }
     return borrowedSimpleCallArg(frame, function, pc);
@@ -958,10 +952,9 @@ pub fn fastGlobalDataValueForAtomAtPc(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -978,11 +971,10 @@ pub fn fastInstalledGlobalDataValueForAtomAtPc(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?core.JSValue {
     if (!canUseInstalledGlobalDataIc(ctx, function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object, global)) return null;
     if (!frame.current_function.isUndefined() and functionFrameBindingShadowsGlobal(ctx.runtime, function, frame, atom_id)) return null;
-    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -1106,8 +1098,6 @@ pub fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
     next_pc: usize,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion) return false;
     const code = function.code;
@@ -1142,8 +1132,8 @@ pub fn tryFuseDroppedLocalPostUpdateGoto8FromGet(
         else => unreachable,
     };
 
-    try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = target_pc;
     _ = fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchAtPc, tryFuseLocalInt32LessThanArgFalseBranchAtPc(function, frame, target_pc));
     return true;
@@ -1157,11 +1147,9 @@ pub fn tryFuseDroppedLocalPostUpdateGoto8AtPc(
     pc: usize,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const get = decodeLocalGet(function.code, pc) orelse return false;
-    return fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, get.idx, get.next_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    return fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, get.idx, get.next_pc, allow_loop_tail_fusion, sync_global_lexical_locals));
 }
 
 fn tryFuseLocalInt32LessThanArgFalseBranchAtPc(
@@ -1357,12 +1345,10 @@ pub fn tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(
     frame: *frame_mod.Frame,
     local_idx: u16,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const get = decodeLocalGet(function.code, frame.pc) orelse return false;
     if (get.checked or get.idx != local_idx) return false;
-    return fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, local_idx, get.next_pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    return fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, local_idx, get.next_pc, sync_global_lexical_locals));
 }
 
 const StringSliceConstLocalStore = struct {
@@ -1418,19 +1404,17 @@ pub fn storeStringSliceConstLocal(
     receiver: core.JSValue,
     decoded: StringSliceConstLocalStore,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     const result = try shared_vm.stringSliceValue(ctx.runtime, receiver, decoded.start, decoded.len);
     var result_owned = true;
     errdefer if (result_owned) result.free(ctx.runtime);
 
-    try setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
+    try shared_vm.setSlotValue(ctx, &frame.locals[decoded.store.idx], result);
     result_owned = false;
     if (decoded.store.idx < function.var_is_lexical.len and function.var_is_lexical[decoded.store.idx]) {
         frame.clearLocalUninitialized(decoded.store.idx);
     }
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, decoded.store.idx, sync_global_lexical_locals);
     frame.pc = decoded.store.operand_pc + decoded.store.consume;
 }
 
@@ -1442,8 +1426,6 @@ pub fn tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(
     local_idx: u16,
     length_pc: usize,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const code = function.code;
     if (length_pc >= code.len or code[length_pc] != op.get_length) return false;
@@ -1463,7 +1445,7 @@ pub fn tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(
     if (decoded.store.operand_pc + decoded.store.consume != branch.false_pc) return false;
 
     if (@as(i64, @intCast(string_value.len())) > @as(i64, threshold.value)) {
-        try storeStringSliceConstLocal(ctx, function, global, frame, receiver, decoded, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeStringSliceConstLocal(ctx, function, global, frame, receiver, decoded, sync_global_lexical_locals);
     } else {
         frame.pc = branch.false_pc;
     }
@@ -1814,77 +1796,6 @@ fn varRefCellFromValue(value: core.JSValue) ?*core.Object {
     const object: *core.Object = @fieldParentPtr("header", header);
     if (object.class_payload_kind != .var_ref) return null;
     return object;
-}
-
-fn testHasPropertyForWith(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    key: core.Atom,
-    caller_function: *const bytecode.Bytecode,
-    caller_frame: *frame_mod.Frame,
-) !bool {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = caller_function;
-    _ = caller_frame;
-    const object = property_ops.expectObject(value) catch return false;
-    return object.hasProperty(key);
-}
-
-fn testIsBlockedByUnscopables(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    key: core.Atom,
-    caller_function: *const bytecode.Bytecode,
-    caller_frame: *frame_mod.Frame,
-) !bool {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = value;
-    _ = key;
-    _ = caller_function;
-    _ = caller_frame;
-    return false;
-}
-
-fn testGetValueProperty(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    value: core.JSValue,
-    key: core.Atom,
-    caller_function: *const bytecode.Bytecode,
-    caller_frame: *frame_mod.Frame,
-) !core.JSValue {
-    _ = ctx;
-    _ = output;
-    _ = global;
-    _ = caller_function;
-    _ = caller_frame;
-    const object = property_ops.expectObject(value) catch return error.TypeError;
-    return object.getProperty(key);
-}
-
-fn testHandleCatchableRuntimeError(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-    err: anytype,
-) !bool {
-    _ = ctx;
-    _ = stack;
-    _ = frame;
-    _ = catch_target;
-    _ = global;
-    return err;
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {

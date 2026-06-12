@@ -118,8 +118,6 @@ fn tryFuseGlobalInductionInt32AddRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
     if (!canUseFastGlobalVarLookup(function, accumulator_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
@@ -196,7 +194,7 @@ fn tryFuseGlobalInductionInt32AddRange(
     }
     if (has_completion_value) {
         defer completion_value.free(ctx.runtime);
-        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, completion_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, completion_value, sync_global_lexical_locals);
     }
 
     const induction_next = core.JSValue.int32(limit.value);
@@ -222,120 +220,106 @@ pub fn getVar(
     eval_var_ref_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
     eval_with_object: core.JSValue,
-    comptime frameCurrentFunctionIsArrow: anytype,
-    comptime lookupFrameLocalValue: anytype,
-    comptime lookupFrameVarRef: anytype,
-    comptime lookupFrameFirstEvalBindingValue: anytype,
-    comptime withObjectBindingValue: anytype,
-    comptime lookupEvalBindingValue: anytype,
-    comptime lookupParentFunctionEvalBindingValue: anytype,
-    comptime directEvalShouldExposeImplicitArguments: anytype,
-    comptime frameArgumentsObject: anytype,
-    comptime globalLexicalValue: anytype,
-    comptime getValueProperty: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const site_pc = frame.pc - 1;
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
     if (ctx.runtime.opcode_profile != null) core.profile.recordGlobalLookup();
     if (atom_id == core.atom.ids.undefined_ and canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lex_value| {
             lex_value.free(ctx.runtime);
         } else {
             try stack.pushOwned(core.JSValue.undefinedValue());
             return .done;
         }
     }
-    if (fastInstalledGlobalDataValueForAtomAtPc(ctx, function, global, frame, site_pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) |value| {
-        return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal, handleCatchableRuntimeError);
+    if (fastInstalledGlobalDataValueForAtomAtPc(ctx, function, global, frame, site_pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) |value| {
+        return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
     }
     if (canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) {
-        if (globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             errdefer lex_value.free(ctx.runtime);
             try stack.pushOwned(lex_value);
             return .done;
         }
-        if (fusion_stats.counted(.tryFuseHostOutputAutoInitAtomCall1, try tryFuseHostOutputAutoInitAtomCall1(ctx, output, global, stack, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
+        if (fusion_stats.counted(.tryFuseHostOutputAutoInitAtomCall1, try tryFuseHostOutputAutoInitAtomCall1(ctx, output, global, stack, function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
         if (globalDataPropertyValueForFastPath(ctx.runtime, global, function, site_pc, atom_id)) |value| {
-            return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal, handleCatchableRuntimeError);
+            return try useFastGlobalDataValue(ctx, output, stack, function, global, frame, catch_target, site_pc, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object);
         }
     }
     const value = value: {
         const prefer_eval_arguments = atom_id == core.atom.ids.arguments and
-            frameCurrentFunctionIsArrow(frame);
+            shared_vm.frameCurrentFunctionIsArrow(frame);
         if (prefer_eval_arguments) {
-            if (lookupFrameLocalValue(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (shared_vm.lookupFrameLocalValue(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
-            if (lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (shared_vm.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
-            if (lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
+            if (shared_vm.lookupFrameFirstEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
         } else {
-            if (withObjectBindingValue(ctx, output, global, eval_with_object, atom_id, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (shared_vm.withObjectBindingValue(ctx, output, global, eval_with_object, atom_id, function, frame) catch |err| {
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }) |with_value| {
                 break :value with_value;
             }
-            if (lookupEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
+            if (shared_vm.lookupEvalBindingValue(ctx.runtime, eval_local_names, eval_local_slots, eval_var_ref_names, eval_var_refs, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
-            if (lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
+            if (shared_vm.lookupFrameVarRef(ctx.runtime, function, frame, atom_id)) |slot_value| {
                 if (slot_value.isUninitialized()) {
                     slot_value.free(ctx.runtime);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                     return error.ReferenceError;
                 }
                 break :value slot_value;
             }
         }
-        if (lookupParentFunctionEvalBindingValue(ctx.runtime, frame, atom_id)) |slot_value| {
+        if (shared_vm.lookupParentFunctionEvalBindingValue(ctx.runtime, frame, atom_id)) |slot_value| {
             if (slot_value.isUninitialized()) {
                 slot_value.free(ctx.runtime);
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             break :value slot_value;
         }
         if (atom_id == core.atom.ids.undefined_) break :value core.JSValue.undefinedValue();
-        if (atom_id == core.atom.ids.arguments and directEvalShouldExposeImplicitArguments(frame)) {
-            break :value try frameArgumentsObject(ctx, global, frame);
+        if (atom_id == core.atom.ids.arguments and shared_vm.directEvalShouldExposeImplicitArguments(frame)) {
+            break :value try shared_vm.frameArgumentsObject(ctx, global, frame);
         }
-        if (globalLexicalValue(ctx, atom_id)) |lex_value| {
+        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lex_value| {
             if (lex_value.isUninitialized()) {
                 lex_value.free(ctx.runtime);
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             break :value lex_value;
@@ -347,15 +331,15 @@ pub fn getVar(
         defer global_value.free(ctx.runtime);
         if (opc == op.get_var) {
             const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             };
             if (!has_global_binding) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
         }
-        break :value try getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
+        break :value try shared_vm.getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
     };
     errdefer value.free(ctx.runtime);
     try stack.pushOwned(value);
@@ -400,11 +384,10 @@ fn tryFuseHostOutputAutoInitAtomCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     if (atom_id != atom_print) return false;
     if (!globalHostOutputAutoInit(ctx.runtime, global, atom_id)) return false;
-    return fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue));
+    return fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object));
 }
 
 fn tryFuseHostOutputCall1(
@@ -417,17 +400,16 @@ fn tryFuseHostOutputCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     if (fusion_stats.counted(.tryFuseHostOutputAtomLiteralCall1, try tryFuseHostOutputAtomLiteralCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputStringNumberConstCall1, try tryFuseHostOutputStringNumberConstCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputStringLocalNumberCall1, try tryFuseHostOutputStringLocalNumberCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputNumberStaticLiteralCall1, try tryFuseHostOutputNumberStaticLiteralCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return true;
+    if (fusion_stats.counted(.tryFuseHostOutputStringNumberConstCall1, try tryFuseHostOutputStringNumberConstCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+    if (fusion_stats.counted(.tryFuseHostOutputStringLocalNumberCall1, try tryFuseHostOutputStringLocalNumberCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+    if (fusion_stats.counted(.tryFuseHostOutputNumberStaticLiteralCall1, try tryFuseHostOutputNumberStaticLiteralCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputLocalInt32AddCall1, try tryFuseHostOutputLocalInt32AddCall1(ctx, output, stack, function, frame))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputLocalSimpleNumericCall0Call1, try tryFuseHostOutputLocalSimpleNumericCall0Call1(ctx, output, stack, function, frame))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputLocalCall1, try tryFuseHostOutputLocalCall1(ctx, output, stack, function, frame))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputTypeofLocalCall1, try tryFuseHostOutputTypeofLocalCall1(ctx, output, stack, function, frame))) return true;
-    if (fusion_stats.counted(.tryFuseHostOutputLocalFieldStrictEqUndefinedCall1, try tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return true;
+    if (fusion_stats.counted(.tryFuseHostOutputLocalFieldStrictEqUndefinedCall1, try tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputLocalImmediateCompareCall1, try tryFuseHostOutputLocalImmediateCompareCall1(ctx, output, stack, function, frame))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputLocalLengthCall1, try tryFuseHostOutputLocalLengthCall1(ctx, output, stack, function, frame))) return true;
     if (fusion_stats.counted(.tryFuseHostOutputLocalFieldCall1, try tryFuseHostOutputLocalFieldCall1(ctx, output, stack, function, frame))) return true;
@@ -471,7 +453,6 @@ fn tryFuseHostOutputStringNumberConstCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     const pc = frame.pc;
     const code = function.code;
@@ -481,7 +462,7 @@ fn tryFuseHostOutputStringNumberConstCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_string) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
+    if (shared_vm.globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -506,7 +487,6 @@ fn tryFuseHostOutputStringLocalNumberCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     const pc = frame.pc;
     const code = function.code;
@@ -516,7 +496,7 @@ fn tryFuseHostOutputStringLocalNumberCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_string) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
+    if (shared_vm.globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -543,7 +523,6 @@ fn tryFuseHostOutputNumberStaticLiteralCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     const pc = frame.pc;
     const code = function.code;
@@ -553,7 +532,7 @@ fn tryFuseHostOutputNumberStaticLiteralCall1(
     const callee_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (callee_atom != atom_number) return false;
     if (!canUseFastGlobalVarLookup(function, callee_atom, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx, callee_atom)) |lex_value| {
+    if (shared_vm.globalLexicalValue(ctx, callee_atom)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -668,7 +647,6 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     _ = global;
     const code = function.code;
@@ -686,7 +664,7 @@ fn tryFuseHostOutputLocalFieldStrictEqUndefinedCall1(
     const call_pc = cmp_pc + 1;
     if (call_pc >= code.len or code[call_pc] != op.call1) return false;
     if (!canUseFastGlobalUndefinedLookup(function, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
-    if (globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
+    if (shared_vm.globalLexicalValue(ctx, core.atom.ids.undefined_)) |lex_value| {
         lex_value.free(ctx.runtime);
         return false;
     }
@@ -851,29 +829,25 @@ fn useFastGlobalDataValue(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     if (atom_id == atom_print and isHostOutputFunctionValue(ctx.runtime, value) and
-        fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
+        fusion_stats.counted(.tryFuseHostOutputCall1, try tryFuseHostOutputCall1(ctx, output, global, stack, function, frame, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     if (atom_id == atom_date and fusion_stats.counted(.tryFuseGlobalDateNowCall, try tryFuseGlobalDateNowCall(ctx, stack, function, frame, value))) return .done;
     if (atom_id == atom_string and fusion_stats.counted(.tryFuseGlobalStringCall1NumberConst, try tryFuseGlobalStringCall1NumberConst(ctx.runtime, stack, function, frame, value))) return .done;
-    if (fusion_stats.counted(.tryFuseGlobalInductionInt32AddRange, try tryFuseGlobalInductionInt32AddRange(ctx, function, global, frame, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return .done;
+    if (fusion_stats.counted(.tryFuseGlobalInductionInt32AddRange, try tryFuseGlobalInductionInt32AddRange(ctx, function, global, frame, atom_id, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     const value_int = value.asInt32();
     if (value_int != null) {
         if (fusion_stats.counted(.tryFuseGlobalDataInt32CompareFalseBranch, tryFuseGlobalDataInt32CompareFalseBranch(function, frame, value))) return .done;
-        if (fusion_stats.counted(.tryFuseGlobalDataInt32ImmediateBinary, try tryFuseGlobalDataInt32ImmediateBinary(ctx, global, stack, function, frame, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
+        if (fusion_stats.counted(.tryFuseGlobalDataInt32ImmediateBinary, try tryFuseGlobalDataInt32ImmediateBinary(ctx, global, stack, function, frame, atom_id, value, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
     }
     if (value_int != null or value.asShortBigInt() != null) {
         if (nextOpIsPostUpdate(function, frame) and
             fusion_stats.counted(.tryFuseDroppedGlobalDataPostUpdateFromValue, try tryFuseDroppedGlobalDataPostUpdateFromValue(ctx, global, function, frame, site_pc, atom_id, value))) return .done;
     } else {
         if (value.isString()) {
-            if (fusion_stats.counted(.tryFuseGlobalStringPercentHexAddStore, try tryFuseGlobalStringPercentHexAddStore(ctx, function, global, frame, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) |step| return step;
+            if (fusion_stats.counted(.tryFuseGlobalStringPercentHexAddStore, try tryFuseGlobalStringPercentHexAddStore(ctx, function, global, frame, value, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
         } else if (nextOpCanStartGlobalUriCall1(function, frame)) {
-            if (fusion_stats.counted(.tryFuseGlobalUriCall1, try tryFuseGlobalUriCall1(ctx, stack, function, frame, catch_target, global, value, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, handleCatchableRuntimeError))) |step| return step;
+            if (fusion_stats.counted(.tryFuseGlobalUriCall1, try tryFuseGlobalUriCall1(ctx, stack, function, frame, catch_target, global, value, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
         }
     }
     try stack.push(value);
@@ -1101,10 +1075,9 @@ fn fastGlobalDataValueForAtomAtPcNoProfile(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?core.JSValue {
     if (!canUseFastGlobalVarLookup(function, atom_id, frame, eval_local_names, eval_var_ref_names, eval_with_object)) return null;
-    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -1158,20 +1131,18 @@ fn tryFuseGlobalUriCall1(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !?Step {
     const function_object = objectFromValue(callee) orelse return null;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
     if (native_ref.domain != .uri) return null;
 
-    const call_arg = try uriCall1StringArgument(ctx, function, frame, global, globalLexicalValue) orelse return null;
+    const call_arg = try uriCall1StringArgument(ctx, function, frame, global) orelse return null;
     defer if (call_arg.owned) call_arg.value.free(ctx.runtime);
 
-    if (fusion_stats.counted(.tryFuseUriDecodeSingleFourByteStrictEqFromCharCode, try tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(ctx, stack, function, frame, catch_target, global, native_ref.id, call_arg.value, call_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, handleCatchableRuntimeError))) |step| return step;
+    if (fusion_stats.counted(.tryFuseUriDecodeSingleFourByteStrictEqFromCharCode, try tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(ctx, stack, function, frame, catch_target, global, native_ref.id, call_arg.value, call_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object))) |step| return step;
 
     const result = builtins.uri.call(ctx.runtime, native_ref.id, call_arg.value) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     errdefer result.free(ctx.runtime);
@@ -1263,7 +1234,6 @@ fn tryFuseGlobalDataInt32ImmediateBinary(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     var current = value.asInt32() orelse return false;
     const source_value = current;
@@ -1285,7 +1255,7 @@ fn tryFuseGlobalDataInt32ImmediateBinary(
     frame.pc = pc;
     if (fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object))) |stored| {
         if (stored.atom != source_atom) {
-            _ = fusion_stats.counted(.tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore, tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, source_atom, source_value, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue));
+            _ = fusion_stats.counted(.tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore, tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, source_atom, source_value, eval_local_names, eval_var_ref_names, eval_with_object));
         }
         return true;
     }
@@ -1302,7 +1272,6 @@ pub fn tryFuseGlobalInt32PrefixTermsStore(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) bool {
     const start = immediateInt32Operand(function.code, start_pc) orelse return false;
     var current = start.value;
@@ -1315,7 +1284,7 @@ pub fn tryFuseGlobalInt32PrefixTermsStore(
     while (tryFoldFollowingImmediateInt32Term(function.code, &pc, &current)) |result| {
         current = result.asInt32() orelse return false;
     }
-    while (tryFoldFollowingGlobalInt32Term(ctx, global, function, frame, &pc, &current, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue)) |result| {
+    while (tryFoldFollowingGlobalInt32Term(ctx, global, function, frame, &pc, &current, eval_local_names, eval_var_ref_names, eval_with_object)) |result| {
         current = result.asInt32() orelse return false;
         consumed_global_term = true;
     }
@@ -1324,7 +1293,7 @@ pub fn tryFuseGlobalInt32PrefixTermsStore(
     const saved_pc = frame.pc;
     frame.pc = pc;
     if (fusion_stats.counted(.tryFuseGlobalDataValueStore, tryFuseGlobalDataValueStore(ctx, global, function, frame, core.JSValue.int32(current), eval_local_names, eval_var_ref_names, eval_with_object))) |stored| {
-        while (fusion_stats.counted(.tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore, tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, stored.atom, current, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) {}
+        while (fusion_stats.counted(.tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore, tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(ctx, global, function, frame, stored.atom, current, eval_local_names, eval_var_ref_names, eval_with_object))) {}
         return true;
     }
     frame.pc = saved_pc;
@@ -1362,10 +1331,9 @@ fn tryFoldFollowingGlobalInt32Term(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?core.JSValue {
     const get = decodeGlobalDataGet(function.code, pc.*) orelse return null;
-    const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc.*, get.atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    const value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, pc.*, get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     var rhs_value = value.asInt32() orelse return null;
     var rhs_pc = get.next_pc;
     while (tryFoldImmediateInt32At(function.code, &rhs_pc, &rhs_value)) |rhs_result| {
@@ -1387,12 +1355,11 @@ fn tryFuseFollowingSameGlobalDataInt32ImmediateBinaryStore(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) bool {
     const start_pc = frame.pc;
     const source_get = decodeGlobalDataGet(function.code, start_pc) orelse return false;
     if (source_get.atom != source_atom) return false;
-    const borrowed = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, start_pc, source_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const borrowed = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, start_pc, source_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const current_source = borrowed.asInt32() orelse return false;
     if (current_source != source_value) return false;
 
@@ -1479,9 +1446,6 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
     const prefix_string = stringFromValue(prefix_value) orelse return false;
@@ -1494,8 +1458,8 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
     const byte2 = percentHexByte(prefix_bytes[7], prefix_bytes[8]) orelse return false;
     if (byte0 != 0xf0 or byte1 != 0xa0 or byte2 < 0x80 or byte2 > 0xbf) return false;
 
-    const plan = decodeUriFourByteRangePlan(ctx, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
-    const current_b3_value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, plan.index_b3_get_pc, plan.index_b3_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const plan = decodeUriFourByteRangePlan(ctx, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
+    const current_b3_value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, plan.index_b3_get_pc, plan.index_b3_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const current_b3 = current_b3_value.asInt32() orelse return false;
     if (current_b3 != byte2) return false;
 
@@ -1546,20 +1510,20 @@ fn tryFuseGlobalUriFourByteDecodeCountRange(
     if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.count_put_pc, plan.count_atom, core.JSValue.int32(count_next))) return false;
     if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, plan.induction_put_pc, plan.induction_atom, core.JSValue.int32(final_induction[0]))) return false;
     if (plan.high_completion_put) |completion_put| {
-        try setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     if (plan.branch_completion_put) |completion_put| {
-        try setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.undefinedValue());
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     if (plan.count_completion_put) |completion_put| {
-        try setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(count_next - 1));
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(count_next - 1));
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     if (plan.induction_completion_put) |completion_put| {
-        try setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(final_b4));
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[completion_put.idx], core.JSValue.int32(final_b4));
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion_put.idx, sync_global_lexical_locals);
     }
     frame.pc = plan.exit_pc;
     return true;
@@ -1573,7 +1537,6 @@ fn decodeUriFourByteRangePlan(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?UriFourByteRangePlan {
     const code = function.code;
     const callee_get = decodeVarRefGet(code, frame.pc) orelse return null;
@@ -1647,7 +1610,7 @@ fn decodeUriFourByteRangePlan(
     pc = high_completion_tail.tail_pc;
 
     const uri_get = decodeGlobalDataGet(code, pc) orelse return null;
-    const uri_callee = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, uri_get.atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    const uri_callee = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, uri_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     const uri_object = objectFromValue(uri_callee) orelse return null;
     const uri_native_ref = core.function.decodeNativeBuiltinId(uri_object.nativeFunctionIdSlot().*) orelse return null;
     if (uri_native_ref.domain != .uri or (uri_native_ref.id != 3 and uri_native_ref.id != 4)) return null;
@@ -1659,7 +1622,7 @@ fn decodeUriFourByteRangePlan(
 
     const string_get = decodeGlobalDataGet(code, pc) orelse return null;
     if (string_get.atom != atom_string) return null;
-    const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_get.atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     pc = string_get.next_pc;
     const method = decodeFieldAtom(code, pc, op.get_field2) orelse return null;
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, string_ctor, method.atom) orelse return null;
@@ -1757,18 +1720,15 @@ fn tryFuseGlobalStringPercentHexAddStore(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !?Step {
-    if (fusion_stats.counted(.tryFuseGlobalUriFourByteDecodeCountRange, try tryFuseGlobalUriFourByteDecodeCountRange(ctx, function, global, frame, lhs, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return .done;
+    if (fusion_stats.counted(.tryFuseGlobalUriFourByteDecodeCountRange, try tryFuseGlobalUriFourByteDecodeCountRange(ctx, function, global, frame, lhs, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
 
     const callee_get = decodeVarRefGet(function.code, frame.pc) orelse return null;
     const callee = varRefReadableBorrowed(frame, callee_get.idx) orelse return null;
     if (simpleStringCallableKind(callee) != .percent_hex_byte) return null;
 
     const arg_get = decodeGlobalDataGet(function.code, callee_get.next_pc) orelse return null;
-    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, callee_get.next_pc, arg_get.atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, callee_get.next_pc, arg_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     const arg_i32 = arg_value.asInt32() orelse return null;
 
     const call_pc = arg_get.next_pc;
@@ -1796,7 +1756,7 @@ fn tryFuseGlobalStringPercentHexAddStore(
     updated_owned = false;
 
     frame.pc = store.next_pc;
-    _ = fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue));
+    _ = fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object));
     return .done;
 }
 
@@ -1808,13 +1768,12 @@ pub fn tryFuseAtomPercentHexGlobalStringStore(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     if (frame.pc + 4 > function.code.len) return false;
     const prefix_atom = readInt(u32, function.code[frame.pc..][0..4]);
     var prefix_buf: [16]u8 = undefined;
     const prefix = atomAsciiText(ctx.runtime, prefix_atom, &prefix_buf) orelse return false;
-    return fusion_stats.counted(.tryFusePercentHexGlobalStringStoreAfterPrefix, try tryFusePercentHexGlobalStringStoreAfterPrefix(ctx, global, function, frame, prefix, frame.pc + 4, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue));
+    return fusion_stats.counted(.tryFusePercentHexGlobalStringStoreAfterPrefix, try tryFusePercentHexGlobalStringStoreAfterPrefix(ctx, global, function, frame, prefix, frame.pc + 4, eval_local_names, eval_var_ref_names, eval_with_object));
 }
 
 fn tryFusePercentHexGlobalStringStoreAfterPrefix(
@@ -1827,14 +1786,13 @@ fn tryFusePercentHexGlobalStringStoreAfterPrefix(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     const callee_get = decodeVarRefGet(function.code, callee_pc) orelse return false;
     const callee = varRefReadableBorrowed(frame, callee_get.idx) orelse return false;
     if (simpleStringCallableKind(callee) != .percent_hex_byte) return false;
 
     const arg_get = decodeGlobalDataGet(function.code, callee_get.next_pc) orelse return false;
-    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, callee_get.next_pc, arg_get.atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, callee_get.next_pc, arg_get.atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const arg_i32 = arg_value.asInt32() orelse return false;
 
     const call_pc = arg_get.next_pc;
@@ -1856,7 +1814,7 @@ fn tryFusePercentHexGlobalStringStoreAfterPrefix(
     updated_owned = false;
 
     frame.pc = store.next_pc;
-    _ = fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue));
+    _ = fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, global, function, frame, frame.pc, eval_local_names, eval_var_ref_names, eval_with_object));
     return true;
 }
 
@@ -1886,8 +1844,6 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !?Step {
     if (uri_mode != 3 and uri_mode != 4) return null;
     const code = function.code;
@@ -1897,7 +1853,7 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     if (string_op != op.get_var and string_op != op.get_var_undef) return null;
     const string_atom = readInt(u32, code[pc + 1 ..][0..4]);
     if (string_atom != atom_string) return null;
-    const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    const string_ctor = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, string_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     pc += 5;
 
     if (pc + 5 > code.len or code[pc] != op.get_field2) return null;
@@ -1906,8 +1862,8 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     if (native_ref.domain != .string or native_ref.id != @intFromEnum(builtins.string.StaticMethod.from_char_code)) return null;
     pc += 5;
 
-    const high_arg = uriStrictEqIntArg(ctx, function, global, frame, pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
-    const low_arg = uriStrictEqIntArg(ctx, function, global, frame, high_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+    const high_arg = uriStrictEqIntArg(ctx, function, global, frame, pc, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
+    const low_arg = uriStrictEqIntArg(ctx, function, global, frame, high_arg.next_pc, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
     const call_pc = low_arg.next_pc;
     if (call_pc + 4 > code.len or code[call_pc] != op.call_method) return null;
     if (readInt(u16, code[call_pc + 1 ..][0..2]) != 2) return null;
@@ -1915,7 +1871,7 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     if (code[strict_eq_pc] != op.strict_eq) return null;
 
     const units = builtins.uri.decodeSingleFourByteEscapeUnits(argument) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     } orelse return null;
     const expected_high: u16 = @intCast(@as(u32, @bitCast(high_arg.value)) & 0xffff);
@@ -1935,7 +1891,6 @@ fn uriStrictEqIntArg(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?UriStrictEqIntArg {
     if (pc >= function.code.len) return null;
     const code = function.code;
@@ -1951,7 +1906,7 @@ fn uriStrictEqIntArg(
         op.get_var, op.get_var_undef => {
             if (pc + 5 > code.len) return null;
             const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
-            const value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return null;
+            const value = fastGlobalDataValueForAtomAtPcNoProfile(ctx, function, global, frame, pc, atom_id, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
             return .{ .value = value.asInt32() orelse return null, .next_pc = pc + 5 };
         },
         op.get_var_ref, op.get_var_ref_check => {
@@ -1988,7 +1943,6 @@ fn uriCall1StringArgument(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     global: *core.Object,
-    comptime globalLexicalValue: anytype,
 ) !?UriCall1Argument {
     if (frame.pc >= function.code.len) return null;
     const code = function.code;
@@ -2011,7 +1965,7 @@ fn uriCall1StringArgument(
         op.get_var, op.get_var_undef => {
             if (frame.pc + 6 > code.len or code[frame.pc + 5] != op.call1) return null;
             const atom_id = readInt(u32, code[frame.pc + 1 ..][0..4]);
-            return uriCall1GlobalStringArgument(ctx, function, frame, global, atom_id, frame.pc, frame.pc + 6, globalLexicalValue);
+            return uriCall1GlobalStringArgument(ctx, function, frame, global, atom_id, frame.pc, frame.pc + 6);
         },
         else => return null,
     }
@@ -2038,11 +1992,10 @@ fn uriCall1GlobalStringArgument(
     atom_id: core.Atom,
     site_pc: usize,
     next_pc: usize,
-    comptime globalLexicalValue: anytype,
 ) ?UriCall1Argument {
     if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
-    if (globalLexicalValue(ctx, atom_id)) |value| {
+    if (shared_vm.globalLexicalValue(ctx, atom_id)) |value| {
         value.free(ctx.runtime);
         return null;
     }
@@ -2067,12 +2020,6 @@ pub fn putVar(
     eval_var_ref_names: []const core.Atom,
     eval_var_refs: []const core.JSValue,
     eval_with_object: core.JSValue,
-    comptime setNamedSlotValue: anytype,
-    comptime setNamedVarRefValue: anytype,
-    comptime directEvalShouldExposeImplicitArguments: anytype,
-    comptime setGlobalLexicalValue: anytype,
-    comptime setValueProperty: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const atom_id = readInt(u32, function.code[frame.pc..][0..4]);
     frame.pc += 4;
@@ -2093,27 +2040,27 @@ pub fn putVar(
             return .continue_loop;
         }
     }
-    if (try setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
+    if (try shared_vm.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, value)) return .continue_loop;
     if (!frame.eval_var_refs_republished) {
-        if (setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (shared_vm.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
+            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         }) return .continue_loop;
     }
-    if (try setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
-    if (setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    if (try shared_vm.setNamedSlotValue(ctx, frame.eval_local_names, frame.eval_local_slots, atom_id, value)) return .continue_loop;
+    if (shared_vm.setNamedVarRefValue(ctx, frame.eval_var_ref_names, frame.eval_var_refs, atom_id, value, runtime_strict or strict_unresolved_get_var, false) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     }) return .continue_loop;
-    if (atom_id == core.atom.ids.arguments and directEvalShouldExposeImplicitArguments(frame)) {
+    if (atom_id == core.atom.ids.arguments and shared_vm.directEvalShouldExposeImplicitArguments(frame)) {
         const old_value = frame.arguments_object;
         frame.arguments_object = value;
         if (old_value) |stored| stored.free(ctx.runtime);
         return .continue_loop;
     }
-    const updated_global_lexical = setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+    const updated_global_lexical = shared_vm.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
         value.free(ctx.runtime);
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     if (updated_global_lexical) {
@@ -2125,12 +2072,12 @@ pub fn putVar(
         defer global_value.free(ctx.runtime);
         const has_global_binding = hasObjectBinding(ctx, output, global, global_value, global, atom_id, function, frame) catch |err| {
             value.free(ctx.runtime);
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
             return err;
         };
         if (!has_global_binding) {
             value.free(ctx.runtime);
-            if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
             return error.ReferenceError;
         }
     }
@@ -2154,8 +2101,8 @@ pub fn putVar(
     defer value.free(ctx.runtime);
     const global_value = global.value().dup();
     defer global_value.free(ctx.runtime);
-    _ = setValueProperty(ctx, output, global, global_value, atom_id, value, function, frame) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    _ = shared_vm.setValueProperty(ctx, output, global, global_value, atom_id, value, function, frame) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -2308,15 +2255,6 @@ pub fn globalDefinition(
     eval_var_refs: []const core.JSValue,
     eval_global_var_bindings: bool,
     is_eval_code: bool,
-    comptime globalLexicalHas: anytype,
-    comptime defineGlobalLexicalValue: anytype,
-    comptime setFrameLocalValue: anytype,
-    comptime setFrameVarRefValue: anytype,
-    comptime setNamedSlotValue: anytype,
-    comptime setNamedVarRefValue: anytype,
-    comptime defineGlobalFunctionBindingValue: anytype,
-    comptime setGlobalLexicalValue: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     switch (opc) {
         op.check_define_var => {
@@ -2326,7 +2264,7 @@ pub fn globalDefinition(
             const is_lexical = (flags & (1 << 7)) != 0;
             const is_function_var = (flags & (1 << 6)) != 0;
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
-            const has_global_lexical = globalLexicalHas(ctx, atom_id);
+            const has_global_lexical = shared_vm.globalLexicalHas(ctx, atom_id);
             var has_own_global_property = false;
             if (global.getOwnProperty(atom_id)) |desc| {
                 has_own_global_property = true;
@@ -2346,7 +2284,7 @@ pub fn globalDefinition(
                 if (define_atom == atom_id and define_flags == flags) {
                     const is_const = (flags & (1 << 4)) != 0;
                     if (is_lexical) {
-                        try defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
+                        try shared_vm.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
                     } else if (!has_own_global_property) {
                         const configurable = (flags & (1 << 5)) != 0;
                         const define_desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
@@ -2378,7 +2316,7 @@ pub fn globalDefinition(
             const is_function_var = (flags & (1 << 6)) != 0;
             if (function.flags.runtime_strict and !is_eval_code and is_function_var) return .done;
             if (is_lexical) {
-                try defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
+                try shared_vm.defineGlobalLexicalValue(ctx, global, atom_id, core.JSValue.uninitialized(), is_const);
             } else if (!global.hasOwnProperty(atom_id)) {
                 const configurable = (flags & (1 << 5)) != 0;
                 const desc = core.Descriptor.data(core.JSValue.undefinedValue(), true, true, configurable);
@@ -2401,19 +2339,19 @@ pub fn globalDefinition(
             const configurable = (flags & (1 << 5)) != 0;
             const global_function_binding = (flags & (1 << 4)) != 0;
             var local_value = func_val.dup();
-            const updated_frame_local = try setFrameLocalValue(ctx, function, frame, atom_id, local_value);
+            const updated_frame_local = try shared_vm.setFrameLocalValue(ctx, function, frame, atom_id, local_value);
             if (!updated_frame_local) local_value.free(ctx.runtime);
             var frame_ref_value = func_val.dup();
-            if (!try setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
+            if (!try shared_vm.setFrameVarRefValue(ctx, function, frame, atom_id, frame_ref_value)) frame_ref_value.free(ctx.runtime);
             var eval_local_value = func_val.dup();
-            const updated_eval_local = try setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
+            const updated_eval_local = try shared_vm.setNamedSlotValue(ctx, eval_local_names, eval_local_slots, atom_id, eval_local_value);
             if (!updated_eval_local) eval_local_value.free(ctx.runtime);
             var eval_ref_value = func_val.dup();
-            const updated_eval_ref = try setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
+            const updated_eval_ref = try shared_vm.setNamedVarRefValue(ctx, eval_var_ref_names, eval_var_refs, atom_id, eval_ref_value, function.flags.is_strict, true);
             if (!updated_eval_ref) eval_ref_value.free(ctx.runtime);
             if (is_eval_code and !eval_global_var_bindings) return .continue_loop;
             if (global_function_binding) {
-                try defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, configurable);
+                try shared_vm.defineGlobalFunctionBindingValue(ctx.runtime, global, atom_id, func_val, configurable);
             } else if (global.hasOwnProperty(atom_id)) {
                 global.setProperty(ctx.runtime, atom_id, func_val) catch |err| switch (err) {
                     error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
@@ -2434,15 +2372,15 @@ pub fn globalDefinition(
             defer if (value_owned) value.free(ctx.runtime);
             if (!function.flags.is_indirect_eval) {
                 const fast_global_lexical = shared_vm.setGlobalLexicalValueForFastPathOwned(ctx, atom_id, value) catch |err| {
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (fast_global_lexical) {
                     value_owned = false;
                     return .continue_loop;
                 }
-                const updated_global_lexical = setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                const updated_global_lexical = shared_vm.setGlobalLexicalValue(ctx, atom_id, value) catch |err| {
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 };
                 if (updated_global_lexical) return .continue_loop;

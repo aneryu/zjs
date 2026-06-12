@@ -56,9 +56,8 @@ pub fn pushI16OperandVm(
     frame: *frame_mod.Frame,
     fast_paths: GlobalFastPathEnv,
     comptime tryFuseGlobalInt32PrefixTermsStore: anytype,
-    comptime globalLexicalValue: anytype,
 ) !void {
-    if (fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object, globalLexicalValue))) return;
+    if (fusion_stats.counted(.tryFuseGlobalInt32PrefixTermsStore, tryFuseGlobalInt32PrefixTermsStore(ctx, fast_paths.global, function, frame, frame.pc - 1, fast_paths.eval_local_names, fast_paths.eval_var_ref_names, fast_paths.eval_with_object))) return;
     try pushI16Operand(stack, function, frame);
 }
 
@@ -266,10 +265,9 @@ pub fn pushAtomValueVm(
     fast_paths: PushAtomValueFastPaths,
     comptime tryFuseAtomPercentHexGlobalStringStore: anytype,
     comptime tryPushRegexpLiteralFromAtomPair: anytype,
-    comptime globalLexicalValue: anytype,
 ) !void {
     const global_env = fast_paths.global_env;
-    if (fusion_stats.counted(.tryFuseAtomPercentHexGlobalStringStore, try tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object, globalLexicalValue))) return;
+    if (fusion_stats.counted(.tryFuseAtomPercentHexGlobalStringStore, try tryFuseAtomPercentHexGlobalStringStore(ctx, global_env.global, function, frame, global_env.eval_local_names, global_env.eval_var_ref_names, global_env.eval_with_object))) return;
     if (ctx.runtime.opcode_profile == null and try tryPushRegexpLiteralFromAtomPair(ctx, stack, function, frame, fast_paths.regexp_prototype)) return;
     try pushAtomValue(ctx, stack, function, frame);
 }

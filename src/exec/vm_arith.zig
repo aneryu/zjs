@@ -17,8 +17,6 @@ pub fn binary(
     binop: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForAddition: anytype,
-    comptime toPrimitiveForNumber: anytype,
 ) !void {
     const rhs = try stack.pop();
     defer rhs.free(ctx.runtime);
@@ -47,16 +45,16 @@ pub fn binary(
         return;
     }
     const result = if (binop == op.add) blk: {
-        const lhs_primitive = try toPrimitiveForAddition(ctx, output, global, lhs);
+        const lhs_primitive = try shared_vm.toPrimitiveForAddition(ctx, output, global, lhs);
         defer lhs_primitive.free(ctx.runtime);
-        const rhs_primitive = try toPrimitiveForAddition(ctx, output, global, rhs);
+        const rhs_primitive = try shared_vm.toPrimitiveForAddition(ctx, output, global, rhs);
         defer rhs_primitive.free(ctx.runtime);
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
     } else if (isBitwiseBinaryOp(binop) or isNumericBinaryOp(binop)) blk: {
-        const lhs_primitive = try toPrimitiveForNumber(ctx, output, global, lhs);
+        const lhs_primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, lhs);
         defer lhs_primitive.free(ctx.runtime);
         if (lhs_primitive.isSymbol()) return error.TypeError;
-        const rhs_primitive = try toPrimitiveForNumber(ctx, output, global, rhs);
+        const rhs_primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, rhs);
         defer rhs_primitive.free(ctx.runtime);
         if (rhs_primitive.isSymbol()) return error.TypeError;
         break :blk try value_ops.binary(ctx.runtime, binop, lhs_primitive, rhs_primitive);
@@ -73,12 +71,9 @@ pub fn binaryVm(
     binop: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForAddition: anytype,
-    comptime toPrimitiveForNumber: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    binary(ctx, stack, binop, output, global, toPrimitiveForAddition, toPrimitiveForNumber) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    binary(ctx, stack, binop, output, global) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -90,8 +85,6 @@ pub fn compare(
     cmp: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
-    comptime toPrimitiveForAddition: anytype,
 ) !void {
     const rhs = try stack.pop();
     defer rhs.free(ctx.runtime);
@@ -124,15 +117,15 @@ pub fn compare(
     }
 
     const result: core.JSValue = switch (cmp) {
-        op.eq => core.JSValue.boolean(try looseEqualOp(ctx, output, global, lhs, rhs, 0, toPrimitiveForAddition)),
-        op.neq => core.JSValue.boolean(!try looseEqualOp(ctx, output, global, lhs, rhs, 0, toPrimitiveForAddition)),
+        op.eq => core.JSValue.boolean(try looseEqualOp(ctx, output, global, lhs, rhs, 0)),
+        op.neq => core.JSValue.boolean(!try looseEqualOp(ctx, output, global, lhs, rhs, 0)),
         op.strict_eq => value_ops.strictEqual(lhs, rhs),
         op.strict_neq => value_ops.strictNotEqual(lhs, rhs),
         else => blk: {
-            const lhs_primitive = try toPrimitiveForNumber(ctx, output, global, lhs);
+            const lhs_primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, lhs);
             defer lhs_primitive.free(ctx.runtime);
             if (lhs_primitive.isSymbol()) return error.TypeError;
-            const rhs_primitive = try toPrimitiveForNumber(ctx, output, global, rhs);
+            const rhs_primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, rhs);
             defer rhs_primitive.free(ctx.runtime);
             if (rhs_primitive.isSymbol()) return error.TypeError;
             break :blk try value_ops.compare(ctx.runtime, cmp, lhs_primitive, rhs_primitive);
@@ -150,12 +143,9 @@ pub fn compareVm(
     cmp: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
-    comptime toPrimitiveForAddition: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    compare(ctx, stack, cmp, output, global, toPrimitiveForNumber, toPrimitiveForAddition) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    compare(ctx, stack, cmp, output, global) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -167,7 +157,6 @@ pub fn unary(
     opcode_id: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
 ) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
@@ -186,7 +175,7 @@ pub fn unary(
             if (value_ops.shortBigIntUnary(opcode_id, bigint_value)) |fast| break :blk fast;
         }
         if (opcode_id == op.neg or opcode_id == op.plus or opcode_id == op.inc or opcode_id == op.dec) {
-            const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+            const primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, value);
             defer primitive.free(ctx.runtime);
             if (primitive.isSymbol()) return error.TypeError;
             break :blk try value_ops.unary(ctx.runtime, opcode_id, primitive);
@@ -205,11 +194,9 @@ pub fn unaryVm(
     opcode_id: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    unary(ctx, stack, opcode_id, output, global, toPrimitiveForNumber) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    unary(ctx, stack, opcode_id, output, global) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -220,11 +207,10 @@ pub fn bitNot(
     stack: *stack_mod.Stack,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
 ) !void {
     const value = try stack.pop();
     defer value.free(ctx.runtime);
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    const primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, value);
     defer primitive.free(ctx.runtime);
     const result = try value_ops.unary(ctx.runtime, op.not, primitive);
     errdefer result.free(ctx.runtime);
@@ -238,11 +224,9 @@ pub fn bitNotVm(
     catch_target: *?usize,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    bitNot(ctx, stack, output, global, toPrimitiveForNumber) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    bitNot(ctx, stack, output, global) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -254,7 +238,6 @@ pub fn postUpdate(
     opcode_id: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
 ) !void {
     const old = try stack.pop();
     defer old.free(ctx.runtime);
@@ -275,7 +258,7 @@ pub fn postUpdate(
             return;
         }
     }
-    const primitive = try toPrimitiveForNumber(ctx, output, global, old);
+    const primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, old);
     defer primitive.free(ctx.runtime);
     if (primitive.isSymbol()) return error.TypeError;
     const numeric_old = if (primitive.isBigInt()) primitive.dup() else try value_ops.toNumberValue(ctx.runtime, primitive);
@@ -294,11 +277,9 @@ pub fn postUpdateVm(
     opcode_id: u8,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    comptime toPrimitiveForNumber: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    postUpdate(ctx, stack, opcode_id, output, global, toPrimitiveForNumber) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    postUpdate(ctx, stack, opcode_id, output, global) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -312,8 +293,6 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateRead(
     idx: u16,
     opcode_id: u8,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const pc = frame.pc;
     if (pc + 5 > function.code.len) return false;
@@ -339,8 +318,8 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateRead(
         }
         return false;
     };
-    try setSlotValue(ctx, &frame.locals[idx], updated);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = pc + 5;
     return true;
 }
@@ -353,8 +332,6 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
     idx: u16,
     opcode_id: u8,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const pc = frame.pc;
     const code = function.code;
@@ -382,8 +359,8 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
             !ctx.runtime.hasInterruptHandler() and
             old_int < condition.limit)
         {
-            try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(condition.limit));
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(condition.limit));
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             frame.pc = condition.exit_pc;
             return true;
         }
@@ -402,8 +379,8 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
             else => return false,
         };
 
-        try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         frame.pc = if (updated_int < condition.limit) condition.body_pc else condition.exit_pc;
         return true;
     }
@@ -425,8 +402,8 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
             else => return false,
         };
 
-        try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(updated_int));
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         frame.pc = if (updated_int < limit) condition.body_pc else condition.exit_pc;
         return true;
     }
@@ -435,8 +412,8 @@ pub fn tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(
     const old_bigint = frame.locals[idx].asShortBigInt() orelse return false;
     const updated = value_ops.shortBigIntUnary(opcode_id, old_bigint) orelse return false;
     const updated_bigint = updated.asShortBigInt() orelse return false;
-    try setSlotValue(ctx, &frame.locals[idx], updated);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     frame.pc = if (updated_bigint < condition.limit) condition.body_pc else condition.exit_pc;
     return true;
 }
@@ -449,17 +426,13 @@ pub fn updateLocal(
     opcode_id: u8,
     output: ?*std.Io.Writer,
     sync_global_lexical_locals: bool,
-    comptime slotValueDup: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime toPrimitiveForNumber: anytype,
 ) !void {
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const idx: u16 = function.code[frame.pc];
     frame.pc += 1;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
 
-    const value = slotValueDup(frame.locals[idx]);
+    const value = shared_vm.slotValueDup(frame.locals[idx]);
     defer value.free(ctx.runtime);
     if (value.asInt32()) |int_value| {
         const updated = switch (opcode_id) {
@@ -467,8 +440,8 @@ pub fn updateLocal(
             op.dec_loc => fastInt32Sub(int_value, 1),
             else => unreachable,
         };
-        try setSlotValue(ctx, &frame.locals[idx], updated);
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         return;
     }
     if (value.asShortBigInt()) |bigint_value| {
@@ -478,12 +451,12 @@ pub fn updateLocal(
             else => unreachable,
         };
         if (value_ops.shortBigIntUnary(op_id, bigint_value)) |updated| {
-            try setSlotValue(ctx, &frame.locals[idx], updated);
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             return;
         }
     }
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    const primitive = try shared_vm.toPrimitiveForNumber(ctx, output, global, value);
     defer primitive.free(ctx.runtime);
     if (primitive.isSymbol()) return error.TypeError;
     const op_id = switch (opcode_id) {
@@ -492,8 +465,8 @@ pub fn updateLocal(
         else => unreachable,
     };
     const updated = try value_ops.unary(ctx.runtime, op_id, primitive);
-    try setSlotValue(ctx, &frame.locals[idx], updated);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub fn updateLocalVm(
@@ -506,14 +479,9 @@ pub fn updateLocalVm(
     opcode_id: u8,
     output: ?*std.Io.Writer,
     sync_global_lexical_locals: bool,
-    comptime slotValueDup: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime toPrimitiveForNumber: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    updateLocal(ctx, function, global, frame, opcode_id, output, sync_global_lexical_locals, slotValueDup, setSlotValue, syncTopLevelGlobalLexicalLocal, toPrimitiveForNumber) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    updateLocal(ctx, function, global, frame, opcode_id, output, sync_global_lexical_locals) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -527,10 +495,6 @@ pub fn addLocal(
     frame: *frame_mod.Frame,
     output: ?*std.Io.Writer,
     sync_global_lexical_locals: bool,
-    comptime slotValueDup: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime toPrimitiveForAddition: anytype,
 ) !void {
     if (frame.pc >= function.code.len) return error.InvalidBytecode;
     const idx: u16 = function.code[frame.pc];
@@ -543,46 +507,46 @@ pub fn addLocal(
     const cell_opt = shared_vm.varRefCellFromValue(frame.locals[idx]);
     const lhs_borrowed = if (cell_opt) |cell| (cell.varRefValueSlot().* orelse core.JSValue.undefinedValue()) else frame.locals[idx];
     if (lhs_borrowed.isString()) {
-        const lhs = slotValueDup(frame.locals[idx]);
+        const lhs = shared_vm.slotValueDup(frame.locals[idx]);
         defer lhs.free(ctx.runtime);
 
-        const rhs_primitive = try toPrimitiveForAddition(ctx, output, global, rhs);
+        const rhs_primitive = try shared_vm.toPrimitiveForAddition(ctx, output, global, rhs);
         defer rhs_primitive.free(ctx.runtime);
 
         const updated = try value_ops.binary(ctx.runtime, op.add, lhs, rhs_primitive);
 
-        try setSlotValue(ctx, &frame.locals[idx], updated);
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         return;
     }
 
-    const lhs = slotValueDup(frame.locals[idx]);
+    const lhs = shared_vm.slotValueDup(frame.locals[idx]);
     defer lhs.free(ctx.runtime);
     if (lhs.asInt32()) |lhs_int| {
         if (rhs.asInt32()) |rhs_int| {
             const updated = fastInt32Add(lhs_int, rhs_int);
-            try setSlotValue(ctx, &frame.locals[idx], updated);
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
             return;
         }
     }
     if (lhs.asShortBigInt()) |lhs_bigint| {
         if (rhs.asShortBigInt()) |rhs_bigint| {
             if (value_ops.shortBigIntBinary(op.add, lhs_bigint, rhs_bigint)) |updated| {
-                try setSlotValue(ctx, &frame.locals[idx], updated);
-                try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+                try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+                try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
                 return;
             }
         }
     }
 
-    const lhs_primitive = try toPrimitiveForAddition(ctx, output, global, lhs);
+    const lhs_primitive = try shared_vm.toPrimitiveForAddition(ctx, output, global, lhs);
     defer lhs_primitive.free(ctx.runtime);
-    const rhs_primitive = try toPrimitiveForAddition(ctx, output, global, rhs);
+    const rhs_primitive = try shared_vm.toPrimitiveForAddition(ctx, output, global, rhs);
     defer rhs_primitive.free(ctx.runtime);
     const updated = try value_ops.binary(ctx.runtime, op.add, lhs_primitive, rhs_primitive);
-    try setSlotValue(ctx, &frame.locals[idx], updated);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], updated);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 pub fn addLocalVm(
@@ -594,14 +558,9 @@ pub fn addLocalVm(
     catch_target: *?usize,
     output: ?*std.Io.Writer,
     sync_global_lexical_locals: bool,
-    comptime slotValueDup: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime toPrimitiveForAddition: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    addLocal(ctx, stack, function, global, frame, output, sync_global_lexical_locals, slotValueDup, setSlotValue, syncTopLevelGlobalLexicalLocal, toPrimitiveForAddition) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    addLocal(ctx, stack, function, global, frame, output, sync_global_lexical_locals) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
     return .done;
@@ -614,7 +573,6 @@ pub fn tryFuseLocalStringAppend(
     global: *core.Object,
     frame: *frame_mod.Frame,
     sync_global_lexical_locals: bool,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const code = function.code;
     var store_pc = frame.pc;
@@ -664,7 +622,7 @@ pub fn tryFuseLocalStringAppend(
     const lhs_owned = try stack.pop();
     if (completion_store) |completion| {
         try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], lhs_owned.dup());
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
     }
     frame.pc = if (drop_pc) |drop|
         drop + 1
@@ -674,7 +632,7 @@ pub fn tryFuseLocalStringAppend(
         store.operand_pc + store.consume;
     rhs_owned.free(ctx.runtime);
     lhs_owned.free(ctx.runtime);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     return true;
 }
 
@@ -981,7 +939,6 @@ fn looseEqualOp(
     lhs: core.JSValue,
     rhs: core.JSValue,
     depth: u8,
-    comptime toPrimitiveForAddition: anytype,
 ) !bool {
     if (depth > 8) return error.TypeError;
     if (sameLooseEqualityType(lhs, rhs)) return value_ops.strictEqual(lhs, rhs).asBool().?;
@@ -1016,11 +973,11 @@ fn looseEqualOp(
     }
     if (lhs.isBool()) {
         const number_lhs = core.JSValue.int32(if (lhs.asBool().?) 1 else 0);
-        return looseEqualOp(ctx, output, global, number_lhs, rhs, depth + 1, toPrimitiveForAddition);
+        return looseEqualOp(ctx, output, global, number_lhs, rhs, depth + 1);
     }
     if (rhs.isBool()) {
         const number_rhs = core.JSValue.int32(if (rhs.asBool().?) 1 else 0);
-        return looseEqualOp(ctx, output, global, lhs, number_rhs, depth + 1, toPrimitiveForAddition);
+        return looseEqualOp(ctx, output, global, lhs, number_rhs, depth + 1);
     }
     if (lhs.isBigInt() and rhs.isNumber()) {
         const number_rhs = value_ops.numberValue(rhs) orelse return false;
@@ -1031,14 +988,14 @@ fn looseEqualOp(
         return value_ops.bigIntEqualsNumber(ctx.runtime, rhs, number_lhs);
     }
     if (isLoosePrimitiveForObject(lhs) and rhs.isObject()) {
-        const primitive_rhs = try toPrimitiveForAddition(ctx, output, global, rhs);
+        const primitive_rhs = try shared_vm.toPrimitiveForAddition(ctx, output, global, rhs);
         defer primitive_rhs.free(ctx.runtime);
-        return looseEqualOp(ctx, output, global, lhs, primitive_rhs, depth + 1, toPrimitiveForAddition);
+        return looseEqualOp(ctx, output, global, lhs, primitive_rhs, depth + 1);
     }
     if (lhs.isObject() and isLoosePrimitiveForObject(rhs)) {
-        const primitive_lhs = try toPrimitiveForAddition(ctx, output, global, lhs);
+        const primitive_lhs = try shared_vm.toPrimitiveForAddition(ctx, output, global, lhs);
         defer primitive_lhs.free(ctx.runtime);
-        return looseEqualOp(ctx, output, global, primitive_lhs, rhs, depth + 1, toPrimitiveForAddition);
+        return looseEqualOp(ctx, output, global, primitive_lhs, rhs, depth + 1);
     }
     return false;
 }

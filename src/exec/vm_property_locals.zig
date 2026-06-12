@@ -121,87 +121,81 @@ pub fn loc(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime execGetLoc: anytype,
-    comptime execPutLoc: anytype,
-    comptime execSetLoc: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     switch (opc) {
         op.get_loc => {
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
-            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 2, false))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 2, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            try execGetLoc(ctx, frame, stack, idx, 2, opc);
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 2, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 2, sync_global_lexical_locals))) return;
+            try shared_vm.execGetLoc(ctx, frame, stack, idx, 2, opc);
         },
-        op.put_loc => try execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
-        op.set_loc => try execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
+        op.put_loc => try shared_vm.execPutLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
+        op.set_loc => try shared_vm.execSetLoc(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, sync_global_lexical_locals),
 
         op.get_loc8 => {
             const idx = function.code[frame.pc];
-            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, idx, frame.pc + 1, false))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 1, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            try execGetLoc(ctx, frame, stack, idx, 1, opc);
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, idx, frame.pc + 1, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, idx, frame.pc + 1, sync_global_lexical_locals))) return;
+            try shared_vm.execGetLoc(ctx, frame, stack, idx, 1, opc);
         },
-        op.put_loc8 => try execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
-        op.set_loc8 => try execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
+        op.put_loc8 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
+        op.set_loc8 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, function.code[frame.pc], 1, opc, sync_global_lexical_locals),
 
         op.get_loc0 => {
-            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 0, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 0, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 0, frame.pc, false))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 0, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 0, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 0, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 0, frame.pc, false))) return;
-            try execGetLoc(ctx, frame, stack, 0, 0, opc);
+            try shared_vm.execGetLoc(ctx, frame, stack, 0, 0, opc);
         },
         op.get_loc1 => {
-            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocal0Local1Int32ArithmeticStoreRange, try tryFuseShortLocal0Local1Int32ArithmeticStoreRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange, try tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocal0Local1Int32ArithmeticStoreRange, try tryFuseShortLocal0Local1Int32ArithmeticStoreRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange, try tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 1, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 1, frame.pc, false))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 1, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 1, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 1, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 1, frame.pc, false))) return;
-            try execGetLoc(ctx, frame, stack, 1, 0, opc);
+            try shared_vm.execGetLoc(ctx, frame, stack, 1, 0, opc);
         },
         op.get_loc2 => {
-            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocalObjectFieldUpdateAccumulateRange, try tryFuseShortLocalObjectFieldUpdateAccumulateRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalObjectFieldUpdateAccumulateRange, try tryFuseShortLocalObjectFieldUpdateAccumulateRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 2, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 2, frame.pc, false))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 2, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 2, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 2, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 2, frame.pc, false))) return;
-            try execGetLoc(ctx, frame, stack, 2, 0, opc);
+            try shared_vm.execGetLoc(ctx, frame, stack, 2, 0, opc);
         },
         op.get_loc3 => {
-            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 3, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8FromGet, try tryFuseDroppedLocalPostUpdateGoto8FromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
+            if (fusion_stats.counted(.tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, 3, allow_loop_tail_fusion, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalInt32LessThanArgFalseBranchFromGet, tryFuseLocalInt32LessThanArgFalseBranchFromGet(function, frame, 3, frame.pc, false))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
-            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 3, frame.pc, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringFromCharCodeInt32AppendFromGet, try tryFuseLocalStringFromCharCodeInt32AppendFromGet(ctx, function, global, frame, 3, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return;
+            if (fusion_stats.counted(.tryFuseLocalStringLengthGtConstSliceConstBranchFromGet, try tryFuseLocalStringLengthGtConstSliceConstBranchFromGet(ctx, function, global, frame, 3, frame.pc, sync_global_lexical_locals))) return;
             if (fusion_stats.counted(.tryFuseLocalFieldGet, try tryFuseLocalFieldGet(ctx, function, frame, stack, 3, frame.pc, false))) return;
-            try execGetLoc(ctx, frame, stack, 3, 0, opc);
+            try shared_vm.execGetLoc(ctx, frame, stack, 3, 0, opc);
         },
-        op.put_loc0 => try execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
-        op.put_loc1 => try execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
-        op.put_loc2 => try execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-        op.put_loc3 => try execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
-        op.set_loc0 => try execSetLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
-        op.set_loc1 => try execSetLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
-        op.set_loc2 => try execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
-        op.set_loc3 => try execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+        op.put_loc0 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
+        op.put_loc1 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
+        op.put_loc2 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
+        op.put_loc3 => try shared_vm.execPutLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
+        op.set_loc0 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 0, 0, opc, sync_global_lexical_locals),
+        op.set_loc1 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 1, 0, opc, sync_global_lexical_locals),
+        op.set_loc2 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 2, 0, opc, sync_global_lexical_locals),
+        op.set_loc3 => try shared_vm.execSetLoc(ctx, function, global, frame, stack, 3, 0, opc, sync_global_lexical_locals),
         op.get_loc0_loc1 => {
             if (fusion_stats.counted(.tryFuseLocal0Local1DenseArrayIndexedAppend, try tryFuseLocal0Local1DenseArrayIndexedAppend(ctx, function, frame))) return;
-            try execGetLoc(ctx, frame, stack, 0, 0, opc);
-            try execGetLoc(ctx, frame, stack, 1, 0, opc);
+            try shared_vm.execGetLoc(ctx, frame, stack, 0, 0, opc);
+            try shared_vm.execGetLoc(ctx, frame, stack, 1, 0, opc);
         },
         else => unreachable,
     }
@@ -213,26 +207,23 @@ pub fn arg(
     frame: *frame_mod.Frame,
     stack: *stack_mod.Stack,
     opc: u8,
-    comptime execGetArg: anytype,
-    comptime execPutArg: anytype,
-    comptime execSetArg: anytype,
 ) !void {
     switch (opc) {
-        op.get_arg => try execGetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.put_arg => try execPutArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.set_arg => try execSetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
-        op.get_arg0 => try execGetArg(ctx, frame, stack, 0, 0, opc),
-        op.get_arg1 => try execGetArg(ctx, frame, stack, 1, 0, opc),
-        op.get_arg2 => try execGetArg(ctx, frame, stack, 2, 0, opc),
-        op.get_arg3 => try execGetArg(ctx, frame, stack, 3, 0, opc),
-        op.put_arg0 => try execPutArg(ctx, frame, stack, 0, 0, opc),
-        op.put_arg1 => try execPutArg(ctx, frame, stack, 1, 0, opc),
-        op.put_arg2 => try execPutArg(ctx, frame, stack, 2, 0, opc),
-        op.put_arg3 => try execPutArg(ctx, frame, stack, 3, 0, opc),
-        op.set_arg0 => try execSetArg(ctx, frame, stack, 0, 0, opc),
-        op.set_arg1 => try execSetArg(ctx, frame, stack, 1, 0, opc),
-        op.set_arg2 => try execSetArg(ctx, frame, stack, 2, 0, opc),
-        op.set_arg3 => try execSetArg(ctx, frame, stack, 3, 0, opc),
+        op.get_arg => try shared_vm.execGetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.put_arg => try shared_vm.execPutArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.set_arg => try shared_vm.execSetArg(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc),
+        op.get_arg0 => try shared_vm.execGetArg(ctx, frame, stack, 0, 0, opc),
+        op.get_arg1 => try shared_vm.execGetArg(ctx, frame, stack, 1, 0, opc),
+        op.get_arg2 => try shared_vm.execGetArg(ctx, frame, stack, 2, 0, opc),
+        op.get_arg3 => try shared_vm.execGetArg(ctx, frame, stack, 3, 0, opc),
+        op.put_arg0 => try shared_vm.execPutArg(ctx, frame, stack, 0, 0, opc),
+        op.put_arg1 => try shared_vm.execPutArg(ctx, frame, stack, 1, 0, opc),
+        op.put_arg2 => try shared_vm.execPutArg(ctx, frame, stack, 2, 0, opc),
+        op.put_arg3 => try shared_vm.execPutArg(ctx, frame, stack, 3, 0, opc),
+        op.set_arg0 => try shared_vm.execSetArg(ctx, frame, stack, 0, 0, opc),
+        op.set_arg1 => try shared_vm.execSetArg(ctx, frame, stack, 1, 0, opc),
+        op.set_arg2 => try shared_vm.execSetArg(ctx, frame, stack, 2, 0, opc),
+        op.set_arg3 => try shared_vm.execSetArg(ctx, frame, stack, 3, 0, opc),
         else => unreachable,
     }
 }
@@ -250,11 +241,6 @@ pub fn checkedLocVm(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime pushSlotValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
@@ -270,35 +256,35 @@ pub fn checkedLocVm(
                     frame.clearLocalUninitialized(idx);
                 } else {
                     const err = shared_vm.throwTdzReference(ctx);
-                    if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                     return err;
                 }
             }
             if ((frame.pc >= function.code.len or function.code[frame.pc] != op.call0) and
-                fusion_stats.counted(.tryFuseCheckedLocalFastPath, try tryFuseCheckedLocalFastPath(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return .continue_loop;
-            try pushSlotValue(stack, frame.locals[idx]);
+                fusion_stats.counted(.tryFuseCheckedLocalFastPath, try tryFuseCheckedLocalFastPath(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return .continue_loop;
+            try shared_vm.pushSlotValue(stack, frame.locals[idx]);
         },
         op.put_loc_check => {
             if (frame.localIsUninitialized(idx)) {
                 const err = shared_vm.throwTdzReference(ctx);
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 return err;
             }
             const value = try stack.pop();
             if (idx < function.var_is_const.len and function.var_is_const[idx]) {
                 value.free(ctx.runtime);
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
                 return error.TypeError;
             }
-            try setSlotValue(ctx, &frame.locals[idx], value);
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[idx], value);
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         op.put_loc_check_init => {
             const is_derived_this = function.flags.is_derived_class_constructor and
                 idx < function.var_names.len and
                 function.var_names[idx] == 8;
             if (is_derived_this and !shared_vm.varRefSlotIsUninitialized(frame.locals[idx])) {
-                if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+                if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
                 return error.ReferenceError;
             }
             const value = try stack.pop();
@@ -307,12 +293,12 @@ pub fn checkedLocVm(
             else
                 core.JSValue.undefinedValue();
             defer constructor_this.free(ctx.runtime);
-            try setSlotValue(ctx, &frame.locals[idx], value);
+            try shared_vm.setSlotValue(ctx, &frame.locals[idx], value);
             if (!constructor_this.isUndefined()) {
-                try setSlotValue(ctx, &frame.this_value, constructor_this.dup());
+                try shared_vm.setSlotValue(ctx, &frame.this_value, constructor_this.dup());
             }
             frame.clearLocalUninitialized(idx);
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
         },
         else => unreachable,
     }
@@ -354,10 +340,6 @@ pub fn varRef(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime execGetVarRefMaybeTdz: anytype,
-    comptime execPutVarRef: anytype,
-    comptime execSetVarRef: anytype,
-    comptime globalLexicalValue: anytype,
 ) !Step {
     switch (opc) {
         op.get_var_ref, op.get_var_ref_check => {
@@ -365,46 +347,46 @@ pub fn varRef(
             const idx = readInt(u16, function.code[frame.pc..][0..2]);
             const next_pc = frame.pc + 2;
             if (!canStartLongVarRefGetFusion(opc, function.code, next_pc) and try tryFastDirectVarRefGet(frame, stack, idx, 2)) return .done;
-            if (canStartGlobalCall1(function.code, next_pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, idx, 2, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
-            if (try execGetVarRefMaybeTdz(ctx, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
+            if (canStartGlobalCall1(function.code, next_pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, idx, 2, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, idx, 2, catch_target, global)) return .continue_loop;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
-            try execPutVarRef(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, eval_global_var_bindings, is_eval_code);
+            try shared_vm.execPutVarRef(ctx, function, global, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc, eval_global_var_bindings, is_eval_code);
         },
         op.set_var_ref => {
             if (frame.pc + 2 > function.code.len) return error.TypeError;
-            try execSetVarRef(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc);
+            try shared_vm.execSetVarRef(ctx, frame, stack, readInt(u16, function.code[frame.pc..][0..2]), 2, opc);
         },
 
         op.get_var_ref0 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 0, 0)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 0, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
-            if (try execGetVarRefMaybeTdz(ctx, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 0, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 0, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref1 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 1, 0)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 1, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
-            if (try execGetVarRefMaybeTdz(ctx, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 1, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 1, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref2 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 2, 0)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 2, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
-            if (try execGetVarRefMaybeTdz(ctx, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 2, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 2, 0, catch_target, global)) return .continue_loop;
         },
         op.get_var_ref3 => {
             if (!canStartShortVarRefGetFusion(function.code, frame.pc) and try tryFastDirectVarRefGet(frame, stack, 3, 0)) return .done;
-            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 3, 0, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue))) return .done;
-            if (try execGetVarRefMaybeTdz(ctx, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
+            if (canStartGlobalCall1(function.code, frame.pc) and fusion_stats.counted(.tryFuseVarRefSimpleStringCall1GlobalIntArgument, try tryFuseVarRefSimpleStringCall1GlobalIntArgument(ctx, function, global, frame, stack, 3, 0, eval_local_names, eval_var_ref_names, eval_with_object))) return .done;
+            if (try shared_vm.execGetVarRefMaybeTdz(ctx, frame, stack, 3, 0, catch_target, global)) return .continue_loop;
         },
-        op.put_var_ref0 => try execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref1 => try execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref2 => try execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.put_var_ref3 => try execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc, eval_global_var_bindings, is_eval_code),
-        op.set_var_ref0 => try execSetVarRef(ctx, frame, stack, 0, 0, opc),
-        op.set_var_ref1 => try execSetVarRef(ctx, frame, stack, 1, 0, opc),
-        op.set_var_ref2 => try execSetVarRef(ctx, frame, stack, 2, 0, opc),
-        op.set_var_ref3 => try execSetVarRef(ctx, frame, stack, 3, 0, opc),
+        op.put_var_ref0 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 0, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref1 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 1, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref2 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 2, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.put_var_ref3 => try shared_vm.execPutVarRef(ctx, function, global, frame, stack, 3, 0, opc, eval_global_var_bindings, is_eval_code),
+        op.set_var_ref0 => try shared_vm.execSetVarRef(ctx, frame, stack, 0, 0, opc),
+        op.set_var_ref1 => try shared_vm.execSetVarRef(ctx, frame, stack, 1, 0, opc),
+        op.set_var_ref2 => try shared_vm.execSetVarRef(ctx, frame, stack, 2, 0, opc),
+        op.set_var_ref3 => try shared_vm.execSetVarRef(ctx, frame, stack, 3, 0, opc),
         else => unreachable,
     }
     return .done;
@@ -423,14 +405,9 @@ pub fn varRefVm(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime execGetVarRefMaybeTdz: anytype,
-    comptime execPutVarRef: anytype,
-    comptime execSetVarRef: anytype,
-    comptime globalLexicalValue: anytype,
-    comptime handleCatchableRuntimeError: anytype,
 ) !Step {
-    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object, execGetVarRefMaybeTdz, execPutVarRef, execSetVarRef, globalLexicalValue) catch |err| {
-        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
+    return varRef(ctx, function, global, frame, stack, opc, catch_target, eval_global_var_bindings, is_eval_code, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
+        if (try shared_vm.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
 }
@@ -599,14 +576,12 @@ fn storeBindingInt32(
     binding: BindingPut,
     value: i32,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (binding.is_var_ref) {
-        try setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
+        try shared_vm.setSlotValue(ctx, &frame.var_refs[binding.idx], core.JSValue.int32(value));
     } else {
-        try setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[binding.idx], core.JSValue.int32(value));
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, binding.idx, sync_global_lexical_locals);
     }
 }
 
@@ -619,13 +594,11 @@ fn storeBindingInt32WithCompletion(
     completion_put: ?BindingPut,
     value: i32,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
-    try storeBindingInt32(ctx, function, global, frame, accumulator_put, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try storeBindingInt32(ctx, function, global, frame, accumulator_put, value, sync_global_lexical_locals);
     if (completion_put) |completion| {
         if (!sameBindingPut(accumulator_put, completion)) {
-            try storeBindingInt32(ctx, function, global, frame, completion, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+            try storeBindingInt32(ctx, function, global, frame, completion, value, sync_global_lexical_locals);
         }
     }
 }
@@ -639,17 +612,15 @@ fn storeBindingOwnedValueWithCompletion(
     completion_put: ?BindingPut,
     value: core.JSValue,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (completion_put) |completion| {
         if (!sameBindingPut(accumulator_put, completion)) {
-            try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, value.dup(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-            try storeBindingOwnedValue(ctx, function, global, frame, completion, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+            try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, value.dup(), sync_global_lexical_locals);
+            try storeBindingOwnedValue(ctx, function, global, frame, completion, value, sync_global_lexical_locals);
             return;
         }
     }
-    try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, value, sync_global_lexical_locals);
 }
 
 fn storeLocalInt32WithCompletion(
@@ -661,15 +632,13 @@ fn storeLocalInt32WithCompletion(
     completion_put: ?LocalPut,
     value: i32,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
-    try setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(value));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], core.JSValue.int32(value));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
     if (completion_put) |completion| {
         if (completion.idx != idx) {
-            try setSlotValue(ctx, &frame.locals[completion.idx], core.JSValue.int32(value));
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], core.JSValue.int32(value));
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
         }
     }
 }
@@ -683,20 +652,18 @@ fn storeLocalOwnedValueWithCompletion(
     completion_put: ?LocalPut,
     value: core.JSValue,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !void {
     if (completion_put) |completion| {
         if (completion.idx != idx) {
-            try setSlotValue(ctx, &frame.locals[idx], value.dup());
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
-            try setSlotValue(ctx, &frame.locals[completion.idx], value);
-            try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[idx], value.dup());
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+            try shared_vm.setSlotValue(ctx, &frame.locals[completion.idx], value);
+            try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
             return;
         }
     }
-    try setSlotValue(ctx, &frame.locals[idx], value);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[idx], value);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, idx, sync_global_lexical_locals);
 }
 
 fn decodeLatin1PrefixIntLocalKey(ctx: *core.JSContext, code: []const u8, pc: usize, local_idx: u16) ?Latin1PrefixIntLocalKey {
@@ -1105,8 +1072,6 @@ fn tryFuseCheckedLocalEmptyInt32Range(
     frame: *frame_mod.Frame,
     idx: u16,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (ctx.runtime.hasInterruptHandler()) return false;
     const local_idx: usize = idx;
@@ -1119,8 +1084,8 @@ fn tryFuseCheckedLocalEmptyInt32Range(
     if (!decodeEmptyCheckedLocalPostIncLoopTail(function.code, condition.body_pc, condition.false_pc, condition_pc, idx)) return false;
 
     if (current < condition.limit) {
-        try setSlotValue(ctx, &frame.locals[local_idx], core.JSValue.int32(condition.limit));
-        try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
+        try shared_vm.setSlotValue(ctx, &frame.locals[local_idx], core.JSValue.int32(condition.limit));
+        try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     }
     frame.pc = condition.false_pc;
     return true;
@@ -1137,9 +1102,6 @@ pub fn tryFuseCheckedLocalFastPath(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     // The matcher chain below is expensive and runs on every executed
     // get_loc_check. Sites that repeatedly fail to match go cold and are
@@ -1151,7 +1113,7 @@ pub fn tryFuseCheckedLocalFastPath(
     if (fusion_site < fusion_cold.len and fusion_cold[fusion_site] >= fusion_cold_threshold) return false;
 
     if (allow_loop_tail_fusion and
-        fusion_stats.counted(.tryFuseCheckedLocalEmptyInt32Range, try tryFuseCheckedLocalEmptyInt32Range(ctx, function, global, frame, idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+        fusion_stats.counted(.tryFuseCheckedLocalEmptyInt32Range, try tryFuseCheckedLocalEmptyInt32Range(ctx, function, global, frame, idx, sync_global_lexical_locals))) return true;
 
     const code = function.code;
     if (frame.pc < code.len) {
@@ -1161,17 +1123,17 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 5] == op.lt and
                     (code[frame.pc + 6] == op.if_false8 or code[frame.pc + 6] == op.if_false))
                 {
-                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalSimpleNumericCallAddRange, try tryFuseCheckedLocalSimpleNumericCallAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalInductionInt32AddRange, try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantBindingInt32AddRange, try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantInt32LoadAddRange, try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayModFieldInt32AddRange, try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalSimpleNumericCallAddRange, try tryFuseCheckedLocalSimpleNumericCallAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInductionInt32AddRange, try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantBindingInt32AddRange, try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantInt32LoadAddRange, try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayModFieldInt32AddRange, try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
                 }
             },
             op.push_i16 => {
@@ -1179,19 +1141,19 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 3] == op.lt and
                     (code[frame.pc + 4] == op.if_false8 or code[frame.pc + 4] == op.if_false))
                 {
-                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantBindingInt32AddRange, try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalInductionInt32AddRange, try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantInt32LoadAddRange, try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayModFieldInt32AddRange, try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalMapSetLatin1PrefixInt32Range, try tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange, try tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayMapSimpleCallbackRange, try tryFuseCheckedLocalArrayMapSimpleCallbackRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantBindingInt32AddRange, try tryFuseCheckedLocalInvariantBindingInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInductionInt32AddRange, try tryFuseCheckedLocalInductionInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalInvariantInt32LoadAddRange, try tryFuseCheckedLocalInvariantInt32LoadAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayModFieldInt32AddRange, try tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMapSetLatin1PrefixInt32Range, try tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange, try tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayMapSimpleCallbackRange, try tryFuseCheckedLocalArrayMapSimpleCallbackRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
                 }
             },
             op.push_i8 => {
@@ -1199,12 +1161,12 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 2] == op.lt and
                     (code[frame.pc + 3] == op.if_false8 or code[frame.pc + 3] == op.if_false))
                 {
-                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalGlobalDataStoreInductionRange, try tryFuseCheckedLocalGlobalDataStoreInductionRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalArrayPushInt32Range, try tryFuseCheckedLocalArrayPushInt32Range(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange, try tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalMathMinMaxAddRange, try tryFuseCheckedLocalMathMinMaxAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalLatin1AtomAppendRange, try tryFuseCheckedLocalLatin1AtomAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+                    if (fusion_stats.counted(.tryFuseLocalInt32GlobalInt32AddRange, try tryFuseLocalInt32GlobalInt32AddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object))) return true;
                 }
             },
             op.push_bigint_i32 => {
@@ -1212,17 +1174,17 @@ pub fn tryFuseCheckedLocalFastPath(
                     code[frame.pc + 5] == op.lt and
                     (code[frame.pc + 6] == op.if_false8 or code[frame.pc + 6] == op.if_false))
                 {
-                    if (fusion_stats.counted(.tryFuseCheckedLocalShortBigIntInductionAddRange, try tryFuseCheckedLocalShortBigIntInductionAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    if (fusion_stats.counted(.tryFuseCheckedLocalShortBigIntInductionAddRange, try tryFuseCheckedLocalShortBigIntInductionAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
                 }
             },
             else => {},
         }
     }
 
-    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-    if (fusion_stats.counted(.tryFuseCheckedLocalSparseArrayLiteralLengthAddRange, try tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayInt32AppendRange, try tryFuseCheckedLocalDenseArrayInt32AppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange, try tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange, try tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalSparseArrayLiteralLengthAddRange, try tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayInt32AppendRange, try tryFuseCheckedLocalDenseArrayInt32AppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
+    if (fusion_stats.counted(.tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange, try tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
     if (fusion_stats.counted(.tryFuseLocalInt32CompareBranch, tryFuseLocalInt32CompareBranch(function, frame, idx))) return true;
     if (fusion_stats.counted(.tryFuseLocalShortBigIntCompareBranch, tryFuseLocalShortBigIntCompareBranch(function, frame, idx))) return true;
 
@@ -1230,8 +1192,8 @@ pub fn tryFuseCheckedLocalFastPath(
         switch (code[frame.pc]) {
             op.post_inc, op.post_dec => {
                 if (allow_loop_tail_fusion and
-                    fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
-                if (fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateRead, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateRead(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                    fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals))) return true;
+                if (fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateRead, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateRead(ctx, function, global, frame, idx, code[frame.pc], sync_global_lexical_locals))) return true;
             },
             else => {},
         }
@@ -1244,7 +1206,7 @@ pub fn tryFuseCheckedLocalFastPath(
                 if (frame.pc + 4 <= code.len) {
                     switch (code[frame.pc + 3]) {
                         op.add => {
-                            if (fusion_stats.counted(.tryFuseCheckedLocalCheckedLocalNumericAdd, try tryFuseCheckedLocalCheckedLocalNumericAdd(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) return true;
+                            if (fusion_stats.counted(.tryFuseCheckedLocalCheckedLocalNumericAdd, try tryFuseCheckedLocalCheckedLocalNumericAdd(ctx, function, global, frame, idx, allow_loop_tail_fusion, sync_global_lexical_locals))) return true;
                         },
                         op.get_field => {},
                         op.push_0, op.push_1, op.push_2, op.push_3, op.push_4, op.push_5, op.push_6, op.push_7 => {},
@@ -1269,8 +1231,6 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -1354,21 +1314,21 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     if (matched) {
         const final_count_i64 = @as(i64, current_count) + @as(i64, iteration_count);
         if (final_count_i64 < std.math.minInt(i32) or final_count_i64 > std.math.maxInt(i32)) return false;
-        try storeBindingInt32(ctx, function, global, frame, counter_put, @intCast(final_count_i64), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeBindingInt32(ctx, function, global, frame, counter_put, @intCast(final_count_i64), sync_global_lexical_locals);
         if (counter_completion_tail.completion_put != null and if_completion_tail.completion_put == null) {
             const last_post_inc_result = final_count_i64 - 1;
-            try storeLocalCompletionBorrowedValue(ctx, function, global, frame, counter_completion_tail.completion_put, core.JSValue.int32(@intCast(last_post_inc_result)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+            try storeLocalCompletionBorrowedValue(ctx, function, global, frame, counter_completion_tail.completion_put, core.JSValue.int32(@intCast(last_post_inc_result)), sync_global_lexical_locals);
         } else if (prefix_completion_tail.completion_put != null and counter_completion_tail.completion_put == null and if_completion_tail.completion_put == null) {
-            try storeLocalCompletionBorrowedValue(ctx, function, global, frame, prefix_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+            try storeLocalCompletionBorrowedValue(ctx, function, global, frame, prefix_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals);
         }
     } else {
-        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, prefix_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, prefix_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals);
     }
     if (matched or false_branch_runs_if_completion) {
-        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, if_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeLocalCompletionBorrowedValue(ctx, function, global, frame, if_completion_tail.completion_put, core.JSValue.undefinedValue(), sync_global_lexical_locals);
     }
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1384,9 +1344,6 @@ fn tryFuseCheckedLocalSimpleNumericCallAddRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return false;
@@ -1411,7 +1368,7 @@ fn tryFuseCheckedLocalSimpleNumericCallAddRange(
     if (iteration_count_i128 <= 0 or iteration_count_i128 > std.math.maxInt(i32)) return false;
 
     const accumulator_get = decodeBindingGet(code, exit_branch.true_pc) orelse return false;
-    const callee = borrowedSimpleCallable(ctx, function, global, frame, accumulator_get.next_pc, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const callee = borrowedSimpleCallable(ctx, function, global, frame, accumulator_get.next_pc, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const arg0 = decodeSimpleNumericRangeArg(code, callee.next_pc, induction_idx) orelse return false;
     var args_buf: [2]SimpleNumericRangeArg = undefined;
     args_buf[0] = arg0.arg;
@@ -1470,9 +1427,9 @@ fn tryFuseCheckedLocalSimpleNumericCallAddRange(
     const final_accumulator = @as(i128, accumulator) + delta.total;
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1485,8 +1442,6 @@ fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -1550,9 +1505,9 @@ fn tryFuseCheckedLocalInvariantBindingInt32AddRange(
     const final_accumulator = @as(i64, lhs) + total_delta;
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
-    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1565,8 +1520,6 @@ fn tryFuseCheckedLocalInductionInt32AddRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -1628,9 +1581,9 @@ fn tryFuseCheckedLocalInductionInt32AddRange(
 
     const final_accumulator = @as(i128, accumulator) + delta.total;
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1643,8 +1596,6 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -1763,13 +1714,13 @@ fn tryFuseCheckedLocalLatin1AtomAppendRange(
     const repeat_count: usize = @intCast(limit - current_i);
     const final_value = try value_ops.latin1AtomRepeatedConcatValue(ctx.runtime, accumulator, suffix_atom, repeat_count) orelse return false;
     if (completion_put) |put| {
-        try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value.dup(), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-        try storeBindingOwnedValue(ctx, function, global, frame, put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value.dup(), sync_global_lexical_locals);
+        try storeBindingOwnedValue(ctx, function, global, frame, put, final_value, sync_global_lexical_locals);
     } else {
-        try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+        try storeBindingOwnedValue(ctx, function, global, frame, accumulator_put, final_value, sync_global_lexical_locals);
     }
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1782,8 +1733,6 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -1864,9 +1813,9 @@ fn tryFuseCheckedLocalShortBigIntInductionAddRange(
 
     const final_accumulator = @as(i128, accumulator) + delta.total;
     if (!core.JSValue.shortBigIntFits(final_accumulator)) return false;
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, completion_put, core.JSValue.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, completion_put, core.JSValue.shortBigInt(@intCast(final_accumulator)), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.shortBigInt(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -1961,8 +1910,6 @@ fn tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2023,9 +1970,9 @@ fn tryFuseCheckedLocalSparseArrayLiteralLengthAddRange(
     if (!safeIntegerI128(final_accumulator)) return false;
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2038,8 +1985,6 @@ fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2101,9 +2046,9 @@ fn tryFuseCheckedLocalInvariantInt32LoadAddRange(
     const final_accumulator = @as(i128, accumulator) + total_delta;
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
-    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2116,8 +2061,6 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2187,9 +2130,9 @@ fn tryFuseCheckedLocalDenseArrayModFieldInt32AddRange(
     if (!safeIntegerI128(final_accumulator)) return false;
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2202,11 +2145,9 @@ fn tryFuseCheckedLocalDenseArrayLengthIndexedInt32SumRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const condition_pc = getConditionPc(function.code, frame.pc, induction_idx) orelse return false;
-    return fusion_stats.counted(.tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt, try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    return fusion_stats.counted(.tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt, try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals));
 }
 
 fn tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(
@@ -2217,11 +2158,9 @@ fn tryFuseShortLocalDenseArrayLengthIndexedInt32SumRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const condition_pc = if (frame.pc >= 1) frame.pc - 1 else return false;
-    return fusion_stats.counted(.tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt, try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    return fusion_stats.counted(.tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt, try tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(ctx, function, global, frame, induction_idx, condition_pc, allow_loop_tail_fusion, sync_global_lexical_locals));
 }
 
 fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
@@ -2233,8 +2172,6 @@ fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
     condition_pc: usize,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2307,9 +2244,9 @@ fn tryFuseLocalDenseArrayLengthIndexedInt32SumRangeAt(
     const final_accumulator = @as(i128, accumulator) + delta.total;
 
     const final_value = value_ops.numberToValue(@floatFromInt(final_accumulator));
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, final_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2322,8 +2259,6 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2372,9 +2307,9 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
 
     try builtins.collection.mapSetLatin1PrefixInt32Range(ctx.runtime, map_object, key.prefix, current_i, limit);
-    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, receiver, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, receiver, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2387,8 +2322,6 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2451,9 +2384,9 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
         if (total < std.math.minInt(i32) or total > std.math.maxInt(i32)) return false;
     }
 
-    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(total), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(total), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2466,8 +2399,6 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2543,9 +2474,9 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
 
     const mapped = try shared_vm.qjsArrayMapSimpleNumericArg0DefaultSpeciesFastCall(ctx.runtime, global, receiver, callback) orelse return false;
     errdefer mapped.free(ctx.runtime);
-    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, result_put, store_tail.completion_put, mapped, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingOwnedValueWithCompletion(ctx, function, global, frame, result_put, store_tail.completion_put, mapped, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2561,8 +2492,6 @@ fn tryFuseCheckedLocalGlobalDataStoreInductionRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2626,9 +2555,9 @@ fn tryFuseCheckedLocalGlobalDataStoreInductionRange(
     if (final_global_value[1] != 0) return false;
     const final_value = core.JSValue.int32(final_global_value[0]);
     if (!setGlobalWritableDataStoreForFastPathOwned(ctx.runtime, ctx.lexicals, global, function, store_pc, store.atom, final_value)) return false;
-    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, final_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_put, final_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2641,8 +2570,6 @@ fn tryFuseCheckedLocalArrayPushInt32Range(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2708,9 +2635,9 @@ fn tryFuseCheckedLocalArrayPushInt32Range(
     const start_index = array_object.length;
     if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, start_index, current_i, iteration_count)) return false;
     const final_length_value = shared_vm.lengthIndexValue(array_object.length);
-    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, final_length_value, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, completion_tail.completion_put, final_length_value, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2726,9 +2653,6 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -2768,7 +2692,7 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     if (code[global_pc + 5] != op.add) return false;
     const atom_id = readInt(u32, code[global_pc + 1 ..][0..4]);
     if (ctx.lexicals != null) {
-        if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
+        if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
             lexical_value.free(ctx.runtime);
             return false;
         }
@@ -2803,9 +2727,9 @@ fn tryFuseLocalInt32GlobalInt32AddRange(
     const target_pc_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
     if (target_pc_i64 < 0 or @as(usize, @intCast(target_pc_i64)) != (getConditionPc(function.code, pc, induction_idx) orelse return false)) return false;
 
-    try storeLocalInt32WithCompletion(ctx, function, global, frame, accumulator_idx, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeLocalInt32WithCompletion(ctx, function, global, frame, accumulator_idx, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -2818,8 +2742,6 @@ fn tryFuseCheckedLocalCheckedLocalNumericAdd(
     local_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const pc = frame.pc;
     const code = function.code;
@@ -2851,9 +2773,9 @@ fn tryFuseCheckedLocalCheckedLocalNumericAdd(
         break :blk try value_ops.binary(ctx.runtime, op.add, lhs, rhs);
     };
     errdefer updated.free(ctx.runtime);
-    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, local_idx, store_tail.completion_put, updated, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    try storeLocalOwnedValueWithCompletion(ctx, function, global, frame, local_idx, store_tail.completion_put, updated, sync_global_lexical_locals);
     frame.pc = store_tail.tail_pc orelse localPutNextPc(store);
-    _ = fusion_stats.counted(.tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition, try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    _ = fusion_stats.counted(.tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition, try tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, allow_loop_tail_fusion, sync_global_lexical_locals));
     return true;
 }
 
@@ -2893,8 +2815,6 @@ fn tryFuseShortLocal0Local1Int32ArithmeticStoreRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (induction_idx != 1) return false;
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
@@ -2967,10 +2887,10 @@ fn tryFuseShortLocal0Local1Int32ArithmeticStoreRange(
         accumulator = accumulator +% (product ^ logical_shift);
     }
 
-    try setSlotValue(ctx, &frame.locals[0], core.JSValue.int32(accumulator));
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 0, sync_global_lexical_locals);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[0], core.JSValue.int32(accumulator));
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 0, sync_global_lexical_locals);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3002,8 +2922,6 @@ fn tryFuseShortLocalObjectFieldUpdateAccumulateRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (induction_idx != 2) return false;
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
@@ -3048,10 +2966,10 @@ fn tryFuseShortLocalObjectFieldUpdateAccumulateRange(
     if (!(try setPlainObjectInt32DataPropertyForFastPath(ctx.runtime, object, pattern.a_atom, a))) return false;
     const accumulator_value = value_ops.numberToValue(@floatFromInt(accumulator));
     errdefer accumulator_value.free(ctx.runtime);
-    try setSlotValue(ctx, &frame.locals[1], accumulator_value);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 1, sync_global_lexical_locals);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[1], accumulator_value);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, 1, sync_global_lexical_locals);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = pattern.false_pc;
     return true;
 }
@@ -3197,8 +3115,6 @@ fn tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (induction_idx != 1) return false;
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
@@ -3254,8 +3170,8 @@ fn tryFuseShortLocal0Local1DenseArrayMulAndMaskAppendRange(
     const array_object = objectFromValue(array_slot) orelse return false;
     if (!try array_object.appendDenseArrayInt32MulAndMaskRange(ctx.runtime, @intCast(current_i), @intCast(limit), formula.multiplier, formula.mask)) return false;
 
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3268,8 +3184,6 @@ fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
     value_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion) return false;
     if (value_idx >= frame.locals.len or value_idx >= frame.locals_uninit.len) return false;
@@ -3348,10 +3262,10 @@ fn tryFuseCheckedLocalDenseArrayChunkedInt32ValueAppendRange(
 
     if (!try array_object.appendDenseArrayInt32ValueRange(ctx.runtime, @intCast(length_value), current_value, count)) return false;
 
-    try setSlotValue(ctx, &frame.locals[length_idx], core.JSValue.int32(@intCast(next_length_i64)));
-    try setSlotValue(ctx, &frame.locals[value_idx], core.JSValue.int32(@intCast(next_value_i64)));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, length_idx, sync_global_lexical_locals);
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, value_idx, sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[length_idx], core.JSValue.int32(@intCast(next_length_i64)));
+    try shared_vm.setSlotValue(ctx, &frame.locals[value_idx], core.JSValue.int32(@intCast(next_value_i64)));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, length_idx, sync_global_lexical_locals);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, value_idx, sync_global_lexical_locals);
     frame.pc = if (hit_chunk) chunk_branch.true_pc else if (capped_for_interrupt) condition_pc else exit_branch.false_pc;
     return true;
 }
@@ -3364,8 +3278,6 @@ fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     induction_idx: u16,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -3423,9 +3335,9 @@ fn tryFuseCheckedLocalDenseArrayInt32AppendRange(
     const end: u32 = @intCast(limit);
     if (!try array_object.appendDenseArrayInt32Range(ctx.runtime, start, end)) return false;
 
-    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, put_tail.completion_put, core.JSValue.int32(limit - 1), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeLocalCompletionBorrowedValue(ctx, function, global, frame, put_tail.completion_put, core.JSValue.int32(limit - 1), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3441,9 +3353,6 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion or ctx.runtime.hasInterruptHandler()) return false;
     if (induction_idx >= frame.locals.len or induction_idx >= frame.locals_uninit.len) return false;
@@ -3511,7 +3420,7 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
     const goto_target_i64 = @as(i64, @intCast(goto_operand_pc)) + @as(i64, goto_diff);
     if (goto_target_i64 < 0 or @as(usize, @intCast(goto_target_i64)) != condition_pc) return false;
 
-    const math_value = fastGlobalDataValueForRange(ctx, function, global, frame, global_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const math_value = fastGlobalDataValueForRange(ctx, function, global, frame, global_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const method_value = ownDataPropertyValueMaterializedForFastPath(ctx.runtime, math_value, method_atom) orelse return false;
     const function_object = objectFromValue(method_value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return false;
@@ -3527,9 +3436,9 @@ fn tryFuseCheckedLocalMathMinMaxAddRange(
     const final_accumulator = @as(i128, accumulator) + total_delta;
     if (final_accumulator < std.math.minInt(i32) or final_accumulator > std.math.maxInt(i32)) return false;
 
-    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
-    try setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
+    try storeBindingInt32WithCompletion(ctx, function, global, frame, accumulator_put, store_tail.completion_put, @intCast(final_accumulator), sync_global_lexical_locals);
+    try shared_vm.setSlotValue(ctx, &frame.locals[induction_idx], core.JSValue.int32(limit));
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, induction_idx, sync_global_lexical_locals);
     frame.pc = exit_branch.false_pc;
     return true;
 }
@@ -3543,13 +3452,12 @@ fn fastGlobalDataValueForRange(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) ?core.JSValue {
     if (!eval_with_object.isUndefined()) return null;
     if (frameHasVarRefBinding(function, frame, atom_id)) return null;
     if (eval_local_names.len != 0 or eval_var_ref_names.len != 0) return null;
     if (frame.eval_local_names.len != 0 or frame.eval_var_ref_names.len != 0) return null;
-    if (globalLexicalValue(ctx, atom_id)) |lexical_value| {
+    if (shared_vm.globalLexicalValue(ctx, atom_id)) |lexical_value| {
         lexical_value.free(ctx.runtime);
         return null;
     }
@@ -3574,8 +3482,6 @@ fn tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(
     frame: *frame_mod.Frame,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     if (!allow_loop_tail_fusion) return false;
     const saved_pc = frame.pc;
@@ -3587,7 +3493,7 @@ fn tryFuseFollowingCheckedLocalPostUpdateReadAndGoto8Condition(
     if (update_op != op.post_inc and update_op != op.post_dec) return false;
 
     frame.pc = saved_pc + 3;
-    if (fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, loop_idx, update_op, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal))) {
+    if (fusion_stats.counted(.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition, try arith_vm.tryFuseDroppedCheckedLocalPostUpdateReadAndGoto8Condition(ctx, function, global, frame, loop_idx, update_op, sync_global_lexical_locals))) {
         return true;
     }
     frame.pc = saved_pc;
@@ -3619,7 +3525,6 @@ fn tryFuseVarRefSimpleStringCall1GlobalIntArgument(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
 ) !bool {
     const callee = varRefReadableBorrowed(frame, var_ref_idx) orelse return false;
     const kind = simpleStringCallableKind(callee) orelse return false;
@@ -3631,7 +3536,7 @@ fn tryFuseVarRefSimpleStringCall1GlobalIntArgument(
     if (code[arg_pc + 5] != op.call1) return false;
 
     const arg_atom = readInt(u32, code[arg_pc + 1 ..][0..4]);
-    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, arg_pc, arg_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const arg_value = fastGlobalDataValueForAtomAtPc(ctx, function, global, frame, arg_pc, arg_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const arg_i32 = arg_value.asInt32() orelse return false;
 
     const result = try simpleStringCallResultFromInt32(ctx.runtime, kind, arg_i32) orelse return false;
@@ -3680,9 +3585,6 @@ fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
     eval_local_names: []const core.Atom,
     eval_var_ref_names: []const core.Atom,
     eval_with_object: core.JSValue,
-    comptime globalLexicalValue: anytype,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const code = function.code;
     if (global_pc + 10 > code.len) return false;
@@ -3691,7 +3593,7 @@ fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
     const global_atom = readInt(u32, code[global_pc + 1 ..][0..4]);
     if (global_atom != atom_string) return false;
 
-    const string_ctor = fastInstalledGlobalDataValueForAtomAtPc(ctx, function, global, frame, global_pc, global_atom, eval_local_names, eval_var_ref_names, eval_with_object, globalLexicalValue) orelse return false;
+    const string_ctor = fastInstalledGlobalDataValueForAtomAtPc(ctx, function, global, frame, global_pc, global_atom, eval_local_names, eval_var_ref_names, eval_with_object) orelse return false;
     const field_pc = global_pc + 5;
     if (code[field_pc] != op.get_field2) return false;
     const method_atom = readInt(u32, code[field_pc + 1 ..][0..4]);
@@ -3702,7 +3604,7 @@ fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
     if (argument.next_pc + 3 > code.len or code[argument.next_pc] != op.call_method) return false;
     if (readInt(u16, code[argument.next_pc + 1 ..][0..2]) != 1) return false;
 
-    return try tryStoreStringFromCharCodeInt32LocalAppend(ctx, function, global, frame, local_idx, argument.value, argument.next_pc + 3, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal);
+    return try tryStoreStringFromCharCodeInt32LocalAppend(ctx, function, global, frame, local_idx, argument.value, argument.next_pc + 3, allow_loop_tail_fusion, sync_global_lexical_locals);
 }
 
 fn tryStoreStringFromCharCodeInt32LocalAppend(
@@ -3715,8 +3617,6 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     add_pc: usize,
     allow_loop_tail_fusion: bool,
     sync_global_lexical_locals: bool,
-    comptime setSlotValue: anytype,
-    comptime syncTopLevelGlobalLexicalLocal: anytype,
 ) !bool {
     const unit: u16 = @intCast(@as(u32, @bitCast(char_code)) & 0xffff);
     if (unit > 0xff) return false;
@@ -3754,15 +3654,15 @@ fn tryStoreStringFromCharCodeInt32LocalAppend(
     if (!appended_in_place) {
         const lhs_bytes = lhs_string.borrowLatin1() orelse return false;
         const replacement = (try core.string.String.createLatin1Concat(ctx.runtime, lhs_bytes, &.{byte})).value();
-        try setSlotValue(ctx, &frame.locals[local_idx], replacement);
+        try shared_vm.setSlotValue(ctx, &frame.locals[local_idx], replacement);
     }
     if (local_idx < function.var_is_lexical.len and function.var_is_lexical[local_idx]) {
         frame.clearLocalUninitialized(local_idx);
     }
-    try syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
+    try shared_vm.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, local_idx, sync_global_lexical_locals);
     frame.pc = if (drop_pc) |drop| drop + 1 else store.operand_pc + store.consume;
-    _ = fusion_stats.counted(.tryFuseFollowingLocalStringLengthGtConstSliceConstBranch, try tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(ctx, function, global, frame, local_idx, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
-    _ = fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8AtPc, try tryFuseDroppedLocalPostUpdateGoto8AtPc(ctx, function, global, frame, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals, setSlotValue, syncTopLevelGlobalLexicalLocal));
+    _ = fusion_stats.counted(.tryFuseFollowingLocalStringLengthGtConstSliceConstBranch, try tryFuseFollowingLocalStringLengthGtConstSliceConstBranch(ctx, function, global, frame, local_idx, sync_global_lexical_locals));
+    _ = fusion_stats.counted(.tryFuseDroppedLocalPostUpdateGoto8AtPc, try tryFuseDroppedLocalPostUpdateGoto8AtPc(ctx, function, global, frame, frame.pc, allow_loop_tail_fusion, sync_global_lexical_locals));
     return true;
 }
 
@@ -3835,9 +3735,8 @@ pub fn closeLoc(
     ctx: *core.JSContext,
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
-    comptime closeLocalVarRef: anytype,
 ) !void {
     const idx = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
-    try closeLocalVarRef(ctx, frame, idx);
+    try shared_vm.closeLocalVarRef(ctx, frame, idx);
 }
