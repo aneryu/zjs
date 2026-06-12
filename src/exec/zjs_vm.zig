@@ -602,6 +602,11 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                         return err;
                     };
                     if (fusion_stats.counted(.tryFuseLocalStringAppend, fused_local_append)) continue;
+                    const fused_global_append = arith_vm.tryFuseGlobalStringAppend(ctx, stack, function, global, frame, sync_global_lexical_locals, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
+                        if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    if (fusion_stats.counted(.tryFuseGlobalStringAppend, fused_global_append)) continue;
                     const fused_global_add = arith_vm.tryFuseGlobalDataAdd(ctx, stack, function, global, frame, eval_local_names, eval_var_ref_names, eval_with_object) catch |err| {
                         if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                         return err;

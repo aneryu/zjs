@@ -43,11 +43,20 @@ pub const Data = union(enum) {
 pub const Rope = struct {
     left: *String,
     right: *String,
+    /// Total length in code units, including the tail buffer's used units.
     len: usize,
     wide: bool,
     rt: *JSRuntime,
     hash: u32 = 0,
     flat: FlatCache = .none,
+    /// Growable private append buffer so `s += x` loops extend the rope in
+    /// place instead of chaining one ~150-byte node per concatenation.
+    /// Logically the tail's content sits after `right`. The slices keep the
+    /// full allocated capacity; `tail_len` is the used unit count. Flattening
+    /// merges the tail into `flat` and releases it, so a materialized rope
+    /// never carries a tail.
+    tail: Tail = .none,
+    tail_len: usize = 0,
     /// Intrusive link used only by the iterative destroy path so arbitrarily
     /// deep rope chains never recurse.
     chain_next: ?*String = null,
@@ -57,6 +66,20 @@ pub const Rope = struct {
         latin1: []u8,
         utf16: []u16,
     };
+
+    pub const Tail = union(enum) {
+        none,
+        latin1: []u8,
+        utf16: []u16,
+    };
+
+    fn tailResolved(self: *const Rope) ?String.ResolvedData {
+        return switch (self.tail) {
+            .none => null,
+            .latin1 => |buf| .{ .latin1 = buf[0..self.tail_len] },
+            .utf16 => |buf| .{ .utf16 = buf[0..self.tail_len] },
+        };
+    }
 };
 
 pub const Layout = enum(u8) {
@@ -352,6 +375,53 @@ pub const String = struct {
 
     pub fn isRope(self: *const String) bool {
         return self.data == .rope;
+    }
+
+    /// Appends flat content to a not-yet-materialized rope by extending the
+    /// rope's private tail buffer (amortized doubling) instead of chaining a
+    /// new rope node per concatenation. Returns false when the caller must
+    /// keep the regular new-node linking: non-rope backing, materialized
+    /// `flat` cache, or an append-protected wrapper (rope child /
+    /// atom-bound). Aliasing is the caller's contract, exactly like the flat
+    /// `append*InPlace` family (reference-count accounting at the call site).
+    /// On allocation failure the rope is left untouched.
+    pub fn appendRopeTail(self: *String, rt: *JSRuntime, suffix: ResolvedData) !bool {
+        if (self.atom_id != null or self.rope_child) return false;
+        if (self.data != .rope) return false;
+        const node = self.data.rope;
+        std.debug.assert(node.rt == rt);
+        if (node.flat != .none) return false;
+        // Tail appends happen strictly pre-materialization (the flat-cache
+        // guard above): content hashes are only computed at flatten time,
+        // so no hash cache can go stale through this in-place mutation.
+        std.debug.assert(node.hash == 0);
+        std.debug.assert(self.hash == 0);
+        const add_len = suffix.len();
+        if (add_len == 0) return true;
+        const new_total = checkedAddLength(node.len, add_len) orelse return false;
+        const used = node.tail_len;
+        const need = checkedAddLength(used, add_len) orelse return false;
+
+        const widen_tail = switch (node.tail) {
+            .none, .latin1 => suffix == .utf16,
+            .utf16 => true,
+        };
+        if (widen_tail) {
+            const buf = try ropeTailEnsureWide(rt, node, need);
+            switch (suffix) {
+                .latin1 => |bytes| for (bytes, used..) |byte, index| {
+                    buf[index] = byte;
+                },
+                .utf16 => |units| @memcpy(buf[used..][0..add_len], units),
+            }
+        } else {
+            const buf = try ropeTailEnsureNarrow(rt, node, need);
+            @memcpy(buf[used..][0..add_len], suffix.latin1);
+        }
+        if (suffix == .utf16) node.wide = true;
+        node.tail_len = need;
+        node.len = new_total;
+        return true;
     }
 
     /// Content hash usable for hashing string values regardless of rope state.
@@ -757,9 +827,10 @@ fn flattenRopeNode(node: *Rope) void {
     };
 }
 
-/// Materializes the rope's content into `node.flat` and releases the children.
-/// Idempotent. On error the rope is left untouched (children retained,
-/// `flat == .none`), so the caller can retry or surface the failure.
+/// Materializes the rope's content into `node.flat` and releases the
+/// children and the tail buffer. Idempotent. On error the rope is left
+/// untouched (children and tail retained, `flat == .none`), so the caller
+/// can retry or surface the failure.
 fn flattenRopeNodeFallible(node: *Rope) !void {
     if (node.flat != .none) return;
     const rt = node.rt;
@@ -780,25 +851,103 @@ fn flattenRopeNodeFallible(node: *Rope) !void {
     releaseRopeChildRef(rt, node.right);
     node.left = undefined;
     node.right = undefined;
+    freeRopeTail(rt, node);
+}
+
+/// Releases a rope's private tail buffer (no-op for tail-less ropes).
+fn freeRopeTail(rt: *JSRuntime, node: *Rope) void {
+    switch (node.tail) {
+        .none => return,
+        .latin1 => |buf| rt.memory.free(u8, buf),
+        .utf16 => |buf| rt.memory.free(u16, buf),
+    }
+    node.tail = .none;
+    node.tail_len = 0;
+}
+
+/// Grows (or creates) a narrow tail buffer to hold `need` used bytes and
+/// returns it. Callers must route wide tails through `ropeTailEnsureWide`.
+fn ropeTailEnsureNarrow(rt: *JSRuntime, node: *Rope, need: usize) ![]u8 {
+    switch (node.tail) {
+        .latin1 => |buf| {
+            if (need <= buf.len) return buf;
+            const grown = try rt.memory.alloc(u8, nextStringCapacity(buf.len, need));
+            @memcpy(grown[0..node.tail_len], buf[0..node.tail_len]);
+            rt.memory.free(u8, buf);
+            node.tail = .{ .latin1 = grown };
+            return grown;
+        },
+        .none => {
+            const buf = try rt.memory.alloc(u8, nextStringCapacity(0, need));
+            node.tail = .{ .latin1 = buf };
+            return buf;
+        },
+        .utf16 => unreachable,
+    }
+}
+
+/// Grows (or creates) a wide tail buffer to hold `need` used units and
+/// returns it. A narrow tail is widened in place so a wide suffix can land
+/// in the same buffer.
+fn ropeTailEnsureWide(rt: *JSRuntime, node: *Rope, need: usize) ![]u16 {
+    switch (node.tail) {
+        .utf16 => |buf| {
+            if (need <= buf.len) return buf;
+            const grown = try rt.memory.alloc(u16, nextStringCapacity(buf.len, need));
+            @memcpy(grown[0..node.tail_len], buf[0..node.tail_len]);
+            rt.memory.free(u16, buf);
+            node.tail = .{ .utf16 = grown };
+            return grown;
+        },
+        .latin1 => |buf| {
+            const widened = try rt.memory.alloc(u16, nextStringCapacity(buf.len, need));
+            for (buf[0..node.tail_len], 0..) |byte, index| widened[index] = byte;
+            rt.memory.free(u8, buf);
+            node.tail = .{ .utf16 = widened };
+            return widened;
+        },
+        .none => {
+            const buf = try rt.memory.alloc(u16, nextStringCapacity(0, need));
+            node.tail = .{ .utf16 = buf };
+            return buf;
+        },
+    }
 }
 
 /// Iterative left-to-right leaf copy; never recurses, so arbitrarily deep
 /// rope chains (`s = s + x` loops) cannot overflow the native stack. Only the
 /// traversal stack can fail; the output buffer is owned by the caller, so an
-/// error leaves the rope itself unmodified.
+/// error leaves the rope itself unmodified. Each unflattened rope contributes
+/// `left ++ right ++ tail`; a flattened child already merged its tail into
+/// `flat`.
 fn copyRopeContent(comptime T: type, rt: *JSRuntime, root: *Rope, out: []T) !void {
     const allocator = rt.memory.allocator;
-    var stack = std.ArrayList(*const String).empty;
+    const Item = union(enum) {
+        str: *const String,
+        tail: *const Rope,
+    };
+    var stack = std.ArrayList(Item).empty;
     defer stack.deinit(allocator);
-    try stack.append(allocator, root.right);
-    try stack.append(allocator, root.left);
+    try stack.append(allocator, .{ .tail = root });
+    try stack.append(allocator, .{ .str = root.right });
+    try stack.append(allocator, .{ .str = root.left });
     var offset: usize = 0;
     while (stack.pop()) |item| {
-        if (item.data == .rope) {
-            const child = item.data.rope;
+        const leaf = switch (item) {
+            .tail => |node| {
+                if (node.tailResolved()) |resolved| {
+                    offset += copyResolvedUnits(T, out[offset..], resolved);
+                }
+                continue;
+            },
+            .str => |s| s,
+        };
+        if (leaf.data == .rope) {
+            const child = leaf.data.rope;
             if (child.flat == .none) {
-                try stack.append(allocator, child.right);
-                try stack.append(allocator, child.left);
+                try stack.append(allocator, .{ .tail = child });
+                try stack.append(allocator, .{ .str = child.right });
+                try stack.append(allocator, .{ .str = child.left });
                 continue;
             }
             offset += copyResolvedUnits(T, out[offset..], switch (child.flat) {
@@ -808,7 +957,7 @@ fn copyRopeContent(comptime T: type, rt: *JSRuntime, root: *Rope, out: []T) !voi
             });
             continue;
         }
-        offset += copyResolvedUnits(T, out[offset..], item.resolveData());
+        offset += copyResolvedUnits(T, out[offset..], leaf.resolveData());
     }
     std.debug.assert(offset == out.len);
 }
@@ -868,11 +1017,20 @@ fn drainRopeDestroyChain(rt: *JSRuntime, pending: *?*String) void {
         }
         switch (node.flat) {
             .none => {
+                freeRopeTail(rt, node);
                 releaseStringRefIntoChain(rt, node.left, pending);
                 releaseStringRefIntoChain(rt, node.right, pending);
             },
-            .latin1 => |buf| rt.memory.free(u8, buf),
-            .utf16 => |buf| rt.memory.free(u16, buf),
+            // Flattening merged and released the tail, so a materialized
+            // rope never carries one.
+            .latin1 => |buf| {
+                std.debug.assert(node.tail == .none);
+                rt.memory.free(u8, buf);
+            },
+            .utf16 => |buf| {
+                std.debug.assert(node.tail == .none);
+                rt.memory.free(u16, buf);
+            },
         }
         rt.memory.destroy(Rope, node);
         rt.memory.destroy(String, wrapper);

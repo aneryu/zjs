@@ -57,6 +57,7 @@ pub const Fusion = enum(u16) {
     tryFuseGlobalDateNowCall,
     tryFuseGlobalInductionInt32AddRange,
     tryFuseGlobalInt32PrefixTermsStore,
+    tryFuseGlobalStringAppend,
     tryFuseGlobalStringCall1NumberConst,
     tryFuseGlobalStringPercentHexAddStore,
     tryFuseGlobalUriCall1,

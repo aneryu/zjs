@@ -657,6 +657,91 @@ pub fn tryFuseLocalStringAppend(
     return true;
 }
 
+/// Fuses `add; dup? put_var s; (put_locN | drop)?` when the add is a string
+/// append whose stack lhs *is* the global data slot's current value: the
+/// known references are that slot, the stack copy this fusion pops, and
+/// (when the previous statement's completion local still holds the
+/// accumulator) the completion slot — all aliases of the accumulator the
+/// pattern overwrites. The append then extends lhs storage in place (flat
+/// capacity append or rope tail append) instead of copying or chaining a
+/// rope node per iteration, keeping top-level `s += part` loops O(1) per
+/// step in nodes and bytes.
+pub fn tryFuseGlobalStringAppend(
+    ctx: *core.JSContext,
+    stack: *stack_mod.Stack,
+    function: *const bytecode.Bytecode,
+    global: *core.Object,
+    frame: *frame_mod.Frame,
+    sync_global_lexical_locals: bool,
+    eval_local_names: []const core.Atom,
+    eval_var_ref_names: []const core.Atom,
+    eval_with_object: core.JSValue,
+) !bool {
+    const code = function.code;
+    var store_pc = frame.pc;
+    const has_dup = store_pc < code.len and code[store_pc] == op.dup;
+    if (has_dup) store_pc += 1;
+    if (store_pc + 5 > code.len or code[store_pc] != op.put_var) return false;
+    const atom_id = std.mem.readInt(u32, code[store_pc + 1 ..][0..4], .little);
+    var next_pc = store_pc + 5;
+    var completion_store: ?LocalPut = null;
+    if (has_dup) {
+        // The duplicated result must be consumed right after the global
+        // store: either dropped or kept as the statement completion local.
+        if (next_pc < code.len and code[next_pc] == op.drop) {
+            next_pc += 1;
+        } else {
+            const candidate = decodeLocalPut(code, next_pc) orelse return false;
+            if (candidate.checked) return false;
+            if (candidate.idx >= frame.locals.len or candidate.idx >= frame.locals_uninit.len) return false;
+            if (candidate.idx < function.var_is_lexical.len and function.var_is_lexical[candidate.idx]) return false;
+            if (slot_ops.varRefCellFromValue(frame.locals[candidate.idx]) != null) return false;
+            if (candidate.idx < function.var_is_const.len and function.var_is_const[candidate.idx]) return false;
+            completion_store = candidate;
+            next_pc = candidate.operand_pc + candidate.consume;
+        }
+    }
+    if (!canFuseGlobalDataWrite(function, frame, atom_id, eval_local_names, eval_var_ref_names, eval_with_object)) return false;
+    if (atom_id == core.atom.ids.undefined_ or atom_id == core.atom.ids.arguments) return false;
+    if (ctx.lexicals) |env| {
+        if (env.hasOwnProperty(atom_id)) return false;
+    }
+    if (stack.values.len < 2) return false;
+    const lhs = stack.values[stack.values.len - 2];
+    const rhs = stack.values[stack.values.len - 1];
+    if (!lhs.isString() or !rhs.isString()) return false;
+
+    // The in-place append is only sound when the stack lhs aliases the
+    // global accumulator: probe the slot for identity, then prove it is a
+    // plain writable data property via a no-op re-store *before* mutating
+    // lhs (a failed store afterwards would corrupt the generic re-add
+    // fallback, which would see an lhs that already contains rhs).
+    const slot_is_lhs = alias: {
+        const slot_value = global.getOwnDataPropertyValue(atom_id) orelse break :alias false;
+        defer slot_value.free(ctx.runtime);
+        break :alias slot_value.same(lhs);
+    };
+    if (!slot_is_lhs) return false;
+    if (!try global.setOwnWritableDataProperty(ctx.runtime, atom_id, lhs)) return false;
+
+    const has_completion_ref =
+        completion_store != null and
+        frame.locals[completion_store.?.idx].same(lhs);
+    const max_ref_count: usize = 2 + @as(usize, @intFromBool(has_completion_ref));
+    if (!try value_ops.tryAppendStringInPlace(ctx.runtime, lhs, rhs, max_ref_count)) return false;
+
+    const rhs_owned = try stack.pop();
+    const lhs_owned = try stack.pop();
+    if (completion_store) |completion| {
+        try slot_ops.setSlotValue(ctx, &frame.locals[completion.idx], lhs_owned.dup());
+        try slot_ops.syncTopLevelGlobalLexicalLocal(ctx, function, global, frame, completion.idx, sync_global_lexical_locals);
+    }
+    frame.pc = next_pc;
+    rhs_owned.free(ctx.runtime);
+    lhs_owned.free(ctx.runtime);
+    return true;
+}
+
 pub fn tryFuseGlobalDataAdd(
     ctx: *core.JSContext,
     stack: *stack_mod.Stack,

@@ -698,6 +698,100 @@ test "normal strings use compact allocation with bounded in-place append" {
     try std.testing.expect(growable.eqlBytes("abc"));
 }
 
+test "rope tail append extends an unmaterialized rope in place" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.string.String.createLatin1(rt, "abc");
+    const right = try core.string.String.createLatin1(rt, "def");
+    const rope = try core.string.String.createRope(rt, left, right);
+    left.value().free(rt);
+    right.value().free(rt);
+    defer rope.value().free(rt);
+
+    try std.testing.expect(try rope.appendRopeTail(rt, .{ .latin1 = "ghi" }));
+    try std.testing.expect(try rope.appendRopeTail(rt, .{ .latin1 = "jkl" }));
+    try std.testing.expect(try rope.appendRopeTail(rt, .{ .latin1 = "" }));
+    try std.testing.expectEqual(@as(usize, 12), rope.len());
+    try std.testing.expect(!rope.isWide());
+
+    // Length growth in a loop exercises the amortized-doubling regrowth.
+    var round: usize = 0;
+    while (round < 100) : (round += 1) {
+        try std.testing.expect(try rope.appendRopeTail(rt, .{ .latin1 = "0123456789" }));
+    }
+    try std.testing.expectEqual(@as(usize, 1012), rope.len());
+
+    // Content reads flatten the rope including the tail segment.
+    try std.testing.expectEqual(@as(u16, 'g'), rope.codeUnitAt(6));
+    try std.testing.expectEqual(@as(u16, 'l'), rope.codeUnitAt(11));
+    try std.testing.expectEqual(@as(u16, '0'), rope.codeUnitAt(12));
+    try std.testing.expectEqual(@as(u16, '9'), rope.codeUnitAt(1011));
+
+    // Materialized ropes refuse tail appends: their hash caches are live.
+    try std.testing.expect(!try rope.appendRopeTail(rt, .{ .latin1 = "nope" }));
+    try std.testing.expectEqual(@as(usize, 1012), rope.len());
+
+    // An unflattened rope destroyed with a pending tail releases it.
+    const l2 = try core.string.String.createLatin1(rt, "xy");
+    const r2 = try core.string.String.createLatin1(rt, "z");
+    const dropped = try core.string.String.createRope(rt, l2, r2);
+    l2.value().free(rt);
+    r2.value().free(rt);
+    try std.testing.expect(try dropped.appendRopeTail(rt, .{ .latin1 = "tail" }));
+    dropped.value().free(rt);
+}
+
+test "rope tail append widens for utf16 suffixes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.string.String.createLatin1(rt, "ab");
+    const right = try core.string.String.createLatin1(rt, "cd");
+    const rope = try core.string.String.createRope(rt, left, right);
+    left.value().free(rt);
+    right.value().free(rt);
+    defer rope.value().free(rt);
+
+    try std.testing.expect(try rope.appendRopeTail(rt, .{ .latin1 = "12" }));
+    try std.testing.expect(!rope.isWide());
+    // A wide suffix widens the narrow tail in place and flips the rope wide.
+    try std.testing.expect(try rope.appendRopeTail(rt, .{ .utf16 = &.{0x0100} }));
+    try std.testing.expect(rope.isWide());
+    // Narrow content keeps landing in the widened tail.
+    try std.testing.expect(try rope.appendRopeTail(rt, .{ .latin1 = "z" }));
+    try std.testing.expectEqual(@as(usize, 8), rope.len());
+
+    const expected = try core.string.String.createUtf16(rt, &.{ 'a', 'b', 'c', 'd', '1', '2', 0x0100, 'z' });
+    defer expected.value().free(rt);
+    try std.testing.expect(rope.eqlString(expected.*));
+    try std.testing.expectEqual(expected.contentHash(), rope.contentHash());
+}
+
+test "rope child with pending tail flattens through the parent rope" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const left = try core.string.String.createLatin1(rt, "abc");
+    const right = try core.string.String.createLatin1(rt, "def");
+    const inner = try core.string.String.createRope(rt, left, right);
+    left.value().free(rt);
+    right.value().free(rt);
+    defer inner.value().free(rt);
+    try std.testing.expect(try inner.appendRopeTail(rt, .{ .latin1 = "ghi" }));
+
+    const suffix = try core.string.String.createLatin1(rt, "XY");
+    const outer = try core.string.String.createRope(rt, inner, suffix);
+    suffix.value().free(rt);
+    defer outer.value().free(rt);
+
+    // Becoming a rope child snapshots the content: further tail appends on
+    // the child must refuse so the parent's view stays immutable.
+    try std.testing.expect(!try inner.appendRopeTail(rt, .{ .latin1 = "no" }));
+    try std.testing.expect(outer.eqlBytes("abcdefghiXY"));
+    try std.testing.expect(inner.eqlBytes("abcdefghi"));
+}
+
 test "strings compare by code unit across storage widths" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();

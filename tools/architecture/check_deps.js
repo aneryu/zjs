@@ -85,7 +85,6 @@ function violationReason(source, target) {
 
   if (source === 'src/root.zig') {
     if (
-      target === 'src/kernel/root.zig' ||
       target === 'src/binding/root.zig' ||
       target === 'src/runtime/public.zig' ||
       target === 'src/core/root.zig' ||
@@ -106,19 +105,6 @@ function violationReason(source, target) {
       'src/runtime/',
     ];
     return targetStarts(target, disallowed) ? 'core must not depend on bytecode, builtins, exec, frontend, runtime, or CLI' : null;
-  }
-
-  if (source.startsWith('src/kernel/')) {
-    const disallowed = [
-      'src/bytecode/',
-      'src/builtins/',
-      'src/cli/',
-      'src/exec/',
-      'src/frontend/',
-      'src/libs/',
-      'src/runtime/',
-    ];
-    return targetStarts(target, disallowed) ? 'kernel may import core/kernel only; it must not depend on exec, runtime, frontend, bytecode, builtins, libs, or CLI' : null;
   }
 
   if (source.startsWith('src/builtins/')) {

@@ -901,9 +901,21 @@ fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value
         return try toStringValue(rt, core.JSValue.int32(int_value));
     }
 
-    // Rope-backed strings must not be flattened by borrowLatin1; chain the
-    // formatted digits through another rope node instead.
+    // Rope-backed strings must not be flattened by borrowLatin1; append the
+    // formatted digits into the rope's tail when the wrapper is exclusively
+    // held, otherwise chain them through another rope node.
     if (string.isRope()) {
+        if (position == .suffix) {
+            if (string_value.refHeader()) |header| {
+                if (header.rc == 1) {
+                    var digits_buf: [16]u8 = undefined;
+                    const digits = dtoa.formatInt32(&digits_buf, int_value);
+                    if (try string.appendRopeTail(rt, .{ .latin1 = digits })) {
+                        return string_value.dup();
+                    }
+                }
+            }
+        }
         const digits_value = try toStringValue(rt, core.JSValue.int32(int_value));
         const digits_string = stringObject(digits_value) orelse {
             digits_value.free(rt);
@@ -958,16 +970,22 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
     const b_len = b_string.len();
     if (a_len == 0) return b.dup();
     if (b_len == 0) return a.dup();
+    // rc==1: the caller holds the only reference, so the lhs is consumed by
+    // this add and may be extended in place (flat capacity append, or rope
+    // tail append when the lhs is an unmaterialized rope). A rope rhs keeps
+    // the deferred rope-of-rope linking below instead of being copied.
+    if (!b_string.isRope()) {
+        if (a.refHeader()) |header| {
+            if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
+                return a.dup();
+            }
+        }
+    }
     // If either operand already is a rope, concatenating eagerly would flatten
     // it; chain another rope node instead (ropes are always >= rope_min_len).
     if (a_string.isRope() or b_string.isRope()) {
         const out = try core.string.String.createRope(rt, a_string, b_string);
         return out.value();
-    }
-    if (a.refHeader()) |header| {
-        if (header.rc == 1 and try appendStringInPlace(rt, a_string, b_string)) {
-            return a.dup();
-        }
     }
     // Long concatenations defer the copy through a rope node (QuickJS
     // JSStringRope analogue); content materializes lazily on first read.
@@ -1007,9 +1025,14 @@ fn stringAddStrings(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core
 }
 
 fn appendStringInPlace(rt: *core.JSRuntime, lhs_string: *core.string.String, rhs_string: *core.string.String) !bool {
-    // Never resolve a rope lhs here: resolveData() would flatten it eagerly.
-    // Bailing out lets the caller build a rope-of-rope instead.
-    if (lhs_string.isRope()) return false;
+    // Rope lhs: never resolve it here (resolveData() would flatten it
+    // eagerly). An unmaterialized rope grows through its private tail
+    // buffer instead of chaining one node per append; a rope rhs keeps the
+    // rope-of-rope linking so its own deferred content stays lazy.
+    if (lhs_string.isRope()) {
+        if (rhs_string.isRope()) return false;
+        return lhs_string.appendRopeTail(rt, rhs_string.resolveData());
+    }
     try rhs_string.ensureFlat(rt);
     return switch (rhs_string.resolveData()) {
         .latin1 => |rhs_bytes| switch (lhs_string.resolveData()) {
