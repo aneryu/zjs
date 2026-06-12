@@ -30,7 +30,6 @@ const string_ops = @import("string_ops.zig");
 const AtomicsWaiter = call_runtime.AtomicsWaiter;
 const ReflectConstructResolution = call_runtime.ReflectConstructResolution;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
-const WorkerModuleContinuation = call_runtime.WorkerModuleContinuation;
 const atomicsBufferObject = object_ops.atomicsBufferObject;
 const atomicsElementBytes = call_runtime.atomicsElementBytes;
 const atomicsLinkWaiter = call_runtime.atomicsLinkWaiter;
@@ -2776,40 +2775,6 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     payload_alive = false;
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-pub fn qjsWorkerHasActiveAsyncDependency(
-    ctx: *core.JSContext,
-    continuations: *const std.ArrayList(WorkerModuleContinuation),
-    filename: []const u8,
-) !bool {
-    const module_name = try ctx.runtime.internAtom(filename);
-    defer ctx.runtime.atoms.free(module_name);
-    const record = ctx.runtime.modules.find(module_name) orelse return false;
-    var visited = std.ArrayList(core.Atom).empty;
-    defer visited.deinit(ctx.runtime.memory.allocator);
-    return qjsWorkerRecordHasActiveAsyncDependency(ctx, continuations, record, &visited);
-}
-
-pub fn qjsWorkerRecordHasActiveAsyncDependency(
-    ctx: *core.JSContext,
-    continuations: *const std.ArrayList(WorkerModuleContinuation),
-    record: *const core.module.ModuleRecord,
-    visited: *std.ArrayList(core.Atom),
-) !bool {
-    for (visited.items) |seen| {
-        if (seen == record.module_name) return false;
-    }
-    try visited.append(ctx.runtime.memory.allocator, record.module_name);
-    for (record.requested_modules) |request| {
-        const request_name = ctx.runtime.atoms.name(request) orelse continue;
-        for (continuations.items) |continuation| {
-            if (!continuation.completed and std.mem.eql(u8, continuation.path, request_name)) return true;
-        }
-        const requested_record = ctx.runtime.modules.find(request) orelse continue;
-        if (try qjsWorkerRecordHasActiveAsyncDependency(ctx, continuations, requested_record, visited)) return true;
-    }
-    return false;
 }
 
 pub fn qjsAsyncFunctionStart(

@@ -10,7 +10,6 @@ pub const EventLoopRunResult = event_loop.RunResult;
 pub const runUntilIdle = event_loop.runUntilIdle;
 pub const cleanupAtomicsWaitersForContext = cleanup.cleanupAtomicsWaitersForContext;
 pub const wakeAtomicsWaitersForRuntimes = cleanup.wakeAtomicsWaitersForRuntimes;
-pub const cleanupWorkersForRuntime = cleanup.cleanupWorkersForRuntime;
 pub const detachArrayBuffer = buffer.detachArrayBuffer;
 pub const evalFileModuleGraphWithOutput = modules.evalFileModuleGraphWithOutput;
 pub const resolveModuleSpecifier = modules.resolveModuleSpecifier;

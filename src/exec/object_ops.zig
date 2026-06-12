@@ -122,7 +122,6 @@ const qjsObjectToStringCall = string_ops.qjsObjectToStringCall;
 const qjsReflectConstructGenericCallable = call_runtime.qjsReflectConstructGenericCallable;
 const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
 const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
-const qjsWorkerNativeFunction = call_runtime.qjsWorkerNativeFunction;
 const readUtf16CodePoint = string_ops.readUtf16CodePoint;
 const regExpConstructorFromGlobal = regexp_fastpath.regExpConstructorFromGlobal;
 const regExpFlagsContain = regexp_fastpath.regExpFlagsContain;
@@ -3872,35 +3871,6 @@ pub fn directEvalCallerAllowsSuperProperty(caller_frame: ?*frame_mod.Frame, eval
     return false;
 }
 
-pub const WorkerObjectInitError = std.mem.Allocator.Error || error{
-    IncompatibleDescriptor,
-    InvalidLength,
-    InvalidUtf8,
-    NotExtensible,
-    ReadOnly,
-    TypeError,
-};
-
-pub fn qjsWorkerObjectId(rt: *core.JSRuntime, value: core.JSValue) !i32 {
-    _ = rt;
-    const object = objectFromValue(value) orelse return error.TypeError;
-    return object.workerId() orelse error.TypeError;
-}
-
-pub fn qjsWorkerParentObject(rt: *core.JSRuntime) WorkerObjectInitError!core.JSValue {
-    const worker = call_runtime.current_qjs_worker orelse return core.JSValue.undefinedValue();
-    if (call_runtime.current_qjs_worker_parent) |parent| return parent.dup();
-    const parent = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, &parent.header);
-    (try parent.workerIdSlot(rt)).* = worker.id;
-    const post = try qjsWorkerNativeFunction(rt, "postMessage", 1, .parent);
-    defer post.free(rt);
-    try defineValueProperty(rt, parent, "postMessage", post);
-    try defineValueProperty(rt, parent, "onmessage", core.JSValue.nullValue());
-    _ = try rt.registerExternalValueSymbolRoot(parent.value());
-    call_runtime.current_qjs_worker_parent = parent.value();
-    return parent.value().dup();
-}
 pub fn createGeneratorObject(
     ctx: *core.JSContext,
     func: core.JSValue,

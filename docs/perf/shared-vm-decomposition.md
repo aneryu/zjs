@@ -2,8 +2,8 @@
 
 `src/exec/call_runtime.zig` (originally `shared.zig`) is the VM call runtime:
 `execCall`, the `callValueOrBytecode*` dispatch chain, construct paths, direct
-and indirect eval support, generator resumption, worker coordination, and
-Atomics waiter machinery. The compatibility alias layer that `shared.zig` once
+and indirect eval support, generator resumption, and Atomics waiter
+machinery. The compatibility alias layer that `shared.zig` once
 carried has been removed; callers now import the owning domain module
 directly. Remaining non-call-runtime code should continue to shrink in small
 behavior-preserving moves. This map is a refactor aid, not a status ledger.
@@ -55,7 +55,8 @@ These domains are still reasonable candidates for future splits when touched:
 - closure and var-ref operations.
 - builtin wrapper glue that does not belong in an existing `builtins/` module
   (Reflect/Iterator-helper native records and similar `qjs*` call glue).
-- worker helper paths (the legacy `qjs:os`/`qjs:std` cluster has been deleted).
+- worker helper paths (the legacy `qjs:os`/`qjs:std` cluster and the dead
+  QjsWorker machinery have both been deleted).
 
 Do not create a new shard for a single unrelated helper. Leave nearby code in
 place until there is a stable domain boundary.

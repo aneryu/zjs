@@ -1099,7 +1099,6 @@ pub const qjsArrayByCopyCall = array_ops.qjsArrayByCopyCall;
 const closeFrameDestructuringIteratorsForAbruptCompletion = call_runtime.closeFrameDestructuringIteratorsForAbruptCompletion;
 pub const drainPendingPromiseJobs = promise_ops.drainPendingPromiseJobs;
 pub const cleanupAtomicsWaitersForContext = call_runtime.cleanupAtomicsWaitersForContext;
-pub const cleanupWorkersForRuntime = call_runtime.cleanupWorkersForRuntime;
 const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicForGlobal;
 pub const getValueProperty = class_vm.getValueProperty;
 

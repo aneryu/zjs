@@ -36,8 +36,6 @@ const RegExpMatch = string_ops.RegExpMatch;
 const SimpleCaptureSequenceAtom = regexp_fastpath.SimpleCaptureSequenceAtom;
 const SimpleClassPredicate = regexp_fastpath.SimpleClassPredicate;
 const SimpleNumericArg0Bytecode = call_runtime.SimpleNumericArg0Bytecode;
-const WorkerMessage = call_runtime.WorkerMessage;
-const WorkerPostTarget = call_runtime.WorkerPostTarget;
 const appendAtom = core.atom.appendAtom;
 const atomIdOrNameEql = call_runtime.atomIdOrNameEql;
 const atomListContains = core.atom.atomListContains;
@@ -93,8 +91,6 @@ const qjsIteratorCallForNativeRecord = call_runtime.qjsIteratorCallForNativeReco
 const qjsIteratorClose = call_runtime.qjsIteratorClose;
 const qjsIteratorPrototype = object_ops.qjsIteratorPrototype;
 const qjsObjectEnumerableOwnPropertiesCall = object_ops.qjsObjectEnumerableOwnPropertiesCall;
-const qjsWorkerByIdLocked = call_runtime.qjsWorkerByIdLocked;
-const qjsWorkerIo = call_runtime.qjsWorkerIo;
 const readInt = call_runtime.readInt;
 const sameObjectIdentity = object_ops.sameObjectIdentity;
 const setValueProperty = object_ops.setValueProperty;
@@ -103,7 +99,6 @@ const simpleNumericArg0Callback = call_runtime.simpleNumericArg0Callback;
 const simpleNumericBinary = call_runtime.simpleNumericBinary;
 const slotValueBorrow = slot_ops.slotValueBorrow;
 const stringSliceValue = string_ops.stringSliceValue;
-const workerPageAllocator = call_runtime.workerPageAllocator;
 const throwTypeErrorMessage = call_runtime.throwTypeErrorMessage;
 const toLengthIndex = coercion_ops.toLengthIndex;
 const toNumberForDateMethod = coercion_ops.toNumberForDateMethod;
@@ -4922,35 +4917,6 @@ pub fn freeAtomSlice(rt: *core.JSRuntime, atoms: []core.Atom) void {
 pub fn freeValueSlice(rt: *core.JSRuntime, values: []core.JSValue) void {
     for (values) |value| value.free(rt);
     if (values.len != 0) rt.memory.free(core.JSValue, values);
-}
-
-pub fn qjsWorkerPopMessage(id: i32, endpoint: WorkerPostTarget) ?WorkerMessage {
-    const allocator = workerPageAllocator();
-    const io = qjsWorkerIo();
-    call_runtime.qjs_workers.mutex.lockUncancelable(io);
-    defer call_runtime.qjs_workers.mutex.unlock(io);
-    const worker = qjsWorkerByIdLocked(id) orelse return null;
-    const queue = switch (endpoint) {
-        .worker => &worker.to_worker,
-        .parent => &worker.to_parent,
-    };
-    const capacity = switch (endpoint) {
-        .worker => &worker.to_worker_capacity,
-        .parent => &worker.to_parent_capacity,
-    };
-    if (queue.*.len == 0) return null;
-    const message = queue.*[0];
-    const old_len = queue.*.len;
-    if (old_len == 1) {
-        const old = queue.*.ptr[0..capacity.*];
-        queue.* = &.{};
-        capacity.* = 0;
-        allocator.free(old);
-    } else {
-        @memmove(queue.*[0 .. old_len - 1], queue.*[1..old_len]);
-        queue.* = queue.*.ptr[0 .. old_len - 1];
-    }
-    return message;
 }
 
 pub fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) !bool {

@@ -114,7 +114,6 @@ zjs.runtime.EventLoopRunResult
 zjs.runtime.Plugin
 zjs.runtime.PluginInstallOptions
 zjs.runtime.cleanupAtomicsWaitersForContext
-zjs.runtime.cleanupWorkersForRuntime
 zjs.runtime.detachArrayBuffer
 zjs.runtime.evalFileModuleGraphWithOutput
 zjs.runtime.resolveModuleSpecifier

@@ -1744,7 +1744,6 @@ fn runEmbeddedEngine(
     try installTest262Globals(rt, ctx, global_obj);
     defer {
         event_loop.deinit();
-        runtime_layer.cleanupWorkersForRuntime(rt);
         _ = cleanupTest262Agents(rt);
         runtime_layer.cleanupAtomicsWaitersForContext(ctx);
         ctx.destroy();

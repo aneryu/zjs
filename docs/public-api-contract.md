@@ -142,7 +142,6 @@ must use explicit hook policy.
 - event-loop helpers;
 - module file graph helpers;
 - SharedArrayBuffer wake/cleanup helpers;
-- worker cleanup helpers;
 - ArrayBuffer detach helper;
 - `zjs.runtime.Plugin` and `zjs.runtime.PluginInstallOptions`.
 

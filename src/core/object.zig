@@ -190,7 +190,6 @@ pub const OrdinaryPayload = struct {
     is_callsite: bool = false,
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
-    worker_id: ?i32 = null,
     realm_global_ptr: ?*Object = null,
 
     pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
@@ -836,7 +835,6 @@ pub const FunctionPayload = struct {
     collection_method_owner_class: class.ClassId = class.invalid_class_id,
     typed_array_element_size: u32 = 0,
     typed_array_kind: u8 = 0,
-    worker_post_target: u8 = 0,
     iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
     primitive_prototypes: [primitive_prototype_slot_count]?JSValue = @splat(null),
@@ -3386,17 +3384,6 @@ pub const Object = struct {
         return 0;
     }
 
-    pub fn functionWorkerPostTargetSlot(self: *Object) *u8 {
-        if (self.functionPayload()) |payload| return &payload.worker_post_target;
-        std.debug.assert(self.class_payload_kind == .function);
-        unreachable;
-    }
-
-    pub fn functionWorkerPostTarget(self: *const Object) u8 {
-        if (self.functionPayloadConst()) |payload| return payload.worker_post_target;
-        return 0;
-    }
-
     pub fn functionIteratorWrapMethodSlot(self: *Object) *u8 {
         if (self.functionPayload()) |payload| return &payload.iterator_wrap_method;
         std.debug.assert(self.class_payload_kind == .function);
@@ -4410,16 +4397,6 @@ pub const Object = struct {
     pub fn promiseCombinatorRemaining(self: *const Object) i32 {
         if (self.ordinaryPayloadConst()) |payload| return payload.promise_combinator_remaining;
         return 0;
-    }
-
-    pub fn workerIdSlot(self: *Object, rt: *JSRuntime) !*?i32 {
-        const payload = try self.ensureOrdinaryPayload(rt);
-        return &payload.worker_id;
-    }
-
-    pub fn workerId(self: *const Object) ?i32 {
-        if (self.ordinaryPayloadConst()) |payload| return payload.worker_id;
-        return null;
     }
 
     pub fn functionRealmGlobalSlot(self: *Object) *?JSValue {

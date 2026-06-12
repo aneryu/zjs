@@ -23,10 +23,6 @@ pub fn wakeAtomicsWaitersForRuntimes(primary: *zjs.JSRuntime, related: []const *
     }
 }
 
-pub fn cleanupWorkersForRuntime(rt: *zjs.JSRuntime) void {
-    exec.zjs_vm.cleanupWorkersForRuntime(rt);
-}
-
 fn runtimeListContains(list: []const *zjs.JSRuntime, runtime: *zjs.JSRuntime) bool {
     for (list) |candidate| {
         if (candidate == runtime) return true;

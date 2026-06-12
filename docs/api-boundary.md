@@ -95,8 +95,8 @@ exception materialization.
 ## Runtime Policy
 
 The runtime layer may expose event loops, timers, I/O policy, module file graph
-helpers, dynamic plugins, worker cleanup, SharedArrayBuffer wake/cleanup hooks,
-and CLI integration. Those policies do not move into `src/core/`.
+helpers, dynamic plugins, SharedArrayBuffer wake/cleanup hooks, and CLI
+integration. Those policies do not move into `src/core/`.
 
 The `zjs` CLI is a thin benchmark and smoke-test shell. Its default
 JavaScript-visible host surface is intentionally small:

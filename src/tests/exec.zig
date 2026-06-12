@@ -235,7 +235,6 @@ pub const helpers = struct {
             wrapper.runJobs(null) catch {};
             self.event_loop.deinit();
             self.allocator.destroy(self.event_loop);
-            engine.exec.zjs_vm.cleanupWorkersForRuntime(self.runtime);
             const run_test262 = @import("../cli/run_test262.zig");
             _ = run_test262.cleanupTest262Agents(self.runtime);
             engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);

@@ -679,7 +679,6 @@ test "public root exposes only the explicit runtime surface" {
     try std.testing.expect(@hasDecl(runtime, "runUntilIdle"));
     try std.testing.expect(@hasDecl(runtime, "cleanupAtomicsWaitersForContext"));
     try std.testing.expect(@hasDecl(runtime, "wakeAtomicsWaitersForRuntimes"));
-    try std.testing.expect(@hasDecl(runtime, "cleanupWorkersForRuntime"));
     try std.testing.expect(@hasDecl(runtime, "detachArrayBuffer"));
     try std.testing.expect(@hasDecl(runtime, "evalFileModuleGraphWithOutput"));
     try std.testing.expect(@hasDecl(runtime, "resolveModuleSpecifier"));
