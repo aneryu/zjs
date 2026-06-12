@@ -450,7 +450,7 @@ fn callValueOrBytecodeClassModeDispatch(
             return if (result.isObject()) result.dup() else this_value.dup();
         }
         if (fb.is_class_constructor) {
-            if (!allow_class_constructor_call) return throwFunctionRealmTypeError(ctx, global, function_object);
+            if (!allow_class_constructor_call) return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "class constructors must be invoked with 'new'");
             const initial_this = if (fb.is_derived_class_constructor) core.JSValue.uninitialized() else this_value;
             const constructor_this = if (fb.is_derived_class_constructor) this_value else core.JSValue.undefinedValue();
             const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
@@ -1360,8 +1360,12 @@ pub fn isErrorStackSetterValue(value: core.JSValue) bool {
 }
 
 pub fn throwFunctionRealmTypeError(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object) !core.JSValue {
+    return throwFunctionRealmTypeErrorMessage(ctx, global, function_object, "not a function");
+}
+
+pub fn throwFunctionRealmTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, function_object: *core.Object, message: []const u8) !core.JSValue {
     const error_global = object_ops.objectRealmGlobal(function_object) orelse global;
-    const error_value = try exception_ops.createNamedError(ctx.runtime, error_global, "TypeError", "not a function");
+    const error_value = try exception_ops.createNamedError(ctx.runtime, error_global, "TypeError", message);
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -1519,6 +1523,12 @@ pub fn constructValueOrBytecodeWithNewTarget(
             const coerced = try builtin_glue.qjsDataViewConstructorArgs(ctx, output, global, args);
             const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
             return try object_ops.qjsDataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype);
+        }
+        if (std.mem.eql(u8, name, "Proxy")) {
+            return construct_mod.constructValue(ctx.runtime, func, args, &.{}) catch |err| switch (err) {
+                error.TypeError => return throwTypeErrorMessage(ctx, global, "not an object"),
+                else => err,
+            };
         }
         if (std.mem.eql(u8, name, "DOMException")) {
             const prototype = try object_ops.constructorPrototypeObject(ctx.runtime, new_target);
@@ -2361,7 +2371,7 @@ pub fn qjsDestructuringRequireIterator(
     const source = property_ops.expectObject(args[0]) catch {
         const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
         defer iterator_method.free(ctx.runtime);
-        if (!isCallableValue(iterator_method)) return error.TypeError;
+        if (!isCallableValue(iterator_method)) return throwTypeErrorMessage(ctx, global, "value is not iterable");
         iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
         _ = try property_ops.expectObject(iterator_value);
         try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
@@ -2376,7 +2386,7 @@ pub fn qjsDestructuringRequireIterator(
     }
     const iterator_method = try getIteratorMethod(ctx, output, global, args[0]);
     defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return error.TypeError;
+    if (!isCallableValue(iterator_method)) return throwTypeErrorMessage(ctx, global, "value is not iterable");
     iterator_value = try callValueOrBytecode(ctx, output, global, args[0], iterator_method, &.{}, null, null);
     _ = try property_ops.expectObject(iterator_value);
     try cacheDestructuringIteratorNextMethod(ctx, output, global, iterator_value);
@@ -2415,7 +2425,7 @@ pub fn iteratorForValue(
     }
     const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
     defer iterator_method.free(ctx.runtime);
-    if (!isCallableValue(iterator_method)) return error.TypeError;
+    if (!isCallableValue(iterator_method)) return throwTypeErrorMessage(ctx, global, "value is not iterable");
     const iterator_value = try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
     errdefer iterator_value.free(ctx.runtime);
     _ = property_ops.expectObject(iterator_value) catch return error.TypeError;
@@ -2529,7 +2539,10 @@ pub fn appendIteratorValues(
     else blk: {
         const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
         defer iterator_method.free(ctx.runtime);
-        if (!isCallableValue(iterator_method)) return error.TypeError;
+        if (!isCallableValue(iterator_method)) {
+            _ = throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
+            return error.TypeError;
+        }
         break :blk try callValueOrBytecode(ctx, output, global, source_value, iterator_method, &.{}, null, null);
     };
     defer iterator_value.free(ctx.runtime);
@@ -7434,7 +7447,8 @@ pub fn qjsReflectApplyCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (args.len < 3 or !isCallableValue(args[0])) return error.TypeError;
+    if (args.len < 1 or !isCallableValue(args[0])) return throwTypeErrorMessage(ctx, global, "not a function");
+    if (args.len < 3) return error.TypeError;
     var apply_args = try array_ops.argsFromArrayLike(ctx, output, global, args[2], caller_function, caller_frame);
     defer freeArgs(ctx.runtime, apply_args);
     var apply_args_root = array_ops.ValueSliceRoot{};
@@ -7756,7 +7770,10 @@ pub fn inOp(
     defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
-    const object = property_ops.expectObject(rhs) catch return error.TypeError;
+    const object = property_ops.expectObject(rhs) catch {
+        _ = throwTypeErrorMessage(ctx, global, "invalid 'in' operand") catch |err| return err;
+        return error.TypeError;
+    };
     const key = try object_ops.toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
     defer ctx.runtime.atoms.free(key);
     const has_builtin_object_proto = value_ops.atomNameEql(ctx.runtime, key, "toString") and (object.class_id == core.class.ids.object or object.flags.is_array);
@@ -7779,7 +7796,10 @@ pub fn instanceofOp(
     defer rhs.free(ctx.runtime);
     const lhs = try stack.pop();
     defer lhs.free(ctx.runtime);
-    const ctor = property_ops.expectObject(rhs) catch return error.TypeError;
+    const ctor = property_ops.expectObject(rhs) catch {
+        _ = throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
+        return error.TypeError;
+    };
     const has_instance_atom = core.atom.predefinedId("Symbol.hasInstance", .symbol) orelse return error.TypeError;
     const has_instance = try object_ops.getValueProperty(ctx, output, global, rhs, has_instance_atom, caller_function, caller_frame);
     defer has_instance.free(ctx.runtime);
@@ -7789,7 +7809,10 @@ pub fn instanceofOp(
         try stack.pushOwned(core.JSValue.boolean(coercion_ops.valueTruthy(result)));
         return;
     }
-    if (!isCallableValue(rhs)) return error.TypeError;
+    if (!isCallableValue(rhs)) {
+        _ = throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
+        return error.TypeError;
+    }
     if (!lhs.isObject()) {
         try stack.pushOwned(core.JSValue.boolean(false));
         return;

@@ -21,6 +21,7 @@ const exception_ops = @import("vm_exception_ops.zig");
 const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
+const reflect_ops = @import("reflect_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const string_ops = @import("string_ops.zig");
 const dtoa = @import("../libs/dtoa.zig");
@@ -2070,17 +2071,17 @@ fn callReflectNativeFunctionRecord(
         const receiver = thisObject(this_value) orelse return error.TypeError;
         if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
         if (!try constructorNameEql(ctx.runtime, receiver, "Proxy")) return error.TypeError;
-        return builtins.reflect_proxy.proxyRevocable(ctx.runtime, global, args);
+        return reflect_ops.proxyRevocable(ctx.runtime, global, args);
     }
     if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
-    const reflect_mod = builtins.reflect_proxy;
+    const reflect_ids = builtins.reflect_proxy.StaticMethod;
     return switch (id) {
-        @intFromEnum(reflect_mod.StaticMethod.define_property) => try reflect_mod.reflectDefineProperty(ctx.runtime, args),
-        @intFromEnum(reflect_mod.StaticMethod.get) => try reflect_mod.reflectGet(ctx.runtime, args),
-        @intFromEnum(reflect_mod.StaticMethod.set) => try reflect_mod.reflectSet(ctx, output, global, args),
-        @intFromEnum(reflect_mod.StaticMethod.has) => try reflect_mod.reflectHas(ctx, output, global, globals, args),
-        @intFromEnum(reflect_mod.StaticMethod.construct) => try reflect_mod.reflectConstruct(ctx.runtime, args, globals),
-        @intFromEnum(reflect_mod.StaticMethod.apply) => try reflect_mod.reflectApply(ctx, output, global, globals, args),
+        @intFromEnum(reflect_ids.define_property) => try reflect_ops.reflectDefineProperty(ctx.runtime, args),
+        @intFromEnum(reflect_ids.get) => try reflect_ops.reflectGet(ctx.runtime, args),
+        @intFromEnum(reflect_ids.set) => try reflect_ops.reflectSet(ctx, output, global, args),
+        @intFromEnum(reflect_ids.has) => try reflect_ops.reflectHas(ctx, output, global, globals, args),
+        @intFromEnum(reflect_ids.construct) => try reflect_ops.reflectConstruct(ctx.runtime, args, globals),
+        @intFromEnum(reflect_ids.apply) => try reflect_ops.reflectApply(ctx, output, global, globals, args),
         else => error.TypeError,
     };
 }
@@ -2660,7 +2661,7 @@ test "reflect construct roots argument list while resolving prototype" {
 
     var globals = [_]globals_mod.Slot{};
     const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
-    const result = try builtins.reflect_proxy.reflectConstruct(rt, &reflect_args, globals[0..]);
+    const result = try reflect_ops.reflectConstruct(rt, &reflect_args, globals[0..]);
     var result_alive = true;
     defer if (result_alive) result.free(rt);
 

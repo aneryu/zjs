@@ -134,6 +134,9 @@ Missing or invalid arguments should print usage and exit non-zero.
   change touches shared runtime/core semantics and targeted evidence is not
   strong enough.
 - Runner or test262 changes require the relevant runner fixture or target slice.
+- New throw sites should use the message-carrying throw*Message helpers; bare
+  `return error.XxxError` is reserved for paths whose message is attached
+  elsewhere or genuinely unreachable by user code.
 - Keep non-trivial validation evidence close to the relevant code change,
   commit message, issue, or PR. Do not add broad status ledgers back to the
   active tree without an explicit request.

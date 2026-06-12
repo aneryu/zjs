@@ -145,7 +145,7 @@ pub fn normalizeEvalRuntimeError(err: anytype) (@TypeOf(err) || error{TypeError}
 pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Object, err: anytype) !core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) return ctx.takeException();
     const value = switch (@as(anyerror, err)) {
-        error.TypeError => try createNamedError(ctx.runtime, global, "TypeError", "not a function"),
+        error.TypeError => try createNamedError(ctx.runtime, global, "TypeError", ""),
         error.RangeError => try createNamedError(ctx.runtime, global, "RangeError", ""),
         error.ReferenceError => try createNamedError(ctx.runtime, global, "ReferenceError", "not defined"),
         error.SyntaxError => try createNamedError(ctx.runtime, global, "SyntaxError", "invalid syntax"),
@@ -290,13 +290,19 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anytype) bool {
     }
 }
 
+// Fallback messages for sentinel errors that reach the catch machinery with
+// no pending exception object. Throw sites that know the real reason should
+// use the message-carrying throw*Message helpers; these defaults must stay
+// neutral because they cover every remaining source of the sentinel. The
+// URIError text is kept: every URIError sentinel comes from the URI builtins
+// and the hex-digit failure is the dominant source (matching the qjs text).
 pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
-        error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "not a Date object" },
+        error.TypeError, error.NotExtensible => .{ .name = "TypeError", .message = "" },
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
-        error.RangeError => .{ .name = "RangeError", .message = "Date value is NaN" },
+        error.RangeError => .{ .name = "RangeError", .message = "" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => null,
     };
@@ -305,9 +311,9 @@ pub fn runtimeErrorInfo(err: anytype) ?ErrorInfo {
 pub fn promiseErrorInfo(err: anytype) ErrorInfo {
     return switch (@as(anyerror, err)) {
         error.URIError, error.InvalidUtf8 => .{ .name = "URIError", .message = "expecting hex digit" },
-        error.TypeError => .{ .name = "TypeError", .message = "not a Date object" },
+        error.TypeError => .{ .name = "TypeError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
-        error.RangeError => .{ .name = "RangeError", .message = "Date value is NaN" },
+        error.RangeError => .{ .name = "RangeError", .message = "" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => .{ .name = "Error", .message = "" },
     };

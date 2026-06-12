@@ -432,9 +432,9 @@ pub fn regExpLegacyNoCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, kin
 
 pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, global: *core.Object, getter_value: core.JSValue) !?core.JSValue {
     const error_value = if (objectFromValue(getter_value)) |getter_object| blk: {
-        const ctor_value = getter_object.functionRealmTypeErrorConstructor() orelse break :blk try createNamedError(ctx.runtime, global, "TypeError", "not a Date object");
-        break :blk try createNamedErrorWithConstructor(ctx.runtime, ctor_value, "TypeError", "not a Date object");
-    } else try createNamedError(ctx.runtime, global, "TypeError", "not a Date object");
+        const ctor_value = getter_object.functionRealmTypeErrorConstructor() orelse break :blk try createNamedError(ctx.runtime, global, "TypeError", "RegExp object expected");
+        break :blk try createNamedErrorWithConstructor(ctx.runtime, ctor_value, "TypeError", "RegExp object expected");
+    } else try createNamedError(ctx.runtime, global, "TypeError", "RegExp object expected");
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
@@ -1732,7 +1732,12 @@ pub fn qjsArrayIterationCall(
             return null;
     };
 
-    const receiver_object_value = if (objectFromValue(receiver)) |_| receiver.dup() else try primitiveObjectForAccess(ctx.runtime, global, receiver);
+    const receiver_object_value = if (objectFromValue(receiver)) |_|
+        receiver.dup()
+    else if (receiver.isNull() or receiver.isUndefined())
+        return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"))
+    else
+        try primitiveObjectForAccess(ctx.runtime, global, receiver);
     defer receiver_object_value.free(ctx.runtime);
     const object = objectFromValue(receiver_object_value) orelse return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);

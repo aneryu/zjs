@@ -31,6 +31,7 @@ pub const fusion_stats = @import("vm_fusion_stats.zig");
 pub const host_dispatch_stats = @import("host_dispatch_stats.zig");
 pub const string_ops = @import("string_ops.zig");
 pub const object_ops = @import("object_ops.zig");
+pub const reflect_ops = @import("reflect_ops.zig");
 pub const array_ops = @import("array_ops.zig");
 pub const coercion_ops = @import("coercion_ops.zig");
 pub const promise_ops = @import("promise_ops.zig");

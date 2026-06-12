@@ -109,7 +109,10 @@ pub fn forOfStart(
     } else {
         const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, iterable);
         defer iterator_method.free(ctx.runtime);
-        if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
+        if (!call_runtime.isCallableValue(iterator_method)) {
+            _ = call_runtime.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
+            return error.TypeError;
+        }
         iterator_value = try call_runtime.callValueOrBytecode(ctx, output, global, iterable, iterator_method, &.{}, function, frame);
         var iterator_value_owned = true;
         errdefer if (iterator_value_owned) iterator_value.free(ctx.runtime);
