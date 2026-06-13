@@ -3,6 +3,14 @@ const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const builtin_glue = @import("../exec/builtin_glue.zig");
+const exceptions = @import("../exec/exceptions.zig");
+const object_ops = @import("../exec/object_ops.zig");
+const value_ops = @import("../exec/value_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -11,22 +19,8 @@ const AppendStringError = error{
     NoSpaceLeft,
 };
 
-pub const StaticMethod = enum(u32) {
-    parse_int = 1,
-    parse_float = 2,
-    is_nan = 3,
-    is_finite = 4,
-    is_integer = 5,
-    is_safe_integer = 6,
-};
-
-pub const PrototypeMethod = enum(u32) {
-    to_string = 101,
-    to_locale_string = 102,
-    to_fixed = 103,
-    to_exponential = 104,
-    to_precision = 105,
-};
+pub const StaticMethod = core.host_function.builtin_method_ids.number.StaticMethod;
+pub const PrototypeMethod = core.host_function.builtin_method_ids.number.PrototypeMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "parseInt")) return @intFromEnum(StaticMethod.parse_int);
@@ -45,6 +39,87 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "toExponential")) return @intFromEnum(PrototypeMethod.to_exponential);
     if (std.mem.eql(u8, name, "toPrecision")) return @intFromEnum(PrototypeMethod.to_precision);
     return null;
+}
+
+/// Declaration table: one entry per `Number.*` static, the four global
+/// number functions, and the `Number.prototype.*` methods. `id` is the
+/// `StaticMethod`/`PrototypeMethod` enum value, reused as the dispatch
+/// `magic`. All share `numberCall`, which mirrors the legacy
+/// `callNumberNativeFunctionRecord` dispatch. Static parse helpers and the
+/// realm-coercing prototype/parse paths reach exec VM ops through
+/// `builtin_glue`/`object_ops` (shared with the fast-call entry points);
+/// bare-runtime parse callers use the primitive-only `parse*Value` fallback.
+pub const internal_entries = [_]core.host_function.InternalEntry{
+    .{ .name = "parseInt", .length = 2, .id = @intFromEnum(StaticMethod.parse_int), .magic = @intFromEnum(StaticMethod.parse_int), .prepared_call_ok = true, .call = &numberCall },
+    .{ .name = "parseFloat", .length = 1, .id = @intFromEnum(StaticMethod.parse_float), .magic = @intFromEnum(StaticMethod.parse_float), .prepared_call_ok = true, .call = &numberCall },
+    .{ .name = "isNaN", .length = 1, .id = @intFromEnum(StaticMethod.is_nan), .magic = @intFromEnum(StaticMethod.is_nan), .call = &numberCall },
+    .{ .name = "isFinite", .length = 1, .id = @intFromEnum(StaticMethod.is_finite), .magic = @intFromEnum(StaticMethod.is_finite), .call = &numberCall },
+    .{ .name = "isInteger", .length = 1, .id = @intFromEnum(StaticMethod.is_integer), .magic = @intFromEnum(StaticMethod.is_integer), .call = &numberCall },
+    .{ .name = "isSafeInteger", .length = 1, .id = @intFromEnum(StaticMethod.is_safe_integer), .magic = @intFromEnum(StaticMethod.is_safe_integer), .call = &numberCall },
+    .{ .name = "toString", .length = 1, .id = @intFromEnum(PrototypeMethod.to_string), .magic = @intFromEnum(PrototypeMethod.to_string), .call = &numberCall },
+    .{ .name = "toLocaleString", .length = 0, .id = @intFromEnum(PrototypeMethod.to_locale_string), .magic = @intFromEnum(PrototypeMethod.to_locale_string), .call = &numberCall },
+    .{ .name = "toFixed", .length = 1, .id = @intFromEnum(PrototypeMethod.to_fixed), .magic = @intFromEnum(PrototypeMethod.to_fixed), .call = &numberCall },
+    .{ .name = "toExponential", .length = 1, .id = @intFromEnum(PrototypeMethod.to_exponential), .magic = @intFromEnum(PrototypeMethod.to_exponential), .call = &numberCall },
+    .{ .name = "toPrecision", .length = 1, .id = @intFromEnum(PrototypeMethod.to_precision), .magic = @intFromEnum(PrototypeMethod.to_precision), .call = &numberCall },
+};
+
+/// Shared record handler for the `.number` domain. Replicates the legacy
+/// `callNumberNativeFunctionRecord` dispatch verbatim: realm parse/predicate
+/// and prototype methods take the VM-coercing exec ops, the bare-runtime
+/// `parse*` fall back to the primitive-only path, and the integer predicates
+/// stay self-contained.
+fn numberCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+    return switch (id) {
+        @intFromEnum(StaticMethod.parse_int) => {
+            if (host_call.global) |global| return builtin_glue.qjsGlobalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
+            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const radix = if (args.len >= 2) args[1] else null;
+            return value_ops.numberToValue(try parseIntValue(ctx.runtime, input, radix));
+        },
+        @intFromEnum(StaticMethod.parse_float) => {
+            if (host_call.global) |global| return builtin_glue.qjsGlobalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
+            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return value_ops.numberToValue(try parseFloatValue(ctx.runtime, input));
+        },
+        @intFromEnum(StaticMethod.is_nan) => {
+            const global = host_call.global orelse return error.TypeError;
+            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, true);
+        },
+        @intFromEnum(StaticMethod.is_finite) => {
+            const global = host_call.global orelse return error.TypeError;
+            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, host_call.output, global, host_call.this_value, args, false);
+        },
+        @intFromEnum(StaticMethod.is_integer) => {
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            return core.JSValue.boolean(numberIsInteger(value));
+        },
+        @intFromEnum(StaticMethod.is_safe_integer) => {
+            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            if (!numberIsInteger(value)) return core.JSValue.boolean(false);
+            const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
+            return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
+        },
+        @intFromEnum(PrototypeMethod.to_string),
+        @intFromEnum(PrototypeMethod.to_locale_string),
+        @intFromEnum(PrototypeMethod.to_fixed),
+        @intFromEnum(PrototypeMethod.to_exponential),
+        @intFromEnum(PrototypeMethod.to_precision),
+        => {
+            const global = host_call.global orelse return error.TypeError;
+            return object_ops.qjsNumberPrototypeMethod(ctx, host_call.output, global, host_call.this_value, id, args, null, null);
+        },
+        else => error.TypeError,
+    };
+}
+
+fn numberIsInteger(value: core.JSValue) bool {
+    const number = value_ops.numberValue(value) orelse return false;
+    return std.math.isFinite(number) and @floor(number) == number;
 }
 
 pub fn parseFloat(bytes: []const u8) !f64 {

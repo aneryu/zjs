@@ -35,6 +35,7 @@ pub const reflect_ops = @import("reflect_ops.zig");
 pub const array_ops = @import("array_ops.zig");
 pub const coercion_ops = @import("coercion_ops.zig");
 pub const promise_ops = @import("promise_ops.zig");
+pub const typed_array_construct = @import("typed_array_construct.zig");
 
 pub fn opcodeName(opcode: u8) []const u8 {
     return bytecode.opcode.nameOf(opcode);

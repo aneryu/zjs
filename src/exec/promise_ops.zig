@@ -124,7 +124,7 @@ pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     const prototype_value = prototype.value();
     var prototype_value_owned = true;
     errdefer if (prototype_value_owned) prototype_value.free(rt);
-    const constructor = try builtins.function.nativeFunction(rt, "AsyncFunction", 1);
+    const constructor = try core.function.nativeFunction(rt, "AsyncFunction", 1);
     defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
@@ -146,12 +146,12 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
     var object_raw_owned = true;
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, &object.header);
-    const method = try builtins.function.nativeFunction(rt, "[Symbol.asyncIterator]", 0);
+    const method = try core.function.nativeFunction(rt, "[Symbol.asyncIterator]", 0);
     defer method.free(rt);
     const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
     try object.defineOwnProperty(rt, async_iterator_atom, core.Descriptor.data(method, true, false, true));
     if (core.atom.predefinedId("Symbol.asyncDispose", .symbol)) |async_dispose_atom| {
-        const dispose = try builtins.function.nativeFunction(rt, "[Symbol.asyncDispose]", 0);
+        const dispose = try core.function.nativeFunction(rt, "[Symbol.asyncDispose]", 0);
         defer dispose.free(rt);
         const dispose_object = objectFromValue(dispose) orelse return error.TypeError;
         if (!dispose_object.addAsyncIteratorAsyncDisposeFunction()) return error.TypeError;
@@ -192,7 +192,7 @@ pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, object: *co
 pub fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try builtins.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunction(rt, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (!method_object.addAsyncGeneratorPrototypeMethod()) return error.TypeError;
@@ -205,7 +205,7 @@ pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *c
     const object_value = object.value();
     var object_value_owned = true;
     errdefer if (object_value_owned) object_value.free(rt);
-    const constructor = try builtins.function.nativeFunction(rt, "AsyncGeneratorFunction", 1);
+    const constructor = try core.function.nativeFunction(rt, "AsyncGeneratorFunction", 1);
     defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
@@ -782,7 +782,7 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
     rt.active_value_roots = &root_frame;
     defer rt.active_value_roots = root_frame.previous;
 
-    function_val = try builtins.function.nativeFunction(rt, "", 1);
+    function_val = try core.function.nativeFunction(rt, "", 1);
     errdefer function_val.free(rt);
     const object = objectFromValue(function_val) orelse return error.TypeError;
     try object.setFunctionRealmGlobalPtr(rt, global);
@@ -1319,7 +1319,7 @@ pub fn qjsPromiseResolvingFunctionCall(
     (try state.promiseAlreadyResolvedSlot(ctx.runtime)).* = true;
     const reject = function_object.functionPromiseResolvingReject();
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    if (!reject and builtins.object.sameValue(value, target_value)) {
+    if (!reject and value.sameValue(target_value)) {
         const error_value = if (objectRealmGlobal(function_object)) |error_global|
             try exception_ops.createNamedError(ctx, error_global, "TypeError", "")
         else
@@ -2044,7 +2044,7 @@ pub fn qjsPromiseStaticBuiltinCallee(rt: *core.JSRuntime, global: *core.Object, 
     defer rt.atoms.free(method_key);
     const method_value = ctor_object.getProperty(method_key);
     defer method_value.free(rt);
-    return builtins.object.sameValue(method_value, function_object.value());
+    return method_value.sameValue(function_object.value());
 }
 
 pub fn qjsPromiseResolveIdentity(
@@ -2060,7 +2060,7 @@ pub fn qjsPromiseResolveIdentity(
     if (promise_object.class_id != core.class.ids.promise) return null;
     const constructor = try getValueProperty(ctx, output, global, value, core.atom.ids.constructor, caller_function, caller_frame);
     defer constructor.free(ctx.runtime);
-    if (builtins.object.sameValue(constructor, constructor_value)) return value.dup();
+    if (constructor.sameValue(constructor_value)) return value.dup();
     return null;
 }
 
@@ -3838,7 +3838,7 @@ pub fn qjsReflectConstructResolveBound(
         current_args = owned_args;
         if (previous_owned_args.len != 0) freeArgs(rt, previous_owned_args);
         const next_target = function_object.boundTarget() orelse return error.TypeError;
-        if (builtins.object.sameValue(target, effective_new_target)) {
+        if (target.sameValue(effective_new_target)) {
             effective_new_target = next_target;
         }
         target = next_target;

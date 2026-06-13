@@ -5,6 +5,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const property_ic = @import("property_ic.zig");
 const property_ops = @import("property_ops.zig");
@@ -442,7 +443,7 @@ fn tryFuseStringFromCharCodeInt32CallFromField2(
     site_pc: usize,
 ) !bool {
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, site_pc, ctx.runtime, receiver, atom_id) orelse return false;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(builtins.string.StaticMethod.from_char_code)) return false;
+    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return false;
 
     const argument = stringFromCharCodeInt32Arg(function, frame, frame.pc) orelse return false;
     const code = function.code;
@@ -750,7 +751,7 @@ fn tryFuseRegExpTestConstStringFromField2(
 
     const regexp_object = objectFromValue(receiver) orelse return false;
     if (regexp_object.class_id != core.class.ids.regexp) return false;
-    if (!fastRegExpPrototypeMethodIsDefault(ctx.runtime, receiver, method_atom, @intFromEnum(builtins.regexp.PrototypeMethod.test_))) return false;
+    if (!fastRegExpPrototypeMethodIsDefault(ctx.runtime, receiver, method_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.test_))) return false;
 
     const input_value = (try atomStringValueForFastPath(ctx.runtime, input_atom)) orelse return false;
     defer input_value.free(ctx.runtime);
@@ -775,7 +776,7 @@ fn tryFuseArrayPushCallFromField2(
     sync_global_lexical_locals: bool,
 ) !bool {
     if (!value_ops.atomNameEql(ctx.runtime, method_atom, "push")) return false;
-    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.array.PrototypeMethod.push))) return false;
+    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.array.PrototypeMethod.push))) return false;
 
     const object = objectFromValue(receiver) orelse return false;
     if (object.proxyTarget() != null or object.exotic != null) return false;
@@ -811,9 +812,9 @@ fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom
     if (object.class_id != core.class.ids.regexp) return null;
     const name = rt.atoms.name(atom_id) orelse return null;
     const expected_id: u32 = if (std.mem.eql(u8, name, "test"))
-        @intFromEnum(builtins.regexp.PrototypeMethod.test_)
+        @intFromEnum(method_ids.regexp.PrototypeMethod.test_)
     else if (std.mem.eql(u8, name, "exec"))
-        @intFromEnum(builtins.regexp.PrototypeMethod.exec)
+        @intFromEnum(method_ids.regexp.PrototypeMethod.exec)
     else
         return null;
 
@@ -839,7 +840,7 @@ fn fastRegExpPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom
 fn fastCollectionPrototypeMethodValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) ?core.JSValue {
     const object = objectFromValue(value) orelse return null;
     const name = rt.atoms.name(atom_id) orelse return null;
-    const expected_id = builtins.collection.fastPrototypeMethodIdForClass(object.class_id, name) orelse return null;
+    const expected_id = core.host_function.builtin_method_id_lookup.collection.fastPrototypeMethodIdForClass(object.class_id, name) orelse return null;
     if (object.hasOwnProperty(atom_id)) return null;
     const proto = object.getPrototype() orelse return null;
     const lookup = proto.getOwnDataPropertyLookup(atom_id) orelse return null;

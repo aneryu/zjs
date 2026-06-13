@@ -2,7 +2,6 @@ const core = @import("../core/root.zig");
 const bytecode = @import("../bytecode/root.zig");
 const array_builtin = @import("../builtins/array.zig");
 const collection_builtin = @import("../builtins/collection.zig");
-const object_builtin = @import("../builtins/object.zig");
 const globals_mod = @import("globals.zig");
 const value_ops = @import("value_ops.zig");
 const std = @import("std");
@@ -858,7 +857,7 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     if (expects.length == 0) return error.JSException;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
-    if (!object_builtin.sameValue(actual, expected)) return error.JSException;
+    if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.length) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));

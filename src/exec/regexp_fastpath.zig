@@ -3,6 +3,7 @@
 const builtins = @import("../builtins/root.zig");
 const bytecode = @import("../bytecode/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const quickjs_regexp = @import("../libs/quickjs_regexp.zig");
@@ -10,12 +11,43 @@ const std = @import("std");
 const unicode_lib = @import("../libs/unicode.zig");
 const value_ops = @import("value_ops.zig");
 
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("vm_exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
+
+// Native-builtin id of the RegExp constructor record. The construct fast path's
+// coercing terminals run the builtin RegExp constructor body through the record
+// table (`builtin_dispatch.callConstructRecord`) keyed on this ref rather than
+// importing `builtins.regexp.constructWithPrototype` directly, so the construct
+// logic stays owned by the table (Phase 6b-3e). The pattern/flags are already
+// coerced and the instance prototype resolved at the call site, so the record
+// only runs the constructor body.
+const regexp_construct_ref = core.function.NativeBuiltinRef{
+    .domain = .regexp,
+    .id = @intFromEnum(core.host_function.builtin_method_ids.regexp.ConstructorMethod.construct),
+};
+
+/// Run the builtin RegExp constructor body for already-coerced `(pattern,
+/// flags)` and a resolved instance `prototype` through the record table. The
+/// RegExp construct record reads only `args`/`new_target`, so no constructor
+/// function object is threaded.
+fn constructRegExpRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    prototype: ?*core.Object,
+    pattern: core.JSValue,
+    flags: core.JSValue,
+    caller_function: ?*const bytecode.Bytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const args = [_]core.JSValue{ pattern, flags };
+    return (try builtin_dispatch.callConstructRecord(ctx, output, global, &.{}, null, regexp_construct_ref, prototype, &args, caller_function, caller_frame)) orelse error.TypeError;
+}
 
 // Helpers that remain in call_runtime.zig (generic utilities and RegExp helpers
 // outside the fast-path cluster).
@@ -201,7 +233,7 @@ pub fn qjsRegExpConstructCall(
             }
         }
         const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
-        return builtins.regexp.constructWithPrototype(ctx.runtime, input_pattern, input_flags, prototype);
+        return constructRegExpRecord(ctx, output, global, prototype, input_pattern, input_flags, caller_function, caller_frame);
     }
     const pattern_is_regexp = try isRegExpObservable(ctx, output, global, input_pattern, caller_function, caller_frame);
 
@@ -264,7 +296,7 @@ pub fn qjsRegExpConstructCall(
     }
 
     const prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
-    return builtins.regexp.constructWithPrototype(ctx.runtime, pattern, flags, prototype);
+    return constructRegExpRecord(ctx, output, global, prototype, pattern, flags, caller_function, caller_frame);
 }
 
 pub fn qjsRegExpExecMethod(
@@ -314,7 +346,7 @@ pub fn qjsRegExpTestMethod(
         break :blk value;
     };
     const exec_atom = core.atom.predefinedId("exec", .string) orelse return error.TypeError;
-    if (qjsRegExpPrototypeMethodIsDefault(receiver_object, exec_atom, @intFromEnum(builtins.regexp.PrototypeMethod.exec))) {
+    if (qjsRegExpPrototypeMethodIsDefault(receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
         if (try qjsRegExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
             return core.JSValue.boolean(matched);
         }
@@ -340,20 +372,20 @@ pub fn qjsRegExpNativeCallById(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (native_id) {
-        @intFromEnum(builtins.regexp.StaticMethod.escape) => try builtins.regexp.escape(ctx.runtime, args),
-        @intFromEnum(builtins.regexp.PrototypeMethod.to_string) => try qjsRegExpToString(ctx, output, global, this_value, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.exec) => try qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.test_) => try qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.compile) => blk: {
+        @intFromEnum(method_ids.regexp.StaticMethod.escape) => try builtins.regexp.escape(ctx.runtime, args),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.to_string) => try qjsRegExpToString(ctx, output, global, this_value, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.exec) => try qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.test_) => try qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.compile) => blk: {
             const function_object = objectFromValue(func) orelse break :blk try qjsRegExpCompile(ctx, output, global, this_value, args, caller_function, caller_frame);
             const compile_global = objectRealmGlobal(function_object) orelse global;
             break :blk try qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame);
         },
-        @intFromEnum(builtins.regexp.PrototypeMethod.symbol_search) => try qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.symbol_match) => try qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.symbol_match_all) => try qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.symbol_replace) => try qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(builtins.regexp.PrototypeMethod.symbol_split) => try qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_search) => try qjsRegExpSymbolSearch(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_match) => try qjsRegExpSymbolMatch(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_match_all) => try qjsRegExpSymbolMatchAll(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_replace) => try qjsRegExpSymbolReplace(ctx, output, global, this_value, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.regexp.PrototypeMethod.symbol_split) => try qjsRegExpSymbolSplit(ctx, output, global, this_value, args, caller_function, caller_frame),
         else => blk: {
             if (builtins.regexp.legacyAccessorMethodFromId(native_id)) |method| {
                 const function_object = objectFromValue(func) orelse return error.TypeError;
@@ -829,7 +861,7 @@ pub fn qjsRegExpLegacyAccessor(
     global: *core.Object,
     this_value: core.JSValue,
     function_object: *core.Object,
-    method: builtins.regexp.LegacyAccessorMethod,
+    method: method_ids.regexp.LegacyAccessorMethod,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,

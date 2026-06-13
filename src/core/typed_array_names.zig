@@ -1,3 +1,13 @@
+//! Engine-core typed-array element specification: the concrete `*Array` names
+//! mapped to their element byte size and the internal element-kind tag.
+//!
+//! QuickJS source map: the typed-array element-type table (`typed_array_size_log2`
+//! / class taxonomy in the C core) is engine metadata, consulted by the
+//! constructor and element read/write fabric (`core/typed_array.zig`). These are
+//! pure name<->kind/size lookups over the fixed standard set; they import only
+//! `std` and run no VM machinery, so they live in core and exec/builtins are
+//! clients.
+
 const std = @import("std");
 
 pub const Element = struct {

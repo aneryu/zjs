@@ -1918,7 +1918,7 @@ test "date constructor native builtin records ignore dispatch names" {
     try engine.exec.value_ops.appendRawString(rt, &call_buffer, call_result);
     try std.testing.expect(std.mem.indexOf(u8, call_buffer.items, "GMT+0000") != null);
 
-    const construct_result = try engine.exec.construct.constructValue(rt, fake, &.{core.JSValue.int32(1)}, &.{});
+    const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
     defer construct_result.free(rt);
     const construct_ms = try engine.builtins.date.methodCall(rt, construct_result, 1);
     defer construct_ms.free(rt);
@@ -1949,6 +1949,8 @@ test "date constructor native builtin records ignore dispatch names" {
 test "constructValue AggregateError releases copied errors array owner" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
     const name = try rt.internAtom("AggregateError");
     defer rt.atoms.free(name);
@@ -1963,7 +1965,7 @@ test "constructValue AggregateError releases copied errors array owner" {
     try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
 
     const baseline_objects = rt.gc.liveCount();
-    const result = try engine.exec.construct.constructValue(rt, constructor, &.{source.value()}, &.{});
+    const result = try engine.exec.construct.constructValue(ctx, constructor, &.{source.value()}, &.{});
     result.free(rt);
     _ = rt.runObjectCycleRemoval();
 

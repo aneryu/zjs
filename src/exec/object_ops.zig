@@ -2,6 +2,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const call_mod = @import("call.zig");
 const construct_mod = @import("construct.zig");
 const date_vm = @import("date_ops.zig");
@@ -100,8 +101,6 @@ const isCallableValue = call_runtime.isCallableValue;
 const isConstructorLike = call_runtime.isConstructorLike;
 const isFunctionLikeClass = call_runtime.isFunctionLikeClass;
 const isUnknownScriptName = string_ops.isUnknownScriptName;
-const iteratorForValue = call_runtime.iteratorForValue;
-const iteratorStepValue = call_runtime.iteratorStepValue;
 const lengthIndexValue = array_ops.lengthIndexValue;
 const lookupFrameFirstEvalBindingValue = call_runtime.lookupFrameFirstEvalBindingValue;
 const lookupNamedSlotValue = call_runtime.lookupNamedSlotValue;
@@ -110,14 +109,10 @@ const mappedArgumentsValue = call_runtime.mappedArgumentsValue;
 const ordinarySetWithReceiver = call_runtime.ordinarySetWithReceiver;
 const qjsBigIntPrototypeToString = string_ops.qjsBigIntPrototypeToString;
 const qjsCreateArrayDataOrTypedArrayElement = array_ops.qjsCreateArrayDataOrTypedArrayElement;
-const qjsDefinePropertiesCall = call_runtime.qjsDefinePropertiesCall;
-const qjsDefinePropertiesOnTarget = call_runtime.qjsDefinePropertiesOnTarget;
 const qjsDefineToStringTag = string_ops.qjsDefineToStringTag;
 const qjsDestructuringRest = call_runtime.qjsDestructuringRest;
 const qjsIteratorClose = call_runtime.qjsIteratorClose;
 const qjsObjectEntryArrayValue = array_ops.qjsObjectEntryArrayValue;
-const qjsObjectToLocaleStringCall = string_ops.qjsObjectToLocaleStringCall;
-const qjsObjectToStringCall = string_ops.qjsObjectToStringCall;
 const qjsReflectConstructGenericCallable = call_runtime.qjsReflectConstructGenericCallable;
 const qjsRegExpAutoInitBuiltinMatches = string_ops.qjsRegExpAutoInitBuiltinMatches;
 const qjsRegExpNativeBuiltinMatches = string_ops.qjsRegExpNativeBuiltinMatches;
@@ -226,7 +221,7 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     const object_value = object.value();
     var object_value_owned = true;
     errdefer if (object_value_owned) object_value.free(rt);
-    const constructor = try builtins.function.nativeFunction(rt, "GeneratorFunction", 1);
+    const constructor = try core.function.nativeFunction(rt, "GeneratorFunction", 1);
     defer constructor.free(rt);
     const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
@@ -1050,7 +1045,7 @@ pub fn regExpExecPropertyIsDefault(
     defer exec_value.free(ctx.runtime);
     const exec_object = objectFromValue(exec_value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(exec_object.nativeFunctionId()) orelse return false;
-    return native_ref.domain == .regexp and native_ref.id == @intFromEnum(builtins.regexp.PrototypeMethod.exec);
+    return native_ref.domain == .regexp and native_ref.id == @intFromEnum(method_ids.regexp.PrototypeMethod.exec);
 }
 
 pub fn setValuePropertyStrict(
@@ -1066,7 +1061,7 @@ pub fn setValuePropertyStrict(
     const object = try property_ops.expectObject(object_value);
     const value_to_set = try arrayLengthAssignmentValue(ctx, output, global, object, atom_id, value, caller_function, caller_frame);
     defer if (!value_to_set.same(value)) value_to_set.free(ctx.runtime);
-    if (builtins.buffer.isTypedArrayObject(object)) {
+    if (core.object.isTypedArrayObject(object)) {
         if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value_to_set)) return;
     }
     const called_setter = callAccessorSetter(ctx, output, global, object_value, object, atom_id, value, caller_function, caller_frame) catch |err| switch (err) {
@@ -3151,11 +3146,11 @@ pub fn getNumberPrototypeMethodId(rt: *core.JSRuntime, function_object: *core.Ob
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return null;
     if (native_ref.domain != .number) return null;
     return switch (native_ref.id) {
-        @intFromEnum(builtins.number.PrototypeMethod.to_string),
-        @intFromEnum(builtins.number.PrototypeMethod.to_locale_string),
-        @intFromEnum(builtins.number.PrototypeMethod.to_fixed),
-        @intFromEnum(builtins.number.PrototypeMethod.to_exponential),
-        @intFromEnum(builtins.number.PrototypeMethod.to_precision),
+        @intFromEnum(method_ids.number.PrototypeMethod.to_string),
+        @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string),
+        @intFromEnum(method_ids.number.PrototypeMethod.to_fixed),
+        @intFromEnum(method_ids.number.PrototypeMethod.to_exponential),
+        @intFromEnum(method_ids.number.PrototypeMethod.to_precision),
         => native_ref.id,
         else => null,
     };
@@ -3185,11 +3180,11 @@ pub fn qjsNumberPrototypeMethod(
     _ = caller_function;
     _ = caller_frame;
     return (switch (method_id) {
-        1, @intFromEnum(builtins.number.PrototypeMethod.to_string) => builtins.number.toStringMethod(ctx.runtime, primitive, method_args),
-        2, @intFromEnum(builtins.number.PrototypeMethod.to_locale_string) => builtins.number.toStringMethod(ctx.runtime, primitive, &.{}),
-        3, @intFromEnum(builtins.number.PrototypeMethod.to_fixed) => builtins.number.toFixed(ctx.runtime, primitive, method_args),
-        4, @intFromEnum(builtins.number.PrototypeMethod.to_exponential) => builtins.number.toExponential(ctx.runtime, primitive, method_args),
-        5, @intFromEnum(builtins.number.PrototypeMethod.to_precision) => builtins.number.toPrecision(ctx.runtime, primitive, method_args),
+        1, @intFromEnum(method_ids.number.PrototypeMethod.to_string) => builtins.number.toStringMethod(ctx.runtime, primitive, method_args),
+        2, @intFromEnum(method_ids.number.PrototypeMethod.to_locale_string) => builtins.number.toStringMethod(ctx.runtime, primitive, &.{}),
+        3, @intFromEnum(method_ids.number.PrototypeMethod.to_fixed) => builtins.number.toFixed(ctx.runtime, primitive, method_args),
+        4, @intFromEnum(method_ids.number.PrototypeMethod.to_exponential) => builtins.number.toExponential(ctx.runtime, primitive, method_args),
+        5, @intFromEnum(method_ids.number.PrototypeMethod.to_precision) => builtins.number.toPrecision(ctx.runtime, primitive, method_args),
         else => error.TypeError,
     }) catch |err| switch (err) {
         error.TypeError => return throwTypeErrorMessage(ctx, global, "not a number"),
@@ -3257,7 +3252,7 @@ pub fn qjsDataViewConstructWithPrototype(
         construct_args[0..2]
     else
         construct_args[0..1];
-    return builtins.buffer.dataViewConstruct(rt, used_args, prototype);
+    return core.typed_array.dataViewConstruct(rt, used_args, prototype);
 }
 
 pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
@@ -3435,25 +3430,6 @@ pub fn createDataPropertyOrThrow(
         return;
     }
     try qjsCreateArrayDataOrTypedArrayElement(ctx.runtime, object, atom_id, value);
-}
-
-pub fn qjsObjectIsPrototypeOf(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (args.len == 0) return core.JSValue.boolean(false);
-    var current = objectFromValue(args[0]) orelse return core.JSValue.boolean(false);
-    const this_object = objectFromValue(this_value) orelse return error.TypeError;
-    while (try qjsObjectGetPrototypeOfStep(ctx, output, global, current, caller_function, caller_frame)) |prototype| {
-        if (prototype == this_object) return core.JSValue.boolean(true);
-        current = prototype;
-    }
-    return core.JSValue.boolean(false);
 }
 
 pub fn qjsObjectGetPrototypeOfStep(
@@ -3667,7 +3643,7 @@ pub fn objectRestOwnKeys(
     global: *core.Object,
     source: *core.Object,
 ) HostError![]core.Atom {
-    if (source.proxyTarget() == null and builtins.buffer.isTypedArrayObject(source)) {
+    if (source.proxyTarget() == null and core.object.isTypedArrayObject(source)) {
         return try typedArrayOwnKeys(ctx.runtime, source);
     }
     if (source.proxyTarget() == null) {
@@ -3724,59 +3700,6 @@ pub fn objectRestKeyExcluded(ctx: *core.JSContext, excluded: []const core.JSValu
         if (excluded_key == key) return true;
     }
     return false;
-}
-
-pub fn qjsObjectCallForNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const object_mod = builtins.object;
-    return switch (id) {
-        @intFromEnum(object_mod.StaticMethod.assign) => (try qjsObjectAssignCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.create) => (try qjsObjectCreateCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.define_property) => (try qjsDefinePropertyWithKind(ctx, output, global, args, 1, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.define_properties) => (try qjsDefinePropertiesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.get_own_property_descriptor) => (try qjsGetOwnPropertyDescriptorCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.get_own_property_descriptors) => (try qjsGetOwnPropertyDescriptorsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.get_own_property_names) => (try qjsObjectOwnPropertyKeysCall(ctx, output, global, args, .string, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.get_own_property_symbols) => (try qjsObjectOwnPropertyKeysCall(ctx, output, global, args, .symbol, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.get_prototype_of) => (try qjsObjectGetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.has_own) => (try qjsObjectHasOwnCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.is_extensible) => (try qjsObjectIsExtensibleCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.keys) => (try qjsObjectEnumerableOwnPropertiesCall(ctx, output, global, args, .keys, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.prevent_extensions) => (try qjsObjectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.seal) => (try qjsObjectSetIntegrityCall(ctx, output, global, args, .sealed, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.is_sealed) => (try qjsObjectTestIntegrityCall(ctx, output, global, args, .sealed)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.is_frozen) => (try qjsObjectTestIntegrityCall(ctx, output, global, args, .frozen)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.set_prototype_of) => (try qjsObjectSetPrototypeOfCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.values) => (try qjsObjectEnumerableOwnPropertiesCall(ctx, output, global, args, .values, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.entries) => (try qjsObjectEnumerableOwnPropertiesCall(ctx, output, global, args, .entries, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.is) => {
-            const lhs = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const rhs = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-            return core.JSValue.boolean(object_mod.sameValue(lhs, rhs));
-        },
-        @intFromEnum(object_mod.StaticMethod.freeze) => (try qjsObjectSetIntegrityCall(ctx, output, global, args, .frozen, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.from_entries) => (try qjsObjectFromEntriesCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.StaticMethod.group_by) => (try qjsObjectGroupByCall(ctx, output, global, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.PrototypeMethod.to_string) => try qjsObjectToStringCall(ctx, output, global, this_value, caller_function, caller_frame),
-        @intFromEnum(object_mod.PrototypeMethod.to_locale_string) => try qjsObjectToLocaleStringCall(ctx, output, global, this_value, caller_function, caller_frame),
-        @intFromEnum(object_mod.PrototypeMethod.value_of) => try qjsObjectValueOfCall(ctx.runtime, global, this_value),
-        @intFromEnum(object_mod.PrototypeMethod.has_own_property) => (try qjsObjectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.PrototypeMethod.is_prototype_of) => try qjsObjectIsPrototypeOf(ctx, output, global, this_value, args, caller_function, caller_frame),
-        @intFromEnum(object_mod.PrototypeMethod.property_is_enumerable) => (try qjsObjectPrototypeOwnPropertyCall(ctx, output, global, this_value, id, args, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.PrototypeMethod.define_getter) => (try qjsObjectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.PrototypeMethod.define_setter) => (try qjsObjectPrototypeDefineAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.PrototypeMethod.lookup_getter) => (try qjsObjectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, true, caller_function, caller_frame)) orelse error.TypeError,
-        @intFromEnum(object_mod.PrototypeMethod.lookup_setter) => (try qjsObjectPrototypeLookupAccessorCall(ctx, output, global, this_value, args, false, caller_function, caller_frame)) orelse error.TypeError,
-        else => error.TypeError,
-    };
 }
 
 pub fn atomicsBufferObject(object: *core.Object) !*core.Object {
@@ -4035,13 +3958,13 @@ pub fn createGeneratorObject(
     const prototype = generatorObjectPrototype(ctx.runtime, global, current_function_value, is_async) catch null;
     try object.setPrototype(ctx.runtime, prototype);
 
-    const next = try builtins.function.nativeFunction(ctx.runtime, "next", 0);
+    const next = try core.function.nativeFunction(ctx.runtime, "next", 0);
     defer next.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "next", next);
-    const return_fn = try builtins.function.nativeFunction(ctx.runtime, "return", 1);
+    const return_fn = try core.function.nativeFunction(ctx.runtime, "return", 1);
     defer return_fn.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "return", return_fn);
-    const slice = try builtins.function.nativeFunction(ctx.runtime, "slice", 1);
+    const slice = try core.function.nativeFunction(ctx.runtime, "slice", 1);
     defer slice.free(ctx.runtime);
     try defineValueProperty(ctx.runtime, object, "slice", slice);
     return object.value();
@@ -4056,12 +3979,12 @@ pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, funct
 }
 
 pub fn qjsIteratorPrototypeAccessor(ctx: *core.JSContext, global: *core.Object, receiver: core.JSValue, args: []const core.JSValue, id: u32) !core.JSValue {
-    if (id == @intFromEnum(builtins.iterator.AccessorMethod.constructor_setter)) {
+    if (id == @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter)) {
         if (args.len > 0) {
             if (!args[0].isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
             if (!receiver.isObject()) return throwTypeErrorMessage(ctx, global, "not an object");
         }
-    } else if (id == @intFromEnum(builtins.iterator.AccessorMethod.to_string_tag_setter)) {
+    } else if (id == @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter)) {
         const receiver_object = property_ops.expectObject(receiver) catch return throwTypeErrorMessage(ctx, global, "not an object");
         if (iteratorPrototypeFromGlobal(ctx.runtime, global)) |home| {
             if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
@@ -4360,11 +4283,11 @@ pub fn getValueProperty(
             return getProxyProperty(ctx, output, global, value, object, atom_id, caller_function, caller_frame);
         }
         if (mappedArgumentsValue(ctx.runtime, object, atom_id)) |mapped_value| return mapped_value;
-        if (builtins.buffer.isTypedArrayObject(object)) {
+        if (core.object.isTypedArrayObject(object)) {
             if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
-            if (atom_id == core.atom.ids.length) return core.JSValue.int32(@intCast(try builtins.buffer.typedArrayLength(rt, object)));
-            if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try builtins.buffer.typedArrayByteLength(rt, object)));
-            if (atom_id == atom_byte_offset) return core.JSValue.int32(@intCast(try builtins.buffer.typedArrayByteOffset(object)));
+            if (atom_id == core.atom.ids.length) return core.JSValue.int32(@intCast(try core.object.typedArrayLength(rt, object)));
+            if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.object.typedArrayByteLength(rt, object)));
+            if (atom_id == atom_byte_offset) return core.JSValue.int32(@intCast(try core.object.typedArrayEffectiveByteOffset(object)));
         }
         if (object.exotic == null) {
             if (object.flags.is_array) {
@@ -4397,8 +4320,8 @@ pub fn getValueProperty(
                 atom_id == atom_byte_offset))
         {
             if (atom_id == atom_buffer) return (object.typedArrayBuffer() orelse return error.TypeError).dup();
-            if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteLength(rt, object)));
-            return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteOffset(rt, object)));
+            if (atom_id == atom_byte_length) return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(rt, object)));
+            return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(rt, object)));
         }
         if (object.getOwnProperty(atom_id)) |own_desc| {
             defer own_desc.destroy(rt);
@@ -4782,7 +4705,7 @@ pub fn setValueProperty(
     }
     if (object.flags.is_with_environment and is_strict and !object.hasProperty(atom_id)) return error.ReferenceError;
     if (try setMappedArgumentsValue(ctx, object, atom_id, value)) return core.JSValue.undefinedValue();
-    if (builtins.buffer.isTypedArrayObject(object)) {
+    if (core.object.isTypedArrayObject(object)) {
         if (try typedArrayCanonicalSet(ctx, output, global, object, atom_id, value)) {
             return core.JSValue.undefinedValue();
         }
@@ -4913,12 +4836,6 @@ pub fn setWithOwnDescriptor(
     }
 }
 
-pub fn qjsObjectValueOfCall(rt: *core.JSRuntime, global: *core.Object, this_value: core.JSValue) !core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    if (this_value.isObject()) return this_value.dup();
-    return primitiveObjectForAccess(rt, global, this_value);
-}
-
 pub fn bytecodeFunctionObjectTag(object: *core.Object) []const u8 {
     const function_value = object.functionBytecodeSlot().* orelse return "Function";
     const function_bytecode = functionBytecodeFromValue(function_value) orelse return "Function";
@@ -4987,86 +4904,6 @@ pub const PendingPropertyDescriptor = struct {
     }
 };
 
-pub fn qjsObjectCreateCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    const prototype: ?*core.Object = if (args[0].isNull())
-        null
-    else
-        objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "object prototype may only be an Object or null"));
-    const object = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &object.header);
-    object.flags.null_prototype = args[0].isNull();
-    if (args.len >= 2 and !args[1].isUndefined()) {
-        try qjsDefinePropertiesOnTarget(ctx, output, global, object, args[1], caller_function, caller_frame);
-    }
-    return object.value();
-}
-
-pub fn qjsObjectAssignCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
-    const target_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    errdefer target_value.free(ctx.runtime);
-    _ = objectFromValue(target_value) orelse return error.TypeError;
-
-    for (args[1..]) |source_arg| {
-        if (source_arg.isNull() or source_arg.isUndefined()) continue;
-        const source_value = if (objectFromValue(source_arg)) |_| source_arg.dup() else try primitiveObjectForAccess(ctx.runtime, global, source_arg);
-        defer source_value.free(ctx.runtime);
-        const source = objectFromValue(source_value) orelse return error.TypeError;
-        const keys = try objectRestOwnKeys(ctx, output, global, source);
-        defer core.Object.freeKeys(ctx.runtime, keys);
-        if (source.proxyTarget() != null) {
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, keys, null, caller_function, caller_frame);
-        } else {
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, keys, false, caller_function, caller_frame);
-            try qjsObjectAssignKeys(ctx, output, global, target_value, source_value, source, keys, true, caller_function, caller_frame);
-        }
-    }
-
-    return target_value;
-}
-
-pub fn qjsObjectAssignKeys(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    target_value: core.JSValue,
-    source_value: core.JSValue,
-    source: *core.Object,
-    keys: []const core.Atom,
-    symbol_pass: ?bool,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    for (keys) |key| {
-        const is_symbol = ctx.runtime.atoms.kind(key) == .symbol;
-        if (symbol_pass) |pass| {
-            if (is_symbol != pass) continue;
-        }
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
-        defer desc.destroy(ctx.runtime);
-        if (desc.enumerable != true) continue;
-        const value = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
-        defer value.free(ctx.runtime);
-        try setValuePropertyStrict(ctx, output, global, target_value, key, value, caller_function, caller_frame);
-    }
-}
-
 pub fn qjsObjectEnumerableOwnPropertiesCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5126,136 +4963,6 @@ pub fn qjsObjectEnumerableOwnPropertiesCall(
     return out_value;
 }
 
-pub fn qjsObjectHasOwnCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
-    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
-    desc.destroy(ctx.runtime);
-    return core.JSValue.boolean(true);
-}
-
-pub fn qjsObjectPrototypeOwnPropertyCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    method_id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const object_mod = builtins.object;
-    if (method_id != @intFromEnum(object_mod.PrototypeMethod.has_own_property) and method_id != @intFromEnum(object_mod.PrototypeMethod.property_is_enumerable)) return null;
-
-    const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
-
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
-    const object = property_ops.expectObject(object_value) catch return error.TypeError;
-    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
-    defer desc.destroy(ctx.runtime);
-    if (method_id == @intFromEnum(object_mod.PrototypeMethod.property_is_enumerable)) return core.JSValue.boolean(desc.enumerable orelse false);
-    return core.JSValue.boolean(true);
-}
-
-pub fn qjsObjectPrototypeDefineAccessorCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    getter: bool,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const accessor_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    if (!isCallableValue(accessor_value)) return error.TypeError;
-    const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(key);
-
-    const desc = if (getter) core.Descriptor{
-        .kind = .accessor,
-        .getter = accessor_value.dup(),
-        .getter_present = true,
-        .enumerable = true,
-        .configurable = true,
-    } else core.Descriptor{
-        .kind = .accessor,
-        .setter = accessor_value.dup(),
-        .setter_present = true,
-        .enumerable = true,
-        .configurable = true,
-    };
-    defer desc.destroy(ctx.runtime);
-    const defined = if (object.proxyTarget() != null)
-        proxyDefineOwnProperty(ctx, output, global, object, key, desc, caller_function, caller_frame) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            error.InvalidLength => return error.RangeError,
-            else => return err,
-        }
-    else blk: {
-        object.defineOwnProperty(ctx.runtime, key, desc) catch |err| switch (err) {
-            error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-            error.InvalidLength => return error.RangeError,
-            else => return err,
-        };
-        break :blk true;
-    };
-    if (!defined) return error.TypeError;
-    return core.JSValue.undefinedValue();
-}
-
-pub fn qjsObjectPrototypeLookupAccessorCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    getter: bool,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value.dup() else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    defer object_value.free(ctx.runtime);
-    var object = objectFromValue(object_value) orelse return error.TypeError;
-    const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(key);
-
-    while (true) {
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key);
-        if (desc) |item| {
-            defer item.destroy(ctx.runtime);
-            if (item.kind != .accessor) return core.JSValue.undefinedValue();
-            if (getter) return if (item.getter_present) item.getter.dup() else core.JSValue.undefinedValue();
-            return if (item.setter_present) item.setter.dup() else core.JSValue.undefinedValue();
-        }
-        object = (try qjsObjectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame)) orelse return core.JSValue.undefinedValue();
-    }
-}
-
 pub fn qjsObjectProtoGetterCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5289,259 +4996,6 @@ pub fn qjsObjectProtoSetterCall(
         return core.JSValue.undefinedValue();
     }
     return core.JSValue.undefinedValue();
-}
-
-pub fn qjsObjectFromEntriesCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    const out_value = out.value();
-
-    const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-
-    while (true) {
-        const step = try iteratorStepValue(ctx, output, global, iterator_value);
-        defer step.value.free(ctx.runtime);
-        if (step.done) return out_value;
-
-        const entry = objectFromValue(step.value) orelse {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return error.TypeError;
-        };
-        const key_value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(0), caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        defer key_value.free(ctx.runtime);
-        const value = getValueProperty(ctx, output, global, entry.value(), core.atom.atomFromUInt32(1), caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        defer value.free(ctx.runtime);
-        const key = toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        defer ctx.runtime.atoms.free(key);
-        createDataPropertyOrThrow(ctx, output, global, out_value, out, key, value, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-    }
-}
-
-pub fn qjsObjectGroupByCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 2) return error.TypeError;
-    if (!isCallableValue(args[1])) return error.TypeError;
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    out.flags.null_prototype = true;
-    const out_value = out.value();
-
-    const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
-    defer iterator_value.free(ctx.runtime);
-
-    var index: usize = 0;
-    while (true) {
-        const max_safe_integer: usize = 9007199254740991;
-        if (index >= max_safe_integer) {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return error.TypeError;
-        }
-        const step = try iteratorStepValue(ctx, output, global, iterator_value);
-        defer step.value.free(ctx.runtime);
-        if (step.done) return out_value;
-
-        const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const raw_key = callValueOrBytecode(ctx, output, global, core.JSValue.undefinedValue(), args[1], &.{ step.value, index_value }, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        defer raw_key.free(ctx.runtime);
-        const key = toPropertyKeyAtom(ctx, output, global, raw_key, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
-            return err;
-        };
-        defer ctx.runtime.atoms.free(key);
-        try appendObjectGroupByValue(ctx, output, global, out_value, out, key, step.value, caller_function, caller_frame);
-        index += 1;
-    }
-}
-
-pub fn qjsObjectSetIntegrityCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    level: IntegrityLevel,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const object = objectFromValue(target_value) orelse return target_value.dup();
-    if (level == .frozen and builtins.buffer.typedArrayBackedByResizableBuffer(object)) return error.TypeError;
-    if (try qjsObjectPreventExtensionsCall(ctx, output, global, args, caller_function, caller_frame)) |prevented| {
-        prevented.free(ctx.runtime);
-    } else return error.TypeError;
-
-    const keys = try objectRestOwnKeys(ctx, output, global, object);
-    defer core.Object.freeKeys(ctx.runtime, keys);
-    for (keys) |key| {
-        const desc = if (level == .frozen)
-            try objectRestOwnPropertyDescriptor(ctx, output, global, object, key)
-        else
-            null;
-        defer if (desc) |item| item.destroy(ctx.runtime);
-
-        const next_desc = switch (level) {
-            .sealed => core.Descriptor.generic(null, false),
-            .frozen => blk: {
-                if (desc) |item| {
-                    if (item.kind == .data) break :blk core.Descriptor{
-                        .kind = .data,
-                        .value_present = false,
-                        .writable = false,
-                        .configurable = false,
-                    };
-                }
-                break :blk core.Descriptor.generic(null, false);
-            },
-        };
-        const defined = if (object.proxyTarget() != null)
-            try proxyDefineOwnProperty(ctx, output, global, object, key, next_desc, caller_function, caller_frame)
-        else blk: {
-            object.defineOwnProperty(ctx.runtime, key, next_desc) catch |err| switch (err) {
-                error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
-                error.InvalidLength => return error.RangeError,
-                else => return err,
-            };
-            break :blk true;
-        };
-        if (!defined) return error.TypeError;
-    }
-    return target_value.dup();
-}
-
-pub fn qjsObjectTestIntegrityCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    level: IntegrityLevel,
-) !?core.JSValue {
-    const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const object = objectFromValue(target_value) orelse return core.JSValue.boolean(true);
-    if (try objectIsExtensibleForIntegrity(ctx, output, global, object)) return core.JSValue.boolean(false);
-    const keys = try objectRestOwnKeys(ctx, output, global, object);
-    defer core.Object.freeKeys(ctx.runtime, keys);
-    for (keys) |key| {
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
-        defer desc.destroy(ctx.runtime);
-        if (desc.configurable == true) return core.JSValue.boolean(false);
-        if (level == .frozen and desc.kind == .data and desc.writable == true) return core.JSValue.boolean(false);
-    }
-    return core.JSValue.boolean(true);
-}
-
-pub fn objectIsExtensibleForIntegrity(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    object: *core.Object,
-) !bool {
-    if (object.proxyTarget() == null) return object.isExtensible();
-    const target_value = object.proxyTarget() orelse return object.isExtensible();
-    const target = property_ops.expectObject(target_value) catch return error.TypeError;
-    const handler_value = object.proxyHandler() orelse return error.TypeError;
-    const trap_key = try ctx.runtime.internAtom("isExtensible");
-    defer ctx.runtime.atoms.free(trap_key);
-    const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, null, null);
-    defer trap.free(ctx.runtime);
-    if (trap.isUndefined() or trap.isNull()) return target.isExtensible();
-    if (!isCallableValue(trap)) return error.TypeError;
-    const result = try callValueOrBytecode(ctx, output, global, handler_value, trap, &.{target_value}, null, null);
-    defer result.free(ctx.runtime);
-    const extensible = valueTruthy(result);
-    if (extensible != target.isExtensible()) return error.TypeError;
-    return extensible;
-}
-
-pub fn appendObjectGroupByValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    out_value: core.JSValue,
-    out: *core.Object,
-    key: core.Atom,
-    value: core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !void {
-    var group_value = getValueProperty(ctx, output, global, out_value, key, caller_function, caller_frame) catch core.JSValue.undefinedValue();
-    defer group_value.free(ctx.runtime);
-    if (group_value.isUndefined()) {
-        group_value.free(ctx.runtime);
-        const group = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        group_value = group.value();
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, group_value, caller_function, caller_frame);
-    }
-    const group = objectFromValue(group_value) orelse return error.TypeError;
-    try createDataPropertyOrThrow(ctx, output, global, group_value, group, core.atom.atomFromUInt32(group.length), value, caller_function, caller_frame);
-}
-
-test "Object.groupBy new group define failure releases group once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-    defer global.value().free(rt);
-    const out = try core.Object.create(rt, core.class.ids.object, null);
-    defer out.value().free(rt);
-    out.preventExtensions();
-
-    const key = try rt.internAtom("group");
-    defer rt.atoms.free(key);
-
-    try std.testing.expectError(
-        error.TypeError,
-        appendObjectGroupByValue(ctx, null, global, out.value(), out, key, core.JSValue.int32(1), null, null),
-    );
-    try std.testing.expectEqual(@as(usize, 2), rt.gc.liveCount());
-}
-
-pub fn qjsObjectPreventExtensionsCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const object = objectFromValue(target_value) orelse return target_value.dup();
-    if (object.proxyTarget() != null) {
-        if (!try proxyAwarePreventExtensions(ctx, output, global, object, caller_function, caller_frame)) return error.TypeError;
-        return target_value.dup();
-    }
-    object.preventExtensions();
-    return target_value.dup();
 }
 
 pub fn qjsObjectIsExtensibleCall(
@@ -5592,7 +5046,12 @@ pub fn qjsObjectSetPrototypeOfCall(
         return args[0].dup();
     }
     object.setPrototype(ctx.runtime, prototype) catch |err| switch (err) {
-        error.PrototypeCycle, error.NotExtensible => return error.TypeError,
+        // Throw via the callee realm's global (threaded in as `global`) so a
+        // cross-realm `gw.Object.setPrototypeOf(...)` produces gw's TypeError.
+        // A bare `return error.TypeError` would materialize at the VM catch
+        // against the caller realm (ctx.global), which is the wrong realm.
+        error.PrototypeCycle => return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "circular prototype chain")),
+        error.NotExtensible => return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "prototype is not extensible")),
         else => return err,
     };
     return args[0].dup();
@@ -5665,132 +5124,6 @@ pub fn reflectConstructRealmPrototype(
 pub fn objectHasImmutablePrototype(rt: *core.JSRuntime, object: *core.Object) bool {
     _ = rt;
     return object.hasImmutablePrototype();
-}
-
-pub fn qjsGetOwnPropertyDescriptorCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    defer ctx.runtime.atoms.free(atom_id);
-    var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
-    try call_mod.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, atom_id, &desc);
-    defer desc.destroy(ctx.runtime);
-    const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
-    return desc_value;
-}
-
-pub fn qjsObjectGetPrototypeOfCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
-    const object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    if (try qjsObjectPrototypeMethodFunctionPrototype(ctx, global, object)) |prototype| return prototype.value().dup();
-    return try qjsObjectGetPrototypeOfValue(ctx, output, global, object, caller_function, caller_frame);
-}
-
-pub fn qjsObjectPrototypeMethodFunctionPrototype(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    object: *core.Object,
-) !?*core.Object {
-    if (object.class_id != core.class.ids.c_function) return null;
-    if (!isObjectPrototypeNativeRecord(object, @intFromEnum(builtins.object.PrototypeMethod.is_prototype_of))) return null;
-    return functionPrototypeFromGlobal(ctx.runtime, global);
-}
-
-pub fn isObjectPrototypeNativeRecord(object: *core.Object, id: u32) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
-    return native_ref.domain == .object and native_ref.id == id;
-}
-
-pub fn qjsGetOwnPropertyDescriptorsCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return null;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const keys = try objectRestOwnKeys(ctx, output, global, object);
-    defer core.Object.freeKeys(ctx.runtime, keys);
-
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    for (keys) |key| {
-        var desc = (try objectRestOwnPropertyDescriptor(ctx, output, global, object, key)) orelse continue;
-        try call_mod.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, key, &desc);
-        defer desc.destroy(ctx.runtime);
-        const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
-        defer desc_value.free(ctx.runtime);
-        try createDataPropertyOrThrow(ctx, output, global, out.value(), out, key, desc_value, caller_function, caller_frame);
-    }
-    return out.value();
-}
-
-pub const OwnPropertyKeyFilter = enum {
-    string,
-    symbol,
-};
-
-pub fn qjsObjectOwnPropertyKeysCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    filter: OwnPropertyKeyFilter,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    if (args.len < 1) return error.TypeError;
-    if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0].dup() else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    defer object_value.free(ctx.runtime);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const keys = try objectRestOwnKeys(ctx, output, global, object);
-    defer core.Object.freeKeys(ctx.runtime, keys);
-
-    const out = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, &out.header);
-    for (keys) |key| {
-        const is_symbol = ctx.runtime.atoms.kind(key) == .symbol;
-        switch (filter) {
-            .string => {
-                if (is_symbol) continue;
-                const name_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
-                defer name_value.free(ctx.runtime);
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.length), name_value, caller_function, caller_frame);
-            },
-            .symbol => {
-                if (!is_symbol) continue;
-                try createDataPropertyOrThrow(ctx, output, global, out.value(), out, core.atom.atomFromUInt32(out.length), core.JSValue.symbol(key), caller_function, caller_frame);
-            },
-        }
-    }
-    return out.value();
 }
 
 pub fn qjsReflectDeletePropertyCall(
@@ -6274,7 +5607,7 @@ pub fn ordinaryHasValueProperty(
 
 pub fn indexedExoticHasProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (stringObjectHasIndexProperty(rt, object, atom_id)) return true;
-    if (!builtins.buffer.isTypedArrayObject(object)) return false;
+    if (!core.object.isTypedArrayObject(object)) return false;
     return typedArrayCanonicalHas(rt, object, atom_id) orelse false;
 }
 
@@ -7308,11 +6641,11 @@ pub fn isCompatibleProxyDescriptor(extensible: bool, current: ?core.Descriptor, 
     if ((desc.kind == .accessor) != current_is_accessor) return false;
     if (!current_is_accessor and !(current_desc.writable orelse false)) {
         if (desc.writable orelse false) return false;
-        if (desc.kind == .data and desc.value_present and !builtins.object.sameValue(current_desc.value, desc.value)) return false;
+        if (desc.kind == .data and desc.value_present and !current_desc.value.sameValue(desc.value)) return false;
     }
     if (current_is_accessor and desc.kind == .accessor) {
-        if (desc.getter_present and !builtins.object.sameValue(current_desc.getter, desc.getter)) return false;
-        if (desc.setter_present and !builtins.object.sameValue(current_desc.setter, desc.setter)) return false;
+        if (desc.getter_present and !current_desc.getter.sameValue(desc.getter)) return false;
+        if (desc.setter_present and !current_desc.setter.sameValue(desc.setter)) return false;
     }
     return true;
 }
@@ -7435,7 +6768,7 @@ pub fn validateProxyGetResult(
     if (target_desc.configurable != false) return;
     switch (target_desc.kind) {
         .data => {
-            if (target_desc.writable == false and !builtins.object.sameValue(result, target_desc.value)) return error.TypeError;
+            if (target_desc.writable == false and !result.sameValue(target_desc.value)) return error.TypeError;
         },
         .accessor => {
             if (target_desc.getter.isUndefined() and !result.isUndefined()) return error.TypeError;
@@ -7503,7 +6836,7 @@ pub fn validateProxySetResult(
     if (target_desc.configurable != false) return;
     switch (target_desc.kind) {
         .data => {
-            if (target_desc.writable == false and !builtins.object.sameValue(value, target_desc.value)) return error.TypeError;
+            if (target_desc.writable == false and !value.sameValue(target_desc.value)) return error.TypeError;
         },
         .accessor => {
             if (target_desc.setter.isUndefined()) return error.TypeError;

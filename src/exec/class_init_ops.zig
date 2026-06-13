@@ -85,7 +85,7 @@ pub fn constructBuiltinSuperConstructor(
         if (!isCallableValue(executor)) return error.TypeError;
     }
     if (std.mem.eql(u8, name, "Iterator")) {
-        if (builtins.object.sameValue(new_target, constructor)) return error.TypeError;
+        if (new_target.sameValue(constructor)) return error.TypeError;
         const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
         const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
         return instance.value();
@@ -104,9 +104,9 @@ pub fn constructBuiltinSuperConstructor(
         const max_byte_length = try qjsArrayBufferMaxByteLengthOption(ctx, output, global, args, byte_length);
         const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "SharedArrayBuffer")) {
-            return try builtins.buffer.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+            return try core.typed_array.sharedArrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
         }
-        return try builtins.buffer.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
+        return try core.typed_array.arrayBufferConstructLength(ctx.runtime, byte_length, max_byte_length, prototype);
     }
 
     if (std.mem.eql(u8, name, "DataView")) {
@@ -121,7 +121,7 @@ pub fn constructBuiltinSuperConstructor(
 
     const prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Object")) {
-        if (builtins.object.sameValue(new_target, constructor) and args.len >= 1 and args[0].isObject()) return args[0].dup();
+        if (new_target.sameValue(constructor) and args.len >= 1 and args[0].isObject()) return args[0].dup();
         const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype);
         return instance.value();
     }
@@ -162,7 +162,7 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "DisposableStack")) return try qjsDisposableStackConstructWithPrototype(ctx, global, prototype);
     if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try qjsAsyncDisposableStackConstructWithPrototype(ctx, global, prototype);
     if (builtins.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype);
-    if (std.mem.eql(u8, name, "DataView")) return try builtins.buffer.dataViewConstruct(ctx.runtime, args, prototype);
+    if (std.mem.eql(u8, name, "DataView")) return try core.typed_array.dataViewConstruct(ctx.runtime, args, prototype);
     if (construct_mod.typedArrayElement(name)) |element| return try construct_mod.constructTypedArrayValue(ctx.runtime, prototype, element, args, global);
 
     return null;

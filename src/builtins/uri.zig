@@ -2,6 +2,12 @@ const core = @import("../core/root.zig");
 const bignum = @import("../libs/bignum.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const builtin_glue = @import("../exec/builtin_glue.zig");
+const exceptions = @import("../exec/exceptions.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -9,6 +15,51 @@ const AppendStringError = error{
     InvalidRadix,
     NoSpaceLeft,
 };
+
+/// Declaration table: one entry per global URI builtin. `id` is the
+/// `methodId` value (encode/decode mode selector), reused as the dispatch
+/// `magic`. The record `call` fn mirrors the legacy
+/// `callUriNativeFunctionRecord` dispatch: realm callers take the VM string
+/// coercion path in `builtin_glue` (shared with the fast-call entry points),
+/// bare-runtime callers use the primitive-only `call` fallback below.
+pub const internal_entries = [_]core.host_function.InternalEntry{
+    uriEntry("encodeURI", 1),
+    uriEntry("encodeURIComponent", 2),
+    uriEntry("decodeURI", 3),
+    uriEntry("decodeURIComponent", 4),
+};
+
+fn uriEntry(comptime name: []const u8, comptime mode: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = 1, .id = mode, .magic = mode, .prepared_call_ok = true, .call = &uriCall };
+}
+
+/// Shared record handler for the four global URI functions. With a realm
+/// global the input is string-coerced through the VM (Annex B ToString);
+/// without one the primitive-only `call` path preserves the legacy host
+/// behavior on bare runtimes.
+fn uriCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const mode: u32 = host_call.magic;
+    if (host_call.global) |global| {
+        return builtin_glue.qjsUriCallForNativeRecord(
+            ctx,
+            host_call.output,
+            global,
+            mode,
+            host_call.args,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ) catch |err| switch (err) {
+            error.TypeError, error.URIError => err,
+            else => err,
+        };
+    }
+    const input = if (host_call.args.len >= 1) host_call.args[0] else core.JSValue.undefinedValue();
+    return call(ctx.runtime, mode, input) catch |err| switch (err) {
+        error.TypeError, error.URIError => err,
+        else => err,
+    };
+}
 
 pub const FourByteEscapeUnits = struct {
     high: u16,

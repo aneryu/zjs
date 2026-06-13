@@ -5,6 +5,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const dtoa = @import("../libs/dtoa.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const frame_mod = @import("frame.zig");
@@ -949,7 +950,7 @@ fn stringNumberConstCall1At(rt: *core.JSRuntime, function: *const bytecode.Bytec
 fn isStringConstructorValue(value: core.JSValue) bool {
     const object = objectFromValue(value) orelse return false;
     const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionIdSlot().*) orelse return false;
-    return native_ref.domain == .string and native_ref.id == @intFromEnum(builtins.string.ConstructorMethod.call);
+    return native_ref.domain == .string and native_ref.id == @intFromEnum(method_ids.string.ConstructorMethod.call);
 }
 
 fn nextOpIsPostUpdate(function: *const bytecode.Bytecode, frame: *const frame_mod.Frame) bool {
@@ -1102,7 +1103,7 @@ fn tryFuseGlobalDateNowCall(
 
     const atom_id = readInt(u32, code[pc + 1 ..][0..4]);
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, receiver, atom_id) orelse return false;
-    if (native_ref.domain != .date or native_ref.id != @intFromEnum(builtins.date.StaticMethod.now)) return false;
+    if (native_ref.domain != .date or native_ref.id != @intFromEnum(method_ids.date.StaticMethod.now)) return false;
 
     const result = try builtins.date.staticCall(ctx.runtime, native_ref.id, &.{});
     errdefer result.free(ctx.runtime);
@@ -1617,7 +1618,7 @@ fn decodeUriFourByteRangePlan(
     pc = string_get.next_pc;
     const method = decodeFieldAtom(code, pc, op.get_field2) orelse return null;
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, string_ctor, method.atom) orelse return null;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(builtins.string.StaticMethod.from_char_code)) return null;
+    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return null;
     pc = method.next_pc;
     const high_get = decodeGlobalDataGet(code, pc) orelse return null;
     if (high_get.atom != high_put.atom) return null;
@@ -1850,7 +1851,7 @@ fn tryFuseUriDecodeSingleFourByteStrictEqFromCharCode(
     if (pc + 5 > code.len or code[pc] != op.get_field2) return null;
     const method_atom = readInt(u32, code[pc + 1 ..][0..4]);
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, pc, ctx.runtime, string_ctor, method_atom) orelse return null;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(builtins.string.StaticMethod.from_char_code)) return null;
+    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return null;
     pc += 5;
 
     const high_arg = uriStrictEqIntArg(ctx, function, global, frame, pc, eval_local_names, eval_var_ref_names, eval_with_object) orelse return null;
@@ -2226,8 +2227,8 @@ fn fastLengthValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
         }
         return core.JSValue.float64(@floatFromInt(object.length));
     }
-    if (builtins.buffer.isTypedArrayObject(object)) {
-        return core.JSValue.int32(@intCast(try builtins.buffer.typedArrayLength(rt, object)));
+    if (core.object.isTypedArrayObject(object)) {
+        return core.JSValue.int32(@intCast(try core.object.typedArrayLength(rt, object)));
     }
     return error.TypeError;
 }

@@ -3,6 +3,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const exceptions = @import("exceptions.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
@@ -335,7 +336,7 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
 }
 
 fn asyncFromSyncMethod(rt: *core.JSRuntime, name: []const u8, method_id: i32) !core.JSValue {
-    const method = try builtins.function.nativeFunction(rt, name, 0);
+    const method = try core.function.nativeFunction(rt, name, 0);
     errdefer method.free(rt);
     const object = try property_ops.expectObject(method);
     if (method_id < 1 or method_id > 2) return error.TypeError;
@@ -698,9 +699,9 @@ pub fn forInNext(
             const source = try property_ops.expectObject(source_value);
             const key_atom = try property_ops.propertyKeyAtom(ctx.runtime, key_value);
             defer ctx.runtime.atoms.free(key_atom);
-            if (builtins.buffer.isTypedArrayObject(source)) {
+            if (core.object.isTypedArrayObject(source)) {
                 if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, key_atom)) |typed_index| {
-                    if (typed_index >= (builtins.buffer.typedArrayLength(ctx.runtime, source) catch 0)) continue;
+                    if (typed_index >= (core.object.typedArrayLength(ctx.runtime, source) catch 0)) continue;
                 } else if (!try object_ops.hasValueProperty(ctx, output, global, source_value, source, key_atom, null, null)) {
                     continue;
                 }
@@ -850,7 +851,7 @@ pub fn arrayIteratorPrototypeFromContext(
     const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
     if (!next_function.addArrayIteratorNextFunction()) return error.TypeError;
 
-    const iterator_method = try builtins.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
+    const iterator_method = try core.function.nativeFunction(ctx.runtime, "[Symbol.iterator]", 0);
     defer iterator_method.free(ctx.runtime);
     const iterator_function = property_ops.expectObject(iterator_method) catch return error.TypeError;
     if (!iterator_function.addIteratorIdentityFunction()) return error.TypeError;
@@ -889,9 +890,9 @@ pub fn arrayIteratorMethod(
 
     const object = try property_ops.expectObject(rooted_object);
     if (array_ops.isTypedArrayPrototypeMethod(ctx.runtime, function_object)) {
-        if (!builtins.buffer.isTypedArrayObject(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayDetached(object)) return error.TypeError;
-        if (try builtins.buffer.typedArrayOutOfBounds(object)) return error.TypeError;
+        if (!core.object.isTypedArrayObject(object)) return error.TypeError;
+        if (try core.object.typedArrayDetached(object)) return error.TypeError;
+        if (try core.object.typedArrayOutOfBounds(object)) return error.TypeError;
     }
     const prototype = try arrayIteratorPrototypeFromContext(ctx, global);
     const iterator = try core.Object.create(ctx.runtime, core.class.ids.array_iterator, prototype);
@@ -913,10 +914,10 @@ pub fn arrayIteratorNext(
     if (iterator.class_id != core.class.ids.array_iterator) return error.TypeError;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return try call_runtime.createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     const target = property_ops.expectObject(target_value) catch return error.TypeError;
-    const length = if (builtins.buffer.isTypedArrayObject(target)) blk: {
-        if (try builtins.buffer.typedArrayDetached(target)) return error.TypeError;
-        if (try builtins.buffer.typedArrayOutOfBounds(target)) return error.TypeError;
-        break :blk builtins.buffer.typedArrayLength(ctx.runtime, target) catch return error.TypeError;
+    const length = if (core.object.isTypedArrayObject(target)) blk: {
+        if (try core.object.typedArrayDetached(target)) return error.TypeError;
+        if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
+        break :blk core.object.typedArrayLength(ctx.runtime, target) catch return error.TypeError;
     } else if (target.flags.is_array) target.length else blk: {
         const length_value = try object_ops.getValueProperty(ctx, output, global, target_value, core.atom.ids.length, null, null);
         defer length_value.free(ctx.runtime);
@@ -945,8 +946,8 @@ pub fn arrayIteratorValue(
 ) !core.JSValue {
     return switch (kind) {
         1 => core.JSValue.int32(@intCast(index)),
-        2 => if (builtins.buffer.isTypedArrayObject(target))
-            try builtins.buffer.typedArrayGetIndex(ctx.runtime, target, index)
+        2 => if (core.object.isTypedArrayObject(target))
+            try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
         else
             try getValueProperty(ctx, output, global, target.value(), core.atom.atomFromUInt32(index), null, null),
         3 => blk: {
@@ -967,8 +968,8 @@ pub fn arrayIteratorValue(
             const pair = try core.Object.createArray(ctx.runtime, null);
             errdefer core.Object.destroyFromHeader(ctx.runtime, &pair.header);
             pair_value = pair.value();
-            value = if (builtins.buffer.isTypedArrayObject(target))
-                try builtins.buffer.typedArrayGetIndex(ctx.runtime, target, index)
+            value = if (core.object.isTypedArrayObject(target))
+                try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
             else
                 try getValueProperty(ctx, output, global, target.value(), core.atom.atomFromUInt32(index), null, null);
             try pair.defineOwnProperty(ctx.runtime, core.atom.atomFromUInt32(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
@@ -1081,19 +1082,19 @@ pub fn qjsIteratorPrototypeAccessor(
     id: u32,
 ) !core.JSValue {
     switch (id) {
-        @intFromEnum(builtins.iterator.AccessorMethod.constructor_getter) => {
+        @intFromEnum(method_ids.iterator.AccessorMethod.constructor_getter) => {
             const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return error.TypeError;
             return global.getProperty(iterator_key);
         },
-        @intFromEnum(builtins.iterator.AccessorMethod.constructor_setter) => {
+        @intFromEnum(method_ids.iterator.AccessorMethod.constructor_setter) => {
             if (args.len == 0) {
                 const iterator_key = core.atom.predefinedId("Iterator", .string) orelse return error.TypeError;
                 return global.getProperty(iterator_key);
             }
             return try qjsIteratorPrototypeAccessorSet(ctx, global, receiver, core.atom.ids.constructor, args[0]);
         },
-        @intFromEnum(builtins.iterator.AccessorMethod.to_string_tag_getter) => return try value_ops.createStringValue(ctx.runtime, "Iterator"),
-        @intFromEnum(builtins.iterator.AccessorMethod.to_string_tag_setter) => return try qjsIteratorPrototypeAccessorSet(
+        @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_getter) => return try value_ops.createStringValue(ctx.runtime, "Iterator"),
+        @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter) => return try qjsIteratorPrototypeAccessorSet(
             ctx,
             global,
             receiver,
@@ -1176,7 +1177,7 @@ pub fn qjsInstallIteratorHelperMethod(
 ) !void {
     const key = try rt.internAtom(name);
     defer rt.atoms.free(key);
-    const method = try builtins.function.nativeFunction(rt, name, 0);
+    const method = try core.function.nativeFunction(rt, name, 0);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     if (method_id < 1 or method_id > 2) return error.TypeError;
@@ -2077,18 +2078,18 @@ pub fn qjsIteratorPrototypeMethodCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     return switch (method_id) {
-        @intFromEnum(builtins.iterator.PrototypeMethod.to_array) => try qjsIteratorToArrayCall(ctx, output, global, receiver, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.every) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .every, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.find) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .find, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.for_each) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .for_each, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.reduce) => try qjsIteratorReduceCall(ctx, output, global, receiver, args, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.some) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .some, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.map) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .map, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.filter) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .filter, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.take) => try qjsIteratorCreateLimitHelper(ctx, output, global, receiver, args, .take, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.drop) => try qjsIteratorCreateLimitHelper(ctx, output, global, receiver, args, .drop, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.flat_map) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .flatMap, caller_function, caller_frame),
-        @intFromEnum(builtins.iterator.PrototypeMethod.dispose) => try qjsIteratorDisposeCall(ctx, output, global, receiver, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.to_array) => try qjsIteratorToArrayCall(ctx, output, global, receiver, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.every) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .every, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.find) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .find, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.for_each) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .for_each, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.reduce) => try qjsIteratorReduceCall(ctx, output, global, receiver, args, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.some) => try qjsIteratorPredicateCall(ctx, output, global, receiver, args, .some, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.map) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .map, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.filter) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .filter, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.take) => try qjsIteratorCreateLimitHelper(ctx, output, global, receiver, args, .take, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.drop) => try qjsIteratorCreateLimitHelper(ctx, output, global, receiver, args, .drop, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.flat_map) => try qjsIteratorCreateCallbackHelper(ctx, output, global, receiver, args, .flatMap, caller_function, caller_frame),
+        @intFromEnum(method_ids.iterator.PrototypeMethod.dispose) => try qjsIteratorDisposeCall(ctx, output, global, receiver, caller_function, caller_frame),
         else => null,
     };
 }

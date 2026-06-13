@@ -3,6 +3,26 @@ const function_builtin = @import("function.zig");
 const bignum = @import("../libs/bignum.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const string_ops = @import("../exec/string_ops.zig");
+const exceptions = @import("../exec/exceptions.zig");
+// Realm-aware String.prototype bodies relocated from `exec/string_ops.zig`
+// (Phase 6b-2) reach the shared VM coercion/number ops through these exec
+// imports; the dependency direction (builtins -> exec) is the migration's
+// client model. The exec `qjsStringPrototypeMethod` dispatcher stays in exec
+// (it is BOTH-reachable: the string opcode/`call_runtime` path also calls it)
+// and now forwards the relocated method ids here.
+const value_ops = @import("../exec/value_ops.zig");
+const coercion_ops = @import("../exec/coercion_ops.zig");
+const builtin_glue = @import("../exec/builtin_glue.zig");
+const vm_exception_ops = @import("../exec/vm_exception_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
+const Bytecode = builtin_dispatch.Bytecode;
+const Frame = builtin_dispatch.Frame;
+const throwTypeErrorMessage = vm_exception_ops.throwTypeErrorMessage;
+const throwRangeErrorMessage = vm_exception_ops.throwRangeErrorMessage;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -13,131 +33,151 @@ const AppendStringError = error{
 
 const TrimMode = enum { start, end, both };
 
-pub const StaticMethod = enum(u32) {
-    from_char_code = 1,
-    from_code_point = 2,
-    raw = 3,
-};
+pub const StaticMethod = core.host_function.builtin_method_ids.string.StaticMethod;
+pub const ConstructorMethod = core.host_function.builtin_method_ids.string.ConstructorMethod;
 
-pub const ConstructorMethod = enum(u32) {
-    call = 4,
-};
+pub const PrototypeMethod = core.host_function.builtin_method_ids.string.PrototypeMethod;
 
-pub const legacy_split_method_id: u32 = 27;
-pub const legacy_normalize_method_id: u32 = 37;
-pub const legacy_search_method_id: u32 = 40;
-pub const legacy_match_method_id: u32 = 41;
-pub const legacy_replace_all_method_id: u32 = 42;
-pub const legacy_match_all_method_id: u32 = 43;
+// Pure name<->id / id->legacy-id mapping helpers relocated to engine core
+// (`core/host_function.zig`, next to the `builtin_method_ids.string` enum) in
+// Phase 6b-3c; re-exported here so the dispatch/install side keeps the original
+// names. The VM consumes the same helpers through `core` (zero exec->builtins).
+const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
+pub const legacy_split_method_id = string_id_lookup.legacy_split_method_id;
+pub const legacy_normalize_method_id = string_id_lookup.legacy_normalize_method_id;
+pub const legacy_search_method_id = string_id_lookup.legacy_search_method_id;
+pub const legacy_match_method_id = string_id_lookup.legacy_match_method_id;
+pub const legacy_replace_all_method_id = string_id_lookup.legacy_replace_all_method_id;
+pub const legacy_match_all_method_id = string_id_lookup.legacy_match_all_method_id;
+pub const staticMethodId = string_id_lookup.staticMethodId;
+pub const prototypeMethodId = string_id_lookup.prototypeMethodId;
+pub const decodePrototypeMethodId = string_id_lookup.decodePrototypeMethodId;
 
-pub const PrototypeMethod = enum(u32) {
-    char_at = 100,
-    substring = 101,
-    to_upper_case = 102,
-    to_lower_case = 103,
-    index_of = 104,
-    includes = 105,
-    starts_with = 106,
-    ends_with = 107,
-    trim = 108,
-    concat = 110,
-    trim_start = 121,
-    trim_end = 122,
-    split = 127,
-    last_index_of = 128,
-    char_code_at = 129,
-    at = 130,
-    code_point_at = 131,
-    slice = 132,
-    repeat = 133,
-    pad_start = 134,
-    pad_end = 135,
-    locale_compare = 136,
-    normalize = 137,
-    is_well_formed = 138,
-    to_well_formed = 139,
-    search = 140,
-    match = 141,
-    replace_all = 142,
-    match_all = 143,
-    iterator_next = 144,
-};
-
-pub fn staticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "fromCharCode")) return @intFromEnum(StaticMethod.from_char_code);
-    if (std.mem.eql(u8, name, "fromCodePoint")) return @intFromEnum(StaticMethod.from_code_point);
-    if (std.mem.eql(u8, name, "raw")) return @intFromEnum(StaticMethod.raw);
-    return null;
-}
-
-pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "charAt")) return @intFromEnum(PrototypeMethod.char_at);
-    if (std.mem.eql(u8, name, "substring")) return @intFromEnum(PrototypeMethod.substring);
-    if (std.mem.eql(u8, name, "toUpperCase")) return @intFromEnum(PrototypeMethod.to_upper_case);
-    if (std.mem.eql(u8, name, "toLocaleUpperCase")) return @intFromEnum(PrototypeMethod.to_upper_case);
-    if (std.mem.eql(u8, name, "toLowerCase")) return @intFromEnum(PrototypeMethod.to_lower_case);
-    if (std.mem.eql(u8, name, "toLocaleLowerCase")) return @intFromEnum(PrototypeMethod.to_lower_case);
-    if (std.mem.eql(u8, name, "indexOf")) return @intFromEnum(PrototypeMethod.index_of);
-    if (std.mem.eql(u8, name, "includes")) return @intFromEnum(PrototypeMethod.includes);
-    if (std.mem.eql(u8, name, "startsWith")) return @intFromEnum(PrototypeMethod.starts_with);
-    if (std.mem.eql(u8, name, "endsWith")) return @intFromEnum(PrototypeMethod.ends_with);
-    if (std.mem.eql(u8, name, "trim")) return @intFromEnum(PrototypeMethod.trim);
-    if (std.mem.eql(u8, name, "concat")) return @intFromEnum(PrototypeMethod.concat);
-    if (std.mem.eql(u8, name, "lastIndexOf")) return @intFromEnum(PrototypeMethod.last_index_of);
-    if (std.mem.eql(u8, name, "charCodeAt")) return @intFromEnum(PrototypeMethod.char_code_at);
-    if (std.mem.eql(u8, name, "at")) return @intFromEnum(PrototypeMethod.at);
-    if (std.mem.eql(u8, name, "codePointAt")) return @intFromEnum(PrototypeMethod.code_point_at);
-    if (std.mem.eql(u8, name, "slice")) return @intFromEnum(PrototypeMethod.slice);
-    if (std.mem.eql(u8, name, "repeat")) return @intFromEnum(PrototypeMethod.repeat);
-    if (std.mem.eql(u8, name, "padStart")) return @intFromEnum(PrototypeMethod.pad_start);
-    if (std.mem.eql(u8, name, "padEnd")) return @intFromEnum(PrototypeMethod.pad_end);
-    if (std.mem.eql(u8, name, "localeCompare")) return @intFromEnum(PrototypeMethod.locale_compare);
-    if (std.mem.eql(u8, name, "normalize")) return @intFromEnum(PrototypeMethod.normalize);
-    if (std.mem.eql(u8, name, "isWellFormed")) return @intFromEnum(PrototypeMethod.is_well_formed);
-    if (std.mem.eql(u8, name, "toWellFormed")) return @intFromEnum(PrototypeMethod.to_well_formed);
-    if (std.mem.eql(u8, name, "trimStart")) return @intFromEnum(PrototypeMethod.trim_start);
-    if (std.mem.eql(u8, name, "trimEnd")) return @intFromEnum(PrototypeMethod.trim_end);
-    if (std.mem.eql(u8, name, "split")) return @intFromEnum(PrototypeMethod.split);
-    if (std.mem.eql(u8, name, "search")) return @intFromEnum(PrototypeMethod.search);
-    if (std.mem.eql(u8, name, "match")) return @intFromEnum(PrototypeMethod.match);
-    if (std.mem.eql(u8, name, "matchAll")) return @intFromEnum(PrototypeMethod.match_all);
-    if (std.mem.eql(u8, name, "replaceAll")) return @intFromEnum(PrototypeMethod.replace_all);
-    return null;
-}
-
-pub fn decodePrototypeMethodId(id: u32) ?u32 {
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.char_at) => 0,
-        @intFromEnum(PrototypeMethod.substring) => 1,
-        @intFromEnum(PrototypeMethod.to_upper_case) => 2,
-        @intFromEnum(PrototypeMethod.to_lower_case) => 3,
-        @intFromEnum(PrototypeMethod.index_of) => 4,
-        @intFromEnum(PrototypeMethod.includes) => 5,
-        @intFromEnum(PrototypeMethod.starts_with) => 6,
-        @intFromEnum(PrototypeMethod.ends_with) => 7,
-        @intFromEnum(PrototypeMethod.trim) => 8,
-        @intFromEnum(PrototypeMethod.concat) => 10,
-        @intFromEnum(PrototypeMethod.trim_start) => 21,
-        @intFromEnum(PrototypeMethod.trim_end) => 22,
-        @intFromEnum(PrototypeMethod.split) => legacy_split_method_id,
-        @intFromEnum(PrototypeMethod.last_index_of) => 28,
-        @intFromEnum(PrototypeMethod.char_code_at) => 29,
-        @intFromEnum(PrototypeMethod.at) => 30,
-        @intFromEnum(PrototypeMethod.code_point_at) => 31,
-        @intFromEnum(PrototypeMethod.slice) => 32,
-        @intFromEnum(PrototypeMethod.repeat) => 33,
-        @intFromEnum(PrototypeMethod.pad_start) => 34,
-        @intFromEnum(PrototypeMethod.pad_end) => 35,
-        @intFromEnum(PrototypeMethod.locale_compare) => 36,
-        @intFromEnum(PrototypeMethod.normalize) => legacy_normalize_method_id,
-        @intFromEnum(PrototypeMethod.is_well_formed) => 38,
-        @intFromEnum(PrototypeMethod.to_well_formed) => 39,
-        @intFromEnum(PrototypeMethod.search) => legacy_search_method_id,
-        @intFromEnum(PrototypeMethod.match) => legacy_match_method_id,
-        @intFromEnum(PrototypeMethod.replace_all) => legacy_replace_all_method_id,
-        @intFromEnum(PrototypeMethod.match_all) => legacy_match_all_method_id,
-        else => null,
+/// Declaration + dispatch table for the `.string` native-builtin domain
+/// (QuickJS js_string_funcs / js_string_proto_funcs analogue). One shared
+/// record handler `stringCall` switches on the per-record `magic` (== the
+/// domain-local id, i.e. the `StaticMethod`/`ConstructorMethod`/`PrototypeMethod`
+/// enum value) and mirrors the retired `call.zig` `callStringNativeFunctionRecord`
+/// exactly: the constructor/statics and the prototype methods delegate to the
+/// exec VM ops in `string_ops.zig`, which stay in exec because the string
+/// opcode handlers (`vm_call.zig`/`call_runtime.zig`) and `regexp_fastpath.zig`
+/// also call them. Property installation still resolves names/lengths through
+/// the registry's `string_static`/`string_prototype` Method tables plus the
+/// `staticMethodId`/`prototypeMethodId` id helpers above (like Date/Number);
+/// this table is consumed only by the slow record-dispatch path
+/// (`rt.internal_builtins`). `prepared_call_ok` mirrors the prepared-call gate
+/// in `vm_call.zig` (`nativeBuiltinSupportedWithoutFunctionObject`): only
+/// `String.fromCharCode` and `String.prototype.substring` are callable without a
+/// materialized function object today.
+pub const internal_entries = stringEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :stringEntries [_]Entry{
+        // Constructor + statics. The `String` record serves both `String(...)`
+        // (call path) and `new String(...)` (construct path), so it is marked
+        // construct-capable; `stringCall` branches on `flags.constructor`.
+        stringConstructorEntry("String", 1, @intFromEnum(ConstructorMethod.call)),
+        stringEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code), true),
+        stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point), false),
+        stringEntry("raw", 1, @intFromEnum(StaticMethod.raw), false),
+        // Prototype methods that carry a `(.string, id)` native record id
+        // (the subset `prototypeMethodId` maps and `decodePrototypeMethodId`
+        // decodes). The remaining String.prototype methods (toString, valueOf,
+        // concat, replace, the AnnexB html helpers, …) are installed as plain
+        // name-dispatched native functions and never reach record dispatch.
+        stringEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), false),
+        stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring), true),
+        stringEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), false),
+        stringEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), false),
+        stringEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of), false),
+        stringEntry("includes", 1, @intFromEnum(PrototypeMethod.includes), false),
+        stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with), false),
+        stringEntry("endsWith", 1, @intFromEnum(PrototypeMethod.ends_with), false),
+        stringEntry("trim", 0, @intFromEnum(PrototypeMethod.trim), false),
+        stringEntry("concat", 1, @intFromEnum(PrototypeMethod.concat), false),
+        stringEntry("trimStart", 0, @intFromEnum(PrototypeMethod.trim_start), false),
+        stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end), false),
+        stringEntry("split", 2, @intFromEnum(PrototypeMethod.split), false),
+        stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of), false),
+        stringEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), false),
+        stringEntry("at", 1, @intFromEnum(PrototypeMethod.at), false),
+        stringEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), false),
+        stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice), false),
+        stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat), false),
+        stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start), false),
+        stringEntry("padEnd", 1, @intFromEnum(PrototypeMethod.pad_end), false),
+        stringEntry("localeCompare", 1, @intFromEnum(PrototypeMethod.locale_compare), false),
+        stringEntry("normalize", 0, @intFromEnum(PrototypeMethod.normalize), false),
+        stringEntry("isWellFormed", 0, @intFromEnum(PrototypeMethod.is_well_formed), false),
+        stringEntry("toWellFormed", 0, @intFromEnum(PrototypeMethod.to_well_formed), false),
+        stringEntry("search", 1, @intFromEnum(PrototypeMethod.search), false),
+        stringEntry("match", 1, @intFromEnum(PrototypeMethod.match), false),
+        stringEntry("replaceAll", 2, @intFromEnum(PrototypeMethod.replace_all), false),
+        stringEntry("matchAll", 1, @intFromEnum(PrototypeMethod.match_all), false),
+        // The String Iterator's `next` method.
+        stringEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next), false),
     };
+};
+
+fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &stringCall };
+}
+
+/// The String constructor record: construct-capable so `new String(...)`
+/// routes through the construct dispatch path into `stringCall`'s construct
+/// branch (it still serves `String(...)` as a function on the call path).
+fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &stringCall };
+}
+
+/// Shared record handler for the `.string` domain. Mirrors the retired
+/// `call.zig` `callStringNativeFunctionRecord`: the String Iterator `next` and
+/// the `from*`/constructor statics run their own helpers, while the prototype
+/// methods (and `String.raw`) delegate to the exec VM ops, which stay in exec
+/// because the string opcode handlers and `regexp_fastpath.zig` also call them.
+fn stringCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const output = host_call.output;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const this_value = host_call.this_value;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
+        const receiver = thisObject(this_value) orelse return error.TypeError;
+        if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
+        return iteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+
+    // `new String(...)` arrives through the construct record path
+    // (`exec/construct.zig`) with `flags.constructor` set and the resolved
+    // wrapper prototype in `new_target`; `String(...)` called as a function
+    // falls through to `qjsStringFunctionCall` (the `ConstructorMethod.call`
+    // case below).
+    if (host_call.flags.constructor and id == @intFromEnum(ConstructorMethod.call)) {
+        return constructWithPrototype(ctx.runtime, args, host_call.new_target);
+    }
+
+    const active_global = host_call.global orelse return error.TypeError;
+    return switch (id) {
+        @intFromEnum(ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.from_char_code) => string_ops.qjsStringFromCharCode(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.from_code_point) => string_ops.qjsStringFromCodePoint(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.raw) => string_ops.qjsStringRaw(ctx, output, active_global, args, caller_function, caller_frame),
+        else => {
+            const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
+            return string_ops.qjsStringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame);
+        },
+    };
+}
+
+fn thisObject(value: core.JSValue) ?*core.Object {
+    if (!value.isObject()) return null;
+    const header = value.refHeader() orelse return null;
+    return @fieldParentPtr("header", header);
 }
 
 pub fn charAt(bytes: []const u8, index: usize) []const u8 {
@@ -1776,4 +1816,356 @@ fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32)
 
 fn isTrimCodeUnit(unit: u16) bool {
     return unicode.isEcmaWhitespaceOrLineTerminatorUnit(unit);
+}
+
+// ---------------------------------------------------------------------------
+// Realm-aware String.prototype method bodies relocated from exec/string_ops.zig
+// (Phase 6b-2). These are the per-method implementations that the exec
+// `qjsStringPrototypeMethod` dispatcher used to host inline; the dispatcher
+// stays in exec (BOTH-reachable through the string opcode/`call_runtime` host
+// path) and now forwards the relocated method ids to these functions. Each one
+// is reachable only through that dispatcher (i.e. the `.string` builtin record
+// handler `stringCall`), never through a VM opcode fast path or
+// `regexp_fastpath.zig`, which is why they are safe to host in builtins. They
+// still lean on the shared exec coercion/number ops (`toStringForAnnexB`,
+// `value_ops`, `coercion_ops`, `builtin_glue`) and the exec rope/UTF helpers
+// (`appendStringValueUnits`, `appendUtf16CodePoint`, `appendUtf32FromStringValue`,
+// `appendAsciiUnits`), which all stay in exec because `regexp_fastpath.zig` and
+// other VM ops depend on them.
+
+pub fn qjsStringPad(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = try string_ops.toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    var source_units = std.ArrayList(u16).empty;
+    defer source_units.deinit(ctx.runtime.memory.allocator);
+    try string_ops.appendStringValueUnits(ctx.runtime, &source_units, string_value);
+
+    const max_length_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const target_length = try coercion_ops.toLengthIndex(ctx, output, global, max_length_value);
+    if (target_length <= source_units.items.len) return string_value.dup();
+
+    const fill_value = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+        break :blk try string_ops.toStringForAnnexB(ctx, output, global, args[1], caller_function, caller_frame);
+    } else try value_ops.createStringValue(ctx.runtime, " ");
+    defer fill_value.free(ctx.runtime);
+
+    var fill_units = std.ArrayList(u16).empty;
+    defer fill_units.deinit(ctx.runtime.memory.allocator);
+    try string_ops.appendStringValueUnits(ctx.runtime, &fill_units, fill_value);
+    if (fill_units.items.len == 0) return string_value.dup();
+
+    const fill_length = target_length - source_units.items.len;
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    if (method_id == 34) {
+        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
+        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
+    } else {
+        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items);
+        try appendRepeatedFillUnits(ctx.runtime, &out, fill_units.items, fill_length);
+    }
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+fn appendRepeatedFillUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), fill: []const u16, length: usize) !void {
+    var index: usize = 0;
+    while (index < length) : (index += 1) {
+        try out.append(rt.memory.allocator, fill[index % fill.len]);
+    }
+}
+
+pub fn qjsStringNormalize(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = try string_ops.toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    const form: unicode.NormalizationForm = if (args.len == 0 or args[0].isUndefined()) .nfc else blk: {
+        const form_value = try string_ops.toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
+        defer form_value.free(ctx.runtime);
+        var form_bytes = std.ArrayList(u8).empty;
+        defer form_bytes.deinit(ctx.runtime.memory.allocator);
+        try value_ops.appendRawString(ctx.runtime, &form_bytes, form_value);
+        if (std.mem.eql(u8, form_bytes.items, "NFC")) break :blk unicode.NormalizationForm.nfc;
+        if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode.NormalizationForm.nfd;
+        if (std.mem.eql(u8, form_bytes.items, "NFKC")) break :blk unicode.NormalizationForm.nfkc;
+        if (std.mem.eql(u8, form_bytes.items, "NFKD")) break :blk unicode.NormalizationForm.nfkd;
+        return error.RangeError;
+    };
+
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(ctx.runtime.memory.allocator);
+    try string_ops.appendUtf32FromStringValue(ctx.runtime, &input, string_value);
+    const normalized_slice = try unicode.normalizeAlloc(ctx.runtime.memory.allocator, input.items, form);
+    defer ctx.runtime.memory.allocator.free(normalized_slice);
+
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    for (normalized_slice) |code_point| try string_ops.appendUtf16CodePoint(ctx.runtime, &out, code_point);
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+pub fn qjsStringLocaleCompare(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const lhs = try string_ops.toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer lhs.free(ctx.runtime);
+    const rhs_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const rhs = try string_ops.toStringForAnnexB(ctx, output, global, rhs_input, caller_function, caller_frame);
+    defer rhs.free(ctx.runtime);
+
+    const lhs_nfc = try normalizedUtf32(ctx.runtime, lhs, .nfc);
+    defer lhs_nfc.deinit();
+    const rhs_nfc = try normalizedUtf32(ctx.runtime, rhs, .nfc);
+    defer rhs_nfc.deinit();
+
+    const result: i32 = switch (std.mem.order(u32, lhs_nfc.slice, rhs_nfc.slice)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+    return core.JSValue.int32(result);
+}
+
+const NormalizedUtf32 = struct {
+    allocator: std.mem.Allocator,
+    slice: []u32,
+
+    fn deinit(self: NormalizedUtf32) void {
+        self.allocator.free(self.slice);
+    }
+};
+
+fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode.NormalizationForm) !NormalizedUtf32 {
+    var input = std.ArrayList(u32).empty;
+    defer input.deinit(rt.memory.allocator);
+    try string_ops.appendUtf32FromStringValue(rt, &input, value);
+    return .{
+        .allocator = rt.memory.allocator,
+        .slice = try unicode.normalizeAlloc(rt.memory.allocator, input.items, form),
+    };
+}
+
+pub fn qjsStringNumericArgsMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    const string_value = if (this_value.isString())
+        this_value
+    else
+        try string_ops.toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer if (!this_value.isString()) string_value.free(ctx.runtime);
+
+    var coerced: [2]core.JSValue = .{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const count = @min(args.len, coerced.len);
+    for (args[0..count], 0..) |arg, index| {
+        coerced[index] = if (arg.isUndefined())
+            core.JSValue.undefinedValue()
+        else if (arg.isNumber())
+            arg
+        else
+            try builtin_glue.toNumberLikeArgument(ctx, output, global, arg);
+    }
+
+    if (method_id == 1) {
+        if (try fastLatin1Substring(ctx.runtime, string_value, coerced[0..count])) |value| return value;
+    }
+    if (method_id == 0) {
+        const index = if (count >= 1) coerced[0] else core.JSValue.int32(0);
+        return charAtValue(ctx.runtime, string_value, index);
+    }
+    if (method_id == 25) {
+        return qjsStringSubstr(ctx, output, global, string_value, coerced[0..count]);
+    }
+    return methodCall(ctx.runtime, string_value, method_id, coerced[0..count]) catch |err| switch (err) {
+        error.RangeError => return throwRangeErrorMessage(ctx, global, "invalid repeat count"),
+        else => err,
+    };
+}
+
+fn fastLatin1Substring(rt: *core.JSRuntime, string_value: core.JSValue, args: []const core.JSValue) !?core.JSValue {
+    if (!string_value.isString() or args.len > 2) return null;
+    const header = string_value.refHeader() orelse return null;
+    const string: *core.string.String = @fieldParentPtr("header", header);
+    try string.ensureFlat(rt);
+    const bytes = switch (string.resolveData()) {
+        .latin1 => |latin1| latin1,
+        .utf16 => return null,
+    };
+    const len: i64 = @intCast(string.len());
+    const start_raw = if (args.len >= 1) int32OrUndefinedStringIndex(args[0]) orelse return null else 0;
+    const end_raw = if (args.len >= 2 and !args[1].isUndefined()) int32OrUndefinedStringIndex(args[1]) orelse return null else len;
+    const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
+    const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
+    const lo = @min(start, end);
+    const hi = @max(start, end);
+    if (lo == hi) {
+        const empty = try rt.emptyString();
+        return empty.value().dup();
+    }
+    return (try core.string.String.createLatin1(rt, bytes[lo..hi])).value();
+}
+
+fn int32OrUndefinedStringIndex(value: core.JSValue) ?i64 {
+    if (value.isUndefined()) return null;
+    return if (value.asInt32()) |int_value| @as(i64, int_value) else null;
+}
+
+pub fn qjsStringSubstr(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    string_value: core.JSValue,
+    args: []const core.JSValue,
+) !core.JSValue {
+    var units = std.ArrayList(u16).empty;
+    defer units.deinit(ctx.runtime.memory.allocator);
+    try string_ops.appendStringValueUnits(ctx.runtime, &units, string_value);
+
+    const size = units.items.len;
+    const start_number = if (args.len >= 1 and !args[0].isUndefined())
+        value_ops.numberValue(args[0]) orelse std.math.nan(f64)
+    else
+        0;
+    var start: usize = 0;
+    if (std.math.isNan(start_number) or start_number == 0) {
+        start = 0;
+    } else if (start_number < 0) {
+        const integer_start = @trunc(start_number);
+        if (integer_start == 0) {
+            start = 0;
+        } else if (std.math.isNegativeInf(integer_start)) {
+            start = 0;
+        } else {
+            const abs_start: usize = @intFromFloat(@min(@abs(integer_start), @as(f64, @floatFromInt(size))));
+            start = size - abs_start;
+        }
+    } else if (std.math.isPositiveInf(start_number)) {
+        start = size;
+    } else {
+        start = @min(@as(usize, @intFromFloat(@trunc(start_number))), size);
+    }
+
+    const max_len = size - start;
+    const requested_len = if (args.len >= 2 and !args[1].isUndefined()) blk: {
+        const length_number = value_ops.numberValue(args[1]) orelse std.math.nan(f64);
+        if (std.math.isNan(length_number) or length_number <= 0) break :blk @as(usize, 0);
+        if (std.math.isPositiveInf(length_number)) break :blk max_len;
+        break :blk @min(@as(usize, @intFromFloat(@trunc(length_number))), max_len);
+    } else max_len;
+
+    _ = output;
+    _ = global;
+    return (try core.string.String.createUtf16(ctx.runtime, units.items[start..][0..requested_len])).value();
+}
+
+pub fn qjsStringHtmlMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    method_id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) !core.JSValue {
+    if (this_value.isNull() or this_value.isUndefined()) return error.TypeError;
+    var string_value = try string_ops.toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
+    defer string_value.free(ctx.runtime);
+
+    var string_units = std.ArrayList(u16).empty;
+    defer string_units.deinit(ctx.runtime.memory.allocator);
+    try string_ops.appendStringValueUnits(ctx.runtime, &string_units, string_value);
+
+    switch (method_id) {
+        11 => return qjsStringCreateHtml(ctx, string_units.items, "a", "name", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        12 => return qjsStringCreateHtml(ctx, string_units.items, "big", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        13 => return qjsStringCreateHtml(ctx, string_units.items, "blink", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        14 => return qjsStringCreateHtml(ctx, string_units.items, "b", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        15 => return qjsStringCreateHtml(ctx, string_units.items, "tt", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        16 => return qjsStringCreateHtml(ctx, string_units.items, "font", "color", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        17 => return qjsStringCreateHtml(ctx, string_units.items, "font", "size", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        18 => return qjsStringCreateHtml(ctx, string_units.items, "i", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        19 => return qjsStringCreateHtml(ctx, string_units.items, "a", "href", if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), true, output, global, caller_function, caller_frame),
+        20 => return qjsStringCreateHtml(ctx, string_units.items, "small", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        23 => return qjsStringCreateHtml(ctx, string_units.items, "strike", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        24 => return qjsStringCreateHtml(ctx, string_units.items, "sub", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        26 => return qjsStringCreateHtml(ctx, string_units.items, "sup", "", core.JSValue.undefinedValue(), false, output, global, caller_function, caller_frame),
+        else => return error.TypeError,
+    }
+}
+
+fn qjsStringCreateHtml(
+    ctx: *core.JSContext,
+    string_units: []const u16,
+    tag: []const u8,
+    attr: []const u8,
+    attr_value: core.JSValue,
+    has_attr: bool,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    caller_function: ?*const Bytecode,
+    caller_frame: ?*Frame,
+) !core.JSValue {
+    var out = std.ArrayList(u16).empty;
+    defer out.deinit(ctx.runtime.memory.allocator);
+    try string_ops.appendAsciiUnits(ctx.runtime, &out, "<");
+    try string_ops.appendAsciiUnits(ctx.runtime, &out, tag);
+    if (has_attr) {
+        const value = try string_ops.toStringForAnnexB(ctx, output, global, attr_value, caller_function, caller_frame);
+        defer value.free(ctx.runtime);
+        var attr_units = std.ArrayList(u16).empty;
+        defer attr_units.deinit(ctx.runtime.memory.allocator);
+        try string_ops.appendStringValueUnits(ctx.runtime, &attr_units, value);
+
+        try string_ops.appendAsciiUnits(ctx.runtime, &out, " ");
+        try string_ops.appendAsciiUnits(ctx.runtime, &out, attr);
+        try string_ops.appendAsciiUnits(ctx.runtime, &out, "=\"");
+        for (attr_units.items) |unit| {
+            if (unit == '"') {
+                try string_ops.appendAsciiUnits(ctx.runtime, &out, "&quot;");
+            } else {
+                try out.append(ctx.runtime.memory.allocator, unit);
+            }
+        }
+        try string_ops.appendAsciiUnits(ctx.runtime, &out, "\"");
+    }
+    try string_ops.appendAsciiUnits(ctx.runtime, &out, ">");
+    try out.appendSlice(ctx.runtime.memory.allocator, string_units);
+    try string_ops.appendAsciiUnits(ctx.runtime, &out, "</");
+    try string_ops.appendAsciiUnits(ctx.runtime, &out, tag);
+    try string_ops.appendAsciiUnits(ctx.runtime, &out, ">");
+    return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }

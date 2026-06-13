@@ -5,6 +5,7 @@ const std = @import("std");
 
 const builtins = @import("../builtins/root.zig");
 const array_ops = @import("array_ops.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const construct_mod = @import("construct.zig");
@@ -18,7 +19,7 @@ const HostError = exceptions.HostError;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 
 // Static-method ids stay with the registration data in builtins/reflect_proxy.zig.
-const StaticMethod = builtins.reflect_proxy.StaticMethod;
+const StaticMethod = core.host_function.builtin_method_ids.reflect.StaticMethod;
 
 // Shared call-runtime helpers that stay with the dispatcher in exec/call.zig.
 const activeGlobalObject = call.activeGlobalObject;
@@ -36,7 +37,8 @@ const primitiveWrapper = call.primitiveWrapper;
 const realmPrototypeKey = call.realmPrototypeKey;
 const thisObject = call.thisObject;
 
-pub fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
+pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
+    const rt = ctx.runtime;
     if (args.len < 2) return error.TypeError;
     if (!isConstructorValue(rt, args[0])) return error.TypeError;
     const target = thisObject(args[0]) orelse return error.TypeError;
@@ -44,12 +46,22 @@ pub fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals
     defer if (target_name) |name| rt.memory.allocator.free(name);
     const new_target = if (args.len >= 3) args[2] else args[0];
     if (!isConstructorValue(rt, new_target)) return error.TypeError;
-    if (builtins.date.isConstructorRecord(target)) {
-        var construct_args = ReflectConstructArguments{};
-        try construct_args.init(rt, args[1]);
-        defer construct_args.deinit();
-        const prototype = try reflectConstructPrototype(rt, "Date", new_target, args[0]);
-        return builtins.date.constructWithPrototype(rt, construct_args.values, prototype);
+    // Table-dispatched builtin constructors (Date/RegExp/String carry a native
+    // builtin id and a construct-capable record): resolve the instance
+    // `[[Prototype]]` and run the record's construct branch through the table,
+    // matching the `exec/construct.zig` `new X()` path (Phase 6b-3d/6b-3e). This
+    // is the null-global `Reflect.construct` fallback (the VM-global path runs
+    // through `qjsReflectConstructCall` -> the VM construct dispatcher), so the
+    // raw argument-list values are forwarded without VM-context coercion, as
+    // before.
+    if (core.function.decodeNativeBuiltinId(target.nativeFunctionIdSlot().*)) |native_ref| {
+        if (reflectConstructTargetName(native_ref)) |proto_name| {
+            var construct_args = ReflectConstructArguments{};
+            try construct_args.init(rt, args[1]);
+            defer construct_args.deinit();
+            const prototype = try reflectConstructPrototype(rt, proto_name, new_target, args[0]);
+            if (try builtin_dispatch.callConstructRecord(ctx, null, null, globals, target, native_ref, prototype, construct_args.values, null, null)) |value| return value;
+        }
     }
     if (target_name) |name| {
         if (std.mem.eql(u8, name, "Array")) {
@@ -61,7 +73,7 @@ pub fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals
             return builtins.array.constructConstructorWithPrototype(rt, construct_args.values, prototype);
         }
         if (std.mem.eql(u8, name, "Iterator")) {
-            if (builtins.object.sameValue(new_target, args[0])) return error.TypeError;
+            if (new_target.sameValue(args[0])) return error.TypeError;
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
             const instance = try core.Object.create(rt, core.class.ids.object, prototype);
             errdefer core.Object.destroyFromHeader(rt, &instance.header);
@@ -77,13 +89,6 @@ pub fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals
             } else core.JSValue.int32(0);
             const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
             return primitiveWrapper(rt, core.class.ids.number, primitive, prototype);
-        }
-        if (std.mem.eql(u8, name, "Date")) {
-            var construct_args = ReflectConstructArguments{};
-            try construct_args.init(rt, args[1]);
-            defer construct_args.deinit();
-            const prototype = try reflectConstructPrototype(rt, name, new_target, args[0]);
-            return builtins.date.constructWithPrototype(rt, construct_args.values, prototype);
         }
         if (std.mem.eql(u8, name, "FinalizationRegistry")) {
             var construct_args = ReflectConstructArguments{};
@@ -129,6 +134,21 @@ pub fn reflectConstruct(rt: *core.JSRuntime, args: []const core.JSValue, globals
         errdefer core.Object.destroyFromHeader(rt, &instance.header);
         return instance.value();
     }
+}
+
+/// Map a decoded native-builtin id to the realm-prototype-key name used by
+/// `reflectConstructPrototype`, for the construct-capable records `Reflect
+/// .construct` routes through the table. Returns null for ids that are not
+/// table-dispatched construct records here, so they fall through to the
+/// name cascade / ordinary-instance fallback below.
+fn reflectConstructTargetName(native_ref: core.function.NativeBuiltinRef) ?[]const u8 {
+    const ids = core.host_function.builtin_method_ids;
+    return switch (native_ref.domain) {
+        .date => if (native_ref.id == @intFromEnum(ids.date.ConstructorMethod.construct)) "Date" else null,
+        .regexp => if (native_ref.id == @intFromEnum(ids.regexp.ConstructorMethod.construct)) "RegExp" else null,
+        .string => if (native_ref.id == @intFromEnum(ids.string.ConstructorMethod.call)) "String" else null,
+        else => null,
+    };
 }
 
 pub fn reflectApply(
@@ -195,11 +215,17 @@ fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     if (!value_ops.isFunctionObject(value)) return false;
     const object = thisObject(value) orelse return false;
     if (object.proxyTarget()) |target| return isConstructorValue(rt, target);
-    if (builtins.date.isConstructorRecord(object)) return true;
     return switch (object.class_id) {
         core.class.ids.c_function => {
             if (object.hostFunctionKindSlot().* == core.host_function.ids.external_host) {
                 return object.hasOwnProperty(core.atom.ids.prototype);
+            }
+            // A construct-capable builtin native id (Date/RegExp/String) marks a
+            // constructor regardless of dispatch name (Phase 6b-3e: replaces the
+            // `date.isConstructorRecord` short circuit with the generic table
+            // probe). Otherwise fall back to the builtin-constructor name set.
+            if (core.function.decodeNativeBuiltinId(object.nativeFunctionId())) |native_ref| {
+                if (builtin_dispatch.isConstructRecordRef(rt, native_ref)) return true;
             }
             const name = nativeFunctionName(rt, object) catch return false;
             defer rt.memory.allocator.free(name);
@@ -279,7 +305,7 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     try defineObjectProperty(rt, object, "proxy", proxy.value());
     proxy_raw_owned = false;
     proxy.value().free(rt);
-    const revoke = try builtins.function.nativeFunction(rt, "revoke", 0);
+    const revoke = try core.function.nativeFunction(rt, "revoke", 0);
     defer revoke.free(rt);
     const revoke_object = thisObject(revoke) orelse return error.TypeError;
     revoke_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.reflect, @intFromEnum(StaticMethod.proxy_revoke));
@@ -293,6 +319,19 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     try revoke_object.setOptionalValueSlot(rt, revoke_object.functionProxyRevokeTargetSlot(), proxy.value().dup());
     try defineObjectProperty(rt, object, "revoke", revoke);
     return object.value();
+}
+
+/// Revoke closure for `Proxy.revocable`: clears the captured proxy's handler
+/// so subsequent trap lookups throw. Mirrors QuickJS `js_proxy_revoke`. Stays
+/// in exec with the rest of the proxy core; the `.reflect` record handler in
+/// builtins/reflect_proxy.zig forwards the `proxy_revoke` id here.
+pub fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSValue {
+    const proxy_slot = function_object.functionProxyRevokeTargetSlot();
+    const proxy_value = function_object.takeOptionalValueSlot(proxy_slot) orelse return core.JSValue.undefinedValue();
+    defer proxy_value.free(rt);
+    const proxy = thisObject(proxy_value) orelse return core.JSValue.undefinedValue();
+    proxy.clearOptionalValueSlot(rt, proxy.proxyHandlerSlot());
+    return core.JSValue.undefinedValue();
 }
 
 pub fn reflectHas(
@@ -354,11 +393,11 @@ fn proxyReflectHasProperty(
 }
 
 fn typedArrayReflectHas(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool {
-    switch (try builtins.buffer.typedArrayCanonicalNumericIndex(rt, atom_id)) {
+    switch (try core.object.typedArrayCanonicalNumericIndex(rt, atom_id)) {
         .none => return null,
         .invalid => return false,
         .index => |index| {
-            const length = builtins.buffer.typedArrayLength(rt, object) catch return false;
+            const length = core.object.typedArrayLength(rt, object) catch return false;
             return index < length;
         },
     }
@@ -372,7 +411,7 @@ pub fn reflectDefineProperty(rt: *core.JSRuntime, args: []const core.JSValue) !c
     const desc_object = try expectObjectArg(args[2]);
     const desc = try descriptorFromObject(rt, desc_object);
     defer desc.destroy(rt);
-    if (builtins.buffer.isTypedArrayObject(object)) {
+    if (core.object.isTypedArrayObject(object)) {
         if (try typedArrayReflectDefineOwnProperty(rt, object, key, desc)) |ok| return core.JSValue.boolean(ok);
     }
     object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
@@ -384,7 +423,7 @@ pub fn reflectDefineProperty(rt: *core.JSRuntime, args: []const core.JSValue) !c
 }
 
 fn typedArrayReflectDefineOwnProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, desc: core.Descriptor) !?bool {
-    return try builtins.buffer.typedArrayDefineOwnProperty(rt, object, atom_id, desc);
+    return try core.typed_array.typedArrayDefineOwnProperty(rt, object, atom_id, desc);
 }
 
 pub fn reflectGet(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
@@ -439,7 +478,7 @@ fn isBuiltinConstructorName(name: []const u8) bool {
         std.mem.eql(u8, name, "BigInt") or
         std.mem.eql(u8, name, "Date") or
         std.mem.eql(u8, name, "RegExp") or
-        builtins.error_names.isErrorConstructorName(name) or
+        core.error_names.isErrorConstructorName(name) or
         std.mem.eql(u8, name, "Iterator") or
         std.mem.eql(u8, name, "DisposableStack") or
         std.mem.eql(u8, name, "AsyncDisposableStack") or

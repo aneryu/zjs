@@ -679,6 +679,15 @@ pub const JSRuntime = struct {
     opcode_profile: ?*profile.OpcodeProfile = null,
     external_host_functions: []host_function.ExternalRecord = &.{},
     external_host_functions_capacity: usize = 0,
+    /// Static internal-builtin record table, indexed
+    /// `[domain][domain-local id]` with the `NativeBuiltinDomain` enum value
+    /// as the outer index (slot 0 unused). Built at comptime by
+    /// `builtins/internal_table.zig` and assigned by the builtins install
+    /// path (`registry.installStandardGlobals`); exec dispatches through
+    /// `internalBuiltinRecord` with no compile-time knowledge of individual
+    /// builtins. Empty until standard globals are installed, which is also
+    /// the only path that creates native function objects carrying these ids.
+    internal_builtins: []const []const host_function.InternalRecord = &.{},
     any_prototype_may_have_indexed_properties: bool = false,
     pub fn init(self: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
         const account = if (options.trace_writer) |writer|
@@ -797,6 +806,7 @@ pub const JSRuntime = struct {
         rt.opcode_profile = null;
         rt.external_host_functions = &.{};
         rt.external_host_functions_capacity = 0;
+        rt.internal_builtins = &.{};
         rt.any_prototype_may_have_indexed_properties = false;
         rt.memory.profile_alloc_count = null;
         rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
@@ -1516,6 +1526,20 @@ pub const JSRuntime = struct {
         const index: usize = @intCast(id - 1);
         if (index >= self.external_host_functions.len) return null;
         return self.external_host_functions[index];
+    }
+
+    /// Internal-builtin record lookup: `domain_index` is the
+    /// `NativeBuiltinDomain` enum value, `id` the domain-local method id.
+    /// Returns null for unmigrated domains/ids (caller falls back to the
+    /// transitional enum dispatch) and for runtimes whose builtins were never
+    /// installed. Two bounds-checked loads; no hashing or string compares.
+    pub fn internalBuiltinRecord(self: *const JSRuntime, domain_index: usize, id: u32) ?*const host_function.InternalRecord {
+        if (domain_index >= self.internal_builtins.len) return null;
+        const records = self.internal_builtins[domain_index];
+        if (id >= records.len) return null;
+        const record = &records[id];
+        if (record.call == null) return null;
+        return record;
     }
 
     pub fn replaceExternalHostFunction(self: *JSRuntime, id: u32, record: host_function.ExternalRecord) ?host_function.ExternalRecord {

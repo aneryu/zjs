@@ -1,3 +1,12 @@
+//! Engine-core error-constructor name predicates.
+//!
+//! QuickJS source map: the native error-class taxonomy (`Error`,
+//! `AggregateError`, the simple `*Error` subclasses, plus the `SuppressedError`
+//! grouping) is engine metadata in the C core, consulted by the constructor /
+//! `OP_throw_error` paths. These are pure `[]const u8` predicates over the
+//! standard error names; they import only `std` and run no VM machinery, so they
+//! live in core and exec/builtins are clients.
+
 const std = @import("std");
 
 pub fn isErrorConstructorName(name: []const u8) bool {

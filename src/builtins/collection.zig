@@ -1,12 +1,25 @@
 const core = @import("../core/root.zig");
 const function_builtin = @import("function.zig");
-const object_builtin = @import("object.zig");
 const symbol_builtin = @import("symbol.zig");
 const globals_mod = core.global_slots;
 const bignum = @import("../libs/bignum.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const call_runtime = @import("../exec/call_runtime.zig");
+const collection_adapter = @import("../exec/collection_adapter.zig");
+const exceptions = @import("../exec/exceptions.zig");
+const object_ops = @import("../exec/object_ops.zig");
+const array_ops = @import("../exec/array_ops.zig");
+const coercion_ops = @import("../exec/coercion_ops.zig");
+const exception_ops = @import("../exec/vm_exception_ops.zig");
+const forof_ops = @import("../exec/forof_ops.zig");
+const property_ops = @import("../exec/property_ops.zig");
+const value_ops = @import("../exec/value_ops.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 pub const CallbackError = error{
     AccessorWithoutSetter,
@@ -141,54 +154,18 @@ pub fn staticMethodId(name: []const u8) ?u32 {
     return null;
 }
 
-pub const PrototypeMethod = enum(u32) {
-    set = 1,
-    get = 2,
-    has = 3,
-    delete = 4,
-    clear = 5,
-    add = 6,
-    keys = 7,
-    values = 8,
-    entries = 9,
-    for_each = 10,
-    get_or_insert = 11,
-    get_or_insert_computed = 12,
-    iterator_next = 13,
-    size_getter = 14,
-    difference = 15,
-    intersection = 16,
-    is_disjoint_from = 17,
-    is_subset_of = 18,
-    is_superset_of = 19,
-    symmetric_difference = 20,
-    union_ = 21,
-};
+pub const PrototypeMethod = core.host_function.builtin_method_ids.collection.PrototypeMethod;
 
-pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "set")) return @intFromEnum(PrototypeMethod.set);
-    if (std.mem.eql(u8, name, "get")) return @intFromEnum(PrototypeMethod.get);
-    if (std.mem.eql(u8, name, "has")) return @intFromEnum(PrototypeMethod.has);
-    if (std.mem.eql(u8, name, "delete")) return @intFromEnum(PrototypeMethod.delete);
-    if (std.mem.eql(u8, name, "clear")) return @intFromEnum(PrototypeMethod.clear);
-    if (std.mem.eql(u8, name, "add")) return @intFromEnum(PrototypeMethod.add);
-    if (std.mem.eql(u8, name, "keys")) return @intFromEnum(PrototypeMethod.keys);
-    if (std.mem.eql(u8, name, "values")) return @intFromEnum(PrototypeMethod.values);
-    if (std.mem.eql(u8, name, "entries")) return @intFromEnum(PrototypeMethod.entries);
-    if (std.mem.eql(u8, name, "forEach")) return @intFromEnum(PrototypeMethod.for_each);
-    if (std.mem.eql(u8, name, "getOrInsert")) return @intFromEnum(PrototypeMethod.get_or_insert);
-    if (std.mem.eql(u8, name, "getOrInsertComputed")) return @intFromEnum(PrototypeMethod.get_or_insert_computed);
-    if (std.mem.eql(u8, name, "next")) return @intFromEnum(PrototypeMethod.iterator_next);
-    if (std.mem.eql(u8, name, "get size")) return @intFromEnum(PrototypeMethod.size_getter);
-    if (std.mem.eql(u8, name, "difference")) return @intFromEnum(PrototypeMethod.difference);
-    if (std.mem.eql(u8, name, "intersection")) return @intFromEnum(PrototypeMethod.intersection);
-    if (std.mem.eql(u8, name, "isDisjointFrom")) return @intFromEnum(PrototypeMethod.is_disjoint_from);
-    if (std.mem.eql(u8, name, "isSubsetOf")) return @intFromEnum(PrototypeMethod.is_subset_of);
-    if (std.mem.eql(u8, name, "isSupersetOf")) return @intFromEnum(PrototypeMethod.is_superset_of);
-    if (std.mem.eql(u8, name, "symmetricDifference")) return @intFromEnum(PrototypeMethod.symmetric_difference);
-    if (std.mem.eql(u8, name, "union")) return @intFromEnum(PrototypeMethod.union_);
-    return null;
-}
+// Pure name->id mapping + the class-keyed fast-path / legacy-closure id helpers
+// relocated to engine core (`core/host_function.zig`, next to
+// `builtin_method_ids.collection`) in Phase 6b-3c; re-exported here so the
+// dispatch/install side keeps the original names. `legacyPrototypeMethodId`
+// below (collection-internal, not VM-referenced) keeps its local definition and
+// consumes the re-exported `prototypeMethodId`.
+const collection_id_lookup = core.host_function.builtin_method_id_lookup.collection;
+pub const prototypeMethodId = collection_id_lookup.prototypeMethodId;
+pub const legacyClosureMethodId = collection_id_lookup.legacyClosureMethodId;
+pub const fastPrototypeMethodIdForClass = collection_id_lookup.fastPrototypeMethodIdForClass;
 
 pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
     const id = prototypeMethodId(name) orelse return null;
@@ -202,37 +179,6 @@ pub fn legacyPrototypeMethodId(name: []const u8) ?u32 {
         @intFromEnum(PrototypeMethod.symmetric_difference),
         @intFromEnum(PrototypeMethod.union_),
         => id,
-        else => null,
-    };
-}
-
-pub fn legacyClosureMethodId(name: []const u8) ?u32 {
-    const id = prototypeMethodId(name) orelse return null;
-    if (legacyBasePrototypeMethodId(id)) |method_id| return method_id;
-    return switch (id) {
-        @intFromEnum(PrototypeMethod.iterator_next) => id,
-        else => null,
-    };
-}
-
-pub fn fastPrototypeMethodIdForClass(class_id: core.ClassId, name: []const u8) ?u32 {
-    const id = prototypeMethodId(name) orelse return null;
-    return switch (class_id) {
-        core.class.ids.map, core.class.ids.weakmap => switch (id) {
-            @intFromEnum(PrototypeMethod.set),
-            @intFromEnum(PrototypeMethod.get),
-            @intFromEnum(PrototypeMethod.has),
-            @intFromEnum(PrototypeMethod.delete),
-            => id,
-            else => null,
-        },
-        core.class.ids.set, core.class.ids.weakset => switch (id) {
-            @intFromEnum(PrototypeMethod.add),
-            @intFromEnum(PrototypeMethod.has),
-            @intFromEnum(PrototypeMethod.delete),
-            => id,
-            else => null,
-        },
         else => null,
     };
 }
@@ -256,6 +202,152 @@ fn legacyBasePrototypeMethodId(id: u32) ?u32 {
     };
 }
 
+/// Declaration + dispatch table for the `.collection` native-builtin domain
+/// (QuickJS js_map_funcs / js_set_funcs analogue). One shared record handler
+/// `collectionCall` switches on the per-record `magic` (== domain-local id) and
+/// dispatches to the method bodies in this module: the primitive strong/weak
+/// implementations (`mapSet`/`mapGet`/`setAdd`/...) for the bare-runtime path,
+/// and the realm-aware `qjs*` bodies (relocated here from exec) that drive user
+/// callbacks through the VM. The weak-collection key registry stays GC-coupled
+/// in core (`Object.weakIdentityFromValue`); the Map/Set opcode fast paths
+/// (`vm_call.zig` prepared path, `vm_property_*`) call the primitive impls
+/// directly. Constructors are not dispatched here (they run through the
+/// `new_collection` opcode); only the static `Map.groupBy` and the shared
+/// prototype methods route through the table. Property installation still
+/// resolves names through the registry's map_prototype/set_prototype/
+/// weak_*_prototype method tables; this table is consumed by the slow
+/// record-dispatch path (`rt.internal_builtins`). `prepared_call_ok` mirrors
+/// the prepared-call gate (`collectionNativeSupportedWithoutFunctionObject` in
+/// `vm_call.zig`).
+pub const internal_entries = collectionEntries: {
+    const RecordEntry = core.host_function.InternalEntry;
+    break :collectionEntries [_]RecordEntry{
+        collectionEntry("set", 2, @intFromEnum(PrototypeMethod.set), true),
+        collectionEntry("get", 1, @intFromEnum(PrototypeMethod.get), true),
+        collectionEntry("has", 1, @intFromEnum(PrototypeMethod.has), true),
+        collectionEntry("delete", 1, @intFromEnum(PrototypeMethod.delete), true),
+        collectionEntry("clear", 0, @intFromEnum(PrototypeMethod.clear), true),
+        collectionEntry("add", 1, @intFromEnum(PrototypeMethod.add), true),
+        collectionEntry("keys", 0, @intFromEnum(PrototypeMethod.keys), true),
+        collectionEntry("values", 0, @intFromEnum(PrototypeMethod.values), true),
+        collectionEntry("entries", 0, @intFromEnum(PrototypeMethod.entries), true),
+        collectionEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each), false),
+        collectionEntry("getOrInsert", 2, @intFromEnum(PrototypeMethod.get_or_insert), true),
+        collectionEntry("getOrInsertComputed", 2, @intFromEnum(PrototypeMethod.get_or_insert_computed), false),
+        collectionEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next), false),
+        collectionEntry("get size", 0, @intFromEnum(PrototypeMethod.size_getter), true),
+        collectionEntry("difference", 1, @intFromEnum(PrototypeMethod.difference), false),
+        collectionEntry("intersection", 1, @intFromEnum(PrototypeMethod.intersection), false),
+        collectionEntry("isDisjointFrom", 1, @intFromEnum(PrototypeMethod.is_disjoint_from), false),
+        collectionEntry("isSubsetOf", 1, @intFromEnum(PrototypeMethod.is_subset_of), false),
+        collectionEntry("isSupersetOf", 1, @intFromEnum(PrototypeMethod.is_superset_of), false),
+        collectionEntry("symmetricDifference", 1, @intFromEnum(PrototypeMethod.symmetric_difference), false),
+        collectionEntry("union", 1, @intFromEnum(PrototypeMethod.union_), false),
+        collectionEntry("groupBy", 2, @intFromEnum(StaticMethod.group_by), false),
+    };
+};
+
+fn collectionEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &collectionCall };
+}
+
+/// Shared record handler for the `.collection` domain. Mirrors the retired
+/// `call.zig` `callCollectionNativeFunctionRecord`: the `Map.groupBy` static and
+/// the prototype methods delegate to the collection VM ops (with a realm global)
+/// or to the primitive-only `builtins.collection` entry points (bare-runtime
+/// fallback, no global). The weak-collection mutators reached from these methods
+/// keep their weak_id registry / GC interaction in exec.
+fn collectionCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const output = host_call.output;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const globals = host_call.globals;
+    const this_value = host_call.this_value;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(StaticMethod.group_by)) {
+        return collectionGroupByRecord(ctx, output, host_call.global, globals, this_value, args, caller_function, caller_frame);
+    }
+    const function_object = host_call.func_obj orelse return error.TypeError;
+    const active_global = host_call.global orelse return collectionRecordWithoutGlobal(ctx, globals, this_value, function_object, id, args);
+    if (try qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
+    return error.TypeError;
+}
+
+fn collectionGroupByRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []globals_mod.Slot,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Map")) return error.TypeError;
+    const prototype = (try object_ops.constructorPrototypeObject(ctx.runtime, this_value));
+    if (global) |active_global| {
+        if (try qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
+        return error.TypeError;
+    }
+    return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
+        error.TypeError => error.TypeError,
+        else => err,
+    };
+}
+
+fn collectionRecordWithoutGlobal(
+    ctx: *core.JSContext,
+    globals: []globals_mod.Slot,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    id: u32,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    const owner_class = function_object.collectionMethodOwnerClass();
+    if (owner_class != core.class.invalid_class_id) {
+        if (receiver.class_id != owner_class) return error.TypeError;
+    }
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.set),
+        @intFromEnum(PrototypeMethod.get),
+        @intFromEnum(PrototypeMethod.has),
+        @intFromEnum(PrototypeMethod.delete),
+        @intFromEnum(PrototypeMethod.clear),
+        @intFromEnum(PrototypeMethod.add),
+        @intFromEnum(PrototypeMethod.keys),
+        @intFromEnum(PrototypeMethod.values),
+        @intFromEnum(PrototypeMethod.entries),
+        @intFromEnum(PrototypeMethod.for_each),
+        @intFromEnum(PrototypeMethod.get_or_insert),
+        @intFromEnum(PrototypeMethod.get_or_insert_computed),
+        @intFromEnum(PrototypeMethod.size_getter),
+        @intFromEnum(PrototypeMethod.difference),
+        @intFromEnum(PrototypeMethod.intersection),
+        @intFromEnum(PrototypeMethod.is_disjoint_from),
+        @intFromEnum(PrototypeMethod.is_subset_of),
+        @intFromEnum(PrototypeMethod.is_superset_of),
+        @intFromEnum(PrototypeMethod.symmetric_difference),
+        @intFromEnum(PrototypeMethod.union_),
+        => methodCallWithContextAndHost(ctx, this_value, id, args, collection_adapter.host(globals)) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        },
+        @intFromEnum(PrototypeMethod.iterator_next) => {
+            if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
+            return methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                else => err,
+            };
+        },
+        else => error.TypeError,
+    };
+}
+
 pub fn sameValueZero(a: core.JSValue, b: core.JSValue) bool {
     if (numberValue(a)) |lhs| {
         if (numberValue(b)) |rhs| {
@@ -267,7 +359,7 @@ pub fn sameValueZero(a: core.JSValue, b: core.JSValue) bool {
         if (b.asBool()) |rhs| return lhs == rhs;
     }
     if (a.isNull() or a.isUndefined()) return a.same(b);
-    if (a.isBigInt() and b.isBigInt()) return object_builtin.sameValue(a, b);
+    if (a.isBigInt() and b.isBigInt()) return a.sameValue(b);
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;
         const lhs = stringFromValue(a) orelse return false;
@@ -1044,7 +1136,7 @@ fn assertAndShiftExpected(rt: *core.JSRuntime, globals: []globals_mod.Slot, actu
     if (!expects.flags.is_array or expects.length == 0) return error.TypeError;
     const expected = expects.getProperty(core.atom.atomFromUInt32(0));
     defer expected.free(rt);
-    if (!@import("object.zig").sameValue(actual, expected)) return error.JSException;
+    if (!actual.sameValue(expected)) return error.JSException;
     var index: u32 = 1;
     while (index < expects.length) : (index += 1) {
         const next = expects.getProperty(core.atom.atomFromUInt32(index));
@@ -2473,4 +2565,965 @@ fn stringFromValue(value: core.JSValue) ?*core.string.String {
     if (!value.isString()) return null;
     const header = value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
+}
+
+
+// === Realm-aware Map/Set/WeakMap method bodies (relocated from exec) ===
+//
+// QuickJS client model (Phase 6b): the realm-sensitive collection method
+// bodies that drive user callbacks through the VM (forEach, getOrInsertComputed,
+// Map.groupBy) and the Set-composition/comparison algorithms that iterate
+// foreign set-like objects live here, alongside the declaration table and the
+// primitive strong/weak implementations above. They were previously stranded in
+// `exec/array_ops.zig` (under a "Merged from collection.zig" banner); the
+// builtins->exec direction is now legal, so they import the exec VM ops
+// (`call_runtime`/`forof_ops`/`coercion_ops`/`value_ops`/`object_ops`/
+// `exception_ops`) directly. The VM caller pair stays type-erased through
+// `builtin_dispatch` (no `src/bytecode/` import). The `.collection` record
+// handler (`collectionCall`) and the residual name-based VM dispatch in
+// `call_runtime.zig` both call these directly; the weak-key registry / GC
+// interaction stays in `core` (`Object.weakIdentityFromValue`).
+
+const SetMethodMode = enum {
+    difference,
+    intersection,
+    is_disjoint_from,
+    is_subset_of,
+    is_superset_of,
+    symmetric_difference,
+    union_,
+};
+
+const SetLikeRecordVm = struct {
+    object_value: core.JSValue,
+    size: f64,
+    has: core.JSValue,
+    keys: core.JSValue,
+    native_kind: enum { none, set, map },
+
+    fn deinit(self: *const SetLikeRecordVm, rt: *core.JSRuntime) void {
+        self.object_value.free(rt);
+        self.has.free(rt);
+        self.keys.free(rt);
+    }
+};
+
+const ValueListRoot = struct {
+    rt: ?*core.JSRuntime = null,
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    fn init(self: *ValueListRoot, rt: *core.JSRuntime, values: *[]core.JSValue) void {
+        self.rt = rt;
+        self.slices[0] = .{ .mutable = values };
+        self.frame = .{
+            .previous = rt.active_value_roots,
+            .slices = &self.slices,
+        };
+        rt.active_value_roots = &self.frame;
+    }
+
+    fn deinit(self: *ValueListRoot) void {
+        const rt = self.rt orelse return;
+        rt.active_value_roots = self.frame.previous;
+        self.rt = null;
+    }
+};
+
+pub fn qjsCollectionIteratorMethodCall(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    name: []const u8,
+    args: []const core.JSValue,
+) !?core.JSValue {
+    _ = args;
+    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
+    if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
+    const method_id: u32 = if (std.mem.eql(u8, name, "keys"))
+        7
+    else if (std.mem.eql(u8, name, "values"))
+        8
+    else if (std.mem.eql(u8, name, "entries"))
+        9
+    else
+        return null;
+    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    return try methodCallWithGlobal(ctx, global, this_value, method_id, &.{}, &.{});
+}
+
+pub fn qjsCollectionForEachCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    name: []const u8,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !?core.JSValue {
+    if (!std.mem.eql(u8, name, "forEach")) return null;
+    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
+    if (owner_class != core.class.ids.map and owner_class != core.class.ids.set) return null;
+    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
+    const callback = args[0];
+    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    var index: usize = 0;
+    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().*[index];
+        if (!entry.active) continue;
+        const callback_args = if (receiver.class_id == core.class.ids.set)
+            [_]core.JSValue{ entry.key, entry.key, receiver.value() }
+        else
+            [_]core.JSValue{ entry.value, entry.key, receiver.value() };
+        const result = try call_runtime.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
+        result.free(ctx.runtime);
+    }
+    return core.JSValue.undefinedValue();
+}
+
+pub fn qjsSetMethodCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    name: []const u8,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !?core.JSValue {
+    const owner_class = collectionMethodOwnerClass(function_object) orelse return null;
+    if (owner_class != core.class.ids.set) return null;
+    const mode = qjsSetMethodMode(name) orelse return null;
+    const receiver = object_ops.objectFromValue(this_value) orelse return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
+    if (receiver.class_id != core.class.ids.set) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, core.class.ids.set));
+    const other_value = if (args.len >= 1) args[0] else return error.TypeError;
+    var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
+    defer other_record.deinit(ctx.runtime);
+    return switch (mode) {
+        .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_disjoint_from => try qjsSetIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_subset_of => try qjsSetIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_superset_of => try qjsSetIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .symmetric_difference => try qjsSetSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .union_ => try qjsSetUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+    };
+}
+
+pub fn qjsCollectionNativeRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    id: u32,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !?core.JSValue {
+    const receiver = object_ops.objectFromValue(this_value) orelse {
+        if (collectionMethodOwnerClass(function_object)) |owner_class| {
+            return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+        }
+        return error.TypeError;
+    };
+    if (collectionMethodOwnerClass(function_object)) |owner_class| {
+        if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    }
+
+    const method: PrototypeMethod = switch (id) {
+        @intFromEnum(PrototypeMethod.set) => .set,
+        @intFromEnum(PrototypeMethod.get) => .get,
+        @intFromEnum(PrototypeMethod.has) => .has,
+        @intFromEnum(PrototypeMethod.delete) => .delete,
+        @intFromEnum(PrototypeMethod.clear) => .clear,
+        @intFromEnum(PrototypeMethod.add) => .add,
+        @intFromEnum(PrototypeMethod.keys) => .keys,
+        @intFromEnum(PrototypeMethod.values) => .values,
+        @intFromEnum(PrototypeMethod.entries) => .entries,
+        @intFromEnum(PrototypeMethod.for_each) => .for_each,
+        @intFromEnum(PrototypeMethod.get_or_insert) => .get_or_insert,
+        @intFromEnum(PrototypeMethod.get_or_insert_computed) => .get_or_insert_computed,
+        @intFromEnum(PrototypeMethod.size_getter) => .size_getter,
+        @intFromEnum(PrototypeMethod.difference) => .difference,
+        @intFromEnum(PrototypeMethod.intersection) => .intersection,
+        @intFromEnum(PrototypeMethod.is_disjoint_from) => .is_disjoint_from,
+        @intFromEnum(PrototypeMethod.is_subset_of) => .is_subset_of,
+        @intFromEnum(PrototypeMethod.is_superset_of) => .is_superset_of,
+        @intFromEnum(PrototypeMethod.symmetric_difference) => .symmetric_difference,
+        @intFromEnum(PrototypeMethod.union_) => .union_,
+        @intFromEnum(PrototypeMethod.iterator_next) => .iterator_next,
+        else => return null,
+    };
+
+    if (collectionCallResultIsDropped(caller_function, caller_frame)) {
+        const handled = methodCallDroppedResult(ctx.runtime, receiver, id, args) catch |err| switch (err) {
+            error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
+            else => return err,
+        };
+        if (handled) return core.JSValue.undefinedValue();
+    }
+
+    return switch (method) {
+        .set,
+        .get,
+        .has,
+        .delete,
+        .clear,
+        .add,
+        .keys,
+        .values,
+        .entries,
+        .get_or_insert,
+        .size_getter,
+        => methodCallObjectWithGlobal(ctx, global, receiver, id, args, &.{}) catch |err| switch (err) {
+            error.TypeError => return @as(?core.JSValue, try throwCollectionMethodTypeError(ctx, global, receiver, method, args)),
+            else => err,
+        },
+        .for_each => try qjsCollectionForEachRecord(ctx, output, global, this_value, receiver, args, caller_function, caller_frame),
+        .get_or_insert_computed => try qjsMapGetOrInsertComputed(ctx, output, global, this_value, function_object, args, caller_function, caller_frame),
+        .difference,
+        .intersection,
+        .is_disjoint_from,
+        .is_subset_of,
+        .is_superset_of,
+        .symmetric_difference,
+        .union_,
+        => try qjsSetMethodRecord(ctx, output, global, receiver, method, args, caller_function, caller_frame),
+        .iterator_next => {
+            if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
+            return methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
+                error.TypeError => error.TypeError,
+                else => err,
+            };
+        },
+    };
+}
+
+fn collectionCallResultIsDropped(caller_function: ?*const builtin_dispatch.Bytecode, caller_frame: ?*builtin_dispatch.Frame) bool {
+    return builtin_dispatch.callerResultIsDropped(caller_function, caller_frame);
+}
+
+fn qjsCollectionForEachRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    receiver: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    if (receiver.class_id != core.class.ids.map and receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, receiver.class_id);
+    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
+    const callback = args[0];
+    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    var index: usize = 0;
+    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().*[index];
+        if (!entry.active) continue;
+        const callback_args = if (receiver.class_id == core.class.ids.set)
+            [_]core.JSValue{ entry.key, entry.key, this_value }
+        else
+            [_]core.JSValue{ entry.value, entry.key, this_value };
+        const result = try call_runtime.callValueOrBytecode(ctx, output, global, this_arg, callback, &callback_args, caller_function, caller_frame);
+        result.free(ctx.runtime);
+    }
+    return core.JSValue.undefinedValue();
+}
+
+fn qjsSetMethodRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    method: PrototypeMethod,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    if (receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, core.class.ids.set);
+    const other_value = if (args.len >= 1) args[0] else return error.TypeError;
+    var other_record = try qjsGetSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
+    defer other_record.deinit(ctx.runtime);
+    const mode = qjsSetMethodModeFromRecord(method) orelse return error.TypeError;
+    return switch (mode) {
+        .difference => try qjsSetDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .intersection => try qjsSetIntersection(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_disjoint_from => try qjsSetIsDisjointFrom(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_subset_of => try qjsSetIsSubsetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .is_superset_of => try qjsSetIsSupersetOf(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .symmetric_difference => try qjsSetSymmetricDifference(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+        .union_ => try qjsSetUnion(ctx, output, global, receiver, other_record, caller_function, caller_frame),
+    };
+}
+
+fn qjsSetMethodMode(name: []const u8) ?SetMethodMode {
+    if (std.mem.eql(u8, name, "difference")) return .difference;
+    if (std.mem.eql(u8, name, "intersection")) return .intersection;
+    if (std.mem.eql(u8, name, "isDisjointFrom")) return .is_disjoint_from;
+    if (std.mem.eql(u8, name, "isSubsetOf")) return .is_subset_of;
+    if (std.mem.eql(u8, name, "isSupersetOf")) return .is_superset_of;
+    if (std.mem.eql(u8, name, "symmetricDifference")) return .symmetric_difference;
+    if (std.mem.eql(u8, name, "union")) return .union_;
+    return null;
+}
+
+fn qjsSetMethodModeFromRecord(method: PrototypeMethod) ?SetMethodMode {
+    return switch (method) {
+        .difference => .difference,
+        .intersection => .intersection,
+        .is_disjoint_from => .is_disjoint_from,
+        .is_subset_of => .is_subset_of,
+        .is_superset_of => .is_superset_of,
+        .symmetric_difference => .symmetric_difference,
+        .union_ => .union_,
+        else => null,
+    };
+}
+
+fn qjsGetSetRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    other_value: core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !SetLikeRecordVm {
+    const object = object_ops.objectFromValue(other_value) orelse return error.TypeError;
+    if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
+        return .{
+            .object_value = other_value.dup(),
+            .size = @floatFromInt(qjsSetStrongSize(object)),
+            .has = core.JSValue.undefinedValue(),
+            .keys = core.JSValue.undefinedValue(),
+            .native_kind = if (object.class_id == core.class.ids.set) .set else .map,
+        };
+    }
+
+    const raw_size = try object_ops.getValueProperty(ctx, output, global, other_value, core.atom.predefinedId("size", .string).?, caller_function, caller_frame);
+    defer raw_size.free(ctx.runtime);
+    const size_value = if (raw_size.isObject())
+        try coercion_ops.toPrimitiveForNumber(ctx, output, global, raw_size)
+    else
+        raw_size.dup();
+    defer size_value.free(ctx.runtime);
+    const number_value = try value_ops.toNumberValue(ctx.runtime, size_value);
+    defer number_value.free(ctx.runtime);
+    const size_number = value_ops.numberValue(number_value) orelse return error.TypeError;
+    if (std.math.isNan(size_number)) return error.TypeError;
+
+    const has_key = try ctx.runtime.internAtom("has");
+    defer ctx.runtime.atoms.free(has_key);
+    const has_value = try object_ops.getValueProperty(ctx, output, global, other_value, has_key, caller_function, caller_frame);
+    errdefer has_value.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(has_value)) return error.TypeError;
+
+    const keys_key = try ctx.runtime.internAtom("keys");
+    defer ctx.runtime.atoms.free(keys_key);
+    const keys_value = try object_ops.getValueProperty(ctx, output, global, other_value, keys_key, caller_function, caller_frame);
+    errdefer keys_value.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(keys_value)) return error.TypeError;
+
+    return .{
+        .object_value = other_value.dup(),
+        .size = size_number,
+        .has = has_value,
+        .keys = keys_value,
+        .native_kind = .none,
+    };
+}
+
+fn qjsSetStrongSize(object: *core.Object) usize {
+    var count: usize = 0;
+    for (object.collectionEntriesSlot().*) |entry| {
+        if (entry.active) count += 1;
+    }
+    return count;
+}
+
+fn qjsConstructPlainSet(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
+    const set_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Set") orelse return error.TypeError;
+    return constructWithPrototype(ctx.runtime, 2, set_proto);
+}
+
+fn qjsSetAddValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
+    const out = try methodCall(rt, set_value, 6, &.{key});
+    out.free(rt);
+}
+
+fn qjsSetDeleteValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !void {
+    const out = try methodCall(rt, set_value, 4, &.{key});
+    out.free(rt);
+}
+
+fn qjsSetHasValue(rt: *core.JSRuntime, set_value: core.JSValue, key: core.JSValue) !bool {
+    const out = try methodCall(rt, set_value, 3, &.{key});
+    defer out.free(rt);
+    return coercion_ops.valueTruthy(out);
+}
+
+fn qjsSetLikeHas(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    record: SetLikeRecordVm,
+    key: core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !bool {
+    if (record.native_kind != .none) {
+        const out = try methodCall(ctx.runtime, record.object_value, 3, &.{key});
+        defer out.free(ctx.runtime);
+        return coercion_ops.valueTruthy(out);
+    }
+    const out = try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.has, &.{key}, caller_function, caller_frame);
+    defer out.free(ctx.runtime);
+    return coercion_ops.valueTruthy(out);
+}
+
+fn qjsSetLikeKeysIterator(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    const source = if (record.native_kind != .none)
+        try methodCall(ctx.runtime, record.object_value, 7, &.{})
+    else
+        try call_runtime.callValueOrBytecode(ctx, output, global, record.object_value, record.keys, &.{}, caller_function, caller_frame);
+    errdefer source.free(ctx.runtime);
+    const iterator_object = object_ops.objectFromValue(source) orelse return error.TypeError;
+    const next_key = try ctx.runtime.internAtom("next");
+    defer ctx.runtime.atoms.free(next_key);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, source, next_key, caller_function, caller_frame);
+    defer next_method.free(ctx.runtime);
+    if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
+    const cached = iterator_object.cachedIteratorNextSlot();
+    try iterator_object.setOptionalValueSlot(ctx.runtime, cached, next_method.dup());
+    return source;
+}
+
+fn qjsSetCloneReceiver(ctx: *core.JSContext, global: *core.Object, receiver: *core.Object) !core.JSValue {
+    const result_value = try qjsConstructPlainSet(ctx, global);
+    errdefer result_value.free(ctx.runtime);
+    var index: usize = 0;
+    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().*[index];
+        if (!entry.active) continue;
+        try qjsSetAddValue(ctx.runtime, result_value, entry.key);
+    }
+    return result_value;
+}
+
+fn qjsSetSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue {
+    const count = qjsSetStrongSize(receiver);
+    if (count == 0) return &.{};
+    const keys = try rt.memory.alloc(core.JSValue, count);
+    errdefer rt.memory.free(core.JSValue, keys);
+    var out: usize = 0;
+    errdefer {
+        for (keys[0..out]) |key| key.free(rt);
+    }
+    for (receiver.collectionEntriesSlot().*) |entry| {
+        if (!entry.active) continue;
+        keys[out] = entry.key.dup();
+        out += 1;
+    }
+    return keys;
+}
+
+fn qjsFreeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
+    for (values) |value| value.free(rt);
+    if (values.len != 0) rt.memory.free(core.JSValue, values);
+}
+
+test "set difference snapshot key root exposes dynamic key slice" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
+    var keys = try rt.memory.alloc(core.JSValue, 1);
+    keys[0] = core.JSValue.symbol(first_atom);
+    defer qjsFreeValueList(rt, keys);
+
+    var keys_root = ValueListRoot{};
+    keys_root.init(rt, &keys);
+    defer keys_root.deinit();
+
+    const Visitor = struct {
+        atom_id: u32,
+        saw_key: bool = false,
+
+        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (slot.asSymbolAtom()) |atom_id| {
+                if (atom_id == self.atom_id) self.saw_key = true;
+            }
+        }
+
+        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+            _ = context;
+            _ = slot;
+        }
+    };
+    var state = Visitor{ .atom_id = first_atom };
+    var visitor = core.runtime.RootVisitor{
+        .context = &state,
+        .visit_value = Visitor.visitValue,
+        .visit_object = Visitor.visitObject,
+    };
+    try rt.traceActiveRoots(&visitor);
+
+    try std.testing.expect(state.saw_key);
+}
+
+fn qjsSetDifference(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    const result_value = try qjsConstructPlainSet(ctx, global);
+    errdefer result_value.free(ctx.runtime);
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) {
+        var copy_index: usize = 0;
+        while (copy_index < receiver.collectionEntriesSlot().*.len) : (copy_index += 1) {
+            const entry = receiver.collectionEntriesSlot().*[copy_index];
+            if (!entry.active) continue;
+            try qjsSetAddValue(ctx.runtime, result_value, entry.key);
+        }
+        var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+        defer iterator_value.free(ctx.runtime);
+        var iterator_done = false;
+        while (true) {
+            const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+                if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+                return err;
+            };
+            defer step.value.free(ctx.runtime);
+            if (step.done) {
+                iterator_done = true;
+                break;
+            }
+            try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
+        }
+    } else {
+        var keys = try qjsSetSnapshotKeys(ctx.runtime, receiver);
+        defer qjsFreeValueList(ctx.runtime, keys);
+        var keys_root = ValueListRoot{};
+        keys_root.init(ctx.runtime, &keys);
+        defer keys_root.deinit();
+        for (keys) |key| {
+            if (!try qjsSetLikeHas(ctx, output, global, other_record, key, caller_function, caller_frame)) {
+                try qjsSetAddValue(ctx.runtime, result_value, key);
+            }
+        }
+    }
+    return result_value;
+}
+
+fn qjsSetIntersection(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    const result_value = try qjsConstructPlainSet(ctx, global);
+    errdefer result_value.free(ctx.runtime);
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
+        var index: usize = 0;
+        while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
+            const entry = receiver.collectionEntriesSlot().*[index];
+            if (!entry.active) continue;
+            if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
+                try qjsSetAddValue(ctx.runtime, result_value, entry.key);
+            }
+        }
+    } else {
+        var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+        defer iterator_value.free(ctx.runtime);
+        var iterator_done = false;
+        while (true) {
+            const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+                if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+                return err;
+            };
+            defer step.value.free(ctx.runtime);
+            if (step.done) {
+                iterator_done = true;
+                break;
+            }
+            if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
+                try qjsSetAddValue(ctx.runtime, result_value, step.value);
+            }
+        }
+    }
+    return result_value;
+}
+
+fn qjsSetUnion(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    defer iterator_value.free(ctx.runtime);
+    const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
+    errdefer result_value.free(ctx.runtime);
+    var iterator_done = false;
+    while (true) {
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            return err;
+        };
+        defer step.value.free(ctx.runtime);
+        if (step.done) {
+            iterator_done = true;
+            break;
+        }
+        try qjsSetAddValue(ctx.runtime, result_value, step.value);
+    }
+    return result_value;
+}
+
+fn qjsSetSymmetricDifference(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    defer iterator_value.free(ctx.runtime);
+    const result_value = try qjsSetCloneReceiver(ctx, global, receiver);
+    errdefer result_value.free(ctx.runtime);
+    var iterator_done = false;
+    while (true) {
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            return err;
+        };
+        defer step.value.free(ctx.runtime);
+        if (step.done) {
+            iterator_done = true;
+            break;
+        }
+        if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
+            try qjsSetDeleteValue(ctx.runtime, result_value, step.value);
+        } else if (!try qjsSetHasValue(ctx.runtime, result_value, step.value)) {
+            try qjsSetAddValue(ctx.runtime, result_value, step.value);
+        }
+    }
+    return result_value;
+}
+
+fn qjsSetIsDisjointFrom(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) <= other_record.size) {
+        var index: usize = 0;
+        while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
+            const entry = receiver.collectionEntriesSlot().*[index];
+            if (!entry.active) continue;
+            if (try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
+                return core.JSValue.boolean(false);
+            }
+        }
+        return core.JSValue.boolean(true);
+    }
+
+    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    defer iterator_value.free(ctx.runtime);
+    var iterator_done = false;
+    while (true) {
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            return err;
+        };
+        defer step.value.free(ctx.runtime);
+        if (step.done) {
+            iterator_done = true;
+            return core.JSValue.boolean(true);
+        }
+        if (try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
+            forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            iterator_done = true;
+            return core.JSValue.boolean(false);
+        }
+    }
+}
+
+fn qjsSetIsSubsetOf(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
+    var index: usize = 0;
+    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().*[index];
+        if (!entry.active) continue;
+        if (!try qjsSetLikeHas(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
+            return core.JSValue.boolean(false);
+        }
+    }
+    return core.JSValue.boolean(true);
+}
+
+fn qjsSetIsSupersetOf(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver: *core.Object,
+    other_record: SetLikeRecordVm,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !core.JSValue {
+    if (@as(f64, @floatFromInt(qjsSetStrongSize(receiver))) < other_record.size) return core.JSValue.boolean(false);
+    var iterator_value = try qjsSetLikeKeysIterator(ctx, output, global, other_record, caller_function, caller_frame);
+    defer iterator_value.free(ctx.runtime);
+    var iterator_done = false;
+    while (true) {
+        const step = call_runtime.iteratorStepValue(ctx, output, global, iterator_value) catch |err| {
+            if (!iterator_done) forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            return err;
+        };
+        defer step.value.free(ctx.runtime);
+        if (step.done) {
+            iterator_done = true;
+            return core.JSValue.boolean(true);
+        }
+        if (!try qjsSetHasValue(ctx.runtime, receiver.value(), step.value)) {
+            forof_ops.closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+            iterator_done = true;
+            return core.JSValue.boolean(false);
+        }
+    }
+}
+
+pub fn qjsMapGroupByCall(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !?core.JSValue {
+    const map_proto = object_ops.constructorPrototypeFromGlobal(ctx.runtime, global, "Map") orelse return error.TypeError;
+    return qjsMapGroupByRecord(ctx, output, global, args, map_proto, caller_function, caller_frame);
+}
+
+pub fn qjsMapGroupByRecord(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    prototype: ?*core.Object,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !?core.JSValue {
+    if (args.len < 2) return error.TypeError;
+    if (!call_runtime.isCallableValue(args[1])) return error.TypeError;
+
+    const map_value = try constructWithPrototype(ctx.runtime, 1, prototype);
+    errdefer map_value.free(ctx.runtime);
+
+    const iterator_value = try call_runtime.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    defer iterator_value.free(ctx.runtime);
+
+    var index: usize = 0;
+    while (true) {
+        const max_safe_integer: usize = 9007199254740991;
+        if (index >= max_safe_integer) {
+            try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            return error.TypeError;
+        }
+
+        const step = try call_runtime.iteratorStepValue(ctx, output, global, iterator_value);
+        defer step.value.free(ctx.runtime);
+        if (step.done) return map_value;
+
+        const index_value = value_ops.numberToValue(@floatFromInt(index));
+        const key = call_runtime.callValueOrBytecode(
+            ctx,
+            output,
+            global,
+            core.JSValue.undefinedValue(),
+            args[1],
+            &.{ step.value, index_value },
+            caller_function,
+            caller_frame,
+        ) catch |err| {
+            try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            return err;
+        };
+        defer key.free(ctx.runtime);
+
+        qjsMapAppendGroupByValue(ctx, global, map_value, key, step.value) catch |err| {
+            try call_runtime.closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            return err;
+        };
+        index += 1;
+    }
+}
+
+pub fn qjsMapGetOrInsertComputed(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    receiver_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) !?core.JSValue {
+    const receiver = property_ops.expectObject(receiver_value) catch return null;
+    if (receiver.class_id != core.class.ids.weakmap and receiver.class_id != core.class.ids.map) return null;
+    if (collectionMethodOwnerClass(function_object)) |owner_class| {
+        if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
+    }
+    if (args.len < 2) return error.TypeError;
+    if (!call_runtime.isCallableValue(args[1])) return error.TypeError;
+
+    const key = if (receiver.class_id == core.class.ids.map)
+        canonicalizeMapKey(args[0])
+    else
+        args[0].dup();
+    defer key.free(ctx.runtime);
+    if (receiver.class_id == core.class.ids.weakmap and !symbol_builtin.canBeHeldWeakly(ctx.runtime, key)) {
+        return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key"));
+    }
+
+    const has_value = try methodCall(ctx.runtime, receiver_value, 3, &.{key});
+    defer has_value.free(ctx.runtime);
+    if (has_value.asBool() == true) {
+        return try methodCall(ctx.runtime, receiver_value, 2, &.{key});
+    }
+
+    const computed = try call_runtime.callValueOrBytecode(
+        ctx,
+        output,
+        global,
+        core.JSValue.undefinedValue(),
+        args[1],
+        &.{key},
+        caller_function,
+        caller_frame,
+    );
+    errdefer computed.free(ctx.runtime);
+    const set_result = try methodCall(ctx.runtime, receiver_value, 1, &.{ key, computed });
+    set_result.free(ctx.runtime);
+    return computed;
+}
+
+pub fn collectionMethodOwnerClass(function_object: *core.Object) ?core.ClassId {
+    const cached = function_object.collectionMethodOwnerClass();
+    if (cached != core.class.invalid_class_id) return cached;
+    return null;
+}
+
+fn canonicalizeMapKey(key: core.JSValue) core.JSValue {
+    if (key.asFloat64()) |number| {
+        if (number == 0) return core.JSValue.int32(0);
+    }
+    return key.dup();
+}
+
+fn throwCollectionReceiverTypeError(ctx: *core.JSContext, global: *core.Object, owner_class: core.ClassId) !core.JSValue {
+    return exception_ops.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
+}
+
+fn throwCollectionMethodTypeError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    receiver: *core.Object,
+    method: PrototypeMethod,
+    args: []const core.JSValue,
+) !core.JSValue {
+    if (receiver.class_id == core.class.ids.weakmap and
+        (method == .set or method == .get_or_insert or method == .get_or_insert_computed) and
+        args.len >= 1 and !symbol_builtin.canBeHeldWeakly(ctx.runtime, args[0]))
+    {
+        return exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used as WeakMap key");
+    }
+    if (receiver.class_id == core.class.ids.weakset and
+        method == .add and
+        args.len >= 1 and !symbol_builtin.canBeHeldWeakly(ctx.runtime, args[0]))
+    {
+        return exception_ops.throwTypeErrorMessage(ctx, global, "invalid value used in weak set");
+    }
+    return exception_ops.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(receiver.class_id));
+}
+
+fn collectionReceiverMessage(owner_class: core.ClassId) []const u8 {
+    if (owner_class == core.class.ids.map) return "Map object expected";
+    if (owner_class == core.class.ids.set) return "Set object expected";
+    if (owner_class == core.class.ids.weakmap) return "WeakMap object expected";
+    if (owner_class == core.class.ids.weakset) return "WeakSet object expected";
+    return "not an object";
+}
+
+fn qjsMapAppendGroupByValue(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    map_value: core.JSValue,
+    key: core.JSValue,
+    value: core.JSValue,
+) !void {
+    const existing = try methodCall(ctx.runtime, map_value, 2, &.{key});
+    defer existing.free(ctx.runtime);
+
+    if (!existing.isUndefined()) {
+        const group = try property_ops.expectObject(existing);
+        if (!group.flags.is_array) return error.TypeError;
+        try group.defineOwnProperty(
+            ctx.runtime,
+            core.atom.atomFromUInt32(group.length),
+            core.Descriptor.data(value, true, true, true),
+        );
+        return;
+    }
+
+    const group = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
+    errdefer core.Object.destroyFromHeader(ctx.runtime, &group.header);
+    try group.defineOwnProperty(
+        ctx.runtime,
+        core.atom.atomFromUInt32(group.length),
+        core.Descriptor.data(value, true, true, true),
+    );
+    const set_result = try methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });
+    defer set_result.free(ctx.runtime);
+    group.value().free(ctx.runtime);
 }

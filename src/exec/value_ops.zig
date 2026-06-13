@@ -1,5 +1,4 @@
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const bignum = @import("../libs/bignum.zig");
@@ -1295,7 +1294,7 @@ pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
         if (b.asBool()) |bb| return ab == bb;
     }
     if (a.isNull() or a.isUndefined()) return a.same(b);
-    if (a.isBigInt() and b.isBigInt()) return builtins.object.sameValue(a, b);
+    if (a.isBigInt() and b.isBigInt()) return a.sameValue(b);
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;
         var a_bytes = std.ArrayList(u8).empty;

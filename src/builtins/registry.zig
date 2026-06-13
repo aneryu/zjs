@@ -4,7 +4,7 @@ const buffer_builtin = @import("buffer.zig");
 const collection_builtin = @import("collection.zig");
 const date_builtin = @import("date.zig");
 const error_builtin = @import("error.zig");
-const error_names = @import("error_names.zig");
+const error_names = core.error_names;
 const function_builtin = @import("function.zig");
 const iterator_builtin = @import("iterator.zig");
 const object_builtin = @import("object.zig");
@@ -12,7 +12,12 @@ const regexp_builtin = @import("regexp.zig");
 const string_builtin = @import("string.zig");
 const atomics_builtin = @import("atomics.zig");
 const reflect_builtin = @import("reflect_proxy.zig");
-const typed_array_names = @import("typed_array_names.zig");
+const typed_array_names = core.typed_array_names;
+const internal_table = @import("internal_table.zig");
+const json_builtin = @import("json.zig");
+const math_builtin = @import("math.zig");
+const number_builtin = @import("number.zig");
+const uri_builtin = @import("uri.zig");
 const std = @import("std");
 
 pub const Flags = struct {
@@ -473,11 +478,10 @@ fn createJsonNamespaceObject(rt: *core.JSRuntime, global: *core.Object) !*core.O
     errdefer namespace.value().free(rt);
     try namespace.setFunctionRealmGlobalPtr(rt, global);
     const flags = core.property.Flags.data(method_flags.writable, method_flags.enumerable, method_flags.configurable);
-    for (json_methods) |method| {
-        const id = @import("json.zig").methodId(method.name) orelse continue;
-        const key = try temporaryStringAtom(rt, method.name);
+    for (json_builtin.internal_entries) |entry| {
+        const key = try temporaryStringAtom(rt, entry.name);
         defer freeTemporaryStringAtom(rt, key);
-        try namespace.defineAutoInitPropertyWithRealmAndNative(rt, key, method.name, method.length, flags, global, core.function.nativeBuiltinId(.json, id));
+        try namespace.defineAutoInitPropertyWithRealmAndNative(rt, key, entry.name, entry.length, flags, global, core.function.nativeBuiltinId(.json, entry.id));
     }
     return namespace;
 }
@@ -722,6 +726,7 @@ fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: 
 
 pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
+    rt.internal_builtins = &internal_table.table;
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, standardGlobalOwnPropertyCapacity());
     var installed_constructors: [constructor_specs.len]?*core.Object = @splat(null);
     for (constructor_specs, 0..) |spec, index| {
@@ -1067,23 +1072,20 @@ fn isNativeErrorSubclassKind(kind: ConstructorKind) bool {
 }
 
 fn installMathConstants(rt: *core.JSRuntime, math: *core.Object) !void {
-    const math_mod = @import("math.zig");
     const flags = Flags{ .writable = false, .enumerable = false, .configurable = false };
-    try defineData(rt, math, "E", core.JSValue.float64(math_mod.E), flags);
-    try defineData(rt, math, "LN10", core.JSValue.float64(math_mod.LN10), flags);
-    try defineData(rt, math, "LN2", core.JSValue.float64(math_mod.LN2), flags);
-    try defineData(rt, math, "LOG2E", core.JSValue.float64(math_mod.LOG2E), flags);
-    try defineData(rt, math, "LOG10E", core.JSValue.float64(math_mod.LOG10E), flags);
-    try defineData(rt, math, "PI", core.JSValue.float64(math_mod.PI), flags);
-    try defineData(rt, math, "SQRT1_2", core.JSValue.float64(math_mod.SQRT1_2), flags);
-    try defineData(rt, math, "SQRT2", core.JSValue.float64(math_mod.SQRT2), flags);
+    try defineData(rt, math, "E", core.JSValue.float64(math_builtin.E), flags);
+    try defineData(rt, math, "LN10", core.JSValue.float64(math_builtin.LN10), flags);
+    try defineData(rt, math, "LN2", core.JSValue.float64(math_builtin.LN2), flags);
+    try defineData(rt, math, "LOG2E", core.JSValue.float64(math_builtin.LOG2E), flags);
+    try defineData(rt, math, "LOG10E", core.JSValue.float64(math_builtin.LOG10E), flags);
+    try defineData(rt, math, "PI", core.JSValue.float64(math_builtin.PI), flags);
+    try defineData(rt, math, "SQRT1_2", core.JSValue.float64(math_builtin.SQRT1_2), flags);
+    try defineData(rt, math, "SQRT2", core.JSValue.float64(math_builtin.SQRT2), flags);
 }
 
 fn bindMathNativeRecords(rt: *core.JSRuntime, math: *core.Object) !void {
-    const math_mod = @import("math.zig");
-    for (math_methods) |method| {
-        const id = math_mod.methodId(method.name) orelse continue;
-        try bindNativeRecordByName(rt, math, method.name, .math, id);
+    for (math_builtin.internal_entries) |entry| {
+        try bindNativeRecordByName(rt, math, entry.name, .math, entry.id);
     }
 }
 
@@ -1117,11 +1119,8 @@ fn bindObjectPrototypeNativeRecords(rt: *core.JSRuntime, ctor: *core.Object) !vo
 }
 
 fn bindUriNativeRecords(rt: *core.JSRuntime, global: *core.Object) !void {
-    const uri_mod = @import("uri.zig");
-    const names = [_][]const u8{ "encodeURI", "encodeURIComponent", "decodeURI", "decodeURIComponent" };
-    for (names) |name| {
-        const id = uri_mod.methodId(name) orelse continue;
-        try bindNativeRecordByName(rt, global, name, .uri, id);
+    for (uri_builtin.internal_entries) |entry| {
+        try bindNativeRecordByName(rt, global, entry.name, .uri, entry.id);
     }
 }
 
@@ -1500,44 +1499,22 @@ fn installTypedArrayPrototypeAccessors(rt: *core.JSRuntime, proto: *core.Object)
     try defineLazyNativeGetterAtom(rt, proto, core.atom.predefinedId("Symbol.toStringTag", .symbol).?, "get [Symbol.toStringTag]", tag_native_id, flags);
 }
 
-const object_static = [_]Method{
-    .{ .name = "assign", .length = 2 },
-    .{ .name = "create", .length = 2 },
-    .{ .name = "defineProperty", .length = 3 },
-    .{ .name = "defineProperties", .length = 2 },
-    .{ .name = "getOwnPropertyDescriptor", .length = 2 },
-    .{ .name = "getOwnPropertyDescriptors", .length = 1 },
-    .{ .name = "getOwnPropertyNames", .length = 1 },
-    .{ .name = "getOwnPropertySymbols", .length = 1 },
-    .{ .name = "getPrototypeOf", .length = 1 },
-    .{ .name = "hasOwn", .length = 2 },
-    .{ .name = "isExtensible", .length = 1 },
-    .{ .name = "keys", .length = 1 },
-    .{ .name = "preventExtensions", .length = 1 },
-    .{ .name = "seal", .length = 1 },
-    .{ .name = "isSealed", .length = 1 },
-    .{ .name = "isFrozen", .length = 1 },
-    .{ .name = "setPrototypeOf", .length = 2 },
-    .{ .name = "values", .length = 1 },
-    .{ .name = "entries", .length = 1 },
-    .{ .name = "is", .length = 2 },
-    .{ .name = "freeze", .length = 1 },
-    .{ .name = "fromEntries", .length = 1 },
-    .{ .name = "groupBy", .length = 2 },
-};
+// Object's static and prototype install tables are derived from the single
+// `.object` declaration table in builtins/object.zig. Static ids occupy 1..99
+// and prototype ids 100.. (see object.StaticMethod / object.PrototypeMethod),
+// so the two install lists are just that table partitioned by id range — no
+// separate length data to keep in sync.
+const object_static = methodsFromInternalEntriesWhere(&object_builtin.internal_entries, struct {
+    fn keep(id: u32) bool {
+        return id < 100;
+    }
+}.keep);
 
-const object_prototype = [_]Method{
-    .{ .name = "toString", .length = 0 },
-    .{ .name = "toLocaleString", .length = 0 },
-    .{ .name = "valueOf", .length = 0 },
-    .{ .name = "hasOwnProperty", .length = 1 },
-    .{ .name = "isPrototypeOf", .length = 1 },
-    .{ .name = "propertyIsEnumerable", .length = 1 },
-    .{ .name = "__defineGetter__", .length = 2 },
-    .{ .name = "__defineSetter__", .length = 2 },
-    .{ .name = "__lookupGetter__", .length = 1 },
-    .{ .name = "__lookupSetter__", .length = 1 },
-};
+const object_prototype = methodsFromInternalEntriesWhere(&object_builtin.internal_entries, struct {
+    fn keep(id: u32) bool {
+        return id >= 100;
+    }
+}.keep);
 
 const function_prototype = [_]Method{
     .{ .name = "call", .length = 1 },
@@ -2002,52 +1979,48 @@ const constructor_specs = [_]ConstructorSpec{
     .{ .name = "Iterator", .kind = .iterator, .length = 0, .static_methods = &iterator_static, .prototype_methods = &iterator_prototype },
 };
 
-const math_methods = [_]Method{
-    .{ .name = "abs", .length = 1 },
-    .{ .name = "floor", .length = 1 },
-    .{ .name = "ceil", .length = 1 },
-    .{ .name = "round", .length = 1 },
-    .{ .name = "sqrt", .length = 1 },
-    .{ .name = "pow", .length = 2 },
-    .{ .name = "min", .length = 2 },
-    .{ .name = "max", .length = 2 },
-    .{ .name = "random", .length = 0 },
-    .{ .name = "exp", .length = 1 },
-    .{ .name = "sin", .length = 1 },
-    .{ .name = "cos", .length = 1 },
-    .{ .name = "tan", .length = 1 },
-    .{ .name = "acos", .length = 1 },
-    .{ .name = "asin", .length = 1 },
-    .{ .name = "atan", .length = 1 },
-    .{ .name = "atan2", .length = 2 },
-    .{ .name = "acosh", .length = 1 },
-    .{ .name = "asinh", .length = 1 },
-    .{ .name = "atanh", .length = 1 },
-    .{ .name = "cbrt", .length = 1 },
-    .{ .name = "clz32", .length = 1 },
-    .{ .name = "cosh", .length = 1 },
-    .{ .name = "expm1", .length = 1 },
-    .{ .name = "f16round", .length = 1 },
-    .{ .name = "fround", .length = 1 },
-    .{ .name = "hypot", .length = 2 },
-    .{ .name = "imul", .length = 2 },
-    .{ .name = "log", .length = 1 },
-    .{ .name = "log1p", .length = 1 },
-    .{ .name = "log2", .length = 1 },
-    .{ .name = "log10", .length = 1 },
-    .{ .name = "sign", .length = 1 },
-    .{ .name = "sinh", .length = 1 },
-    .{ .name = "sumPrecise", .length = 1 },
-    .{ .name = "tanh", .length = 1 },
-    .{ .name = "trunc", .length = 1 },
-};
+// Math/JSON method declarations live with their implementations
+// (math.zig/json.zig `internal_entries`); these derived views keep the
+// generic namespace-creation machinery working unchanged.
+const math_methods = methodsFromInternalEntries(&math_builtin.internal_entries);
 
-const json_methods = [_]Method{
-    .{ .name = "isRawJSON", .length = 1 },
-    .{ .name = "parse", .length = 2 },
-    .{ .name = "rawJSON", .length = 1 },
-    .{ .name = "stringify", .length = 3 },
-};
+const json_methods = methodsFromInternalEntries(&json_builtin.internal_entries);
+
+fn methodsFromInternalEntries(comptime entries: []const core.host_function.InternalEntry) [entries.len]Method {
+    var methods: [entries.len]Method = undefined;
+    for (entries, 0..) |entry, index| {
+        methods[index] = .{ .name = entry.name, .length = entry.length };
+    }
+    return methods;
+}
+
+/// Derive an install Method table from the subset of `entries` whose id matches
+/// `keep`, preserving declaration order. Used to partition a single internal
+/// entry table (e.g. Object's) into its static and prototype install lists.
+fn methodsFromInternalEntriesWhere(
+    comptime entries: []const core.host_function.InternalEntry,
+    comptime keep: fn (id: u32) bool,
+) [countInternalEntriesWhere(entries, keep)]Method {
+    var methods: [countInternalEntriesWhere(entries, keep)]Method = undefined;
+    var index: usize = 0;
+    for (entries) |entry| {
+        if (!keep(entry.id)) continue;
+        methods[index] = .{ .name = entry.name, .length = entry.length };
+        index += 1;
+    }
+    return methods;
+}
+
+fn countInternalEntriesWhere(
+    comptime entries: []const core.host_function.InternalEntry,
+    comptime keep: fn (id: u32) bool,
+) usize {
+    var count: usize = 0;
+    for (entries) |entry| {
+        if (keep(entry.id)) count += 1;
+    }
+    return count;
+}
 
 const reflect_methods = [_]Method{
     .{ .name = "defineProperty", .length = 3 },

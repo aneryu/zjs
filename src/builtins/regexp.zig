@@ -2,6 +2,13 @@ const core = @import("../core/root.zig");
 const regexp_validate = @import("../libs/regexp_validate.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const builtin_dispatch = @import("../exec/builtin_dispatch.zig");
+const regexp_fastpath = @import("../exec/regexp_fastpath.zig");
+const string_ops = @import("../exec/string_ops.zig");
+const exceptions = @import("../exec/exceptions.zig");
+
+const HostError = exceptions.HostError;
+const InternalCall = core.host_function.InternalCall;
 
 const AppendStringError = error{
     OutOfMemory,
@@ -10,30 +17,15 @@ const AppendStringError = error{
     NoSpaceLeft,
 };
 
-pub const StaticMethod = enum(u32) {
-    escape = 1,
-};
+pub const StaticMethod = core.host_function.builtin_method_ids.regexp.StaticMethod;
 
-pub const ConstructorMethod = enum(u32) {
-    construct = 1000,
-};
+// Relocated to engine core (`core/host_function.zig`, next to
+// `builtin_method_ids.regexp.StaticMethod`) in Phase 6b-3e so the VM construct
+// dispatchers can gate on the construct id without importing builtins;
+// re-exported here so the install/dispatch side keeps the original name.
+pub const ConstructorMethod = core.host_function.builtin_method_ids.regexp.ConstructorMethod;
 
-pub fn isConstructorRecord(function_object: *core.Object) bool {
-    const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionId()) orelse return false;
-    return native_ref.domain == .regexp and native_ref.id == @intFromEnum(ConstructorMethod.construct);
-}
-
-pub const PrototypeMethod = enum(u32) {
-    to_string = 101,
-    test_ = 102,
-    exec = 103,
-    symbol_search = 104,
-    symbol_match = 105,
-    symbol_match_all = 106,
-    symbol_replace = 107,
-    symbol_split = 108,
-    compile = 109,
-};
+pub const PrototypeMethod = core.host_function.builtin_method_ids.regexp.PrototypeMethod;
 
 pub const AccessorMethod = enum(u32) {
     source = 201,
@@ -48,23 +40,7 @@ pub const AccessorMethod = enum(u32) {
     unicode_sets = 210,
 };
 
-pub const LegacyAccessorMethod = enum(u32) {
-    get_input = 301,
-    set_input = 302,
-    get_last_match = 303,
-    get_last_paren = 304,
-    get_left_context = 305,
-    get_right_context = 306,
-    get_capture_1 = 311,
-    get_capture_2 = 312,
-    get_capture_3 = 313,
-    get_capture_4 = 314,
-    get_capture_5 = 315,
-    get_capture_6 = 316,
-    get_capture_7 = 317,
-    get_capture_8 = 318,
-    get_capture_9 = 319,
-};
+pub const LegacyAccessorMethod = core.host_function.builtin_method_ids.regexp.LegacyAccessorMethod;
 
 pub fn staticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "escape")) return @intFromEnum(StaticMethod.escape);
@@ -180,6 +156,160 @@ pub fn legacyCaptureIndex(method: LegacyAccessorMethod) ?usize {
         .get_capture_8 => 7,
         .get_capture_9 => 8,
         else => null,
+    };
+}
+
+/// Declaration + dispatch table for the `.regexp` native-builtin domain
+/// (QuickJS js_regexp_funcs / js_regexp_proto_funcs analogue). One shared
+/// record handler `regexpCall` switches on the per-record `magic` (== the
+/// domain-local id, i.e. the `StaticMethod`/`ConstructorMethod`/`PrototypeMethod`/
+/// `AccessorMethod`/`LegacyAccessorMethod` enum value) and mirrors the retired
+/// `call.zig` `callRegExpNativeFunctionRecord` exactly: the constructor, the
+/// exec/test/compile prototype methods and every accessor delegate to the
+/// `regexp_fastpath.zig` VM ops, the `Symbol.*` and `toString` prototype methods
+/// delegate to `string_ops.zig`, and `RegExp.escape` plus the accessor
+/// primitive-only fallback run in this module. Those exec ops STAY in exec
+/// because the RegExp fast-path opcode handlers (`vm_call.zig`,
+/// `call_runtime.zig`) and the matcher fast path also call them directly; the
+/// `Symbol.*` helpers additionally back `String.prototype.{match,replace,split,
+/// search,matchAll}` (BOTH — kept in exec, reused through a thin entry here).
+/// Property installation still resolves names/lengths through the registry's
+/// `regexp_prototype` Method table plus the `prototypeMethodId`/`accessorMethodId`/
+/// `LegacyAccessorMethod` id helpers above (like Date); this table is consumed
+/// only by the slow record-dispatch path (`rt.internal_builtins`).
+/// `prepared_call_ok` mirrors the prepared-call gate in `vm_call.zig`
+/// (`nativeBuiltinSupportedWithoutFunctionObject`): only `RegExp.prototype.test`
+/// and `RegExp.prototype.exec` are callable without a materialized function
+/// object today.
+pub const internal_entries = regexpEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :regexpEntries [_]Entry{
+        // Constructor + static.
+        regexpConstructorEntry("RegExp", 2, @intFromEnum(ConstructorMethod.construct)),
+        regexpEntry("escape", 1, @intFromEnum(StaticMethod.escape), false),
+        // Prototype methods (the subset `prototypeMethodId` maps and
+        // `decodePrototypeMethodId` decodes).
+        regexpEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string), false),
+        regexpEntry("test", 1, @intFromEnum(PrototypeMethod.test_), true),
+        regexpEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), true),
+        regexpEntry("[Symbol.search]", 1, @intFromEnum(PrototypeMethod.symbol_search), false),
+        regexpEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), false),
+        regexpEntry("[Symbol.matchAll]", 1, @intFromEnum(PrototypeMethod.symbol_match_all), false),
+        regexpEntry("[Symbol.replace]", 2, @intFromEnum(PrototypeMethod.symbol_replace), false),
+        regexpEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), false),
+        regexpEntry("compile", 2, @intFromEnum(PrototypeMethod.compile), false),
+        // Flag/source accessor getters.
+        regexpEntry("get source", 0, @intFromEnum(AccessorMethod.source), false),
+        regexpEntry("get flags", 0, @intFromEnum(AccessorMethod.flags), false),
+        regexpEntry("get global", 0, @intFromEnum(AccessorMethod.global), false),
+        regexpEntry("get ignoreCase", 0, @intFromEnum(AccessorMethod.ignore_case), false),
+        regexpEntry("get multiline", 0, @intFromEnum(AccessorMethod.multiline), false),
+        regexpEntry("get dotAll", 0, @intFromEnum(AccessorMethod.dot_all), false),
+        regexpEntry("get unicode", 0, @intFromEnum(AccessorMethod.unicode), false),
+        regexpEntry("get sticky", 0, @intFromEnum(AccessorMethod.sticky), false),
+        regexpEntry("get hasIndices", 0, @intFromEnum(AccessorMethod.has_indices), false),
+        regexpEntry("get unicodeSets", 0, @intFromEnum(AccessorMethod.unicode_sets), false),
+        // Legacy static RegExp accessors (input/$_, lastMatch, capture groups).
+        regexpEntry("get input", 0, @intFromEnum(LegacyAccessorMethod.get_input), false),
+        regexpEntry("set input", 1, @intFromEnum(LegacyAccessorMethod.set_input), false),
+        regexpEntry("get lastMatch", 0, @intFromEnum(LegacyAccessorMethod.get_last_match), false),
+        regexpEntry("get lastParen", 0, @intFromEnum(LegacyAccessorMethod.get_last_paren), false),
+        regexpEntry("get leftContext", 0, @intFromEnum(LegacyAccessorMethod.get_left_context), false),
+        regexpEntry("get rightContext", 0, @intFromEnum(LegacyAccessorMethod.get_right_context), false),
+        regexpEntry("get $1", 0, @intFromEnum(LegacyAccessorMethod.get_capture_1), false),
+        regexpEntry("get $2", 0, @intFromEnum(LegacyAccessorMethod.get_capture_2), false),
+        regexpEntry("get $3", 0, @intFromEnum(LegacyAccessorMethod.get_capture_3), false),
+        regexpEntry("get $4", 0, @intFromEnum(LegacyAccessorMethod.get_capture_4), false),
+        regexpEntry("get $5", 0, @intFromEnum(LegacyAccessorMethod.get_capture_5), false),
+        regexpEntry("get $6", 0, @intFromEnum(LegacyAccessorMethod.get_capture_6), false),
+        regexpEntry("get $7", 0, @intFromEnum(LegacyAccessorMethod.get_capture_7), false),
+        regexpEntry("get $8", 0, @intFromEnum(LegacyAccessorMethod.get_capture_8), false),
+        regexpEntry("get $9", 0, @intFromEnum(LegacyAccessorMethod.get_capture_9), false),
+    };
+};
+
+fn regexpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32, comptime prepared: bool) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = prepared, .call = &regexpCall };
+}
+
+/// The RegExp constructor record: construct-capable so `new RegExp(...)`
+/// routes through the construct dispatch path into `regexpCall`'s construct
+/// branch.
+fn regexpConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{ .name = name, .length = length, .id = id, .magic = @intCast(id), .prepared_call_ok = false, .constructor = true, .call = &regexpCall };
+}
+
+/// Shared record handler for the `.regexp` domain. Mirrors the retired
+/// `call.zig` `callRegExpNativeFunctionRecord`: the constructor, the
+/// exec/test/compile prototype methods and the accessors delegate to the
+/// `regexp_fastpath.zig` VM ops (which fall back to `accessor` below when the
+/// fast path returns null), the `Symbol.*` and `toString` prototype methods
+/// delegate to `string_ops.zig`, and `RegExp.escape` runs in this module. All
+/// of those exec ops stay in exec because the RegExp opcode handlers and the
+/// matcher fast path also call them.
+fn regexpCall(host_call: InternalCall) HostError!core.JSValue {
+    const ctx = host_call.ctx;
+    const output = host_call.output;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const this_value = host_call.this_value;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(ConstructorMethod.construct)) {
+        // `new RegExp(pattern, flags)` arrives through the construct record
+        // path with `flags.constructor` set and the resolved instance prototype
+        // in `new_target`. The construct branch reads only `args`/`new_target`,
+        // so it runs before the `func_obj` requirement below: the VM construct
+        // fast path (`regexp_fastpath.qjsRegExpConstructCall`) routes its
+        // coerced terminal here without a materialized constructor object.
+        // `RegExp(...)` called as a function routes through the fast-path call
+        // op (which itself handles the "return the argument unchanged when it is
+        // already a RegExp and no flags are given" call-only behavior).
+        if (host_call.flags.constructor) {
+            const rt = ctx.runtime;
+            const pattern = if (args.len >= 1) args[0] else try createStringValue(rt, "");
+            defer if (args.len < 1) pattern.free(rt);
+            const flags = if (args.len >= 2) args[1] else try createStringValue(rt, "");
+            defer if (args.len < 2) flags.free(rt);
+            return constructWithPrototype(rt, pattern, flags, host_call.new_target);
+        }
+        const active_global = host_call.global orelse return error.TypeError;
+        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, args, caller_function, caller_frame);
+    }
+
+    const function_object = host_call.func_obj orelse return error.TypeError;
+    if (id == @intFromEnum(StaticMethod.escape)) return escape(ctx.runtime, args);
+    if (legacyAccessorMethodFromId(id)) |method| {
+        const active_global = host_call.global orelse return error.TypeError;
+        return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, caller_function, caller_frame);
+    }
+    if (accessorNameFromId(id)) |accessor_name| {
+        const active_global = host_call.global orelse return error.TypeError;
+        if (try regexp_fastpath.qjsRegExpAccessor(ctx, output, active_global, this_value, function_object.value(), accessor_name, caller_function, caller_frame)) |value| return value;
+        return accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+    const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
+    // `compile` resolves the global through the function object's realm first
+    // (matching the retired call.zig branch); the rest take `host_call.global`.
+    if (method_id == 9) {
+        const compile_global = function_object.functionRealmGlobalPtr() orelse host_call.global orelse return error.TypeError;
+        return (try regexp_fastpath.qjsRegExpCompile(ctx, output, compile_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError;
+    }
+    const active_global = host_call.global orelse return error.TypeError;
+    return switch (method_id) {
+        1 => string_ops.qjsRegExpToString(ctx, output, active_global, this_value, caller_function, caller_frame),
+        2 => (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        3 => (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        4 => (try string_ops.qjsRegExpSymbolSearch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        5 => (try string_ops.qjsRegExpSymbolMatch(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        6 => (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        7 => (try string_ops.qjsRegExpSymbolReplace(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        8 => (try string_ops.qjsRegExpSymbolSplit(ctx, output, active_global, this_value, args, caller_function, caller_frame)) orelse error.TypeError,
+        else => error.TypeError,
     };
 }
 

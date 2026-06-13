@@ -1,19 +1,9 @@
 const core = @import("../core/root.zig");
 const function_builtin = @import("function.zig");
-const object_builtin = @import("object.zig");
 const jobs = @import("../core/jobs.zig");
 const std = @import("std");
 
-pub const LegacyStaticMethod = enum(u32) {
-    resolve = 1,
-    all = 2,
-    race = 3,
-    reject = 4,
-    all_settled = 5,
-    any = 6,
-    try_ = 7,
-    with_resolvers = 8,
-};
+pub const LegacyStaticMethod = core.host_function.builtin_method_ids.promise.LegacyStaticMethod;
 
 pub fn legacyStaticMethodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "resolve")) return @intFromEnum(LegacyStaticMethod.resolve);
@@ -177,13 +167,13 @@ pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     const pending_exception_is_unhandled =
         ctx.exception_slot.hasException() and
         ctx.unhandled_rejection_slot.hasException() and
-        object_builtin.sameValue(ctx.exception_slot.value, ctx.unhandled_rejection_slot.value);
+        ctx.exception_slot.value.sameValue(ctx.unhandled_rejection_slot.value);
     const matches_unhandled_promise =
         ctx.unhandled_rejection_promise_slot.hasException() and
         ctx.unhandled_rejection_promise_slot.value.same(promise.value());
     const matches_unhandled_reason =
         ctx.unhandled_rejection_slot.hasException() and
-        object_builtin.sameValue(ctx.unhandled_rejection_slot.value, reason);
+        ctx.unhandled_rejection_slot.value.sameValue(reason);
 
     if (matches_unhandled_promise or matches_unhandled_reason) {
         ctx.clearUnhandledRejection();
@@ -193,7 +183,7 @@ pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
         }
     }
     if (!ctx.exception_slot.hasException()) return;
-    if (object_builtin.sameValue(ctx.exception_slot.value, reason)) {
+    if (ctx.exception_slot.value.sameValue(reason)) {
         ctx.clearException();
     }
 }

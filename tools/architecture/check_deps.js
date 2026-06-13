@@ -111,11 +111,10 @@ function violationReason(source, target) {
     const disallowed = [
       'src/bytecode/',
       'src/cli/',
-      'src/exec/',
       'src/frontend/',
       'src/runtime/',
     ];
-    return targetStarts(target, disallowed) ? 'builtins may import core/libs/builtins only; exec/runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
+    return targetStarts(target, disallowed) ? 'builtins may import core/libs/exec/builtins only (Phase 6 client model: builtins implement methods on top of exec VM ops); runtime/frontend/bytecode/CLI dependencies must be explicit debt' : null;
   }
 
   if (source.startsWith('src/libs/')) {

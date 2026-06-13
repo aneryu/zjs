@@ -1,6 +1,5 @@
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -263,7 +262,7 @@ fn setObjectDataPropertyForSimplePutField(rt: *core.JSRuntime, receiver: core.JS
     if (rt.atoms.kind(atom_id) == .private) return false;
     const object = objectFromValue(receiver) orelse return false;
     if (object.proxyTarget() != null or object.exotic != null) return false;
-    if (builtins.buffer.isTypedArrayObject(object)) return false;
+    if (core.object.isTypedArrayObject(object)) return false;
     if (object.flags.is_array) {
         if (atom_id == core.atom.ids.length or core.array.arrayIndexFromAtom(&rt.atoms, atom_id) != null) return false;
     }

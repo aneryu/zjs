@@ -4,19 +4,18 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const collection_vm = @import("array_ops.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("vm_exception_ops.zig");
-const builtin_glue = @import("builtin_glue.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const class_init_ops = @import("class_init_ops.zig");
 const forof_ops = @import("forof_ops.zig");
-const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
-const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -252,7 +251,7 @@ fn tryFuseImmediateSimpleArrayMapClosure(
     const method = stack.values[stack.values.len - 1];
     const method_object = object_ops.callableObjectFromValue(method) orelse return null;
     const native_ref = core.function.decodeNativeBuiltinId(method_object.nativeFunctionIdSlot().*) orelse return null;
-    const map_id = @intFromEnum(builtins.array.PrototypeMethod.map);
+    const map_id = @intFromEnum(method_ids.array.PrototypeMethod.map);
     if (native_ref.domain != .array or native_ref.id != map_id) return null;
 
     const args = [_]core.JSValue{callback};
@@ -568,15 +567,6 @@ fn fastInt32Mul(lhs: i32, rhs: i32) core.JSValue {
     const result = @mulWithOverflow(lhs, rhs);
     if (result[1] == 0) return core.JSValue.int32(result[0]);
     return value_ops.numberToValue(@as(f64, @floatFromInt(lhs)) * @as(f64, @floatFromInt(rhs)));
-}
-
-fn primitiveMathNumber(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
-    return null;
 }
 
 pub fn tailCall(
@@ -910,13 +900,13 @@ fn nativeBuiltinSupportedWithoutFunctionObject(
 ) bool {
     return switch (native_ref.domain) {
         .math => true,
-        .date => native_ref.id == @intFromEnum(builtins.date.StaticMethod.now),
-        .number => native_ref.id == @intFromEnum(builtins.number.StaticMethod.parse_int) or
-            native_ref.id == @intFromEnum(builtins.number.StaticMethod.parse_float),
-        .string => native_ref.id == @intFromEnum(builtins.string.StaticMethod.from_char_code) or
-            native_ref.id == @intFromEnum(builtins.string.PrototypeMethod.substring),
-        .regexp => native_ref.id == @intFromEnum(builtins.regexp.PrototypeMethod.test_) or
-            native_ref.id == @intFromEnum(builtins.regexp.PrototypeMethod.exec),
+        .date => native_ref.id == @intFromEnum(method_ids.date.StaticMethod.now),
+        .number => native_ref.id == @intFromEnum(method_ids.number.StaticMethod.parse_int) or
+            native_ref.id == @intFromEnum(method_ids.number.StaticMethod.parse_float),
+        .string => native_ref.id == @intFromEnum(method_ids.string.StaticMethod.from_char_code) or
+            native_ref.id == @intFromEnum(method_ids.string.PrototypeMethod.substring),
+        .regexp => native_ref.id == @intFromEnum(method_ids.regexp.PrototypeMethod.test_) or
+            native_ref.id == @intFromEnum(method_ids.regexp.PrototypeMethod.exec),
         .json, .uri => true,
         .collection => collectionNativeSupportedWithoutFunctionObject(native_ref.id, info),
         .array => arrayNativeSupportedWithoutFunctionObject(receiver, native_ref.id),
@@ -927,8 +917,8 @@ fn nativeBuiltinSupportedWithoutFunctionObject(
 fn arrayNativeSupportedWithoutFunctionObject(receiver: core.JSValue, id: u32) bool {
     _ = receiver;
     return switch (id) {
-        @intFromEnum(builtins.array.PrototypeMethod.push),
-        @intFromEnum(builtins.array.PrototypeMethod.pop),
+        @intFromEnum(method_ids.array.PrototypeMethod.push),
+        @intFromEnum(method_ids.array.PrototypeMethod.pop),
         => true,
         else => false,
     };
@@ -937,17 +927,17 @@ fn arrayNativeSupportedWithoutFunctionObject(receiver: core.JSValue, id: u32) bo
 fn collectionNativeSupportedWithoutFunctionObject(id: u32, info: core.property.AutoInit) bool {
     if (info.collection_method_owner_class == core.class.invalid_class_id) return false;
     return switch (id) {
-        @intFromEnum(builtins.collection.PrototypeMethod.set),
-        @intFromEnum(builtins.collection.PrototypeMethod.get),
-        @intFromEnum(builtins.collection.PrototypeMethod.has),
-        @intFromEnum(builtins.collection.PrototypeMethod.delete),
-        @intFromEnum(builtins.collection.PrototypeMethod.clear),
-        @intFromEnum(builtins.collection.PrototypeMethod.add),
-        @intFromEnum(builtins.collection.PrototypeMethod.keys),
-        @intFromEnum(builtins.collection.PrototypeMethod.values),
-        @intFromEnum(builtins.collection.PrototypeMethod.entries),
-        @intFromEnum(builtins.collection.PrototypeMethod.get_or_insert),
-        @intFromEnum(builtins.collection.PrototypeMethod.size_getter),
+        @intFromEnum(method_ids.collection.PrototypeMethod.set),
+        @intFromEnum(method_ids.collection.PrototypeMethod.get),
+        @intFromEnum(method_ids.collection.PrototypeMethod.has),
+        @intFromEnum(method_ids.collection.PrototypeMethod.delete),
+        @intFromEnum(method_ids.collection.PrototypeMethod.clear),
+        @intFromEnum(method_ids.collection.PrototypeMethod.add),
+        @intFromEnum(method_ids.collection.PrototypeMethod.keys),
+        @intFromEnum(method_ids.collection.PrototypeMethod.values),
+        @intFromEnum(method_ids.collection.PrototypeMethod.entries),
+        @intFromEnum(method_ids.collection.PrototypeMethod.get_or_insert),
+        @intFromEnum(method_ids.collection.PrototypeMethod.size_getter),
         => true,
         else => false,
     };
@@ -965,36 +955,63 @@ fn callPreparedNativeTarget(
 ) !core.JSValue {
     const native_ref = target.native_ref;
     switch (native_ref.domain) {
-        .math => {
-            if (native_ref.id == builtins.math.sum_precise_method_id) return math_ops.qjsMathSumPrecise(ctx, output, global, args, caller_function, caller_frame);
-            return builtin_glue.qjsMathCall(ctx, output, global, native_ref.id, args);
+        // Domains whose record handlers are safe to invoke without a
+        // materialized function object: route the prepared (no-func-object)
+        // call through the same builtins-owned internal record table the slow
+        // record dispatch (`call.zig`) and the VM fast path
+        // (`call_runtime.callNativeBuiltinRecordForVm`) use, so exec carries
+        // zero compile-time knowledge of these builtins. Math is now uniform
+        // with the rest: the retired prepared hybrid called
+        // `builtins.math.preparedOpCall` directly to dodge the record table's
+        // indirect call, but the QuickJS uniform model (grill 2026-06-13) keeps
+        // exactly one dispatch path, so `.math` goes through the table like any
+        // other domain — `builtins/math.zig`'s record handler `mathOpCall`
+        // already delegates to the same `preparedOpCall`, so the single source
+        // of truth is unchanged. The prepared call site has no function object
+        // (pass `func_obj = null`) and only the realm `global` (no `globals`
+        // slot array, so pass an empty slice; every handler here prefers
+        // `host_call.global` and only consults `globals` on the bare-runtime
+        // `global == null` fallback, which never triggers on this path). Every
+        // id of these domains that the prepared-call gate
+        // (`nativeBuiltinSupportedWithoutFunctionObject`) admits is table-backed
+        // with `prepared_call_ok = true`, so the table dispatch is
+        // authoritative; the `error.TypeError` fall-through mirrors the
+        // corrupt-id behavior of the retired per-domain switch.
+        .math, .date, .number, .string, .json, .uri => {
+            return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, receiver, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
         },
-        .date => if (native_ref.id == @intFromEnum(builtins.date.StaticMethod.now)) {
-            return builtins.date.staticCall(ctx.runtime, native_ref.id, args);
-        },
-        .number => switch (native_ref.id) {
-            @intFromEnum(builtins.number.StaticMethod.parse_int) => return builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame),
-            @intFromEnum(builtins.number.StaticMethod.parse_float) => return builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame),
-            else => {},
-        },
-        .string => switch (native_ref.id) {
-            @intFromEnum(builtins.string.StaticMethod.from_char_code) => return string_ops.qjsStringFromCharCode(ctx, output, global, args),
-            @intFromEnum(builtins.string.PrototypeMethod.substring) => return string_ops.qjsStringPrototypeMethod(ctx, output, global, receiver, 1, args, caller_function, caller_frame),
-            else => {},
-        },
+        // RegExp keeps its dedicated branch: the `.regexp` record handler
+        // (`builtins.regexp.regexpCall`) requires a materialized function object
+        // (`host_call.func_obj orelse return error.TypeError`), which the
+        // prepared call site does not have, so it must not go through the table.
         .regexp => switch (native_ref.id) {
-            @intFromEnum(builtins.regexp.PrototypeMethod.test_) => {
+            @intFromEnum(method_ids.regexp.PrototypeMethod.test_) => {
                 if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, receiver, args, caller_function, caller_frame)) |value| return value;
             },
-            @intFromEnum(builtins.regexp.PrototypeMethod.exec) => {
+            @intFromEnum(method_ids.regexp.PrototypeMethod.exec) => {
                 if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, receiver, args, caller_function, caller_frame)) |value| return value;
             },
             else => {},
         },
-        .json => return builtin_glue.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
-        .uri => return builtin_glue.qjsUriCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        // Collection keeps its dedicated branch: the prepared path has
+        // dropped-result (`methodCallDroppedResult`) and AutoInit owner-class
+        // semantics that the `.collection` record handler
+        // (`builtins.collection.collectionCall`, which also requires a function
+        // object) does not replicate, so it must not go through the table.
         .collection => if (try callPreparedCollectionNativeTarget(ctx, global, receiver, target, args, caller_function, caller_frame)) |value| return value,
-        .array => if (try collection_vm.qjsArrayPreparedNativeCall(ctx, output, global, receiver, native_ref.id, args, caller_function, caller_frame)) |value| return value,
+        // Array now joins the uniform path: route the prepared (no-func-object)
+        // call through the same builtins-owned record table the slow record
+        // dispatch and the VM fast path use, so exec carries zero compile-time
+        // knowledge of `push`/`pop`. The prepared-call gate
+        // (`arrayNativeSupportedWithoutFunctionObject`) only admits `push`/`pop`,
+        // and the `.array` record handler (`builtins.array.arrayCall`) routes
+        // exactly those two ids to their func-object-free implementations when
+        // `func_obj == null`; every other Array method record returns the
+        // corrupt-id `error.TypeError` under null func_obj, which never fires
+        // here because the gate blocks it. The prepared site has no function
+        // object (pass `func_obj = null`) and only the realm `global` (no
+        // `globals` slot array, so pass an empty slice).
+        .array => return (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, receiver, native_ref, args, caller_function, caller_frame)) orelse error.TypeError,
         else => {},
     }
     return error.TypeError;
@@ -1109,115 +1126,41 @@ fn fastNativeMethodCall(
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    // QuickJS uniform dispatch: the `call_method` / `call_prepared` opcode hot
+    // path routes through the same builtins-owned internal record table the slow
+    // record dispatch (`call.zig:callNativeFunctionRecord`) and the plain-call
+    // VM fast path (`call_runtime.callNativeBuiltinRecordForVm`) use, so exec
+    // carries zero compile-time knowledge of the migrated builtins. The retired
+    // per-domain hot subset (math min/max primitives, the URI string fast path,
+    // Number.parse{Int,Float}, String.fromCharCode / substring primitive, the
+    // Array prototype hub, the collection / regexp / JSON record glue) is gone:
+    // every one of those domains is table-backed, and the table handler is the
+    // complete implementation, so a table HIT returns the final value here.
+    //
+    // This call site holds the materialized function object (pass non-null
+    // `func_obj = function_object`). Resolve the realm global from the function
+    // object (`objectRealmGlobal`, falling back to the caller `global`) exactly
+    // as the plain-call VM fast path does before
+    // `callNativeBuiltinRecordForVm` — a cross-realm method call
+    // (`other.Object.keys(...)`) must create its result and throw its errors in
+    // the callee's realm, not the caller's. The pre-table per-domain switch
+    // never routed the realm-sensitive `.object` domain here (it fell through to
+    // the realm-correct generic dispatch), so this resolution preserves that
+    // behavior under the unified path. No `globals` slot array exists at this
+    // site, so pass an empty slice; migrated handlers prefer `host_call.global`
+    // and only consult `globals` on the bare-runtime `global == null` fallback,
+    // which never triggers here.
+    //
+    // A table MISS returns null so the caller falls through to the array
+    // fast-array storage fallback (`qjsArrayMethodFastCall`, which keeps the
+    // name-based TypedArray slice/subarray path that has no native-builtin id)
+    // and then the generic value/bytecode dispatch — the same fall-through the
+    // non-table domains (`.atomics` / `.performance` / `.host` / `.promise`)
+    // already relied on.
     const function_object = property_ops.expectObject(func) catch return null;
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
-    switch (native_ref.domain) {
-        .math => switch (native_ref.id) {
-            7 => if (mathMinMaxPrimitive(args, false)) |val| return val,
-            8 => if (mathMinMaxPrimitive(args, true)) |val| return val,
-            else => {},
-        },
-        .uri => {
-            if (args.len >= 1 and args[0].isString()) {
-                return builtins.uri.call(ctx.runtime, native_ref.id, args[0]) catch |err| switch (err) {
-                    error.TypeError, error.URIError => err,
-                    else => err,
-                };
-            }
-        },
-        .number => switch (native_ref.id) {
-            @intFromEnum(builtins.number.StaticMethod.parse_int) => return @as(?core.JSValue, try builtin_glue.qjsGlobalParseInt(ctx, output, global, args, caller_function, caller_frame)),
-            @intFromEnum(builtins.number.StaticMethod.parse_float) => return @as(?core.JSValue, try builtin_glue.qjsGlobalParseFloat(ctx, output, global, args, caller_function, caller_frame)),
-            else => {},
-        },
-        .string => switch (native_ref.id) {
-            @intFromEnum(builtins.string.StaticMethod.from_char_code) => {
-                return @as(?core.JSValue, try string_ops.qjsStringFromCharCode(ctx, output, global, args));
-            },
-            @intFromEnum(builtins.string.PrototypeMethod.substring) => {
-                if (try fastStringSubstringPrimitive(ctx.runtime, this_value, args)) |value| return value;
-            },
-            else => {},
-        },
-        .date => switch (native_ref.id) {
-            @intFromEnum(builtins.date.StaticMethod.now) => return @as(?core.JSValue, try builtins.date.staticCall(ctx.runtime, native_ref.id, &.{})),
-            else => {},
-        },
-        .array => {
-            if (try collection_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame)) |value| return value;
-        },
-        .regexp => switch (native_ref.id) {
-            @intFromEnum(builtins.regexp.PrototypeMethod.test_) => {
-                if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-            },
-            @intFromEnum(builtins.regexp.PrototypeMethod.exec) => {
-                if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-            },
-            else => {},
-        },
-        .collection => {
-            if (try collection_vm.qjsCollectionNativeRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame)) |value| return value;
-        },
-        .json => return @as(?core.JSValue, try builtin_glue.qjsJsonCallForNativeRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame)),
-        else => {},
-    }
-    return null;
-}
-
-fn fastStringSubstringPrimitive(
-    rt: *core.JSRuntime,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-) !?core.JSValue {
-    if (!this_value.isString() or args.len > 2) return null;
-    const header = this_value.refHeader() orelse return null;
-    const string_value: *core.string.String = @fieldParentPtr("header", header);
-    const len_i64: i64 = @intCast(string_value.len());
-
-    const start_raw: i64 = if (args.len >= 1 and !args[0].isUndefined())
-        args[0].asInt32() orelse return null
-    else
-        0;
-    const end_raw: i64 = if (args.len >= 2 and !args[1].isUndefined())
-        args[1].asInt32() orelse return null
-    else
-        len_i64;
-
-    const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len_i64)));
-    const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len_i64)));
-    const lo = @min(start, end);
-    const hi = @max(start, end);
-    if (lo == 0 and hi == string_value.len()) return this_value.dup();
-
-    const out = try core.string.String.createSlice(rt, string_value, lo, hi - lo);
-    return out.value();
-}
-
-fn mathMinMaxPrimitive(args: []const core.JSValue, is_max: bool) ?core.JSValue {
-    if (args.len == 0) return core.JSValue.float64(if (is_max) -std.math.inf(f64) else std.math.inf(f64));
-    var result = if (is_max) -std.math.inf(f64) else std.math.inf(f64);
-    for (args) |arg| {
-        const number = primitiveMathNumber(arg) orelse return null;
-        if (!std.math.isNan(result)) {
-            result = if (std.math.isNan(number))
-                number
-            else if (is_max)
-                mathFmax(result, number)
-            else
-                mathFmin(result, number);
-        }
-    }
-    return value_ops.numberToValue(result);
-}
-
-fn mathFmin(a: f64, b: f64) f64 {
-    if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) | @as(u64, @bitCast(b)));
-    return if (a < b) a else b;
-}
-
-fn mathFmax(a: f64, b: f64) f64 {
-    if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) & @as(u64, @bitCast(b)));
-    return if (a < b) b else a;
+    const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
+    return builtin_dispatch.callInternalRecord(ctx, output, function_global, &.{}, function_object, this_value, native_ref, args, caller_function, caller_frame);
 }
 
 pub fn apply(

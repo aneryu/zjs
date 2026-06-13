@@ -6,6 +6,8 @@ const call_mod = @import("call.zig");
 const bytecode = @import("../bytecode/root.zig");
 const collection_vm = @import("array_ops.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
+const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
 const date_vm = @import("date_ops.zig");
 const frame_mod = @import("frame.zig");
 const json_vm = @import("json_ops.zig");
@@ -41,7 +43,6 @@ const qjsTypedArrayConstructToIndex = collection_vm.qjsTypedArrayConstructToInde
 const toPrimitiveForNumber = coercion_ops.toPrimitiveForNumber;
 const toStringBytesForSymbol = string_ops.toStringBytesForSymbol;
 const toStringForAnnexB = string_ops.toStringForAnnexB;
-const toUint32Number = coercion_ops.toUint32Number;
 
 pub fn qjsNumberFunctionCall(
     ctx: *core.JSContext,
@@ -273,211 +274,40 @@ pub fn qjsGlobalParseFloat(
     return value_ops.numberToValue(try builtins.number.parseFloatValue(ctx.runtime, string_value));
 }
 
-pub fn qjsMathCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const number = switch (id) {
-        1 => @abs(try mathArg(ctx, output, global, args, 0)),
-        2 => @floor(try mathArg(ctx, output, global, args, 0)),
-        3 => @ceil(try mathArg(ctx, output, global, args, 0)),
-        4 => qjsMathRound(try mathArg(ctx, output, global, args, 0)),
-        5 => @sqrt(try mathArg(ctx, output, global, args, 0)),
-        6 => qjsMathPow(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
-        7 => try qjsMathMinMax(ctx, output, global, args, false),
-        8 => try qjsMathMinMax(ctx, output, global, args, true),
-        9 => 0.5,
-        10 => builtins.math.exp(try mathArg(ctx, output, global, args, 0)),
-        11 => @sin(try mathArg(ctx, output, global, args, 0)),
-        12 => @cos(try mathArg(ctx, output, global, args, 0)),
-        13 => @tan(try mathArg(ctx, output, global, args, 0)),
-        14 => std.math.acos(try mathArg(ctx, output, global, args, 0)),
-        15 => std.math.asin(try mathArg(ctx, output, global, args, 0)),
-        16 => std.math.atan(try mathArg(ctx, output, global, args, 0)),
-        17 => std.math.atan2(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)),
-        18 => std.math.acosh(try mathArg(ctx, output, global, args, 0)),
-        19 => std.math.asinh(try mathArg(ctx, output, global, args, 0)),
-        20 => std.math.atanh(try mathArg(ctx, output, global, args, 0)),
-        21 => @log(try mathArg(ctx, output, global, args, 0)),
-        22 => blk: {
-            const a = try mathArg(ctx, output, global, args, 0);
-            break :blk if (std.math.isNan(a) or a == 0 or !std.math.isFinite(a)) a else if (a < 0) -@floor(@abs(a)) else @floor(a);
-        },
-        23 => std.math.cbrt(try mathArg(ctx, output, global, args, 0)),
-        24 => @as(f64, @floatFromInt(@clz(toUint32Number(try mathArg(ctx, output, global, args, 0))))),
-        25 => std.math.cosh(try mathArg(ctx, output, global, args, 0)),
-        26 => std.math.expm1(try mathArg(ctx, output, global, args, 0)),
-        27 => @as(f64, @floatCast(@as(f16, @floatCast(try mathArg(ctx, output, global, args, 0))))),
-        28 => @as(f64, @floatCast(@as(f32, @floatCast(try mathArg(ctx, output, global, args, 0))))),
-        29 => try qjsMathHypot(ctx, output, global, args),
-        30 => @as(f64, @floatFromInt(qjsMathImul(try mathArg(ctx, output, global, args, 0), try mathArg(ctx, output, global, args, 1)))),
-        31 => std.math.log1p(try mathArg(ctx, output, global, args, 0)),
-        32 => builtins.math.log2(try mathArg(ctx, output, global, args, 0)),
-        33 => @log10(try mathArg(ctx, output, global, args, 0)),
-        34 => qjsMathSign(try mathArg(ctx, output, global, args, 0)),
-        35 => std.math.sinh(try mathArg(ctx, output, global, args, 0)),
-        36 => std.math.tanh(try mathArg(ctx, output, global, args, 0)),
-        else => return error.TypeError,
-    };
-    return value_ops.numberToValue(number);
-}
-
-pub fn mathArg(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, index: usize) !f64 {
-    if (index >= args.len) return std.math.nan(f64);
-    return toMathNumber(ctx, output, global, args[index]);
-}
-
-pub fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
-    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    defer primitive.free(ctx.runtime);
-    if (primitive.isBigInt()) return error.TypeError;
-    const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
-    defer number_value.free(ctx.runtime);
-    return value_ops.numberValue(number_value) orelse std.math.nan(f64);
-}
-
-pub fn qjsMathMinMax(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, is_max: bool) !f64 {
-    if (args.len == 2) {
-        const a_val = args[0];
-        const b_val = args[1];
-        if (a_val.isInt() and b_val.isInt()) {
-            const a_i32 = a_val.asInt32().?;
-            const b_i32 = b_val.asInt32().?;
-            if (a_i32 == 0 and b_i32 == 0) return 0.0;
-            return @floatFromInt(if (is_max) (if (a_i32 > b_i32) a_i32 else b_i32) else (if (a_i32 < b_i32) a_i32 else b_i32));
-        }
-        if (a_val.isNumber() and b_val.isNumber()) {
-            const a = qjsPrimitiveMathNumber(a_val).?;
-            const b = qjsPrimitiveMathNumber(b_val).?;
-            if (std.math.isNan(a)) return a;
-            if (std.math.isNan(b)) return b;
-            return if (is_max) qjsFmax(a, b) else qjsFmin(a, b);
-        }
-    }
-    if (args.len == 0) return if (is_max) -std.math.inf(f64) else std.math.inf(f64);
-    if (qjsMathMinMaxPrimitiveFast(args, is_max)) |fast| return fast;
-    var result = try toMathNumber(ctx, output, global, args[0]);
-    for (args[1..]) |arg| {
-        const number = try toMathNumber(ctx, output, global, arg);
-        if (!std.math.isNan(result)) {
-            result = if (std.math.isNan(number))
-                number
-            else if (is_max)
-                qjsFmax(result, number)
-            else
-                qjsFmin(result, number);
-        }
-    }
-    return result;
-}
-
-pub fn qjsMathMinMaxPrimitiveFast(args: []const core.JSValue, is_max: bool) ?f64 {
-    var result = if (is_max) -std.math.inf(f64) else std.math.inf(f64);
-    for (args) |arg| {
-        const number = qjsPrimitiveMathNumber(arg) orelse return null;
-        if (!std.math.isNan(result)) {
-            result = if (std.math.isNan(number))
-                number
-            else if (is_max)
-                qjsFmax(result, number)
-            else
-                qjsFmin(result, number);
-        }
-    }
-    return result;
-}
-
-pub fn qjsPrimitiveMathNumber(value: core.JSValue) ?f64 {
-    if (value.isInt()) return @floatFromInt(value.asInt32().?);
-    if (value.isFloat64()) return value.asFloat64().?;
-    if (value.asBool()) |bool_value| return if (bool_value) 1 else 0;
-    if (value.isNull()) return 0;
-    if (value.isUndefined()) return std.math.nan(f64);
-    return null;
-}
-
-pub fn qjsFmin(a: f64, b: f64) f64 {
-    if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) | @as(u64, @bitCast(b)));
-    return if (a < b) a else b;
-}
-
-pub fn qjsFmax(a: f64, b: f64) f64 {
-    if (a == 0 and b == 0) return @bitCast(@as(u64, @bitCast(a)) & @as(u64, @bitCast(b)));
-    return if (a < b) b else a;
-}
-
-pub fn qjsMathPow(a: f64, b: f64) f64 {
-    if (!std.math.isFinite(b) and @abs(a) == 1) return std.math.nan(f64);
-    return std.math.pow(f64, a, b);
-}
-
-pub fn qjsMathRound(a: f64) f64 {
-    var bits: u64 = @bitCast(a);
-    const exponent = (bits >> 52) & 0x7ff;
-    if (exponent < 1023) {
-        if (exponent == 1022 and bits != 0xbfe0000000000000) {
-            bits = (bits & (@as(u64, 1) << 63)) | (@as(u64, 1023) << 52);
-        } else {
-            bits &= @as(u64, 1) << 63;
-        }
-    } else if (exponent < 1075) {
-        const sign = bits >> 63;
-        const one = @as(u64, 1) << @intCast(52 - (exponent - 1023));
-        const frac_mask = one - 1;
-        bits +%= (one >> 1) -% sign;
-        bits &= ~frac_mask;
-    }
-    return @bitCast(bits);
-}
-
-pub fn qjsMathHypot(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue) !f64 {
-    if (args.len == 0) return 0;
-    var result = try toMathNumber(ctx, output, global, args[0]);
-    if (args.len == 1) return @abs(result);
-    for (args[1..]) |arg| {
-        const number = try toMathNumber(ctx, output, global, arg);
-        result = std.math.hypot(result, number);
-    }
-    return result;
-}
-
-pub fn qjsMathImul(lhs: f64, rhs: f64) i32 {
-    const product = toUint32Number(lhs) *% toUint32Number(rhs);
-    return @bitCast(product);
-}
-
-pub fn qjsMathSign(value: f64) f64 {
-    if (std.math.isNan(value) or value == 0) return value;
-    return if (value < 0) -1 else 1;
-}
-
-pub fn qjsCollectionNativeRecord(
+/// `.array` domain VM-op dispatch glue. Mirrors the retired `call.zig`
+/// `callArrayNativeFunctionRecord`: resolve the Array static methods
+/// (`from`/`of`/`isArray`) and the Array.prototype method record hub against
+/// the realm-aware exec ops, which stay in exec because they are also reached
+/// by the VM fast-call path (`qjsArrayMethodFastCall`) and the `array.map`
+/// opcode fusion (`tryFastMapCallDense`) — BOTH.
+///
+/// `function_object` is nullable so the prepared (no-function-object) call path
+/// routes through this same record glue under the uniform dispatch model. Only
+/// `push`/`pop` reach here with `function_object == null` (the prepared-call
+/// gate admits no other Array id), and the prototype hub services those two
+/// without the function object. The Array statics (`from`/`of`/`isArray`) and
+/// every other prototype method need the materialized function object, so they
+/// surface the corrupt-id `error.TypeError` (via the hub) under null func_obj —
+/// unreachable in practice because the gate blocks those ids. The VM caller
+/// bytecode/frame are forwarded so the table path keeps the inline-cache hint
+/// the dedicated prepared bypass carried.
+pub fn qjsArrayNativeRecord(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    function_object: *core.Object,
+    function_object: ?*core.Object,
     id: u32,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.Bytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    return collection_vm.qjsCollectionNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame);
-}
-
-pub fn qjsMapGroupByRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    args: []const core.JSValue,
-    prototype: ?*core.Object,
-    caller_function: ?*const bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
-    return collection_vm.qjsMapGroupByRecord(ctx, output, global, args, prototype, caller_function, caller_frame);
+    return switch (id) {
+        @intFromEnum(method_ids.array.StaticMethod.is_array) => core.JSValue.boolean(args.len >= 1 and try builtins.array.isArrayValue(args[0])),
+        @intFromEnum(method_ids.array.StaticMethod.from) => collection_vm.qjsArrayFromCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
+        @intFromEnum(method_ids.array.StaticMethod.of) => collection_vm.qjsArrayOfCall(ctx, output, global, this_value, (function_object orelse return error.TypeError).value(), args, caller_function, caller_frame),
+        else => collection_vm.qjsArrayPrototypeNativeRecord(ctx, output, global, this_value, function_object, id, args, caller_function, caller_frame),
+    };
 }
 
 pub fn qjsBufferNativeRecord(
@@ -486,23 +316,23 @@ pub fn qjsBufferNativeRecord(
     id: u32,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (id == @intFromEnum(builtins.buffer.StaticMethod.is_view)) return qjsArrayBufferIsView(args);
-    if (builtins.buffer.arrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
+    if (id == @intFromEnum(method_ids.buffer.StaticMethod.is_view)) return qjsArrayBufferIsView(args);
+    if (buffer_id_lookup.arrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try qjsArrayBufferAccessor(ctx, receiver, accessor_name));
     }
-    if (builtins.buffer.sharedArrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
+    if (buffer_id_lookup.sharedArrayBufferAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try qjsSharedArrayBufferAccessor(ctx, receiver, accessor_name));
     }
-    if (builtins.buffer.dataViewAccessorNameFromRecordId(id)) |accessor_name| {
+    if (buffer_id_lookup.dataViewAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try qjsDataViewAccessor(ctx, receiver, accessor_name));
     }
-    if (builtins.buffer.typedArrayAccessorNameFromRecordId(id)) |accessor_name| {
+    if (buffer_id_lookup.typedArrayAccessorNameFromRecordId(id)) |accessor_name| {
         return @as(?core.JSValue, try qjsTypedArrayAccessor(ctx, receiver, accessor_name));
     }
     if (try qjsArrayBufferPrototypeNativeRecord(ctx, receiver, id, args)) |value| return value;
-    if (builtins.buffer.dataViewGetKindFromRecordId(id)) |method_id| {
+    if (buffer_id_lookup.dataViewGetKindFromRecordId(id)) |method_id| {
         const global = ctx.global orelse {
-            const value = try (builtins.buffer.dataViewGet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
+            const value = try (core.typed_array.dataViewGet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 error.RangeError => error.RangeError,
                 else => err,
@@ -516,9 +346,9 @@ pub fn qjsBufferNativeRecord(
         });
         return @as(?core.JSValue, value);
     }
-    if (builtins.buffer.dataViewSetKindFromRecordId(id)) |method_id| {
+    if (buffer_id_lookup.dataViewSetKindFromRecordId(id)) |method_id| {
         const global = ctx.global orelse {
-            const value = try (builtins.buffer.dataViewSet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
+            const value = try (core.typed_array.dataViewSet(ctx.runtime, receiver, method_id, args) catch |err| switch (err) {
                 error.TypeError => error.TypeError,
                 error.RangeError => error.RangeError,
                 else => err,
@@ -548,7 +378,7 @@ pub fn qjsDataViewConstructorArgs(
     args: []const core.JSValue,
 ) !DataViewConstructorArgs {
     if (args.len < 1) return error.TypeError;
-    try builtins.buffer.dataViewRequireArrayBuffer(args[0]);
+    try core.typed_array.dataViewRequireArrayBuffer(args[0]);
     const byte_offset = if (args.len >= 2)
         try qjsTypedArrayConstructToIndex(ctx, output, global, args[1])
     else
@@ -557,7 +387,7 @@ pub fn qjsDataViewConstructorArgs(
         try qjsTypedArrayConstructToIndex(ctx, output, global, args[2])
     else
         null;
-    try builtins.buffer.dataViewValidateConstructorRange(ctx.runtime, args[0], byte_offset, view_length);
+    try core.typed_array.dataViewValidateConstructorRange(ctx.runtime, args[0], byte_offset, view_length);
     return .{
         .byte_offset = byte_offset,
         .view_length = view_length,
@@ -572,10 +402,10 @@ pub fn qjsDataViewAccessor(ctx: *core.JSContext, receiver: core.JSValue, accesso
         return (object.typedArrayBuffer() orelse return error.TypeError).dup();
     }
     if (std.mem.eql(u8, accessor, "byteLength")) {
-        return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteLength(ctx.runtime, object)));
+        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteLength(ctx.runtime, object)));
     }
     if (std.mem.eql(u8, accessor, "byteOffset")) {
-        return core.JSValue.int32(@intCast(try builtins.buffer.dataViewByteOffset(ctx.runtime, object)));
+        return core.JSValue.int32(@intCast(try core.typed_array.dataViewByteOffset(ctx.runtime, object)));
     }
     return error.TypeError;
 }
@@ -588,12 +418,12 @@ pub fn qjsDataViewGet(
     method_id: u32,
     args: []const core.JSValue,
 ) !core.JSValue {
-    try builtins.buffer.dataViewRequire(receiver);
+    try core.typed_array.dataViewRequire(receiver);
     const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const index = try qjsTypedArrayConstructToIndex(ctx, output, global, index_arg);
     const little_endian = args.len >= 2 and value_ops.isTruthy(args[1]);
     const call_args = [_]core.JSValue{ lengthIndexValue(index), core.JSValue.boolean(little_endian) };
-    return builtins.buffer.dataViewGet(ctx.runtime, receiver, method_id, call_args[0..]);
+    return core.typed_array.dataViewGet(ctx.runtime, receiver, method_id, call_args[0..]);
 }
 
 pub fn qjsDataViewSet(
@@ -604,7 +434,7 @@ pub fn qjsDataViewSet(
     method_id: u32,
     args: []const core.JSValue,
 ) !core.JSValue {
-    try builtins.buffer.dataViewRejectImmutable(ctx.runtime, receiver);
+    try core.typed_array.dataViewRejectImmutable(ctx.runtime, receiver);
     const index_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const index = try qjsTypedArrayConstructToIndex(ctx, output, global, index_arg);
     const value_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
@@ -612,7 +442,7 @@ pub fn qjsDataViewSet(
     defer coerced_value.free(ctx.runtime);
     const little_endian = args.len >= 3 and value_ops.isTruthy(args[2]);
     const call_args = [_]core.JSValue{ lengthIndexValue(index), coerced_value, core.JSValue.boolean(little_endian) };
-    return builtins.buffer.dataViewSet(ctx.runtime, receiver, method_id, call_args[0..]);
+    return core.typed_array.dataViewSet(ctx.runtime, receiver, method_id, call_args[0..]);
 }
 
 pub fn qjsDataViewSetCoerceValue(
@@ -650,9 +480,9 @@ pub fn qjsFinalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSVa
     const held_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const unregister_token = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
     if (!qjsCanBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-    if (builtins.object.sameValue(target, held_value)) return error.TypeError;
+    if (target.sameValue(held_value)) return error.TypeError;
     if (!unregister_token.isUndefined() and !qjsCanBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
-    if (builtins.object.sameValue(target, receiver)) return core.JSValue.undefinedValue();
+    if (target.sameValue(receiver)) return core.JSValue.undefinedValue();
     try qjsFinalizationRegistryAppendCell(ctx.runtime, object, target, held_value, unregister_token);
     return core.JSValue.undefinedValue();
 }
@@ -711,7 +541,7 @@ pub fn qjsSymbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JS
 }
 
 pub fn qjsCreateBuiltinFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function = try builtins.function.nativeFunction(rt, name, length);
+    const function = try core.function.nativeFunction(rt, name, length);
     errdefer function.free(rt);
     const object = objectFromValue(function) orelse return error.TypeError;
     try object.setFunctionRealmGlobalPtr(rt, global);
@@ -843,7 +673,7 @@ pub fn storeRealmValue(rt: *core.JSRuntime, global: *core.Object, slot: core.obj
 pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try builtins.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunction(rt, name, length);
     defer method.free(rt);
     try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
 }
@@ -854,7 +684,7 @@ pub fn defineNativeDataMethod(rt: *core.JSRuntime, object: *core.Object, name: [
 pub fn defineNativeDataMethodWithNativeId(rt: *core.JSRuntime, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
     const atom_id = try rt.internAtom(name);
     defer rt.atoms.free(atom_id);
-    const method = try builtins.function.nativeFunction(rt, name, length);
+    const method = try core.function.nativeFunction(rt, name, length);
     defer method.free(rt);
     const method_object = property_ops.expectObject(method) catch return error.TypeError;
     method_object.nativeFunctionIdSlot().* = native_builtin_id;

@@ -1,9 +1,9 @@
 const core = @import("../core/root.zig");
 const builtins = @import("../builtins/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const bytecode_opcode = @import("../bytecode/opcode.zig");
 const function_bytecode = @import("../bytecode/function.zig");
 const closure_mod = @import("closure.zig");
-const collection_adapter = @import("collection_adapter.zig");
 const construct_mod = @import("construct.zig");
 const frame_mod = @import("frame.zig");
 const globals_mod = @import("globals.zig");
@@ -13,7 +13,7 @@ const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
-const builtin_glue = @import("builtin_glue.zig");
+const builtin_dispatch = @import("builtin_dispatch.zig");
 const coercion_ops = @import("coercion_ops.zig");
 const disposable_ops = @import("disposable_ops.zig");
 const exception_ops = @import("vm_exception_ops.zig");
@@ -21,8 +21,6 @@ const math_ops = @import("math_ops.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const reflect_ops = @import("reflect_ops.zig");
-const regexp_fastpath = @import("regexp_fastpath.zig");
-const string_ops = @import("string_ops.zig");
 const dtoa = @import("../libs/dtoa.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
@@ -826,7 +824,7 @@ pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object) ?
 }
 
 fn createPromiseBuiltinFunction(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8, length: i32) !core.JSValue {
-    const function = try builtins.function.nativeFunction(rt, name, length);
+    const function = try core.function.nativeFunction(rt, name, length);
     errdefer function.free(rt);
     const function_object = thisObject(function) orelse return error.TypeError;
     if (global) |global_object| {
@@ -928,7 +926,7 @@ test "createPromiseCapability roots builtin promise capability under GC" {
     const global = try core.Object.create(rt, core.class.ids.object, null);
     defer global.value().free(rt);
 
-    const constructor_value = try builtins.function.nativeFunction(rt, "Promise", 1);
+    const constructor_value = try core.function.nativeFunction(rt, "Promise", 1);
     var constructor_alive = true;
     defer if (constructor_alive) constructor_value.free(rt);
     const constructor = thisObject(constructor_value) orelse return error.TypeError;
@@ -1488,39 +1486,17 @@ pub fn callNativeFunctionRecord(
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
     const native_ref = core.function.decodeNativeBuiltinId(function_object.nativeFunctionIdSlot().*) orelse return null;
+    if (try builtin_dispatch.callInternalRecord(ctx, output, global, globals, function_object, this_value, native_ref, args, caller_function, caller_frame)) |value| return value;
     return switch (native_ref.domain) {
-        .math => {
-            if (native_ref.id == builtins.math.sum_precise_method_id) {
-                if (global) |global_object| return try math_ops.qjsMathSumPrecise(ctx, output, global_object, args, caller_function, caller_frame);
-                return error.TypeError;
-            }
-            if (global) |global_object| return try builtin_glue.qjsMathCall(ctx, output, global_object, native_ref.id, args);
-            const number = builtins.math.call(native_ref.id, args) catch return error.TypeError;
-            return value_ops.numberToValue(number);
-        },
-        .number => try callNumberNativeFunctionRecord(ctx, output, global, this_value, native_ref.id, args, caller_function, caller_frame),
-        .string => try callStringNativeFunctionRecord(ctx, output, global, this_value, native_ref.id, args, caller_function, caller_frame),
-        .date => try callDateNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
-        .array => try callArrayNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args),
-        .regexp => try callRegExpNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args),
-        .collection => try callCollectionNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
-        .buffer => try callBufferNativeFunctionRecord(ctx, this_value, native_ref.id, args),
-        .uri => try callUriNativeFunctionRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
+        // Migrated to the internal record table (rt.internal_builtins);
+        // reaching here means the id is not installed, which only happens
+        // for corrupt ids.
+        .math, .json, .uri, .number, .date, .error_object, .function, .primitive, .iterator, .collection, .reflect, .buffer, .string, .object, .array, .regexp => error.TypeError,
         .performance => try callPerformanceNativeFunctionRecord(ctx, native_ref.id),
-        .json => try callJsonNativeFunctionRecord(ctx, output, global, native_ref.id, args, caller_function, caller_frame),
         .atomics => {
             if (global) |global_object| return try call_runtime.qjsAtomicsCallForNativeRecord(ctx, output, global_object, native_ref.id, args, caller_function, caller_frame);
             return error.TypeError;
         },
-        .reflect => try callReflectNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
-        .object => try callObjectNativeFunctionRecord(ctx, output, global, globals, this_value, native_ref.id, args, caller_function, caller_frame),
-        .primitive => {
-            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            return @as(?core.JSValue, try object_ops.qjsPrimitivePrototypeMethod(ctx, output, active_global, function_object, this_value, native_ref.id, args, caller_function, caller_frame));
-        },
-        .function => try callFunctionNativeFunctionRecord(ctx, output, global, globals, this_value, native_ref.id, args),
-        .error_object => try callErrorNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
-        .iterator => try callIteratorNativeFunctionRecord(ctx, output, global, this_value, function_object, native_ref.id, args, caller_function, caller_frame),
         .host => try callHostGlobalNativeFunctionRecord(ctx, global, this_value, function_object, native_ref.id, args),
         .promise => try callPromiseStaticNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, native_ref.id, args),
     };
@@ -1581,10 +1557,10 @@ fn callPromiseStaticNativeFunctionRecord(
     // capability machinery (element callbacks, custom capability support);
     // everything else takes the prototype-directed static call below.
     const combinator: ?PromiseCombinatorMode = switch (id) {
-        @intFromEnum(builtins.promise.LegacyStaticMethod.all) => .all,
-        @intFromEnum(builtins.promise.LegacyStaticMethod.race) => .race,
-        @intFromEnum(builtins.promise.LegacyStaticMethod.all_settled) => .all_settled,
-        @intFromEnum(builtins.promise.LegacyStaticMethod.any) => .any,
+        @intFromEnum(method_ids.promise.LegacyStaticMethod.all) => .all,
+        @intFromEnum(method_ids.promise.LegacyStaticMethod.race) => .race,
+        @intFromEnum(method_ids.promise.LegacyStaticMethod.all_settled) => .all_settled,
+        @intFromEnum(method_ids.promise.LegacyStaticMethod.any) => .any,
         else => null,
     };
     if (combinator) |mode| {
@@ -1609,7 +1585,7 @@ fn callPromiseStaticNativeFunctionRecord(
     const receiver = thisObject(this_value) orelse return error.TypeError;
     if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
     if (!try constructorNameEql(ctx.runtime, receiver, "Promise")) return error.TypeError;
-    if (id == @intFromEnum(builtins.promise.LegacyStaticMethod.try_)) {
+    if (id == @intFromEnum(method_ids.promise.LegacyStaticMethod.try_)) {
         const promise_proto = constructorPrototype(ctx.runtime, receiver);
         const callback = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const callback_args = if (args.len >= 1) args[1..] else args[0..0];
@@ -1627,183 +1603,23 @@ fn callPromiseStaticNativeFunctionRecord(
     };
 }
 
-fn callFunctionNativeFunctionRecord(
+/// `Function.prototype.bind` body. Stays in exec because `createBoundFunction`
+/// and its proxy-aware property helpers are call.zig internals (covered by the
+/// in-file tests); the `.function` builtins record handler delegates here. The
+/// VM's own bind fast path (call_runtime.callNativeBuiltinRecordForVm) also
+/// routes back through this via callNativeFunctionRecord (BOTH).
+pub fn qjsFunctionBindCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
     globals: []globals_mod.Slot,
     this_value: core.JSValue,
-    id: u32,
     args: []const core.JSValue,
-) HostError!?core.JSValue {
-    return switch (id) {
-        @intFromEnum(builtins.function.PrototypeMethod.to_string) => @as(?core.JSValue, try string_ops.qjsFunctionToStringCall(ctx, this_value)),
-        @intFromEnum(builtins.function.PrototypeMethod.bind) => {
-            if (thisObject(this_value) == null or !call_runtime.isCallableValue(this_value)) return error.TypeError;
-            const bound_this = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const bound_args = if (args.len >= 1) args[1..] else args[0..0];
-            return @as(?core.JSValue, try createBoundFunction(ctx, output, global, globals, this_value, bound_this, bound_args));
-        },
-        else => error.TypeError,
-    };
-}
-
-fn callErrorNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!?core.JSValue {
-    if (id == @intFromEnum(builtins.error_.StaticMethod.capture_stack_trace)) {
-        const receiver = thisObject(this_value) orelse return error.TypeError;
-        if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
-        if (!try constructorNameEql(ctx.runtime, receiver, "Error")) return error.TypeError;
-        if (try activeGlobalObject(ctx.runtime, global, globals)) |global_object| {
-            return @as(?core.JSValue, try call_runtime.qjsErrorCaptureStackTrace(ctx, output, global_object, args));
-        }
-        return error.TypeError;
-    }
-    return switch (id) {
-        @intFromEnum(builtins.error_.PrototypeMethod.to_string) => blk: {
-            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            break :blk @as(?core.JSValue, try string_ops.qjsErrorToStringCall(ctx, output, active_global, this_value, caller_function, caller_frame));
-        },
-        @intFromEnum(builtins.error_.PrototypeMethod.stack_getter) => blk: {
-            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            break :blk @as(?core.JSValue, try call_runtime.qjsErrorStackGetter(ctx, output, active_global, this_value));
-        },
-        @intFromEnum(builtins.error_.PrototypeMethod.stack_setter) => blk: {
-            const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-            break :blk @as(?core.JSValue, try call_runtime.qjsErrorStackSetter(ctx, output, active_global, this_value, function_object, args, caller_function, caller_frame));
-        },
-        else => error.TypeError,
-    };
-}
-
-fn callIteratorNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!?core.JSValue {
-    const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-    if (try call_runtime.qjsIteratorCallForNativeRecord(ctx, output, active_global, this_value, id, args, caller_function, caller_frame)) |value| return value;
-    return error.TypeError;
-}
-
-fn callObjectNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    if (global) |global_object| return try object_ops.qjsObjectCallForNativeRecord(ctx, output, global_object, this_value, id, args, caller_function, caller_frame);
-    if (builtins.object.prototypeMethodOrdinal(id)) |method| {
-        return objectPrototypeMethodCall(ctx, output, global, globals, method, this_value, args);
-    }
-    return callObjectStatic(ctx, output, global, globals, id, args) catch |err| switch (err) {
-        error.TypeError => error.TypeError,
-        else => err,
-    };
-}
-
-fn callReflectNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) HostError!core.JSValue {
-    if (id == @intFromEnum(builtins.reflect_proxy.StaticMethod.proxy_revoke)) {
-        return revokeProxy(ctx.runtime, function_object);
-    }
-    if (id == @intFromEnum(builtins.reflect_proxy.StaticMethod.proxy_revocable)) {
-        const receiver = thisObject(this_value) orelse return error.TypeError;
-        if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
-        if (!try constructorNameEql(ctx.runtime, receiver, "Proxy")) return error.TypeError;
-        return reflect_ops.proxyRevocable(ctx.runtime, global, args);
-    }
-    if (global) |global_object| return try call_runtime.qjsReflectCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
-    const reflect_ids = builtins.reflect_proxy.StaticMethod;
-    return switch (id) {
-        @intFromEnum(reflect_ids.define_property) => try reflect_ops.reflectDefineProperty(ctx.runtime, args),
-        @intFromEnum(reflect_ids.get) => try reflect_ops.reflectGet(ctx.runtime, args),
-        @intFromEnum(reflect_ids.set) => try reflect_ops.reflectSet(ctx, output, global, args),
-        @intFromEnum(reflect_ids.has) => try reflect_ops.reflectHas(ctx, output, global, globals, args),
-        @intFromEnum(reflect_ids.construct) => try reflect_ops.reflectConstruct(ctx.runtime, args, globals),
-        @intFromEnum(reflect_ids.apply) => try reflect_ops.reflectApply(ctx, output, global, globals, args),
-        else => error.TypeError,
-    };
-}
-
-fn callJsonNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const json_mod = builtins.json;
-    return switch (id) {
-        @intFromEnum(json_mod.StaticMethod.is_raw_json) => core.JSValue.boolean(args.len >= 1 and json_mod.isRawJSON(args[0])),
-        @intFromEnum(json_mod.StaticMethod.raw_json) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return json_mod.rawJSON(ctx.runtime, value) catch |err| switch (err) {
-                error.SyntaxError => error.SyntaxError,
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        },
-        @intFromEnum(json_mod.StaticMethod.parse) => {
-            if (global) |global_object| {
-                if (try json_vm.qjsJsonParseCall(ctx, output, global_object, args, caller_function, caller_frame)) |value| return value;
-                return error.TypeError;
-            }
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return json_mod.parse(ctx.runtime, global, value) catch |err| switch (err) {
-                error.SyntaxError => error.SyntaxError,
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        },
-        @intFromEnum(json_mod.StaticMethod.stringify) => {
-            if (global) |global_object| {
-                if (try json_vm.qjsJsonStringifyCall(ctx, output, global_object, args, caller_function, caller_frame)) |value| return value;
-                return error.TypeError;
-            }
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const replacer = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-            const space = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-            return json_mod.stringify(ctx.runtime, value, replacer, space) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        },
-        else => error.TypeError,
-    };
+    if (thisObject(this_value) == null or !call_runtime.isCallableValue(this_value)) return error.TypeError;
+    const bound_this = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const bound_args = if (args.len >= 1) args[1..] else args[0..0];
+    return createBoundFunction(ctx, output, global, globals, this_value, bound_this, bound_args);
 }
 
 fn callPerformanceNativeFunctionRecord(ctx: *core.JSContext, id: u32) !core.JSValue {
@@ -1811,372 +1627,6 @@ fn callPerformanceNativeFunctionRecord(ctx: *core.JSContext, id: u32) !core.JSVa
         1 => core.JSValue.float64(performanceNowMs() - ctx.runtime.performance_time_origin_ms),
         else => error.TypeError,
     };
-}
-
-fn callUriNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (global) |global_object| {
-        return builtin_glue.qjsUriCallForNativeRecord(ctx, output, global_object, id, args, caller_function, caller_frame);
-    }
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    return builtins.uri.call(ctx.runtime, id, input) catch |err| switch (err) {
-        error.TypeError, error.URIError => err,
-        else => err,
-    };
-}
-
-fn callNumberNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const number_mod = builtins.number;
-    return switch (id) {
-        @intFromEnum(number_mod.StaticMethod.parse_int) => {
-            if (global) |global_object| return builtin_glue.qjsGlobalParseInt(ctx, output, global_object, args, caller_function, caller_frame);
-            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const radix = if (args.len >= 2) args[1] else null;
-            return value_ops.numberToValue(try number_mod.parseIntValue(ctx.runtime, input, radix));
-        },
-        @intFromEnum(number_mod.StaticMethod.parse_float) => {
-            if (global) |global_object| return builtin_glue.qjsGlobalParseFloat(ctx, output, global_object, args, caller_function, caller_frame);
-            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return value_ops.numberToValue(try number_mod.parseFloatValue(ctx.runtime, input));
-        },
-        @intFromEnum(number_mod.StaticMethod.is_nan) => {
-            const active_global = global orelse return error.TypeError;
-            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, active_global, this_value, args, true);
-        },
-        @intFromEnum(number_mod.StaticMethod.is_finite) => {
-            const active_global = global orelse return error.TypeError;
-            return builtin_glue.qjsGlobalIsNaNOrFinite(ctx, output, active_global, this_value, args, false);
-        },
-        @intFromEnum(number_mod.StaticMethod.is_integer) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return core.JSValue.boolean(numberIsInteger(value));
-        },
-        @intFromEnum(number_mod.StaticMethod.is_safe_integer) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            if (!numberIsInteger(value)) return core.JSValue.boolean(false);
-            const number = value_ops.numberValue(value) orelse return core.JSValue.boolean(false);
-            return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
-        },
-        @intFromEnum(number_mod.PrototypeMethod.to_string),
-        @intFromEnum(number_mod.PrototypeMethod.to_locale_string),
-        @intFromEnum(number_mod.PrototypeMethod.to_fixed),
-        @intFromEnum(number_mod.PrototypeMethod.to_exponential),
-        @intFromEnum(number_mod.PrototypeMethod.to_precision),
-        => {
-            const active_global = global orelse return error.TypeError;
-            return object_ops.qjsNumberPrototypeMethod(ctx, output, active_global, this_value, id, args, null, null);
-        },
-        else => error.TypeError,
-    };
-}
-
-fn callStringNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (id == @intFromEnum(builtins.string.PrototypeMethod.iterator_next)) {
-        const receiver = thisObject(this_value) orelse return error.TypeError;
-        if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
-        return builtins.string.iteratorNext(ctx.runtime, this_value) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    const active_global = global orelse return error.TypeError;
-    return switch (id) {
-        @intFromEnum(builtins.string.ConstructorMethod.call) => string_ops.qjsStringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
-        @intFromEnum(builtins.string.StaticMethod.from_char_code) => string_ops.qjsStringFromCharCode(ctx, output, active_global, args),
-        @intFromEnum(builtins.string.StaticMethod.from_code_point) => string_ops.qjsStringFromCodePoint(ctx, output, active_global, args),
-        else => {
-            const method_id = builtins.string.decodePrototypeMethodId(id) orelse return error.TypeError;
-            return string_ops.qjsStringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, null, null);
-        },
-    };
-}
-
-fn callDateNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (id == @intFromEnum(builtins.date.ConstructorMethod.construct)) {
-        return builtins.date.call(ctx.runtime, args);
-    }
-    if (id == @intFromEnum(builtins.date.PrototypeMethod.to_primitive)) {
-        const active_global = global orelse object_ops.objectRealmGlobal(function_object) orelse ctx.global orelse return error.TypeError;
-        return builtin_glue.qjsDateToPrimitiveNativeRecord(ctx, output, active_global, this_value, args, caller_function, caller_frame);
-    }
-    if (id == @intFromEnum(builtins.date.StaticMethod.utc)) {
-        const active_global = global orelse return error.TypeError;
-        var coerced_args: [7]core.JSValue = undefined;
-        var coerced_len: usize = 0;
-        defer {
-            for (coerced_args[0..coerced_len]) |value| value.free(ctx.runtime);
-        }
-        while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
-            coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, active_global, args[coerced_len], null, null);
-        }
-        return builtins.date.staticCall(ctx.runtime, id, coerced_args[0..coerced_len]) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    if (builtins.date.decodePrototypeMethodId(id)) |method_id| {
-        const active_global = global orelse return error.TypeError;
-        return object_ops.qjsDatePrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    return builtins.date.staticCall(ctx.runtime, id, args) catch |err| switch (err) {
-        error.TypeError => error.TypeError,
-        else => err,
-    };
-}
-
-fn callArrayNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const active_global = global orelse return error.TypeError;
-    return switch (id) {
-        @intFromEnum(builtins.array.StaticMethod.is_array) => core.JSValue.boolean(args.len >= 1 and try builtins.array.isArrayValue(args[0])),
-        @intFromEnum(builtins.array.StaticMethod.from) => {
-            if (try array_ops.qjsArrayFromCall(ctx, output, active_global, this_value, function_object.value(), args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        @intFromEnum(builtins.array.StaticMethod.of) => {
-            if (try array_ops.qjsArrayOfCall(ctx, output, active_global, this_value, function_object.value(), args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        else => {
-            if (try array_ops.qjsArrayPrototypeNativeRecord(ctx, output, active_global, this_value, function_object, id, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-    };
-}
-
-fn callRegExpNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (id == @intFromEnum(builtins.regexp.ConstructorMethod.construct)) {
-        const active_global = global orelse return error.TypeError;
-        return regexp_fastpath.qjsRegExpFunctionCall(ctx, output, active_global, args, null, null);
-    }
-    if (id == @intFromEnum(builtins.regexp.StaticMethod.escape)) return builtins.regexp.escape(ctx.runtime, args);
-    if (builtins.regexp.legacyAccessorMethodFromId(id)) |method| {
-        const active_global = global orelse return error.TypeError;
-        return regexp_fastpath.qjsRegExpLegacyAccessor(ctx, output, active_global, this_value, function_object, method, args, null, null);
-    }
-    if (builtins.regexp.accessorNameFromId(id)) |accessor_name| {
-        const active_global = global orelse return error.TypeError;
-        if (try regexp_fastpath.qjsRegExpAccessor(ctx, output, active_global, this_value, function_object.value(), accessor_name, null, null)) |value| return value;
-        return builtins.regexp.accessor(ctx.runtime, this_value, accessor_name) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        };
-    }
-    const method_id = builtins.regexp.decodePrototypeMethodId(id) orelse return error.TypeError;
-    return callRegExpPrototypeNativeFunctionRecord(ctx, output, global, this_value, function_object, method_id, args);
-}
-
-fn callRegExpPrototypeNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    method_id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    return switch (method_id) {
-        1 => {
-            const active_global = global orelse return error.TypeError;
-            return string_ops.qjsRegExpToString(ctx, output, active_global, this_value, null, null);
-        },
-        2 => {
-            const active_global = global orelse return error.TypeError;
-            if (try regexp_fastpath.qjsRegExpTestMethod(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        3 => {
-            const active_global = global orelse return error.TypeError;
-            if (try regexp_fastpath.qjsRegExpExecMethod(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        4 => {
-            const active_global = global orelse return error.TypeError;
-            if (try string_ops.qjsRegExpSymbolSearch(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        5 => {
-            const active_global = global orelse return error.TypeError;
-            if (try string_ops.qjsRegExpSymbolMatch(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        6 => {
-            const active_global = global orelse return error.TypeError;
-            if (try string_ops.qjsRegExpSymbolMatchAll(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        7 => {
-            const active_global = global orelse return error.TypeError;
-            if (try string_ops.qjsRegExpSymbolReplace(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        8 => {
-            const active_global = global orelse return error.TypeError;
-            if (try string_ops.qjsRegExpSymbolSplit(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        9 => {
-            const active_global = function_object.functionRealmGlobalPtr() orelse global orelse return error.TypeError;
-            if (try regexp_fastpath.qjsRegExpCompile(ctx, output, active_global, this_value, args, null, null)) |value| return value;
-            return error.TypeError;
-        },
-        else => error.TypeError,
-    };
-}
-
-fn callCollectionNativeFunctionRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    if (id == @intFromEnum(builtins.collection.StaticMethod.group_by)) {
-        return collectionGroupByNativeRecord(ctx, output, global, globals, this_value, args, caller_function, caller_frame);
-    }
-    const active_global = global orelse return collectionNativeRecordWithoutGlobal(ctx, globals, this_value, function_object, id, args);
-    if (try builtin_glue.qjsCollectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
-    return error.TypeError;
-}
-
-fn collectionGroupByNativeRecord(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    args: []const core.JSValue,
-    caller_function: ?*const function_bytecode.Bytecode,
-    caller_frame: ?*frame_mod.Frame,
-) !core.JSValue {
-    const receiver = thisObject(this_value) orelse return error.TypeError;
-    if (!try constructorNameEql(ctx.runtime, receiver, "Map")) return error.TypeError;
-    const prototype = constructorPrototype(ctx.runtime, receiver);
-    if (global) |active_global| {
-        if (try builtin_glue.qjsMapGroupByRecord(ctx, output, active_global, args, prototype, caller_function, caller_frame)) |value| return value;
-        return error.TypeError;
-    }
-    return builtins.collection.groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(globals)) catch |err| switch (err) {
-        error.TypeError => error.TypeError,
-        else => err,
-    };
-}
-
-fn collectionNativeRecordWithoutGlobal(
-    ctx: *core.JSContext,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    const receiver = thisObject(this_value) orelse return error.TypeError;
-    const owner_class = function_object.collectionMethodOwnerClass();
-    if (owner_class != core.class.invalid_class_id) {
-        if (receiver.class_id != owner_class) return error.TypeError;
-    }
-    return switch (id) {
-        @intFromEnum(builtins.collection.PrototypeMethod.set),
-        @intFromEnum(builtins.collection.PrototypeMethod.get),
-        @intFromEnum(builtins.collection.PrototypeMethod.has),
-        @intFromEnum(builtins.collection.PrototypeMethod.delete),
-        @intFromEnum(builtins.collection.PrototypeMethod.clear),
-        @intFromEnum(builtins.collection.PrototypeMethod.add),
-        @intFromEnum(builtins.collection.PrototypeMethod.keys),
-        @intFromEnum(builtins.collection.PrototypeMethod.values),
-        @intFromEnum(builtins.collection.PrototypeMethod.entries),
-        @intFromEnum(builtins.collection.PrototypeMethod.for_each),
-        @intFromEnum(builtins.collection.PrototypeMethod.get_or_insert),
-        @intFromEnum(builtins.collection.PrototypeMethod.get_or_insert_computed),
-        @intFromEnum(builtins.collection.PrototypeMethod.size_getter),
-        @intFromEnum(builtins.collection.PrototypeMethod.difference),
-        @intFromEnum(builtins.collection.PrototypeMethod.intersection),
-        @intFromEnum(builtins.collection.PrototypeMethod.is_disjoint_from),
-        @intFromEnum(builtins.collection.PrototypeMethod.is_subset_of),
-        @intFromEnum(builtins.collection.PrototypeMethod.is_superset_of),
-        @intFromEnum(builtins.collection.PrototypeMethod.symmetric_difference),
-        @intFromEnum(builtins.collection.PrototypeMethod.union_),
-        => builtins.collection.methodCallWithContextAndHost(ctx, this_value, id, args, collection_adapter.host(globals)) catch |err| switch (err) {
-            error.TypeError => error.TypeError,
-            else => err,
-        },
-        @intFromEnum(builtins.collection.PrototypeMethod.iterator_next) => {
-            if (receiver.class_id != core.class.ids.map_iterator and receiver.class_id != core.class.ids.set_iterator) return error.TypeError;
-            return builtins.collection.methodCall(ctx.runtime, this_value, id, args) catch |err| switch (err) {
-                error.TypeError => error.TypeError,
-                else => err,
-            };
-        },
-        else => error.TypeError,
-    };
-}
-
-fn callBufferNativeFunctionRecord(
-    ctx: *core.JSContext,
-    this_value: core.JSValue,
-    id: u32,
-    args: []const core.JSValue,
-) !core.JSValue {
-    if (try builtin_glue.qjsBufferNativeRecord(ctx, this_value, id, args)) |value| return value;
-    return error.TypeError;
 }
 
 pub fn createRealmObject(rt: *core.JSRuntime) HostError!core.JSValue {
@@ -2303,10 +1753,12 @@ const ActiveRootSymbolProbe = struct {
 test "reflect construct roots argument list while resolving prototype" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
+    const ctx = try core.JSContext.create(rt);
+    defer ctx.destroy();
 
-    const target = try builtins.function.nativeFunction(rt, "Array", 1);
+    const target = try core.function.nativeFunction(rt, "Array", 1);
     defer target.free(rt);
-    const new_target = try builtins.function.nativeFunction(rt, "Array", 1);
+    const new_target = try core.function.nativeFunction(rt, "Array", 1);
     defer new_target.free(rt);
     const new_target_object = thisObject(new_target) orelse return error.TypeError;
     try new_target_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
@@ -2332,7 +1784,7 @@ test "reflect construct roots argument list while resolving prototype" {
 
     var globals = [_]globals_mod.Slot{};
     const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
-    const result = try reflect_ops.reflectConstruct(rt, &reflect_args, globals[0..]);
+    const result = try reflect_ops.reflectConstruct(ctx, &reflect_args, globals[0..]);
     var result_alive = true;
     defer if (result_alive) result.free(rt);
 
@@ -2351,7 +1803,15 @@ pub fn realmPrototypeKey(rt: *core.JSRuntime, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(rt.memory.allocator, "__realm_{s}_proto", .{name});
 }
 
-fn callObjectStatic(
+/// Bare-runtime (no realm global) `Object.*` static fallback. Reached only via
+/// the `.object` builtins record handler (`builtins.object.objectCall`) when the
+/// host record path supplies no realm global; the realm path takes
+/// `builtins.object.objectCallForNativeRecord` instead. Stays in call.zig because
+/// it leans on the shared call.zig property/descriptor helper web
+/// (`expectObjectArg`, `descriptorFromObject`, `objectStaticToObjectValue`, ...)
+/// that the rest of this file owns — the BOTH split keeps the core here and the
+/// thin dispatch entry in builtins.
+pub fn callObjectStatic(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
@@ -2360,7 +1820,7 @@ fn callObjectStatic(
     args: []const core.JSValue,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    if (id == @intFromEnum(builtins.object.StaticMethod.assign)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.assign)) {
         if (args.len < 1) return error.TypeError;
         const target_value = try objectStaticToObjectValue(rt, global, args[0]);
         errdefer target_value.free(rt);
@@ -2383,7 +1843,7 @@ fn callObjectStatic(
         }
         return target_value;
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.create)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.create)) {
         if (args.len < 1) return error.TypeError;
         const proto: ?*core.Object = if (args[0].isNull())
             null
@@ -2397,30 +1857,30 @@ fn callObjectStatic(
         }
         return object.value();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.is)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.is)) {
         const lhs = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const rhs = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-        return core.JSValue.boolean(builtins.object.sameValue(lhs, rhs));
+        return core.JSValue.boolean(lhs.sameValue(rhs));
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.keys)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.keys)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
         return builtins.object.ownEntriesArray(rt, object_value, .keys);
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.values)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.values)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
         return builtins.object.ownEntriesArray(rt, object_value, .values);
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.entries)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.entries)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
         return builtins.object.ownEntriesArray(rt, object_value, .entries);
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_descriptor)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_descriptor)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -2433,7 +1893,7 @@ fn callObjectStatic(
         defer desc.destroy(rt);
         return descriptorObject(rt, desc);
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_descriptors)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_descriptors)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -2452,7 +1912,7 @@ fn callObjectStatic(
         }
         return out.value();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_names)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_names)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -2470,7 +1930,7 @@ fn callObjectStatic(
         }
         return out.value();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.get_own_property_symbols)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.get_own_property_symbols)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -2485,7 +1945,7 @@ fn callObjectStatic(
         }
         return out.value();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.has_own)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.has_own)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -2499,7 +1959,7 @@ fn callObjectStatic(
         }
         return core.JSValue.boolean(false);
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.get_prototype_of)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.get_prototype_of)) {
         if (args.len < 1) return error.TypeError;
         const object_value = try objectStaticToObjectValue(rt, global, args[0]);
         defer object_value.free(rt);
@@ -2507,7 +1967,7 @@ fn callObjectStatic(
         if (object.getPrototype()) |prototype| return prototype.value().dup();
         return core.JSValue.nullValue();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.set_prototype_of)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.set_prototype_of)) {
         if (args.len < 2) return error.TypeError;
         if (args[0].isNull() or args[0].isUndefined()) return error.TypeError;
         const prototype: ?*core.Object = if (args[1].isNull())
@@ -2521,40 +1981,40 @@ fn callObjectStatic(
         };
         return args[0].dup();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.is_extensible)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.is_extensible)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return core.JSValue.boolean(false);
         return core.JSValue.boolean(object.isExtensible());
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.prevent_extensions)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.prevent_extensions)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return target_value.dup();
         object.preventExtensions();
         return target_value.dup();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.seal)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.seal)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return target_value.dup();
         try object.seal(rt);
         return target_value.dup();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.is_sealed)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.is_sealed)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return core.JSValue.boolean(true);
         return core.JSValue.boolean(try objectIsSealed(rt, object));
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.is_frozen)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.is_frozen)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return core.JSValue.boolean(true);
         return core.JSValue.boolean(try objectIsFrozen(rt, object));
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.freeze)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.freeze)) {
         const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const object = thisObject(target_value) orelse return target_value.dup();
         try object.freeze(rt);
         return target_value.dup();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.define_property)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.define_property)) {
         if (args.len < 3) return error.TypeError;
         const object = try expectObjectArg(args[0]);
         const key = try atomFromPropertyKey(rt, args[1]);
@@ -2569,7 +2029,7 @@ fn callObjectStatic(
         };
         return object.value().dup();
     }
-    if (id == @intFromEnum(builtins.object.StaticMethod.define_properties)) {
+    if (id == @intFromEnum(method_ids.object.StaticMethod.define_properties)) {
         if (args.len < 2) return error.TypeError;
         const object = try expectObjectArg(args[0]);
         try definePropertiesFromObject(rt, object, args[1]);
@@ -2694,7 +2154,11 @@ fn objectIsFrozen(rt: *core.JSRuntime, object: *core.Object) !bool {
     return true;
 }
 
-fn objectPrototypeMethodCall(
+/// Bare-runtime (no realm global) `Object.prototype.*` fallback, dispatched by
+/// the `prototypeMethodOrdinal` mapping. Like `callObjectStatic`, this is the
+/// `global == null` branch of the `.object` builtins record handler and stays in
+/// call.zig alongside the shared property helpers it depends on.
+pub fn objectPrototypeMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: ?*core.Object,
@@ -2825,11 +2289,6 @@ pub fn isCallableObjectValue(value: core.JSValue) bool {
         object.class_id == core.class.ids.c_closure or
         object.class_id == core.class.ids.bound_function or
         object.class_id == core.class.ids.bytecode_function;
-}
-
-fn numberIsInteger(value: core.JSValue) bool {
-    const number = value_ops.numberValue(value) orelse return false;
-    return std.math.isFinite(number) and @floor(number) == number;
 }
 
 pub fn primitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, primitive: core.JSValue, prototype: ?*core.Object) !core.JSValue {
@@ -3009,7 +2468,7 @@ test "createBoundFunction roots bound this and args while creating function" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
-    const target = try builtins.function.nativeFunction(rt, "target", 0);
+    const target = try core.function.nativeFunction(rt, "target", 0);
     defer target.free(rt);
 
     const this_atom = try rt.atoms.newValueSymbol("gc-bound-this-symbol");
@@ -3053,7 +2512,7 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const target = try builtins.function.nativeFunction(rt, "get [Symbol.species]", 0);
+    const target = try core.function.nativeFunction(rt, "get [Symbol.species]", 0);
     defer target.free(rt);
     const target_object = thisObject(target) orelse return error.TypeError;
     target_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.species_getter));
@@ -3447,15 +2906,6 @@ pub fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Ob
     if (!prototype_value.isObject()) return null;
     const header = prototype_value.refHeader() orelse return null;
     return @fieldParentPtr("header", header);
-}
-
-fn revokeProxy(rt: *core.JSRuntime, function_object: *core.Object) !core.JSValue {
-    const proxy_slot = function_object.functionProxyRevokeTargetSlot();
-    const proxy_value = function_object.takeOptionalValueSlot(proxy_slot) orelse return core.JSValue.undefinedValue();
-    defer proxy_value.free(rt);
-    const proxy = thisObject(proxy_value) orelse return core.JSValue.undefinedValue();
-    proxy.clearOptionalValueSlot(rt, proxy.proxyHandlerSlot());
-    return core.JSValue.undefinedValue();
 }
 
 fn hostOutputValues(rt: *core.JSRuntime, output: ?*std.Io.Writer, values: []const core.JSValue) HostError!core.JSValue {

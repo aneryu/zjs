@@ -1,6 +1,5 @@
 //! for-in/for-of iterator records, pending-error iterator close paths and VM iterator helpers.
 
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const iter_vm = @import("iterator_ops.zig");
@@ -63,8 +62,8 @@ pub fn createForInIterator(
         var current: ?*core.Object = try property_ops.expectObject(source_val);
         const root = current;
         while (current) |object| {
-            if (root != null and object == root.? and builtins.buffer.isTypedArrayObject(object)) {
-                const length = builtins.buffer.typedArrayLength(rt, object) catch 0;
+            if (root != null and object == root.? and core.object.isTypedArrayObject(object)) {
+                const length = core.object.typedArrayLength(rt, object) catch 0;
                 var index: u32 = 0;
                 while (index < length) : (index += 1) {
                     const key = core.atom.atomFromUInt32(index);
@@ -154,7 +153,7 @@ fn simpleForInEnumerableStringKeyCount(rt: *core.JSRuntime, source: *core.Object
 
 pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) bool {
     if (source.class_id != core.class.ids.object or source.flags.is_proxy or source.exotic != null or source.flags.is_array) return false;
-    if (builtins.buffer.isTypedArrayObject(source)) return false;
+    if (core.object.isTypedArrayObject(source)) return false;
     if (source.arrayElements().len != 0) return false;
     for (source.shapeProps()) |prop| {
         if (core.property.Flags.fromBits(prop.flags).deleted) continue;
@@ -166,7 +165,7 @@ pub fn simpleForInRootCanUseFastPath(rt: *core.JSRuntime, source: *core.Object) 
     var proto = source.getPrototype();
     while (proto) |object| : (proto = object.getPrototype()) {
         if (object.flags.is_proxy or object.exotic != null) return false;
-        if (builtins.buffer.isTypedArrayObject(object)) return false;
+        if (core.object.isTypedArrayObject(object)) return false;
         if (object.arrayElements().len != 0) return false;
         for (object.shapeProps()) |prop| {
             const prop_flags = core.property.Flags.fromBits(prop.flags);

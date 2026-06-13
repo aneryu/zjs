@@ -5,6 +5,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
 const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const arith_vm = @import("vm_arith.zig");
 const property_ic = @import("property_ic.zig");
@@ -1304,7 +1305,7 @@ fn tryFuseCheckedLocalRegExpLiteralTestConstStringCountRange(
     if (goto_target != condition_pc) return false;
 
     const regexp_proto = object_ops.constructorPrototypeFromGlobalAtom(ctx.runtime, global, atom_regexp) orelse return false;
-    if (!ownPrototypeEntryIsNativeBuiltinDefault(regexp_proto, method_atom, .regexp, @intFromEnum(builtins.regexp.PrototypeMethod.test_))) return false;
+    if (!ownPrototypeEntryIsNativeBuiltinDefault(regexp_proto, method_atom, .regexp, @intFromEnum(method_ids.regexp.PrototypeMethod.test_))) return false;
 
     const source_value = (try stringLiteralRefValueForFastPath(ctx.runtime, source_ref)) orelse return false;
     defer source_value.free(ctx.runtime);
@@ -2289,7 +2290,7 @@ fn tryFuseCheckedLocalMapSetLatin1PrefixInt32Range(
     if (map_object.class_id != core.class.ids.map) return false;
     if (receiver_get.next_pc + 8 > code.len or code[receiver_get.next_pc] != op.get_field2) return false;
     const method_atom = readInt(u32, code[receiver_get.next_pc + 1 ..][0..4]);
-    if (!fastCollectionPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.collection.PrototypeMethod.set))) return false;
+    if (!fastCollectionPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.collection.PrototypeMethod.set))) return false;
 
     const key = decodeLatin1PrefixIntLocalKey(ctx, code, receiver_get.next_pc + 5, induction_idx) orelse return false;
     const value_get = decodeLocalGet(code, key.next_pc) orelse return false;
@@ -2353,7 +2354,7 @@ fn tryFuseCheckedLocalMapGetLatin1PrefixInt32SumRange(
     if (map_object.class_id != core.class.ids.map) return false;
     if (receiver_get.next_pc + 8 > code.len or code[receiver_get.next_pc] != op.get_field2) return false;
     const method_atom = readInt(u32, code[receiver_get.next_pc + 1 ..][0..4]);
-    if (!fastCollectionPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.collection.PrototypeMethod.get))) return false;
+    if (!fastCollectionPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.collection.PrototypeMethod.get))) return false;
 
     const key = decodeLatin1PrefixIntLocalKey(ctx, code, receiver_get.next_pc + 5, induction_idx) orelse return false;
     if (key.next_pc + 4 > code.len or code[key.next_pc] != op.call_method or readInt(u16, code[key.next_pc + 1 ..][0..2]) != 1) return false;
@@ -2430,7 +2431,7 @@ fn tryFuseCheckedLocalArrayMapSimpleCallbackRange(
     } else return false;
     if (receiver_get.next_pc + 7 > code.len or code[receiver_get.next_pc] != op.get_field2) return false;
     const method_atom = readInt(u32, code[receiver_get.next_pc + 1 ..][0..4]);
-    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.array.PrototypeMethod.map))) return false;
+    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.array.PrototypeMethod.map))) return false;
 
     var closure_pc = receiver_get.next_pc + 5;
     const callback_index: u32 = switch (code[closure_pc]) {
@@ -2633,7 +2634,7 @@ fn tryFuseCheckedLocalArrayPushInt32Range(
     if (goto_target != condition_pc) return false;
 
     const receiver = bindingReadableBorrowed(frame, receiver_get) orelse return false;
-    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(builtins.array.PrototypeMethod.push))) return false;
+    if (!fastArrayPrototypeMethodIsDefault(receiver, method_atom, @intFromEnum(method_ids.array.PrototypeMethod.push))) return false;
     const array_object = objectFromValue(receiver) orelse return false;
     if (array_object.proxyTarget() != null or array_object.exotic != null) return false;
     if (array_object.properties.len != 0) return false;
@@ -3604,7 +3605,7 @@ fn tryFuseLocalStringFromCharCodeInt32AppendFromGet(
     if (code[field_pc] != op.get_field2) return false;
     const method_atom = readInt(u32, code[field_pc + 1 ..][0..4]);
     const native_ref = functionOwnNativeBuiltinRefForFastPath(function, field_pc, ctx.runtime, string_ctor, method_atom) orelse return false;
-    if (native_ref.domain != .string or native_ref.id != @intFromEnum(builtins.string.StaticMethod.from_char_code)) return false;
+    if (native_ref.domain != .string or native_ref.id != @intFromEnum(method_ids.string.StaticMethod.from_char_code)) return false;
 
     const argument = stringFromCharCodeInt32Arg(function, frame, field_pc + 5) orelse return false;
     if (argument.next_pc + 3 > code.len or code[argument.next_pc] != op.call_method) return false;

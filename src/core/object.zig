@@ -1,6 +1,7 @@
 const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
+const value_format = @import("value_format.zig");
 const descriptor = @import("descriptor.zig");
 const function = @import("function.zig");
 const gc = @import("gc.zig");
@@ -9516,7 +9517,138 @@ pub fn destroyPropertySlot(rt: *JSRuntime, atom_id: atom.Atom, slot: property.Sl
 }
 
 fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
+    return isTypedArrayObject(object);
+}
+
+// --- TypedArray element mechanism (engine core) -----------------------------
+//
+// QuickJS source map: the typed-array length/bounds/detach helpers live in the
+// engine core (quickjs.c), with builtins as clients. These are thin predicates
+// over the core typed-array storage slots (`Object.typedArrayBuffer()`,
+// `typedArrayByteOffset()`, `typedArrayElementSize()`, `typedArrayFixedLength()`,
+// `arrayBufferDetached()`, ...); this block holds the storage-shape mechanism
+// the VM consults directly. The element read/write *value coercion*
+// (ToNumber/ToBigInt over primitives, shared with the DataView and ArrayBuffer
+// paths) and the buffer storage operations live in `src/core/typed_array.zig`,
+// which imports these predicates. `src/builtins/buffer.zig` re-exports both
+// blocks under their original names.
+
+fn typedArrayBackingBufferObject(object: *Object) !*Object {
+    const value = object.typedArrayBuffer() orelse return error.TypeError;
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.isObject()) return error.TypeError;
+    const buffer: *Object = @fieldParentPtr("header", header);
+    if (buffer.class_id != class.ids.array_buffer and buffer.class_id != class.ids.shared_array_buffer) return error.TypeError;
+    return buffer;
+}
+
+pub fn isTypedArrayObject(object: *const Object) bool {
     return object.typedArrayBuffer() != null and object.typedArrayElementSize() != 0;
+}
+
+pub fn typedArrayOutOfBounds(object: *Object) !bool {
+    const buffer = try typedArrayBackingBufferObject(object);
+    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return true;
+    if (object.typedArrayFixedLength()) |fixed| {
+        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
+        return bytes > buffer.byteStorage().len - object.typedArrayByteOffset();
+    }
+    return false;
+}
+
+pub fn typedArrayDetached(object: *Object) !bool {
+    const buffer = try typedArrayBackingBufferObject(object);
+    return buffer.arrayBufferDetached();
+}
+
+pub fn typedArrayLength(rt: *JSRuntime, object: *Object) !u32 {
+    _ = rt;
+    const buffer = try typedArrayBackingBufferObject(object);
+    if (buffer.arrayBufferDetached()) return 0;
+    if (object.typedArrayByteOffset() > buffer.byteStorage().len) return 0;
+    if (object.typedArrayFixedLength()) |fixed| {
+        const bytes = @as(usize, fixed) * object.typedArrayElementSize();
+        if (bytes > buffer.byteStorage().len - object.typedArrayByteOffset()) return 0;
+        return fixed;
+    }
+    return @intCast(@divTrunc(buffer.byteStorage().len - object.typedArrayByteOffset(), object.typedArrayElementSize()));
+}
+
+pub fn typedArrayByteLength(rt: *JSRuntime, object: *Object) !usize {
+    const length = try typedArrayLength(rt, object);
+    return @as(usize, length) * object.typedArrayElementSize();
+}
+
+pub fn typedArrayEffectiveByteOffset(object: *Object) !usize {
+    if (try typedArrayDetached(object)) return 0;
+    if (try typedArrayOutOfBounds(object)) return 0;
+    return object.typedArrayByteOffset();
+}
+
+pub fn typedArrayIndexValid(rt: *JSRuntime, object: *Object, index: u32) !bool {
+    const length = try typedArrayLength(rt, object);
+    return index < length;
+}
+
+pub const TypedArrayCanonicalIndex = union(enum) {
+    none,
+    invalid,
+    index: u32,
+};
+
+pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !TypedArrayCanonicalIndex {
+    if (array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return .{ .index = index };
+    if (rt.atoms.kind(atom_id) != .string) return .none;
+    const name = rt.atoms.name(atom_id) orelse return .none;
+    if (name.len == 0) return .none;
+    if (std.mem.eql(u8, name, "-0")) return .invalid;
+
+    const number: f64 = if (std.mem.eql(u8, name, "NaN"))
+        std.math.nan(f64)
+    else if (std.mem.eql(u8, name, "Infinity"))
+        std.math.inf(f64)
+    else if (std.mem.eql(u8, name, "-Infinity"))
+        -std.math.inf(f64)
+    else
+        std.fmt.parseFloat(f64, name) catch return .none;
+
+    var buf: [64]u8 = undefined;
+    const printed = if (std.math.isNan(number))
+        "NaN"
+    else if (std.math.isPositiveInf(number))
+        "Infinity"
+    else if (std.math.isNegativeInf(number))
+        "-Infinity"
+    else
+        try value_format.formatFiniteNumber(&buf, number);
+    if (!std.mem.eql(u8, name, printed)) return .none;
+    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
+    return .{ .index = @intFromFloat(number) };
+}
+
+pub fn typedArrayBackedByResizableBuffer(object: *Object) bool {
+    if (!isTypedArrayObject(object)) return false;
+    const buffer = typedArrayBackingBufferObject(object) catch return false;
+    return buffer.arrayBufferMaxByteLength() != null;
+}
+
+pub fn arrayBufferIsImmutable(rt: *JSRuntime, object: *Object) bool {
+    _ = rt;
+    return object.arrayBufferImmutable();
+}
+
+pub fn markArrayBufferImmutable(rt: *JSRuntime, object: *Object) !void {
+    _ = rt;
+    object.arrayBufferImmutableSlot().* = true;
+}
+
+pub fn typedArrayImmutableBuffer(rt: *JSRuntime, object: *Object) !bool {
+    const buffer = try typedArrayBackingBufferObject(object);
+    return arrayBufferIsImmutable(rt, buffer);
+}
+
+pub fn typedArrayRejectImmutableBuffer(rt: *JSRuntime, object: *Object) !void {
+    if (try typedArrayImmutableBuffer(rt, object)) return error.TypeError;
 }
 
 fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) bool {

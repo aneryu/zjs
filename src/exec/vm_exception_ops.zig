@@ -325,7 +325,7 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
 }
 
 pub fn isErrorConstructorName(name: []const u8) bool {
-    return builtins.error_names.isErrorConstructorName(name);
+    return core.error_names.isErrorConstructorName(name);
 }
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {

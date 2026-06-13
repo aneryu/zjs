@@ -1,8 +1,8 @@
 const fusion_stats = @import("vm_fusion_stats.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode/root.zig");
-const builtins = @import("../builtins/root.zig");
 const core = @import("../core/root.zig");
+const method_ids = core.host_function.builtin_method_ids;
 const frame_mod = @import("frame.zig");
 const property_ic = @import("property_ic.zig");
 const property_ops = @import("property_ops.zig");
@@ -1354,7 +1354,7 @@ pub fn decodeStringSliceConstLocalStore(
     arg_pc: usize,
 ) ?StringSliceConstLocalStore {
     const string_value = stringFromValue(receiver) orelse return null;
-    if (!fastStringPrototypeMethodIsDefault(ctx.runtime, global, atom_id, @intFromEnum(builtins.string.PrototypeMethod.slice))) return null;
+    if (!fastStringPrototypeMethodIsDefault(ctx.runtime, global, atom_id, @intFromEnum(method_ids.string.PrototypeMethod.slice))) return null;
 
     const code = function.code;
     const start_arg = immediateInt32Operand(code, arg_pc) orelse return null;
@@ -1722,8 +1722,8 @@ pub fn fastArrayPrototypeMethodIsDefault(value: core.JSValue, atom_id: core.Atom
 
 pub fn fastStringPrototypeMethodIsDefault(rt: *core.JSRuntime, global: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
     const expected_name = switch (expected_id) {
-        @intFromEnum(builtins.string.PrototypeMethod.slice) => "slice",
-        @intFromEnum(builtins.string.PrototypeMethod.substring) => "substring",
+        @intFromEnum(method_ids.string.PrototypeMethod.slice) => "slice",
+        @intFromEnum(method_ids.string.PrototypeMethod.substring) => "substring",
         else => return false,
     };
     if (!value_ops.atomNameEql(rt, atom_id, expected_name)) return false;
