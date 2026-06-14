@@ -770,7 +770,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                     .done => {},
                     .continue_loop => continue,
                     .inline_call => |request| {
-                        machine.pushCall(global, stack, request.target, request.region_base, request.argc) catch |err| {
+                        machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
                             try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
                             if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
                             return err;
@@ -791,7 +791,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 // depth slot was just vacated) and propagate via the outer
                 // unwind, like an error thrown by the callee on entry.
                 .tail_inline => |request| {
-                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc);
+                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
                     continue;
                 },
             },
@@ -801,7 +801,7 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
                 // Non-%eval% callee in tail position: proper tail call via
                 // frame reuse, mirroring the op.tail_call leg.
                 .tail_inline => |request| {
-                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc);
+                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
                     continue;
                 },
             },
@@ -817,16 +817,43 @@ fn dispatchLoop(loop_state: *LoopState) HostError!core.JSValue {
             op.call_prepared => switch (try call_vm.callPrepared(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
+                // Prepared property call to a plain bytecode function: run it as
+                // an inline frame (receiver becomes `this`), mirroring op.call.
+                .inline_call => |request| {
+                    machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
+                        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    continue;
+                },
             },
             op.call_method => switch (try call_vm.callMethod(ctx, output, global, stack, function, frame, catch_target)) {
                 .done => {},
                 .continue_loop => continue,
+                // Method call to a plain bytecode function: run it as an inline
+                // frame (receiver becomes `this`), mirroring the op.call leg.
+                .inline_call => |request| {
+                    machine.pushCall(global, stack, request.target, request.region_base, request.argc, request.layout) catch |err| {
+                        try closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+                        if (try handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) continue;
+                        return err;
+                    };
+                    continue;
+                },
             },
-            op.tail_call_method => switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target)) {
+            op.tail_call_method => switch (try call_vm.tailCallMethod(ctx, output, global, stack, function, frame, catch_target, machine.depth > 0)) {
                 .handled => continue,
                 .return_value => |value| {
                     if (machine.depth == 0) return value;
                     try machine.popReturn(value);
+                    continue;
+                },
+                // Tail-positioned method call to a plain bytecode function:
+                // reuse the current inline frame with the receiver as `this`,
+                // mirroring the op.tail_call leg.
+                .tail_inline => |request| {
+                    try machine.tailCallReuse(global, stack, request.target, request.region_base, request.argc, request.layout);
                     continue;
                 },
             },

@@ -31,38 +31,78 @@ const popCallFuncFromStack = call_runtime.popCallFuncFromStack;
 /// An eligible bytecode-to-bytecode call target resolved from a callable
 /// value on the operand stack. All values are borrowed from the caller's
 /// (rooted) operand stack region.
+/// Operand-stack layout of an inline call's region, as seen by `pushFrame`.
+pub const RegionLayout = enum {
+    /// `[callable, args...]` — plain call; `this` defaults to undefined.
+    plain,
+    /// `[receiver, callable, args...]` — method call; receiver becomes `this`.
+    method,
+    /// `[receiver, args..., callable]` — prepared property call: the callable
+    /// was resolved off-stack (a prepared IC target) and pushed back on top,
+    /// receiver becomes `this`. Only valid for non-tail `pushCall`.
+    prepared,
+};
+
 pub const InlineTarget = struct {
     function_object: *core.Object,
     /// The callable closure value (becomes `frame.current_function`).
     callable: core.JSValue,
     fb: *const bytecode.FunctionBytecode,
+    /// Raw receiver before [[Call]] `this` boxing: an arrow target's lexical
+    /// `this` (arrows ignore any provided receiver), otherwise the call
+    /// receiver — `undefined` for plain calls, the property base for method
+    /// calls. `pushFrame` applies `coerceCallThis` to it. Borrowed; stays
+    /// valid while `callable` is rooted (the lexical `this` is owned by the
+    /// function object; a method receiver is co-owned with the operand
+    /// region).
+    this_value: core.JSValue,
+    /// Lexical `new.target` for arrow targets, `undefined` otherwise.
+    /// Borrowed; valid while `callable` is rooted.
+    new_target: core.JSValue,
 };
 
-/// Resolve `func` to an inline-eligible bytecode call target. Mirrors the
-/// plain-call leg of `callValueOrBytecodeClassModeDispatch`; any condition
-/// that path special-cases (class constructors, arrows, cross-realm calls,
-/// simple-numeric/string fusion bodies, async/generator kinds) disqualifies
-/// the target so the slow path keeps handling it. Direct-eval bindings on
-/// the function object are supported: `pushFrame` merges them into the
-/// frame's var-ref view like `callFunctionBytecodeModeState` does.
-pub fn resolveInlineTarget(global: *core.Object, func: core.JSValue) ?InlineTarget {
+/// Resolve `func` to an inline-eligible bytecode call target for a call with
+/// receiver `receiver` (`undefined` for plain calls, the property base for
+/// method calls). Mirrors the plain-call leg of
+/// `callValueOrBytecodeClassModeDispatch`; any condition that path
+/// special-cases (class constructors, cross-realm calls, simple-numeric/string
+/// fusion bodies, async/generator kinds) disqualifies the target so the slow
+/// path keeps handling it. Direct-eval bindings on the function object are
+/// supported: `pushFrame` merges them into the frame's var-ref view like
+/// `callFunctionBytecodeModeState` does.
+///
+/// Arrow targets ARE eligible: an arrow has no own `this` / `new.target`, so
+/// the resolved `this_value` / `new_target` come from the lexical values
+/// captured on the function object (mirroring the slow path's arrow leg) and
+/// `pushFrame` boxes `this_value` through the same `coerceCallThis` primitive
+/// as the recursive path — the boxing rules stay in one place. Fusion arrows
+/// (`x => x + 1`) are still caught by the fusion check below and routed to the
+/// faster `callSimple*Bytecode` path.
+pub fn resolveInlineTarget(global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget {
     const function_object = object_ops.functionObjectFromValue(func) orelse return null;
     const function_value = function_object.functionBytecodeSlot().* orelse return null;
     const fb = call_runtime.functionBytecodeFromValue(function_value) orelse return null;
     if (fb.func_kind != .normal) return null;
     if (fb.is_class_constructor or fb.is_derived_class_constructor) return null;
-    // Arrow functions carry lexical this / new.target plumbing; keep them on
-    // the slow path so the boxing rules stay in one place.
-    if (fb.is_arrow_function) return null;
     // Fusion-recognizable bodies are handled by callSimple*Bytecode in the
     // slow path with broader matching than the pre-call fast checks.
     if (fb.simple_numeric_kind != .none or fb.simple_string_kind != .none) return null;
     const function_global = object_ops.objectRealmGlobal(function_object) orelse global;
     if (function_global != global) return null;
+    const this_value = if (fb.is_arrow_function)
+        (function_object.functionLexicalThis() orelse core.JSValue.undefinedValue())
+    else
+        receiver;
+    const new_target = if (fb.is_arrow_function)
+        (function_object.functionArrowNewTarget() orelse core.JSValue.undefinedValue())
+    else
+        core.JSValue.undefinedValue();
     return .{
         .function_object = function_object,
         .callable = func,
         .fb = fb,
+        .this_value = this_value,
+        .new_target = new_target,
     };
 }
 
@@ -164,18 +204,35 @@ pub const Machine = struct {
     /// Where the new frame's `func | args...` call region comes from.
     const ArgsSource = union(enum) {
         /// Region still live on the caller's operand stack; it is popped
-        /// (func freed, args moved) during frame setup, after the bindings
-        /// have duplicated the callable.
+        /// (receiver/func freed, args moved) during frame setup, after the
+        /// bindings have duplicated them. Layout is `[callable, args...]`, or
+        /// `[receiver, callable, args...]` when `has_receiver` (a non-tail
+        /// method call; the receiver becomes the new frame's `this`).
         stack_region: struct {
             stack: *stack_mod.Stack,
             region_base: usize,
             argc: u16,
+            has_receiver: bool,
         },
         /// Region already moved off a torn-down frame's operand stack for
-        /// tail-call frame reuse; slot 0 is the callable, the rest are the
-        /// args. Entries transfer to the new frame and are replaced with
+        /// tail-call frame reuse. Layout is `[callable, args...]`, or
+        /// `[receiver, callable, args...]` when `has_receiver` (a method tail
+        /// call). Entries transfer to the new frame and are replaced with
         /// undefined as they move; the caller frees whatever is left.
-        moved: []core.JSValue,
+        moved: struct {
+            values: []core.JSValue,
+            has_receiver: bool,
+        },
+        /// Prepared property call still live on the caller's operand stack as
+        /// `[receiver, args..., callable]`: the callable (an off-stack prepared
+        /// IC target) was pushed back on top so it stays rooted until the frame
+        /// duplicates it. Frame setup pops+frees the callable, drops the
+        /// receiver (now the frame's `this`), and moves the args.
+        prepared: struct {
+            stack: *stack_mod.Stack,
+            region_base: usize,
+            argc: u16,
+        },
     };
 
     /// Push an inline call frame for `target`. Shared between plain inline
@@ -196,8 +253,8 @@ pub const Machine = struct {
         errdefer entry.profile_guard.deinit();
 
         const callable = switch (source) {
-            .stack_region => target.callable,
-            .moved => |moved| moved[0],
+            .stack_region, .prepared => target.callable,
+            .moved => |moved| moved.values[if (moved.has_receiver) 1 else 0],
         };
 
         // Direct-eval bindings extend the callee's var-ref view, mirroring
@@ -237,12 +294,21 @@ pub const Machine = struct {
         errdefer entry.frame.deinit(&rt.memory, rt);
         ctx.borrowBacktracePc(&entry.frame.pc);
 
-        const fb_strict = entry.view.flags.is_strict or entry.view.flags.runtime_strict;
-        const effective_this = if (fb_strict) core.JSValue.undefinedValue() else global.value();
+        // Box `this` through the same primitive the recursive slow path uses
+        // (`callFunctionBytecodeModeState`): for a plain non-arrow call
+        // `target.this_value` is undefined and boxes to global / undefined by
+        // strictness, exactly as before; arrow targets carry their lexical
+        // `this`, and method tail calls carry the receiver. `initCallBindings`
+        // dups the result, so the freshly boxed primitive wrapper (if any) is
+        // released after the frame has captured it.
+        var boxed_this: ?core.JSValue = null;
+        defer if (boxed_this) |value| value.free(rt);
+        const fb_strict = target.fb.is_strict_mode or target.fb.runtime_strict_mode;
+        const effective_this = try call_runtime.coerceCallThis(ctx, global, fb_strict, target.this_value, &boxed_this);
         entry.eval_snapshot = try entry.frame.initCallBindings(rt, .{
             .initial_this_value = effective_this,
             .current_function_value = callable,
-            .new_target_value = core.JSValue.undefinedValue(),
+            .new_target_value = target.new_target,
             .constructor_this_value = core.JSValue.undefinedValue(),
             .eval_local_names = &.{},
             .eval_local_slots = &.{},
@@ -262,6 +328,10 @@ pub const Machine = struct {
         try vm_call.initFrameLocals(ctx, &entry.view, &entry.frame, &.{}, &.{}, true);
         switch (source) {
             .stack_region => |region| {
+                // Drop the receiver slot (method calls) then the callable slot
+                // — both already duplicated into the frame's bindings — leaving
+                // `[args...]` at region_base for initArgumentsFromStack to move.
+                if (region.has_receiver) popCallFuncFromStack(rt, region.stack, region.region_base);
                 popCallFuncFromStack(rt, region.stack, region.region_base);
                 try entry.frame.initArgumentsFromStack(
                     &rt.memory,
@@ -275,10 +345,27 @@ pub const Machine = struct {
             .moved => |moved| try entry.frame.initArgumentsMoved(
                 &rt.memory,
                 &rt.vm_stack,
-                moved[1..],
+                moved.values[if (moved.has_receiver) 2 else 1 ..],
                 true,
                 frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
             ),
+            .prepared => |region| {
+                // [receiver, args..., callable]: pop+free the callable on top
+                // (already duplicated into the frame's bindings), then drop the
+                // receiver slot (captured as `this`), leaving [args...] for
+                // initArgumentsFromStack to move.
+                const callable_owned = try region.stack.pop();
+                callable_owned.free(rt);
+                popCallFuncFromStack(rt, region.stack, region.region_base);
+                try entry.frame.initArgumentsFromStack(
+                    &rt.memory,
+                    &rt.vm_stack,
+                    region.stack,
+                    region.argc,
+                    true,
+                    frame_mod.argumentsNeedsOriginalSnapshot(&entry.view),
+                );
+            },
         }
         try vm_call.initFrameVarRefs(ctx, global, &entry.view, &entry.frame, frame_var_refs, true);
 
@@ -317,10 +404,10 @@ pub const Machine = struct {
         entry.merged_var_refs = &.{};
     }
 
-    /// Push an inline call frame for `target` whose `func | args...` region
-    /// starts at `region_base` on `caller_stack`. On success the region has
-    /// been popped from the caller stack and the machine's top entry is the
-    /// new current execution level.
+    /// Push an inline call frame for `target` whose operand region starts at
+    /// `region_base` on `caller_stack`, shaped by `layout` (see `RegionLayout`).
+    /// On success the region has been popped from the caller stack and the
+    /// machine's top entry is the new current execution level.
     pub fn pushCall(
         self: *Machine,
         global: *core.Object,
@@ -328,21 +415,33 @@ pub const Machine = struct {
         target: InlineTarget,
         region_base: usize,
         argc: u16,
+        layout: RegionLayout,
     ) HostError!void {
-        return self.pushFrame(global, target, .{ .stack_region = .{
-            .stack = caller_stack,
-            .region_base = region_base,
-            .argc = argc,
-        } });
+        return self.pushFrame(global, target, switch (layout) {
+            .plain, .method => .{ .stack_region = .{
+                .stack = caller_stack,
+                .region_base = region_base,
+                .argc = argc,
+                .has_receiver = layout == .method,
+            } },
+            .prepared => .{ .prepared = .{
+                .stack = caller_stack,
+                .region_base = region_base,
+                .argc = argc,
+            } },
+        });
     }
 
     /// Proper tail call: replace the top inline frame with a fresh frame
-    /// for `target`, keeping the logical call depth constant. The
-    /// `func | args...` region starting at `region_base` lives on the dying
-    /// frame's own operand stack, so it is moved into a scratch buffer
-    /// before the frame (and the arena window backing its stack) is torn
-    /// down. On error the dying frame is already gone; the error propagates
-    /// as if thrown by the callee before executing any code.
+    /// for `target`, keeping the logical call depth constant. The operand
+    /// region starting at `region_base` lives on the dying frame's own
+    /// operand stack, so it is moved into a scratch buffer before the frame
+    /// (and the arena window backing its stack) is torn down. The region is
+    /// `[callable, args...]`, or `[receiver, callable, args...]` when
+    /// `has_receiver` (a tail-positioned method call, where the receiver
+    /// becomes the reused frame's `this`). On error the dying frame is
+    /// already gone; the error propagates as if thrown by the callee before
+    /// executing any code.
     pub fn tailCallReuse(
         self: *Machine,
         global: *core.Object,
@@ -350,12 +449,18 @@ pub const Machine = struct {
         target: InlineTarget,
         region_base: usize,
         argc: u16,
+        layout: RegionLayout,
     ) HostError!void {
         std.debug.assert(self.depth > 0);
+        // Tail calls are never the off-stack prepared shape; only op.call /
+        // op.call_method get rewritten to the prepared IC path, and those are
+        // not tail positions.
+        std.debug.assert(layout != .prepared);
+        const has_receiver = layout == .method;
         const rt = self.ctx.runtime;
 
-        const total = @as(usize, argc) + 1;
-        var inline_buf: [9]core.JSValue = undefined;
+        const total = @as(usize, argc) + 1 + @as(usize, @intFromBool(has_receiver));
+        var inline_buf: [10]core.JSValue = undefined;
         const moved: []core.JSValue = if (total <= inline_buf.len)
             inline_buf[0..total]
         else
@@ -363,12 +468,12 @@ pub const Machine = struct {
         defer if (total > inline_buf.len) rt.memory.free(core.JSValue, moved);
         @memcpy(moved, caller_stack.values[region_base..][0..total]);
         caller_stack.values = caller_stack.values.ptr[0..region_base];
-        // `moved` now owns the call region (the callable plus any args not
-        // yet transferred into the new frame).
+        // `moved` now owns the call region (the receiver and callable plus any
+        // args not yet transferred into the new frame).
         defer for (moved) |value| value.free(rt);
 
         self.popTeardown();
-        try self.pushFrame(global, target, .{ .moved = moved });
+        try self.pushFrame(global, target, .{ .moved = .{ .values = moved, .has_receiver = has_receiver } });
     }
 
     /// Tear down the top inline frame. Mirrors the defer chain of the

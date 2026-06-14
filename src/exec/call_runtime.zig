@@ -60,9 +60,12 @@ const atomics_wait = @import("atomics_wait.zig");
 
 pub const InlineCallRequest = struct {
     target: inline_calls.InlineTarget,
-    /// Index of the callable on the caller operand stack; args follow it.
+    /// Index of the operand region on the caller stack; its shape (where the
+    /// callable, receiver, and args live) is given by `layout`.
     region_base: usize,
     argc: u16,
+    /// Operand-region layout for the dispatch loop's push (see `RegionLayout`).
+    layout: inline_calls.RegionLayout = .plain,
 };
 
 pub const ExecCallResult = union(enum) { done, continue_loop, inline_call: InlineCallRequest };
@@ -96,7 +99,9 @@ pub fn execCall(
     }
     const is_super_constructor = class_init_ops.isCurrentSuperConstructor(ctx, frame, func);
     if (allow_inline and !is_super_constructor) {
-        if (inline_calls.resolveInlineTarget(global, func)) |target| {
+        // Plain call: no receiver on the stack, so the call binds `this` to
+        // undefined (arrow targets override this with their lexical `this`).
+        if (inline_calls.resolveInlineTarget(global, core.JSValue.undefinedValue(), func)) |target| {
             return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc } };
         }
     }
@@ -279,6 +284,32 @@ pub fn callValueOrBytecode(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     return callValueOrBytecodeClassMode(ctx, output, global, this_value, func, args, caller_function, caller_frame, false);
+}
+
+/// Coerce a call receiver per the ordinary [[Call]] `this` boxing for a
+/// callee with strictness `runtime_strict`. Returns the effective `this`
+/// borrowed from `this_value`, the realm `global`, or a freshly boxed
+/// primitive wrapper. When a wrapper is created, `boxed_out.*` holds the
+/// owned box and the caller frees it once the frame has duplicated the
+/// value. Mirrors the boxing QuickJS `JS_CallInternal` performs before
+/// entering a non-strict bytecode frame; shared by the recursive slow path
+/// (`callFunctionBytecodeModeState`) and the inline frame setup
+/// (`inline_calls.Machine.pushFrame`) so the boxing rules live in one place.
+pub fn coerceCallThis(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    runtime_strict: bool,
+    this_value: core.JSValue,
+    boxed_out: *?core.JSValue,
+) HostError!core.JSValue {
+    if (runtime_strict) return this_value;
+    if (this_value.isUndefined() or this_value.isNull()) return global.value();
+    if (!this_value.isObject()) {
+        const boxed = try object_ops.primitiveObjectForAccess(ctx.runtime, global, this_value);
+        boxed_out.* = boxed;
+        return boxed;
+    }
+    return this_value;
 }
 
 pub fn callNativeBuiltinRecordForVm(
@@ -4779,14 +4810,7 @@ pub fn callFunctionBytecodeModeState(
     var boxed_this: ?core.JSValue = null;
     defer if (boxed_this) |value| value.free(ctx.runtime);
     const fb_runtime_strict = fb.is_strict_mode or fb.runtime_strict_mode;
-    const effective_this = if (!fb_runtime_strict) blk: {
-        if (this_value.isUndefined() or this_value.isNull()) break :blk global.value();
-        if (!this_value.isObject()) {
-            boxed_this = try object_ops.primitiveObjectForAccess(ctx.runtime, global, this_value);
-            break :blk boxed_this.?;
-        }
-        break :blk this_value;
-    } else this_value;
+    const effective_this = try coerceCallThis(ctx, global, fb_runtime_strict, this_value, &boxed_this);
     if (fb.func_kind == .async and generator_state == null) {
         return promise_ops.qjsAsyncFunctionStart(ctx, func, current_function_value, effective_this, args, combined_var_refs, output, global, eval_var_ref_names, eval_var_refs);
     }

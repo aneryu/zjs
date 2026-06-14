@@ -4334,6 +4334,64 @@ test "Engine eval executes simple functions and arrows" {
     try std.testing.expectEqualStrings("5\n42\n720\n12\nobject\n", stream.buffered());
 }
 
+test "Phase 7: arrow and method tail calls reuse inline frames for deep recursion" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    // Each recursion goes 40000 deep — past both the native-recursion limit
+    // (`max(16, stack_limit/16384)`) and the inline-frame storage cap
+    // (`max_chunks * entries_per_chunk` = 8192), so it only completes if the
+    // tail call REUSES the inline frame rather than pushing a new one (Phase 7).
+    // test262 has no coverage for deep tail recursion at the arrow or method
+    // position, so this is the self-built fixture. Arrows gained inline
+    // eligibility (lexical this/new.target routed through the shared frame-setup
+    // boxing primitive); `tail_call_method` reuses the frame with the receiver
+    // as `this` (mutual `even`/`odd` and self `loop`).
+    const result = try js.evalWithOutput(
+        \\const arrowTail = (n, acc) => n === 0 ? acc : arrowTail(n - 1, acc + 1);
+        \\print(arrowTail(40000, 0));
+        \\const machine = {
+        \\  even(n) { return n === 0 ? "even" : this.odd(n - 1); },
+        \\  odd(n) { return n === 0 ? "odd" : this.even(n - 1); },
+        \\};
+        \\print(machine.even(40000));
+        \\const counter = { loop(n, acc) { return n === 0 ? acc : this.loop(n - 1, acc + n); } };
+        \\print(counter.loop(40000, 0));
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("40000\neven\n800020000\n", stream.buffered());
+}
+
+test "Phase 7: inlined arrow keeps lexical this and ignores any receiver" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    var output_buffer: [128]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    // An arrow captures `this` lexically; once it is inline-eligible, the shared
+    // frame setup must still bind the lexical `this` (not the plain-call default
+    // or the method receiver). `bound.call(other)`/`carrier.m()` must not change
+    // the arrow's `this`.
+    const result = try js.evalWithOutput(
+        \\const lex = { tag: "LEX" };
+        \\function make() { return () => this.tag; }
+        \\const bound = make.call(lex);
+        \\print(bound());
+        \\const carrier = { tag: "CARRIER", m: bound };
+        \\print(carrier.m());
+        \\const obj = { name: "outer", run() { const a = () => this.name; return a(); } };
+        \\print(obj.run());
+    , &stream);
+    defer result.free(js.runtime);
+
+    try std.testing.expect(result.isUndefined());
+    try std.testing.expectEqualStrings("LEX\nLEX\nouter\n", stream.buffered());
+}
+
 test "Engine eval Function.prototype.toString returns source or native text" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();

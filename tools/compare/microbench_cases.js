@@ -427,6 +427,18 @@ export const cases = [
         'for (let i = 0; i < 500000; i++) s += f(i);',
         'print(s);',
     ]),
+    supported('arrow_call_loop', 'arrow_call_loop', 'function', 'Targeted two-argument arrow call loop (arrow inline path).', [
+        'const f = (a, b) => a + b;',
+        'let s = 0;',
+        'for (let i = 0; i < 500000; i++) s += f(i, 1);',
+        'print(s);',
+    ]),
+    supported('arrow_tail_recursion', 'arrow_tail_recursion', 'function', 'Targeted arrow tail-recursion loop (inline frame reuse, non-fusion body).', [
+        'const sum = (n, acc) => n === 0 ? acc : sum(n - 1, acc + n);',
+        'let s = 0;',
+        'for (let i = 0; i < 500; i++) s = sum(100, 0);',
+        'print(s);',
+    ]),
     supported('dense_array_write_read', 'dense_array_write_read', 'array', 'Targeted dense array indexed write/read loop.', [
         'const a = [];',
         'for (let i = 0; i < 100000; i++) a[i] = i;',

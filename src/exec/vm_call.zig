@@ -12,6 +12,7 @@ const exception_ops = @import("vm_exception_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const class_init_ops = @import("class_init_ops.zig");
 const forof_ops = @import("forof_ops.zig");
+const inline_calls = @import("inline_calls.zig");
 const object_ops = @import("object_ops.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
@@ -33,6 +34,10 @@ pub const CallStep = union(enum) {
 pub const TailCallMethodResult = union(enum) {
     handled,
     return_value: core.JSValue,
+    /// Eligible bytecode method target for tail-call frame reuse; the
+    /// dispatch loop replaces the current inline frame (the receiver becomes
+    /// the reused frame's `this`) instead of recursing.
+    tail_inline: call_runtime.InlineCallRequest,
 };
 
 pub const TailCallResult = union(enum) {
@@ -665,7 +670,7 @@ pub fn callPrepared(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-) !Step {
+) !CallStep {
     if (frame.pc + 2 > function.code.len) return error.InvalidBytecode;
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
@@ -689,6 +694,24 @@ pub fn callPrepared(
         .value => |func| blk: {
             rooted_func = func;
             rooted_func_active = true;
+            // Inline frame fast path: a prepared property call to a plain
+            // bytecode function runs as an inline frame (like op.call_method),
+            // so method-position recursion gets the logical call-depth limit and
+            // its tail calls reuse frames. The prepared rewrite moved the
+            // callable off-stack (freeing the slot stack_size budgeted for the
+            // original call_method shape `[receiver, callable, args...]`), so
+            // pushing it back on top as `[receiver, args..., callable]` stays
+            // within budget and keeps it rooted until the dispatch loop's
+            // pushCall duplicates it. Ownership transfers to the stack
+            // (rooted_func_active = false); the .prepared push consumes it.
+            if (inline_calls.resolveInlineTarget(global, receiver, rooted_func)) |inline_target| {
+                stack.pushOwned(rooted_func) catch |err| {
+                    discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
+                    return err;
+                };
+                rooted_func_active = false;
+                return .{ .inline_call = .{ .target = inline_target, .region_base = receiver_index, .argc = argc, .layout = .prepared } };
+            }
             const fast_result = fastNativeMethodCall(ctx, output, global, receiver, rooted_func, args, function, frame) catch |err| {
                 if (try call_runtime.handleCatchableRuntimeError(ctx, stack, frame, catch_target, global, err)) return .continue_loop;
                 discardPreparedCallInputs(ctx.runtime, stack, argc) catch {};
@@ -723,9 +746,31 @@ pub fn callMethod(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
-) !Step {
+) !CallStep {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
+    // Inline frame fast path: a method call whose callable is a plain bytecode
+    // function runs as an inline frame (like op.call), so method-position
+    // recursion gets the logical call-depth limit instead of the shallow
+    // native-recursion limit, and its tail-positioned method calls become
+    // frame-reusing proper tail calls. Receiver, callable, and args stay on the
+    // operand stack (zero-copy) at `[receiver, callable, args...]` until the
+    // dispatch loop pushes the frame; the receiver becomes the callee's `this`
+    // (arrow targets use their lexical `this`). Native builtin methods — the
+    // common case — are not inline-eligible and fall through to the fast native
+    // dispatch below. Class constructors (super() targets) are rejected by
+    // `resolveInlineTarget`, so this never shadows the super-constructor path.
+    {
+        const total = @as(usize, argc) + 2;
+        if (stack.values.len >= total) {
+            const region_base = stack.values.len - total;
+            const receiver = stack.values[region_base];
+            const method = stack.values[region_base + 1];
+            if (inline_calls.resolveInlineTarget(global, receiver, method)) |target| {
+                return .{ .inline_call = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method } };
+            }
+        }
+    }
     var inline_args: [4]core.JSValue = undefined;
     const args_buf: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
@@ -1075,9 +1120,30 @@ pub fn tailCallMethod(
     function: *const bytecode.Bytecode,
     frame: *frame_mod.Frame,
     catch_target: *?usize,
+    allow_inline: bool,
 ) !TailCallMethodResult {
     const argc = readInt(u16, function.code[frame.pc..][0..2]);
     frame.pc += 2;
+    // Inline frame-reuse fast path: a tail-positioned method call whose
+    // callable is a plain bytecode function reuses the current inline frame
+    // instead of recursing, mirroring op.tail_call. The receiver, callable,
+    // and args stay on the operand stack (zero-copy) at
+    // `[region_base ..][receiver, callable, args...]` until the dispatch loop
+    // moves them into the reused frame; `resolveInlineTarget` binds the
+    // receiver as the callee's `this` (or the arrow's lexical `this`). Native
+    // builtin methods — the common case — are not inline-eligible and fall
+    // through to the fast native dispatch below.
+    if (allow_inline) {
+        const total = @as(usize, argc) + 2;
+        if (stack.values.len >= total) {
+            const region_base = stack.values.len - total;
+            const receiver = stack.values[region_base];
+            const method = stack.values[region_base + 1];
+            if (inline_calls.resolveInlineTarget(global, receiver, method)) |target| {
+                return .{ .tail_inline = .{ .target = target, .region_base = region_base, .argc = argc, .layout = .method } };
+            }
+        }
+    }
     var inline_args: [4]core.JSValue = undefined;
     const args_buf: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
