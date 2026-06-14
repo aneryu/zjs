@@ -240,6 +240,15 @@ pub const BigInt = struct {
         }
     }
 
+    pub fn toU64(self: BigInt) ?u64 {
+        if (self.isZero()) return 0;
+        // Any non-zero negative value is out of range for u64.
+        if (self.negative) return null;
+        // More than one limb means the magnitude exceeds 2^64-1.
+        if (self.limbs.len > 1) return null;
+        return self.limbs[0];
+    }
+
     pub fn bitLengthAbs(self: BigInt) usize {
         if (self.limbs.len == 0) return 0;
         const top = self.limbs[self.limbs.len - 1];
@@ -755,4 +764,56 @@ test "bignum functionality" {
     defer std.testing.allocator.free(neg_r_text);
     try std.testing.expectEqualStrings("-2", neg_q_text);
     try std.testing.expectEqualStrings("-1", neg_r_text);
+}
+
+test "bignum toU64 and toI64 range edges" {
+    const t = std.testing;
+    // Zero.
+    var zero = try BigInt.fromInt(t.allocator, 0);
+    defer zero.deinit();
+    try t.expectEqual(@as(?u64, 0), zero.toU64());
+    try t.expectEqual(@as(?i64, 0), zero.toI64());
+
+    // Mid positive fits both.
+    var mid = try BigInt.fromInt(t.allocator, 1234567890123);
+    defer mid.deinit();
+    try t.expectEqual(@as(?u64, 1234567890123), mid.toU64());
+    try t.expectEqual(@as(?i64, 1234567890123), mid.toI64());
+
+    // i64::MAX fits both.
+    var i64_max = try BigInt.fromInt(t.allocator, std.math.maxInt(i64));
+    defer i64_max.deinit();
+    try t.expectEqual(@as(?u64, @as(u64, std.math.maxInt(i64))), i64_max.toU64());
+    try t.expectEqual(@as(?i64, std.math.maxInt(i64)), i64_max.toI64());
+
+    // i64::MIN: fits i64 (the edge), out of range for u64.
+    var i64_min = try BigInt.fromInt(t.allocator, std.math.minInt(i64));
+    defer i64_min.deinit();
+    try t.expectEqual(@as(?i64, std.math.minInt(i64)), i64_min.toI64());
+    try t.expectEqual(@as(?u64, null), i64_min.toU64());
+
+    // u64::MAX: single non-negative limb with the high bit set. Fits u64,
+    // out of range for i64 — the band asUint64 must accept and asInt64 reject.
+    var u64_max = try BigInt.fromInt(t.allocator, @as(i128, std.math.maxInt(u64)));
+    defer u64_max.deinit();
+    try t.expectEqual(@as(?u64, std.math.maxInt(u64)), u64_max.toU64());
+    try t.expectEqual(@as(?i64, null), u64_max.toI64());
+
+    // 2^63 exactly: out of range for i64 (positive), in range for u64.
+    var two_63 = try BigInt.fromInt(t.allocator, @as(i128, 1) << 63);
+    defer two_63.deinit();
+    try t.expectEqual(@as(?u64, @as(u64, 1) << 63), two_63.toU64());
+    try t.expectEqual(@as(?i64, null), two_63.toI64());
+
+    // Negative non-zero: out of range for u64.
+    var neg = try BigInt.fromInt(t.allocator, -5);
+    defer neg.deinit();
+    try t.expectEqual(@as(?u64, null), neg.toU64());
+    try t.expectEqual(@as(?i64, -5), neg.toI64());
+
+    // Beyond u64 (2^64): out of range for both.
+    var beyond = try BigInt.fromInt(t.allocator, @as(i128, 1) << 64);
+    defer beyond.deinit();
+    try t.expectEqual(@as(?u64, null), beyond.toU64());
+    try t.expectEqual(@as(?i64, null), beyond.toI64());
 }

@@ -333,6 +333,47 @@ pub const JSValue = extern struct {
         return @bitCast(self.repr.payload);
     }
 
+    /// Extract a BigInt value as a signed i64. Handles BOTH the inline
+    /// (short_big_int) and heap (big_int) representations. Returns null for
+    /// non-BigInt values and for BigInts whose magnitude exceeds the i64 range
+    /// (the i64::MIN edge, magnitude == 1<<63, is handled correctly). Stays in
+    /// core: reuses the file-local `bigIntParts`, so it carries no builtins
+    /// dependency. The public, representation-complete analog of `asShortBigInt`.
+    pub fn asInt64(self: JSValue) ?i64 {
+        if (!self.isBigInt()) return null;
+        // Fast path: an inline short BigInt always fits i64 by construction (its
+        // payload is at most the 48-bit short window under NaN-boxing).
+        if (self.asShortBigInt()) |short| return short;
+        var scratch: [2]bignum.Limb = undefined;
+        const parts = bigIntParts(self, &scratch) orelse return null;
+        // Build a non-owning view over the limbs (allocator is never touched by
+        // toI64); scratch outlives this call since it is stack-local here.
+        const view = bignum.BigInt{
+            .negative = parts.negative,
+            .limbs = @constCast(parts.limbs),
+            .allocator = undefined,
+        };
+        return view.toI64();
+    }
+
+    /// Extract a BigInt value as an unsigned u64. Handles BOTH the inline
+    /// (short_big_int) and heap (big_int) representations. Returns null for
+    /// non-BigInt values, for negative non-zero BigInts, and for BigInts whose
+    /// magnitude exceeds the u64 range. Crucially this accepts the 2^63..2^64-1
+    /// band that does NOT fit i64, so it must NOT be implemented as a shim over
+    /// `asInt64`.
+    pub fn asUint64(self: JSValue) ?u64 {
+        if (!self.isBigInt()) return null;
+        var scratch: [2]bignum.Limb = undefined;
+        const parts = bigIntParts(self, &scratch) orelse return null;
+        const view = bignum.BigInt{
+            .negative = parts.negative,
+            .limbs = @constCast(parts.limbs),
+            .allocator = undefined,
+        };
+        return view.toU64();
+    }
+
     pub fn asCatchOffset(self: JSValue) ?i32 {
         if (self.hasTag(Tag.catch_offset)) return payloadAsI32(self.payloadOf());
         return null;
@@ -518,4 +559,34 @@ fn payloadAsI32(payload: u64) i32 {
 fn ptrFromPayload(comptime T: type, payload: u64) ?*T {
     if (payload == 0) return null;
     return @ptrFromInt(payload);
+}
+
+test "asInt64 / asUint64 on inline short BigInt and non-BigInt" {
+    const t = std.testing;
+
+    // Non-BigInt values must extract as null on both.
+    try t.expectEqual(@as(?i64, null), JSValue.int32(7).asInt64());
+    try t.expectEqual(@as(?u64, null), JSValue.int32(7).asUint64());
+    try t.expectEqual(@as(?i64, null), JSValue.float64(1.5).asInt64());
+    try t.expectEqual(@as(?u64, null), JSValue.boolean(true).asUint64());
+
+    // Inline short BigInt across its full representable range. That range is the
+    // NaN-boxed 48-bit window (±2^47) when nan_boxing is on, or the full i64
+    // otherwise — so the test pins to the representation's own bounds. A raw
+    // i64::MAX literal would overflow the 48-bit short payload and trip the
+    // `shortBigInt` construction assert under the default (NaN-boxed) build.
+    try t.expectEqual(@as(?i64, 0), JSValue.shortBigInt(0).asInt64());
+    try t.expectEqual(@as(?i64, 42), JSValue.shortBigInt(42).asInt64());
+    try t.expectEqual(@as(?i64, -42), JSValue.shortBigInt(-42).asInt64());
+    try t.expectEqual(@as(?i64, JSValue.short_big_int_max), JSValue.shortBigInt(JSValue.short_big_int_max).asInt64());
+    try t.expectEqual(@as(?i64, JSValue.short_big_int_min), JSValue.shortBigInt(JSValue.short_big_int_min).asInt64());
+
+    // asUint64 on inline: non-negative ok, negative non-zero -> null. (The
+    // 2^63..2^64-1 band that distinguishes asUint64 from asInt64 lives in the
+    // heap representation and is covered by the bignum toU64/toI64 edge test.)
+    try t.expectEqual(@as(?u64, 0), JSValue.shortBigInt(0).asUint64());
+    try t.expectEqual(@as(?u64, 42), JSValue.shortBigInt(42).asUint64());
+    try t.expectEqual(@as(?u64, @as(u64, @intCast(JSValue.short_big_int_max))), JSValue.shortBigInt(JSValue.short_big_int_max).asUint64());
+    try t.expectEqual(@as(?u64, null), JSValue.shortBigInt(-1).asUint64());
+    try t.expectEqual(@as(?u64, null), JSValue.shortBigInt(JSValue.short_big_int_min).asUint64());
 }

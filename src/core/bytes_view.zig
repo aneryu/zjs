@@ -157,12 +157,23 @@ pub fn JSBytes(comptime Value: type) type {
             const byte_offset = object.typedArrayByteOffset();
             const buffer_bytes = buffer.byteStorage();
             if (byte_offset > buffer_bytes.len) return error.OutOfBounds;
+            const element_size = object.typedArrayElementSize();
             const len = if (object.typedArrayFixedLength()) |fixed| blk: {
-                const element_size = object.typedArrayElementSize();
                 const byte_len = std.math.mul(usize, fixed, element_size) catch return error.OutOfBounds;
                 if (byte_len > buffer_bytes.len - byte_offset) return error.OutOfBounds;
                 break :blk byte_len;
-            } else buffer_bytes.len - byte_offset;
+            } else blk: {
+                // Length-tracking (auto-length) view over a Resizable ArrayBuffer:
+                // the element count is floor((remaining bytes) / element_size), so
+                // the BYTE length must be floored to an element_size boundary. Using
+                // the raw remaining byte count (buffer_bytes.len - byte_offset)
+                // would expose a trailing partial element for a non-u8 element type
+                // (e.g. Uint16Array with an odd remaining byte count), which is not
+                // an addressable element and diverges from typedArrayByteLength.
+                if (element_size == 0) return error.InvalidStore;
+                const remaining = buffer_bytes.len - byte_offset;
+                break :blk remaining - (remaining % element_size);
+            };
             const bytes = buffer_bytes[byte_offset .. byte_offset + len];
             return .{
                 .ptr = bytes.ptr,
@@ -453,6 +464,76 @@ test "JSBytes views TypedArray byte range without copying" {
     try std.testing.expectEqual(@as(u8, 8), buffer.byteStorage()[2]);
 }
 
+test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
+    const core = @import("root.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Object = @import("object.zig").Object;
+    const class_ids = @import("class.zig").ids;
+    const buffer = try Object.create(rt, class_ids.array_buffer, null);
+    const buffer_value = buffer.value();
+    defer buffer_value.free(rt);
+    // 7 bytes is NOT a multiple of the Uint16Array element size (2). A
+    // length-tracking view starting at offset 1 sees 6 trailing bytes, which is
+    // exactly 3 u16 elements (6 bytes) — the 7th byte is an unaddressable partial
+    // element and must be excluded from the borrow length.
+    const backing = try rt.memory.alloc(u8, 7);
+    const initial = [_]u8{ 0, 1, 2, 3, 4, 5, 6 };
+    @memcpy(backing, &initial);
+    try buffer.installByteStorage(rt, backing);
+    // Mark resizable so a length-tracking view is well-formed.
+    buffer.arrayBufferMaxByteLengthSlot().* = 32;
+
+    const view = try Object.create(rt, class_ids.object, null);
+    const view_value = view.value();
+    defer view_value.free(rt);
+    try view.ensureTypedArrayPayload(rt);
+    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
+    view.typedArrayByteOffsetSlot().* = 1;
+    view.typedArrayElementSizeSlot().* = 2; // Uint16Array
+    view.typedArrayFixedLengthSlot().* = null; // length-tracking (auto length)
+    view.typedArrayKindSlot().* = 5;
+
+    const bytes = try view_value.asBytes(undefined);
+    // 6 bytes (3 elements), floored from the 6 trailing bytes — already aligned
+    // here, but the floor logic must NOT include any trailing partial element.
+    try std.testing.expectEqual(@as(usize, 6), bytes.len);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6 }, bytes.slice());
+}
+
+test "JSBytes drops trailing partial element for odd-remaining length-tracking view" {
+    const core = @import("root.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Object = @import("object.zig").Object;
+    const class_ids = @import("class.zig").ids;
+    const buffer = try Object.create(rt, class_ids.array_buffer, null);
+    const buffer_value = buffer.value();
+    defer buffer_value.free(rt);
+    // 5 bytes, offset 0, element_size 2: 5 % 2 == 1, so the borrow length must be
+    // floored to 4 (2 elements), NOT the raw remaining 5.
+    const backing = try rt.memory.alloc(u8, 5);
+    @memcpy(backing, &[_]u8{ 9, 8, 7, 6, 5 });
+    try buffer.installByteStorage(rt, backing);
+    buffer.arrayBufferMaxByteLengthSlot().* = 16;
+
+    const view = try Object.create(rt, class_ids.object, null);
+    const view_value = view.value();
+    defer view_value.free(rt);
+    try view.ensureTypedArrayPayload(rt);
+    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
+    view.typedArrayByteOffsetSlot().* = 0;
+    view.typedArrayElementSizeSlot().* = 2; // Uint16Array
+    view.typedArrayFixedLengthSlot().* = null; // length-tracking
+    view.typedArrayKindSlot().* = 5;
+
+    const bytes = try view_value.asBytes(undefined);
+    try std.testing.expectEqual(@as(usize, 4), bytes.len);
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, bytes.slice());
+}
+
 test "JSBytes views DataView byte range without copying" {
     const core = @import("root.zig");
     const rt = try core.JSRuntime.create(std.testing.allocator);
@@ -478,6 +559,36 @@ test "JSBytes views DataView byte range without copying" {
 
     const bytes = try view_value.asBytes(undefined);
     try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13 }, bytes.slice());
+}
+
+test "JSBytes views length-tracking DataView to end of buffer" {
+    const core = @import("root.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const Object = @import("object.zig").Object;
+    const class_ids = @import("class.zig").ids;
+    const buffer = try Object.create(rt, class_ids.array_buffer, null);
+    const buffer_value = buffer.value();
+    defer buffer_value.free(rt);
+    const backing = try rt.memory.alloc(u8, 5);
+    @memcpy(backing, &[_]u8{ 10, 11, 12, 13, 14 });
+    try buffer.installByteStorage(rt, backing);
+    buffer.arrayBufferMaxByteLengthSlot().* = 16;
+
+    const view = try Object.create(rt, class_ids.dataview, null);
+    const view_value = view.value();
+    defer view_value.free(rt);
+    try view.setOptionalValueSlot(rt, view.typedArrayBufferSlot(), buffer_value.dup());
+    view.typedArrayByteOffsetSlot().* = 2;
+    view.typedArrayFixedLengthSlot().* = null; // length-tracking DataView
+    view.typedArrayKindSlot().* = 1; // DataView is byte-addressed (kind 1)
+
+    // A length-tracking DataView spans to the end of the buffer (byte-addressed,
+    // so no element-size flooring): 5 - 2 = 3 trailing bytes.
+    const bytes = try view_value.asBytes(undefined);
+    try std.testing.expectEqual(@as(usize, 3), bytes.len);
+    try std.testing.expectEqualSlices(u8, &.{ 12, 13, 14 }, bytes.slice());
 }
 
 fn testObjectFromValue(comptime Value: type, value: Value) ?*@import("object.zig").Object {
