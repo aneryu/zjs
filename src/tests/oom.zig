@@ -163,11 +163,25 @@ fn expectStringValue(rt: *core.JSRuntime, value: core.JSValue, expected: []const
     if (!string_value.eqlBytes(expected)) return error.TestUnexpectedResult;
 }
 
+/// Register the builtins standard-globals installer as the process-global
+/// default so every `core.JSRuntime.create` below copies it into the new
+/// runtime's `install_standard_globals_cb`. Phase 6b-3 STEP 7B routed global
+/// installation through that callback, which the binding-layer
+/// `JSContext.create` wires up; this suite drives the core API directly, so it
+/// must register the installer itself or the first `contextGlobal` fails with
+/// `error.InvalidBuiltinRegistry` (a non-OOM error that derails the sweep).
+/// Mirrors `installHostGlobalsBare` in the exec test tree. Idempotent and
+/// allocation-free, so it is safe to call before each injected attempt.
+fn ensureStandardGlobalsInstaller() void {
+    zjs.builtins.registry.registerStandardGlobalsDefault();
+}
+
 /// One full engine lifecycle around a corpus snippet. Shaped for
 /// `std.testing.checkAllAllocationFailures`: every allocation flows through
 /// `allocator`, OOM propagates out as `error.OutOfMemory`, and all paths
 /// (success or failure) release everything they allocated.
 fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
+    ensureStandardGlobalsInstaller();
     const rt = try core.JSRuntime.create(allocator);
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
@@ -305,6 +319,7 @@ fn loadGraphModule(
 /// ESM link lifecycle: two in-memory modules resolved through host hooks,
 /// exercising module records, link, instantiate, and evaluation order.
 fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
+    ensureStandardGlobalsInstaller();
     const rt = try core.JSRuntime.create(allocator);
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
@@ -480,6 +495,7 @@ const canary_source = "(1 + 2) * 14 === 42 ? \"canary-ok\" : \"canary-bad\"";
 ///   - teardown releases every byte (explicit alloc/free balance).
 fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !void {
     attempt: {
+        ensureStandardGlobalsInstaller();
         const rt = core.JSRuntime.create(injector.allocator()) catch |err| {
             // Injection landed inside runtime bootstrap: acceptable, the
             // constructor must fail cleanly (balance asserted below).
